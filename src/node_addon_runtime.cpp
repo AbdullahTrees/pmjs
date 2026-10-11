@@ -192,6 +192,7 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
   if (!terminal && now - value.preparationPresentedAt < std::chrono::milliseconds(100))
     return undefined(env);
   value.preparationPresentedAt = now;
+  value.core.syncDrawableSize();
   const float width = static_cast<float>(value.width);
   const float height = static_cast<float>(value.height);
   const float amount = total > 0 ? static_cast<float>(std::clamp(completed / total, 0.0, 1.0)) : 0;
@@ -204,8 +205,22 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
   if (hasProperty(env, progress, "lines")) {
     resolvePreparationFonts(env, progress, value);
     if (!value.preparationFonts.empty()) {
-      if (!value.preparationSurface) {
-        const auto surface = value.canvases.create(value.width, value.height);
+      const auto geometry = value.renderer.presentationGeometry();
+      double fitScale = 1.0;
+      if (geometry.viewportWidth > 0 && geometry.viewportHeight > 0 &&
+          value.width > 0 && value.height > 0) {
+        fitScale = std::min(static_cast<double>(geometry.viewportWidth) / value.width,
+                            static_cast<double>(geometry.viewportHeight) / value.height);
+      }
+      const double textScale = std::clamp(std::max(fitScale, 2.0), 1.0, 4.0);
+      const float scale = static_cast<float>(textScale);
+      const int surfaceWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
+      const int surfaceHeight = std::max(1, static_cast<int>(std::lround(height * scale)));
+      const auto current = value.canvases.info(value.preparationSurface);
+      if (!value.preparationSurface || !current ||
+          current->width != surfaceWidth || current->height != surfaceHeight) {
+        if (value.preparationSurface) value.canvases.release(value.preparationSurface);
+        const auto surface = value.canvases.create(surfaceWidth, surfaceHeight);
         if (!surface) throw std::runtime_error("cannot allocate preparation screen");
         value.preparationSurface = surface->handle;
       }
@@ -220,15 +235,19 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
       for (std::uint32_t i = 0; i < std::min(count, 6U); ++i) {
         napi_value entry;
         check(env, napi_get_element(env, lines, i, &entry), "invalid preparation line");
-        const float size = std::clamp(height * (i == 0 ? 0.05F : 0.037F), 8.0F, i == 0 ? 32.0F : 24.0F);
+        const float size = std::clamp(height * (i == 0 ? 0.07F : 0.05F), i == 0 ? 12.0F : 10.0F,
+                                        i == 0 ? 44.0F : 32.0F) * scale;
         const auto text = fitProgressLine(value.canvases, value.preparationFonts,
-          asString(env, entry), size, width * 0.84F);
+          asString(env, entry), size, width * 0.84F * scale);
         value.canvases.drawText(value.preparationSurface, value.preparationFonts,
-          text, width * 0.08F, height * positions[i], size,
+          text, width * 0.08F * scale, height * positions[i] * scale, size,
           i == 0 ? 0xFFFFFFFFU : 0xCACAD4FFU);
       }
       if (const auto image = value.canvases.prepareImage(value.preparationSurface)) {
-        value.renderer.queueImage(*image, {1, 0, 0, 1, 0, 0}, {0, 0, width, height},
+        const float inverse = 1.0F / scale;
+        value.renderer.queueImage(*image, {inverse, 0, 0, inverse, 0, 0},
+                                  {0, 0, static_cast<float>(surfaceWidth),
+                                   static_cast<float>(surfaceHeight)},
                                   1, 0xFFFFFFU, pmjs::BlendMode::normal);
       }
     }

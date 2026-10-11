@@ -217,33 +217,56 @@ function progressClock(milliseconds) {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function stageKeyOf(phase) {
+  return typeof phase === 'string' && phase.startsWith('map-') ? 'maps' : 'assets';
+}
+
+function stageProgress(current, elapsedMs, stageBaseline) {
+  const stage = stageKeyOf(current.phase);
+  if (!stageBaseline || stageBaseline.key !== stage) {
+    stageBaseline = { key: stage, completed: current.completed || 0, elapsedMs };
+  }
+  return { baseline: stageBaseline, progress: { ...current, elapsedMs,
+    stageElapsedMs: Math.max(0, elapsedMs - stageBaseline.elapsedMs),
+    stageCompleted: stageBaseline.completed } };
+}
+
 function progressLines(progress) {
   const { phase, source = '', completed = 0, total = 0, generated = 0,
-    hits = 0, fallback = 0, elapsedMs = 0 } = progress;
+    hits = 0, fallback = 0, elapsedMs = 0, stageElapsedMs, stageCompleted } = progress;
+  const mapStage = stageKeyOf(phase) === 'maps';
   const titles = {
     discover: 'Finding game assets', wait: 'Waiting for asset cache',
     validate: 'Checking cached assets', prepare: 'Preparing new assets',
+    'map-wait': 'Waiting for map cache', 'map-compile': 'Compiling maps',
+    'map-pack': 'Packing maps', 'map-validate': 'Checking cached maps',
     ready: 'Checking game assets', install: 'Finishing asset preparation',
     cleanup: 'Finishing asset preparation', complete: 'Assets ready',
     cancelled: 'Asset preparation cancelled', error: 'Continuing with original assets',
   };
-  const rate = elapsedMs > 0 && completed > 0 ? completed * 1000 / elapsedMs : null;
+  const hasStageBaseline = stageElapsedMs !== undefined && stageCompleted !== undefined;
+  const stageDone = hasStageBaseline ? Math.max(0, completed - stageCompleted) : completed;
+  const stageTime = hasStageBaseline ? stageElapsedMs : elapsedMs;
+  const rate = stageTime > 0 && stageDone > 0 ? stageDone * 1000 / stageTime : null;
   const remaining = Math.max(0, total - completed);
-  const working = phase === 'validate' || phase === 'prepare';
-  const lines = [titles[phase] || 'Preparing game assets',
+  const working = phase === 'validate' || phase === 'prepare' ||
+    phase === 'map-compile' || phase === 'map-pack' || phase === 'map-validate';
+  const unit = mapStage ? 'maps/s' : 'files/s';
+  const lines = [titles[phase] || (mapStage ? 'Preparing maps' : 'Preparing game assets'),
     phase === 'discover' ? 'Counting files...' :
       `${completed} / ${total} done (${total ? Math.floor(completed * 100 / total) : 100}%)  |  ${remaining} left`,
     source ? `Current file: ${source.replace(/[\r\n\t]/g, ' ')}` : '',
-    `Cache: ${generated} new, ${hits} reused  |  Originals: ${fallback}`,
-    `Elapsed: ${progressClock(elapsedMs)}  |  Average: ${rate === null ? 'estimating...' : `${rate.toFixed(1)} files/s`}`];
-  if (!progress.terminal && total && remaining && rate !== null && completed >= 3 &&
+    mapStage ? `Maps: ${generated} new, ${hits} reused  |  Skipped: ${fallback}`
+      : `Cache: ${generated} new, ${hits} reused  |  Originals: ${fallback}`,
+    `Elapsed: ${progressClock(elapsedMs)}  |  Average: ${rate === null ? 'estimating...' : `${rate.toFixed(1)} ${unit}`}`];
+  if (!progress.terminal && total && remaining && rate !== null && stageDone >= 3 &&
       (phase === 'ready' || working)) {
     lines.push(`Estimated time left: ${progressClock(remaining * 1000 / rate)}`);
   } else if (phase === 'prepare') {
     lines.push('Large files can take longer. Original files are preserved.');
-  } else if (phase === 'wait') {
+  } else if (phase === 'wait' || phase === 'map-wait') {
     lines.push('Another launch is preparing this cache.');
-  } else if (phase === 'discover' || phase === 'validate') {
+  } else if (phase === 'discover' || phase === 'validate' || phase === 'map-validate') {
     lines.push('Existing prepared assets are reused when unchanged.');
   } else if (phase === 'install' || phase === 'cleanup') {
     lines.push('All files checked; finishing up...');
@@ -300,12 +323,15 @@ async function run(input) {
       const screenStarted = performance.now();
       let screenUpdated = -Infinity;
       let current = { completed: 0, total: 0, phase: 'discover' };
+      let stageBaseline = null;
       const showProgress = () => {
         if (preparationFailed || (cancelled && !current.terminal) ||
             typeof native.runtime.preparationProgress !== 'function') return;
         const elapsedMs = performance.now() - screenStarted;
         screenUpdated = elapsedMs;
-        const progress = { ...current, elapsedMs };
+        const stepped = stageProgress(current, elapsedMs, stageBaseline);
+        stageBaseline = stepped.baseline;
+        const progress = stepped.progress;
         native.runtime.preparationProgress({ ...progress, lines: progressLines(progress),
           fonts: options.preparationFonts });
       };
@@ -477,5 +503,5 @@ async function run(input) {
   }
 }
 
-module.exports = { run, validate, progressLines, parseTimingConfig, resolveSwapDefault, advanceDeadline,
+module.exports = { run, validate, progressLines, stageProgress, stageKeyOf, parseTimingConfig, resolveSwapDefault, advanceDeadline,
   PMJS_MV_LOGIC_HZ, PMJS_SUPPORTED_RENDER_HZ };
