@@ -83,6 +83,14 @@
     },
     {
       "plugins": [
+        "SRD_MenuBackgrounds"
+      ],
+      "modules": [
+        "js/pmjs-plugins/srd/menu-backgrounds.js"
+      ]
+    },
+    {
+      "plugins": [
         "StartUpFullScreen"
       ],
       "modules": [

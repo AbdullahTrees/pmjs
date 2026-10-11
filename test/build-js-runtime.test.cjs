@@ -63,6 +63,19 @@ test('scene harness sources follow the production profile and selected adapter o
   assert.deepEqual(modules.filter(source => writerSources.includes(source)), writerSources);
 });
 
+test('SRD menu adapter is selected only for enabled plugin demand', () => {
+  const root = temporaryDirectory('pmjs-srd-menu-');
+  const game = writeMvGame(root, { plugins: [{ name: 'SRD_MenuBackgrounds', status: true }] });
+  const out = path.join(root, 'out.js');
+  const args = [tool, '--game', game, '--output', out];
+  childProcess.execFileSync(process.execPath, args);
+  assert.match(fs.readFileSync(out, 'utf8'), /BEGIN js\/pmjs-plugins\/srd\/menu-backgrounds\.js/);
+  fs.writeFileSync(path.join(game, 'js/plugins.js'),
+    'var $plugins = ' + JSON.stringify([{ name: 'SRD_MenuBackgrounds', status: false }]) + ';');
+  childProcess.execFileSync(process.execPath, args);
+  assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /BEGIN js\/pmjs-plugins\/srd\/menu-backgrounds\.js/);
+});
+
 test('profile bundles accept configuration data without external code insertion', () => {
   const root = temporaryDirectory('pmjs-profile-');
   const config = path.join(root, 'config.json');

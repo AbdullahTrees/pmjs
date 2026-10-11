@@ -39,6 +39,12 @@
       "license": "MIT",
       "notice": "LICENSE"
     },
+    "js/pmjs-plugins/srd/menu-backgrounds.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
+    },
     "js/pmjs-plugins/startup-fullscreen/desktop.js": {
       "origin": "compatibility",
       "source": "PMJS",
