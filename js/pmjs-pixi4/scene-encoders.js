@@ -3,7 +3,7 @@ function createEmission() {
   return { kind: 0, resource: 0, tint: 0xffffff, texture: null,
   frame: null, nativeImage: null, source: null, localX: 0, localY: 0,
   destWidth: 0, destHeight: 0, tilingResolution: 1, sampledBaseTexture: null,
-  roundPixelsEligible: false, aborted: false };
+  roundPixelsEligible: false, presentation: null, aborted: false };
 }
 
 function resetEmission(scratch, tint) {
@@ -22,6 +22,7 @@ function resetEmission(scratch, tint) {
   scratch.sampledBaseTexture = null;
   scratch.roundPixelsEligible = false;
   scratch.aborted = false;
+  scratch.presentation = null;
 }
 
 function writeNativeSceneContainer(node, type, particleContext, particleValues,
@@ -34,6 +35,10 @@ function writeNativeSceneSprite(node, type, particleContext, particleValues,
 
   scratch.roundPixelsEligible = type === 'sprite' || type === 'picture';
   var texture = particleValues ? particleValues.texture : node.texture;
+  var presentation = !particleValues && PMJS.pixi4.bitmapPresentation &&
+    PMJS.pixi4.bitmapPresentation.get(node);
+  if (presentation) texture = presentation.texture;
+  scratch.presentation = presentation;
   var sampledBaseTexture = particleContext && particleContext.baseTexture ||
     texture && texture.baseTexture;
   scratch.sampledBaseTexture = sampledBaseTexture;
@@ -56,6 +61,10 @@ function writeNativeSceneSprite(node, type, particleContext, particleValues,
       -anchor.y * original.height;
     scratch.destWidth = trim ? trim.width : original.width;
     scratch.destHeight = trim ? trim.height : original.height;
+    if (presentation) {
+      scratch.localX += presentation.offsetX;
+      scratch.localY += presentation.offsetY;
+    }
   }
   scratch.texture = texture;
   scratch.frame = frame;

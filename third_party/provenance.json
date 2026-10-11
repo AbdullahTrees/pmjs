@@ -366,6 +366,12 @@
       "revision": "v4.5.4",
       "license": "MIT",
       "notice": "third_party/pixi4.LICENSE"
+    },
+    "js/pmjs-plugins/yanfly/core-character-presentation.js": {
+      "origin": "original"
+    },
+    "js/pmjs-plugins/yanfly/core-transforms.js": {
+      "origin": "original"
     }
   },
   "defaults": {

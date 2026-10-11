@@ -49,6 +49,22 @@ napi_value loadImage(napi_env env, napi_callback_info info) try {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
 
+napi_value acquireCachedImage(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 2);
+  State& value = host(env);
+  const auto path = value.vfs.resolve(asString(env, args.at(0)));
+  const auto source = path ? ImageStore::openFile(*path) : nullptr;
+  const auto requested = args.size() > 1 ? asString(env, args[1]) : "";
+  const auto image = source ? value.images.acquireCached(*source,
+    value.images.effectiveTileSet(*source, requested)) : std::nullopt;
+  if (image) return imageInfo(env, image->handle, image->width, image->height);
+  napi_value result;
+  check(env, napi_get_null(env, &result), "cannot create cache miss");
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value loadImageBytes(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 2);
   State& value = host(env);
@@ -528,6 +544,7 @@ void registerResourceBindings(napi_env env, napi_value exports) {
   napi_value images = moduleObject(env);
   method(env, images, "load", loadImage);
   method(env, images, "loadAsync", loadImageAsync);
+  method(env, images, "acquireCached", acquireCachedImage);
   method(env, images, "loadBytes", loadImageBytes);
   method(env, images, "loadBytesAsync", loadImageBytesAsync);
   method(env, images, "fallbackImage", fallbackImage);

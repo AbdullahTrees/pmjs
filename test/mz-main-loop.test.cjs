@@ -11,12 +11,12 @@ const sharedSource = fs.readFileSync(path.resolve(__dirname,
 const mzSource = fs.readFileSync(path.resolve(__dirname,
   '../js/pmjs-mz/main-loop.js'), 'utf8');
 
-test('MZ host tick drains native services, pending work, and scheduler in order', () => {
+test('MZ host tick drains native services, pending work, and scheduler in order', async () => {
   const events = [];
   const context = vm.createContext({
     console: { log() {} },
     globalThis: null,
-    PMJS: { tasks: { drain() { events.push('pending'); } },
+    PMJS: { tasks: { invokeRendering(callback) { return new Promise(resolve => setImmediate(() => { events.push('checkpoint'); resolve(callback()); })); } },
       rpgmaker: { audio: { update() { events.push('audio'); } } },
       web: { video: { update() { events.push('video'); } } },
       mz: { graphics: { updatePresentation() { events.push('presentation'); } } } },
@@ -27,10 +27,10 @@ test('MZ host tick drains native services, pending work, and scheduler in order'
   vm.runInContext(sharedSource, context, { filename: 'pmjs-rpgmaker/main-loop.js' });
   vm.runInContext(mzSource, context, { filename: 'pmjs-mz/main-loop.js' });
 
-  context.__pmjsTick(25);
+  await context.__pmjsTick(25);
 
   assert.deepEqual(events, [
-    'audio', 'video', 'pending', 'scheduler:25',
+    'audio', 'video', 'checkpoint', 'scheduler:25',
   ]);
   assert.equal(typeof context.__pmjsRender, 'function');
   context.__pmjsRender(25);

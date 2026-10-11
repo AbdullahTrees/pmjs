@@ -79,6 +79,9 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
     if ((flags & NodeFlags::standaloneBitmapRegion) && !(flags & NodeFlags::premultipliedSpriteTexture)) return false;
     if (parentIndex != noParent && (metadata[parentIndex * metadataStride + 5] & NodeFlags::spriteWorldVertices)) return false;
     const bool spriteVertices = flags & NodeFlags::spriteWorldVertices;
+    const bool preparedWorld = flags & NodeFlags::preparedWorldState;
+    if (preparedWorld && (filterMarker || kind == static_cast<std::uint32_t>(NodeKind::clearRect) ||
+        kind == static_cast<std::uint32_t>(NodeKind::effect))) return false;
     const bool effectNode = kind == static_cast<std::uint32_t>(NodeKind::effect);
     const std::array<float, 6> local = effectNode ?
       std::array<float, 6>{1, 0, 0, 1, 0, 0} : std::array<float, 6>{
@@ -89,7 +92,9 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
     const SceneState parent = parentIndex == noParent
       ? SceneState{} : states[parentIndex];
     SceneState& state = states[index];
-    state.world = {
+    if (spriteVertices) state.world = parent.world;
+    else if (preparedWorld) state.world = local;
+    else state.world = {
       parent.world[0] * local[0] + parent.world[2] * local[1],
       parent.world[1] * local[0] + parent.world[3] * local[1],
       parent.world[0] * local[2] + parent.world[2] * local[3],
@@ -97,8 +102,7 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
       parent.world[0] * local[4] + parent.world[2] * local[5] + parent.world[4],
       parent.world[1] * local[4] + parent.world[3] * local[5] + parent.world[5],
     };
-    if (spriteVertices) state.world = parent.world;
-    state.alpha = parent.alpha * values[valueOffset + 6];
+    state.alpha = (preparedWorld ? 1 : parent.alpha) * values[valueOffset + 6];
     state.clip = parent.clip;
     state.clipped = parent.clipped;
     state.maskImage = parent.maskImage;
@@ -130,6 +134,29 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
       }
       state.clip = own;
       state.clipped = true;
+    }
+    if (kind == static_cast<std::uint32_t>(NodeKind::clearRect)) {
+      if (filterDepth == 0 || resource != 0 || maskImage != 0 ||
+          flags & ~NodeFlags::hasClipRectangle || blendValue != 0) return false;
+      const float x = values[valueOffset + 7], y = values[valueOffset + 8];
+      const float width = values[valueOffset + 13], height = values[valueOffset + 14];
+      if (width < 0 || height < 0 || std::abs(x) > 1000000 || std::abs(y) > 1000000 ||
+          width > 1000000 || height > 1000000) return false;
+      RenderCommand command;
+      command.action = RenderCommand::Action::clearRect;
+      command.clearResolution = values[valueOffset + 33];
+      if (command.clearResolution == 0) command.clearResolution = 1;
+      if (command.clearResolution <= 0 || command.clearResolution > 16) return false;
+      float left = x, top = y, right = x + width, bottom = y + height;
+      if (state.clipped) {
+        left = std::max(left, static_cast<float>(state.clip[0]));
+        top = std::max(top, static_cast<float>(state.clip[1]));
+        right = std::min(right, static_cast<float>(state.clip[2]));
+        bottom = std::min(bottom, static_cast<float>(state.clip[3]));
+      }
+      command.clearRectangle = {left, top, std::max(0.0F, right - left), std::max(0.0F, bottom - top)};
+      frame_.commands.push_back(command);
+      continue;
     }
     if (filterMarker) {
       if (maskImage != 0 || flags & ~NodeFlags::hasClipRectangle) return false;

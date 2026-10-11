@@ -8,8 +8,17 @@ function nativeFilterGroupPreservesTransparentBounds(group) {
   return !!group && group.preservesTransparentBlack === true;
 }
 
+function nativeSceneAncestorHasMask(parentIndex) {
+  while (parentIndex !== undefined && parentIndex !== 0xffffffff) {
+    var offset = parentIndex * nativeSceneMetadataStride;
+    if (nativeSceneMetadata[offset + 5] & 5) return true;
+    parentIndex = nativeSceneMetadata[offset + 1];
+  }
+  return false;
+}
+
 function resolveNativeAdvancedEffects(node, particleContext, activeFilters,
-    nodeMask, forcedMask, pictureBlend, forcedClip) {
+    nodeMask, forcedMask, pictureBlend, forcedClip, parentIndex) {
   var filterPlan = nativeSceneFilter(node, activeFilters);
   if (filterPlan.unsupported) {
     var filterNames = filterPlan.filters.map(function(filter) {
@@ -20,10 +29,41 @@ function resolveNativeAdvancedEffects(node, particleContext, activeFilters,
     filterPlan = { blur: 0, groups: [] };
   }
 
+  var scissorClip = null;
+  if (!particleContext && nodeMask && nativeSceneUsePixiWorldState &&
+      typeof nodeMask.getBounds === 'function') {
+    var renderer = globalThis.Graphics && Graphics._renderer;
+    var target = renderer && renderer._activeRenderTarget;
+    var matrix = nodeMask.worldTransform;
+    var rotation = matrix && Math.round(Math.atan2(matrix.b, matrix.a) * 180 / Math.PI);
+    // Only root scissor masks refresh bounds; sprite and stencil masks use cached state.
+    if (nodeMask.texture) node.filterArea = nodeMask.getBounds(true);
+    else if (!nativeSceneFilterDepth && !filterPlan.groups.length &&
+        !nativeSceneAncestorHasMask(parentIndex) &&
+        (!target || target.root !== false) && typeof nodeMask.isFastRect === 'function' &&
+        nodeMask.isFastRect() && rotation % 90 === 0) {
+      nodeMask.renderable = true;
+      var bounds;
+      try { bounds = nodeMask.getBounds(); }
+      finally { nodeMask.renderable = false; }
+      var size = target && target.size || { x: 0, y: 0,
+        width: globalThis.Graphics && Graphics.width || 816,
+        height: globalThis.Graphics && Graphics.height || 624 };
+      bounds.fit(size);
+      var resolution = renderer && renderer.resolution || 1;
+      var left = Math.trunc(bounds.x * resolution);
+      var height = Math.trunc(bounds.height * resolution);
+      var bottom = size.height * resolution -
+        Math.trunc((size.height - bounds.y - bounds.height) * resolution);
+      scissorClip = { left: left, top: bottom - height,
+        right: left + Math.trunc(bounds.width * resolution), bottom: bottom };
+    }
+  }
+
   var canKeepRectangleMask = !filterPlan.groups.length ||
     filterPlan.groups.every(nativeFilterGroupPreservesTransparentBounds);
-  var maskClip = !particleContext && nodeMask && canKeepRectangleMask ?
-    nativeRectangleMask(nodeMask) : null;
+  var maskClip = scissorClip || (!particleContext && nodeMask && canKeepRectangleMask ?
+    nativeRectangleMask(nodeMask) : null);
   var nativeClip = nativeIntersectClip(forcedClip, maskClip);
   var nativeMask = !particleContext && nodeMask && !maskClip ?
     nativeAlphaMask(nodeMask) : null;

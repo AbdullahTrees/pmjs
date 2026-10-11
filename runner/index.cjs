@@ -8,6 +8,7 @@ const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const { createStorage, createGameFilesystem } = require('./storage.cjs');
 const { prepareAssets, validRecipes } = require('./asset-preparation.cjs');
+const hostTimers = require('node:timers');
 
 function resolveDefaults(input) {
   let title = input.title;
@@ -273,6 +274,8 @@ async function run(input) {
       { imageWarmCacheBytes: options.imageWarmCacheBytes }) });
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidateImages, invalidateMaps;
+  let dispatcher;
+  let cancelFrameSchedule = () => {};
   native.assets.invalidateMapCatalog = () => { pendingInvalidations |= 2; };
   function flushPreparationInvalidations(force = false) {
     if (typeof native.assets.consumePreparationInvalidations === 'function')
@@ -367,9 +370,9 @@ async function run(input) {
     native.runtime.runScript = source => vm.runInThisContext(String(source), {
       filename: 'inline-script.js'
     });
-    const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
-    const hostSetImmediate = typeof globalThis.setImmediate === 'function'
-      ? globalThis.setImmediate.bind(globalThis) : null;
+    const hostSetTimeout = hostTimers.setTimeout;
+    const hostSetImmediate = hostTimers.setImmediate;
+    native.runtime.scheduling = { ...hostTimers };
     const physicalDisplay = (native.runtime && typeof native.runtime.displaySize === 'function')
       ? native.runtime.displaySize()
       : {
@@ -395,9 +398,13 @@ async function run(input) {
       displayWidth: physicalDisplay.width,
       displayHeight: physicalDisplay.height
     };
-    vm.runInThisContext(fs.readFileSync(options.bootstrap, 'utf8'), {
-      filename: options.bootstrap, displayErrors: true,
-    });
+    try {
+      vm.runInThisContext(fs.readFileSync(options.bootstrap, 'utf8'), {
+        filename: options.bootstrap, displayErrors: true,
+      });
+    } finally {
+      dispatcher = globalThis.PMJS && globalThis.PMJS.tasks;
+    }
     if (typeof globalThis.__pmjsTick !== 'function' ||
         typeof globalThis.__pmjsRender !== 'function') {
       throw new Error('bootstrap did not install __pmjsTick and __pmjsRender');
@@ -409,13 +416,23 @@ async function run(input) {
       (timing.uncapped ? 'render_hz=uncapped' : `render_hz=${timing.renderHz}`));
     console.log(`[pmjs] ready size=${options.width}x${options.height}`);
     return await new Promise((resolve, reject) => {
+      native.runtime.scheduling.onFatal = reject;
+      let frameHandle, immediateFrame = false;
+      cancelFrameSchedule = () => {
+        if (immediateFrame) hostTimers.clearImmediate(frameHandle);
+        else hostTimers.clearTimeout(frameHandle);
+        frameHandle = undefined;
+      };
       function schedule() {
-        if (timing.uncapped) { hostSetImmediate(tick); return; }
+        if (dispatcher && dispatcher.stopped) return;
+        if (timing.uncapped) { immediateFrame = true; frameHandle = hostSetImmediate(tick); return; }
         const delay = Math.max(0, deadline - native.runtime.monotonicNow());
-        if (delay < 1 && hostSetImmediate) hostSetImmediate(tick);
-        else hostSetTimeout(tick, delay);
+        immediateFrame = delay < 1;
+        frameHandle = immediateFrame ? hostSetImmediate(tick) : hostSetTimeout(tick, delay);
       }
       function tick() {
+        frameHandle = undefined;
+        if (dispatcher && dispatcher.stopped) return;
         try {
           flushPreparationInvalidations();
           if (!native.pollEvents()) { flushPreparationInvalidations(true); resolve(); return; }
@@ -427,17 +444,23 @@ async function run(input) {
             globalThis.__pmjsReceiveInput(native.input.snapshot());
           }
           const now = performance.now();
-          native.beginFrame();
-          globalThis.__pmjsTick(now);
-          globalThis.__pmjsRender(now);
-          native.renderFrame();
-          native.swapFrame();
-          flushPreparationInvalidations();
-          if (!timing.uncapped) {
-            const monotonicNow = native.runtime.monotonicNow();
-            deadline = advanceDeadline(deadline, monotonicNow, period);
-          }
-          schedule();
+          const frame = () => {
+            native.beginFrame();
+            return Promise.resolve(globalThis.__pmjsTick(now)).then(() => {
+              if (dispatcher && dispatcher.stopped) return;
+              globalThis.__pmjsRender(now);
+              native.renderFrame();
+              native.swapFrame();
+              flushPreparationInvalidations();
+            });
+          };
+          const complete = dispatcher ? dispatcher.runFrame(frame) : frame();
+          complete.then(() => {
+            if (!timing.uncapped) {
+              deadline = advanceDeadline(deadline, native.runtime.monotonicNow(), period);
+            }
+            schedule();
+          }, reject);
         } catch (error) {
           reject(error);
         }
@@ -448,6 +471,9 @@ async function run(input) {
     try { flushPreparationInvalidations(true); } catch (_) {}
     try { native.runtime.quit(); } catch (_) {}
     throw error;
+  } finally {
+    cancelFrameSchedule();
+    if (dispatcher) dispatcher.stop();
   }
 }
 

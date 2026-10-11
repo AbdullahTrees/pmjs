@@ -70,7 +70,7 @@ NativePreparePlugin.prototype.upload = function(item, done) {
     if (completeIndex >= 0) plugin.completes.splice(completeIndex, 1);
     plugin._activeUploads--;
     plugin.ticking = plugin._activeUploads > 0;
-    PMJS.tasks.enqueue(complete);
+    PMJS.tasks.enqueue(complete, { errorMode: 'event' });
   }
   for (index = 0; index < sources.length; index++) {
     var source = sources[index];

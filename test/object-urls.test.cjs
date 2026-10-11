@@ -16,7 +16,7 @@ const elementsSource = require('./helpers/web-element-sources.cjs').source;
 
 function imageContext(loadBytesAsync, loadAsync) {
   const context = {
-    performance: { now() { return 0; } },
+    __pmjsBuiltinRequire: require, performance: { now() { return 0; } },
     Blob,
     URL: function URL() {},
     console,
@@ -89,7 +89,7 @@ test('NativeImage loads object URL bytes without using the path loader', async (
   const second = new context.Image();
   first.src = url;
   second.src = url;
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.equal(loads, 2);
   assert.equal(first.complete, true);
@@ -112,7 +112,7 @@ test('revoking before NativeImage consumes an object URL reports an error', asyn
   image.onerror = function() { errors++; };
   image.src = url;
   context.URL.revokeObjectURL(url);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.equal(loads, 0);
   assert.equal(errors, 1);
@@ -133,14 +133,14 @@ test('NativeImage retries a path after a transient native load failure', async (
     ({ handle: 40, width: 2, height: 2 });
   const image = new context.Image();
   image.src = 'img/pictures/retry.png';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.equal(attempts, 1);
   assert.equal(image._pmjsLoadFailed, true);
   assert.equal(image.naturalWidth, 0);
 
   image.src = 'img/pictures/retry.png';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.equal(attempts, 2);
   assert.equal(image._pmjsLoadFailed, false);
@@ -172,7 +172,7 @@ test('Atlas retention composes with other rules across path, generated, and byte
     const image = new context.Image();
     image.src = src;
   }
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.deepEqual(loads, [
     ['img/atlases/main.png', true],
@@ -198,7 +198,7 @@ test('image completion listeners follow guest load handlers for path and byte lo
     image.onload = () => order.push('handler');
     image.addEventListener('load', () => order.push('event'));
     image.src = src;
-    context.PMJS.tasks.drain();
+    await context.PMJS.tasks.idle();
     await settle();
   }
   assert.deepEqual(order, ['handler', 'event', 'first', 'second',
@@ -217,13 +217,13 @@ test('failed and stale image loads do not notify completion listeners', async ()
   context.PMJS.images.onLoadComplete(image => completed.push(image.src));
   const image = new context.Image();
   image.src = 'old.png';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   image.src = 'new.png';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   resolveOld({ handle: 90, width: 2, height: 2 });
   const failed = new context.Image();
   failed.src = context.URL.createObjectURL(new Blob(['bad']));
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await settle();
   assert.deepEqual(completed, ['new.png']);
   assert.ok(releases.includes(90));

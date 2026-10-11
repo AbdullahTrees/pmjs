@@ -379,6 +379,162 @@ void testPreparedHighPitchEof() {
   }
 }
 
+void testContextAutomation() {
+  using Kind = pmjs::GainAutomation::Kind;
+  pmjs::GainAutomation gain;
+  CHECK(gain.schedule(Kind::set, 0, 0, 0), "initial automation event");
+  CHECK(gain.schedule(Kind::linear, 1, 2, 0), "future ramp");
+  CHECK(gain.schedule(Kind::set, 0.25, 0.5, 0.5), "volume change during ramp");
+  CHECK(near(gain.valueAt(0.5), 0.25) && near(gain.valueAt(1), 0.5) &&
+        near(gain.valueAt(1.5), 0.75) && near(gain.valueAt(2), 1),
+        "a current set event preserves the scheduled ramp endpoint");
+  CHECK(gain.schedule(Kind::linear, 0.8, 2, 0.5) && near(gain.valueAt(2), 0.8),
+        "same type and timestamp replaces an event");
+  CHECK(gain.cancel(2) && near(gain.valueAt(3), 0.25), "cancellation removes the endpoint inclusively");
+  CHECK(!gain.schedule(Kind::set, 1, -1, 0) && !gain.cancel(-1), "invalid times are rejected");
+  pmjs::GainAutomation intrinsic;
+  intrinsic.setValue(static_cast<float>(0.3), 0);
+  intrinsic.schedule(Kind::set, 0.8, 1, 0);
+  intrinsic.cancel(0);
+  CHECK(intrinsic.valueAt(0) == static_cast<float>(0.3),
+        "cancelling all events preserves the assigned intrinsic value");
+  pmjs::GainAutomation property(0.2);
+  property.schedule(Kind::set, static_cast<float>(0.2), 0, 0);
+  property.schedule(Kind::linear, static_cast<float>(0.8), 1, 0);
+  property.renderBlock(0, 11904);
+  CHECK(near(property.value(), 0.3487877675, 1e-6), "reads expose the last processed sample");
+  property.setValue(static_cast<float>(0.6), 0.248);
+  CHECK(property.value() == static_cast<float>(0.6), "property assignment is immediately observable");
+  CHECK(near(property.renderBlock(11904, 12097).back(), 0.5, 1e-6),
+        "property assignment does not insert an event into the active ramp");
+  const auto last = property.value();
+  property.cancel(1);
+  CHECK(near(property.renderBlock(24001, 128).back(), last, 1e-6),
+        "cancelling an active endpoint retains the processed intrinsic value");
+  pmjs::GainAutomation future;
+  future.schedule(Kind::set, 0.5, 2, 0);
+  future.schedule(Kind::linear, 0, 1, 0.5);
+  CHECK(near(future.valueAt(0.5), 1) && near(future.valueAt(0.75), 1) && near(future.valueAt(1), 0),
+        "a leading ramp inserted before an existing future event preserves the intrinsic value until its endpoint");
+
+  pmjs::GainAutomation starvedGain(0.2);
+  starvedGain.schedule(Kind::set, 0.2, 0, 0);
+  starvedGain.schedule(Kind::linear, 1, 1, 0);
+  pmjs::VoiceMixState starved;
+  starved.playing = true;
+  starved.samples = {1, 1};
+  starved.automation = &starvedGain;
+  std::vector<float> silence(4800 * 2);
+  pmjs::mixVoiceInto(starved, silence.data(), 4800, 1, 0);
+  CHECK(starved.playing && starved.positionFrame == 0 && starved.samples.size() == 2,
+        "underrun retains the source playhead and pending frame");
+  CHECK(near(silence.front(), 0) && near(silence.back(), 0), "underrun emits silence");
+  CHECK(near(starved.gain, 0.28, 0.00002), "context automation advances during starvation");
+  starved.samples.insert(starved.samples.end(), {0.5F, 0.5F});
+  float recovery[2]{};
+  pmjs::mixVoiceInto(starved, recovery, 1, 1, 4800);
+  CHECK(near(recovery[0], 0.28) && starved.positionFrame == 1,
+        "recovery uses current context gain and the retained source frame");
+  pmjs::VoiceMixState legacy;
+  legacy.playing = true; legacy.samples = {1, 1};
+  legacy.gain = 0.1; legacy.targetGain = 0; legacy.gainStep = -0.1; legacy.stopAfterFade = true;
+  float legacyOutput[8]{};
+  pmjs::mixVoiceInto(legacy, legacyOutput, 4, 1);
+  CHECK(legacy.playing && legacy.gain == 0.1 && legacy.positionFrame == 0,
+        "relative fades and stop-after-fade retain their source-time underrun behavior");
+  auto fast = constantVoice(2, 0.25F, 0.25F);
+  fast.pitch = 8;
+  float fastOutput[2]{};
+  pmjs::mixVoiceInto(fast, fastOutput, 1, 1);
+  CHECK(fast.positionFrame == 2 && fast.phase == 6, "high pitch retains pending source advancement");
+  for (int sample = 2; sample <= 10; ++sample) {
+    fast.samples.push_back(sample * 0.05F);
+    fast.samples.push_back(sample * 0.05F);
+  }
+  float resumed[2]{};
+  pmjs::mixVoiceInto(fast, resumed, 1, 1);
+  CHECK(near(resumed[0], 0.4F), "recovery consumes pending advancement before interpolation");
+}
+
+void testAutomationHistory() {
+  using Kind = pmjs::GainAutomation::Kind;
+  pmjs::GainAutomation gain;
+  constexpr int quantum = 128;
+  for (std::uint64_t frame = 0; frame < 100000ULL * quantum; frame += quantum) {
+    const double time = static_cast<double>(frame) / 48000;
+    const double value = (frame / quantum) % 2 ? 0.2 : 0.8;
+    gain.schedule(Kind::set, value, time, time);
+    gain.schedule(Kind::linear, 1 - value, time + static_cast<double>(quantum) / 48000, time);
+    const auto& block = gain.renderBlock(frame, quantum);
+    CHECK(near(block.front(), value, 1e-6), "long-session scheduling preserves new ramp anchors");
+    CHECK(gain.eventCount() <= 7, "consumed event history remains bounded over 100000 callbacks");
+    const auto read = gain.value();
+    CHECK(gain.renderBlock(frame, quantum).back() == read,
+          "shared voices reuse the same automation block");
+  }
+  gain.renderBlock(100001ULL * quantum, quantum);
+  gain.renderBlock(100004ULL * quantum, quantum);
+  CHECK(gain.eventCount() == 0, "completed timelines release all consumed endpoints");
+  pmjs::GainAutomation future;
+  for (int time = 1; time <= 10000; ++time) future.schedule(Kind::set, 0.5, time, 0);
+  future.renderBlock(0, quantum);
+  CHECK(future.eventCount() == 10000, "history compaction preserves every pending future event");
+  future.cancel(5000);
+  CHECK(future.eventCount() == 4999, "future cancellation remains inclusive after compaction");
+}
+
+void testTerminalFrames() {
+  for (int length : {1, 3}) for (bool prepared : {false, true}) {
+    pmjs::VoiceMixState voice;
+    voice.playing = true; voice.eof = true;
+    auto asset = std::make_shared<pmjs::PreparedAudioAsset>();
+    for (int frame = 1; frame <= length; ++frame) {
+      asset->samples.insert(asset->samples.end(), {frame * 0.25F, frame * 0.25F});
+    }
+    if (prepared) voice.asset = asset;
+    else voice.samples.assign(asset->samples.begin(), asset->samples.end());
+    std::vector<float> output((length + 1) * 2);
+    pmjs::mixVoiceInto(voice, output.data(), length + 1, 1);
+    for (int frame = 0; frame < length; ++frame)
+      CHECK(near(output[frame * 2], (frame + 1) * 0.25F), "every valid terminal frame is emitted");
+    CHECK(near(output[length * 2], 0) && !voice.playing && voice.positionFrame == static_cast<std::uint64_t>(length),
+          "source stops at the actual PCM endpoint");
+  }
+}
+
+void testAutomationReference() {
+  std::ifstream reference(PMJS_GAIN_AUDIO_REFERENCE);
+  int cases = 0, samples = 0;
+  reference >> cases;
+  CHECK(cases == 7, "all browser automation reference cases are present");
+  for (int index = 0; index < cases; ++index) {
+    pmjs::GainAutomation gain;
+    int events = 0, count = 0;
+    reference >> events >> count;
+    for (int event = 0; event < events; ++event) {
+      int kind;
+      double value, time, now;
+      reference >> kind >> value >> time >> now;
+      CHECK(kind == 2 ? gain.cancel(time) : kind == 3 ? gain.setValue(value, now) : gain.schedule(kind == 0 ?
+        pmjs::GainAutomation::Kind::set : pmjs::GainAutomation::Kind::linear, value, time, now),
+        "reference automation events are valid");
+    }
+    for (int sample = 0; sample < count; ++sample) {
+      std::uint64_t frame;
+      float expected;
+      reference >> frame >> expected;
+      auto voice = constantVoice(4, 1, 1);
+      voice.automation = &gain;
+      float output[2]{};
+      pmjs::mixVoiceInto(voice, output, 1, 1, frame);
+      CHECK(near(output[0], expected, 1e-6F) && near(gain.valueAt(static_cast<double>(frame) / 48000), expected, 1e-6F),
+        "mixing and gain reads match browser event ordering and cancellation");
+      ++samples;
+    }
+  }
+  CHECK(reference.good() && samples == 60, "all automation reference samples are consumed");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -421,6 +577,10 @@ int main(int argc, char** argv) {
   testEofAndPaused();
   testPreparedSampleParity();
   testPreparedHighPitchEof();
+  testContextAutomation();
+  testAutomationHistory();
+  testTerminalFrames();
+  testAutomationReference();
   if (failures == 0) std::cout << "media-mix unit tests passed\n";
   return failures == 0 ? 0 : 1;
 }

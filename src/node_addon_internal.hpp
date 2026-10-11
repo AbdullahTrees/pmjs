@@ -52,7 +52,7 @@ struct State {
   std::uint32_t nextVideo = 1;
 };
 
-extern std::unique_ptr<State> state;
+extern std::shared_ptr<State> state;
 
 void check(napi_env env, napi_status status, const char* message);
 napi_value undefined(napi_env env);

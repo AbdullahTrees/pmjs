@@ -60,7 +60,7 @@ struct CustomFilterPlan {
 };
 
 struct RenderCommand {
-  enum class Action : std::uint8_t { draw, filterBegin, filterEnd };
+  enum class Action : std::uint8_t { draw, filterBegin, filterEnd, clearRect };
   enum class Primitive : std::uint8_t {
     sprite, tilingSprite, screenFill, tileLayer, mesh, effect
   };
@@ -76,6 +76,8 @@ struct RenderCommand {
   std::array<float, 2> tileAnimation{};
   std::array<int, 4> clip{};
   bool clipped = false;
+  std::array<float, 4> clearRectangle{};
+  float clearResolution = 1.0F;
   float blur = 0;
   ImageHandle maskImage = 0;
   std::array<float, 6> maskTransform{};

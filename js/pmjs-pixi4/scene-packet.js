@@ -140,18 +140,31 @@ function nativeParticleValues(context, node, childIndex) {
   return value;
 }
 
-function nativeSpriteVertices(node, nodeIndex) {
+function nativeSpriteVertices(node, nodeIndex, presentation) {
   if (!nativeSceneUsePixiWorldState || node.children && node.children.length ||
       typeof node.calculateVertices !== 'function') return;
-  node.calculateVertices();
-  var vertices = node.vertexData;
+  var vertices;
+  if (presentation) {
+    var world = node.worldTransform;
+    var offset = nodeIndex * nativeSceneValueStride;
+    var left = nativeSceneValues[offset + 7], top = nativeSceneValues[offset + 8];
+    var right = left + nativeSceneEmission.destWidth, bottom = top + nativeSceneEmission.destHeight;
+    vertices = new Float32Array([
+      world.a * left + world.c * top + world.tx, world.b * left + world.d * top + world.ty,
+      world.a * right + world.c * top + world.tx, world.b * right + world.d * top + world.ty,
+      world.a * right + world.c * bottom + world.tx, world.b * right + world.d * bottom + world.ty,
+      world.a * left + world.c * bottom + world.tx, world.b * left + world.d * bottom + world.ty]);
+  } else {
+    node.calculateVertices();
+    vertices = node.vertexData;
+  }
   if (!vertices || vertices.length !== 8) return;
   var offset = nodeIndex * nativeSceneValueStride;
   for (var corner = 0; corner < 4; corner++) {
     var x = vertices[corner * 2], y = vertices[corner * 2 + 1];
     var destination = offset + (corner < 3 ? corner * 2 : 15);
-    // Skipped world state excludes the additional capture transform.
-    if (nativeSceneRootUsesWorldTransform) {
+    // Target projection is separate from observable guest world state.
+    if (nativeSceneRootTransform !== nativeIdentityTransform) {
       var root = nativeSceneRootTransform;
       nativeSceneValues[destination] = root.a * x + root.c * y + root.tx;
       nativeSceneValues[destination + 1] = root.b * x + root.d * y + root.ty;
@@ -175,10 +188,11 @@ function nativePackSpriteColor(node, nodeIndex, tint) {
 }
 
 function nativeSpriteLocalTransform(node, local) {
-  if (!nativeSceneUsePixiWorldState || !(node instanceof PIXI.Sprite) ||
+  if (NativeHost.scene.schema.preparedWorldState) return local;
+  if (!nativeSceneUsePixiWorldState ||
       !node.parent || !node.parent.worldTransform) return local;
   // Leaf Sprites send their final quad; only parents need a local transform.
-  if (!(node.children && node.children.length) && typeof node.calculateVertices === 'function') return local;
+  if (node instanceof PIXI.Sprite && !(node.children && node.children.length) && typeof node.calculateVertices === 'function') return local;
   var parent = node.parent.worldTransform, world = node.worldTransform;
   var determinant = parent.a * parent.d - parent.b * parent.c;
   if (!determinant) return local;
@@ -189,9 +203,22 @@ function nativeSpriteLocalTransform(node, local) {
   return nativeComposeTransform(inverse, world);
 }
 
+function nativePreparedWorldRecord(node, nodeIndex, forcedAlpha) {
+  if (!nativeSceneUsePixiWorldState || !NativeHost.scene.schema.preparedWorldState ||
+      !node.worldTransform || !Number.isFinite(node.worldAlpha)) return;
+  var world = node.worldTransform;
+  if (nativeSceneRootTransform !== nativeIdentityTransform) world = nativeComposeTransform(nativeSceneRootTransform, world);
+  var offset = nodeIndex * nativeSceneValueStride;
+  nativeSceneValues[offset] = world.a; nativeSceneValues[offset + 1] = world.b;
+  nativeSceneValues[offset + 2] = world.c; nativeSceneValues[offset + 3] = world.d;
+  nativeSceneValues[offset + 4] = world.tx; nativeSceneValues[offset + 5] = world.ty;
+  nativeSceneValues[offset + 6] = forcedAlpha === undefined ? node.worldAlpha : forcedAlpha;
+  nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 524288;
+}
+
 function nativePlainSpriteBinding(node) {
   if (nativeSceneNodeRejected(node, null) || node.children && node.children.length ||
-      node._cacheAsBitmap ||
+      node._cacheAsBitmap || PMJS.pixi4.bitmapPresentation && PMJS.pixi4.bitmapPresentation.has(node) ||
       node.shader || node.mask ||
       nativeNodeRenderType(node) !== 'sprite' || nativeScenePictureBlend(node) >= 0 ||
       PMJS.pixi4.scenePreparation.forNode(node) || pmjsPixiRenderPreflight.unsupportedMethod(node)) {
@@ -239,7 +266,7 @@ function writeNativePlainSpriteSegment(bindings, parentIndex) {
     var binding = bindings[bindingIndex];
     var node = binding.node;
     var transform = node.transform;
-    if (transform && typeof transform.updateLocalTransform === 'function') {
+    if (!nativeSceneTransformsPrepared && transform && typeof transform.updateLocalTransform === 'function') {
       transform.updateLocalTransform();
     }
     var local = nativeSpriteLocalTransform(node, transform && transform.localTransform || nativeIdentityTransform);
@@ -251,6 +278,7 @@ function writeNativePlainSpriteSegment(bindings, parentIndex) {
     var nodeIndex = nativeSceneRecord(parentIndex, 1, binding.nativeImage.handle,
       node.tint === undefined ? 0xffffff : node.tint, binding.blendMode,
       local, node.alpha, null, 0, null);
+    nativePreparedWorldRecord(node, nodeIndex);
     nativePackSpriteColor(node, nodeIndex, node.tint === undefined ? 0xffffff : node.tint);
     nativeSpriteVertices(node, nodeIndex);
     var metadataOffset = nodeIndex * nativeSceneMetadataStride;
@@ -322,7 +350,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   }
   if (!particleContext) {
     pmjsPixiRenderPreflight.check(node);
-    PMJS.pixi4.scenePreparation.prepare(node, nativeSceneFilterResolution);
+    PMJS.pixi4.scenePreparation.prepare(node, nativeSceneFilterResolution, nativeSceneTransformsPrepared);
   }
   if (!particleContext && node.shader) {
     PMJS.compat.hit('render.shader',
@@ -365,7 +393,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   if (nativeNodeNeedsAdvancedEffects(enabledFilterCount, nodeMask,
       forcedMask, pictureBlend)) {
     filterPlan = resolveNativeAdvancedEffects(node, particleContext,
-      activeFilters, nodeMask, forcedMask, pictureBlend, forcedClip);
+      activeFilters, nodeMask, forcedMask, pictureBlend, forcedClip, parentIndex);
     if (!filterPlan) return;
     nativeClip = filterPlan.clip;
     nativeMask = null;
@@ -377,7 +405,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   }
   var nativeBlur = filterPlan.blur;
   var transform = node.transform;
-  if (!particleContext && transform &&
+  if (!particleContext && !nativeSceneTransformsPrepared && transform &&
       !(parentIndex === 0xffffffff && nativeSceneRootUsesWorldTransform) &&
       typeof transform.updateLocalTransform === 'function') {
     transform.updateLocalTransform();
@@ -441,6 +469,13 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
       Math.round(node.alpha * 255)]);
   }
   var filterGroups = filterPlan.groups || [];
+  var windowLayer = typeof WindowLayer === 'function' && node instanceof WindowLayer &&
+    typeof node._maskWindow === 'function';
+  if (windowLayer && !filterGroups.length && nativeWindowLayerHasContent(node)) {
+    filterGroups = [{ kind: 20, resource: 0, parameters: [1] }];
+  }
+  var windowTargetFrame = windowLayer && filterGroups.length && filterGroups[0].frame ||
+    windowLayer && node.filterArea || null;
   if (nativeSceneFilterDepth + filterGroups.length > 4) {
     var appliedGroups = Math.max(0, 4 - nativeSceneFilterDepth);
     PMJS.compat.hit('render.filter-depth',
@@ -480,12 +515,15 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     blendMode, local, particleValues ? particleValues.alpha :
       forcedAlpha === undefined ? node.alpha : forcedAlpha,
     nativeClip, nativeBlur, nativeMask);
+  if (!particleContext && kind !== 9 && !(forcedAlpha !== undefined && parentIndex !== 0xffffffff)) {
+    nativePreparedWorldRecord(node, nodeIndex, forcedAlpha);
+  }
   var valueOffset = nodeIndex * nativeSceneValueStride;
   nativeSceneValues[valueOffset + 7] = localX;
   nativeSceneValues[valueOffset + 8] = localY;
   if (kind === 1) {
     if (!particleContext && forcedAlpha === undefined) nativePackSpriteColor(node, nodeIndex, tint);
-    if (!particleContext) nativeSpriteVertices(node, nodeIndex);
+    if (!particleContext) nativeSpriteVertices(node, nodeIndex, nativeSceneEmission.presentation);
     if (texture && texture.__pmjsStandaloneBitmapRegion) nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 8192;
     textureRotation = ((Number(texture && texture.rotate) || 0) % 16 + 16) % 16;
     nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |=
@@ -502,7 +540,8 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     nativeSceneValues[valueOffset + 9] = frame.x;
     nativeSceneValues[valueOffset + 10] = frame.y;
     var textureBase = texture && texture.baseTexture;
-    if (textureBase && textureBase.mipmap) {
+    if (textureBase && textureBase.mipmap &&
+        !(PIXI.BaseRenderTexture && textureBase instanceof PIXI.BaseRenderTexture)) {
       nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 65536;
     }
     if (textureBase && textureBase.__pmjsPremultiplied) {
@@ -638,18 +677,40 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     for (var windowIndex = 0; windowIndex < node.children.length; windowIndex++) {
       var windowChild = node.children[windowIndex];
       if (windowChild && windowChild._isWindow && windowChild.visible &&
-          windowChild._openness > 0) {
+          windowChild.openness > 0) {
 
+        if (windowLayer) {
+          if (!NativeHost.scene.schema.isolatedClearRect || !filterGroups.length) {
+            PMJS.compat.hit('render.window-layer', 'isolated rectangle clear is unavailable');
+          } else {
+            node._maskWindow(windowChild, {
+              x: Math.round(-windowTargetFrame.x), y: Math.round(-windowTargetFrame.y) });
+            var rectangle = node._windowRect;
+            if (!rectangle) throw new Error('WindowLayer mask did not provide a rectangle');
+            var clearIndex = nativeSceneRecord(0xffffffff, 10, 0, 0, 0,
+              nativeIdentityTransform, 1, nativeClip, 0, null);
+            var clearOffset = clearIndex * nativeSceneValueStride;
+            var clearProjection = nativeSceneRootTransform;
+            var clearScale = clearProjection.b === 0 && clearProjection.c === 0 &&
+              clearProjection.a > 0 && clearProjection.a === clearProjection.d ? clearProjection.a : 1;
+            nativeSceneValues[clearOffset + 7] = (rectangle.x + windowTargetFrame.x) * clearScale + clearProjection.tx;
+            nativeSceneValues[clearOffset + 8] = (rectangle.y + windowTargetFrame.y) * clearScale + clearProjection.ty;
+            nativeSceneValues[clearOffset + 13] = rectangle.width * clearScale;
+            nativeSceneValues[clearOffset + 14] = rectangle.height * clearScale;
+            var clearRenderer = globalThis.Graphics && Graphics._renderer;
+            nativeSceneValues[clearOffset + 33] = (clearRenderer && clearRenderer.resolution || 1) / clearScale;
+          }
+        }
         writeNativeSceneNode(windowChild, nodeIndex);
       }
     }
+    closeNativeSceneFilters(filterGroups.length, parentIndex, nativeClip);
     for (var otherIndex = 0; otherIndex < node.children.length; otherIndex++) {
       var otherChild = node.children[otherIndex];
       if (otherChild && !otherChild._isWindow) {
         writeNativeSceneNode(otherChild, nodeIndex);
       }
     }
-    closeNativeSceneFilters(filterGroups.length, parentIndex, nativeClip);
     return;
   }
   var particleContainer = PIXI.particles && PIXI.particles.ParticleContainer &&
@@ -793,29 +854,35 @@ function collectNativeTilemaps(node, output) {
 }
 
 function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
-    skipUpdateTransform, backgroundColor = null, options = {}) {
+    skipUpdateTransform, backgroundColor = null, options = {}, bindTarget) {
+  var previousContext = {
+    worldState: nativeSceneUsePixiWorldState, prepared: nativeSceneTransformsPrepared,
+    root: nativeSceneRootTransform, usesWorld: nativeSceneRootUsesWorldTransform,
+    resolution: nativeSceneFilterResolution, roundPixels: nativeSceneRoundPixels
+  };
+  var parentWorld = nativeTransformParent.transform.worldTransform;
+  var previousParentWorld = { a: parentWorld.a, b: parentWorld.b, c: parentWorld.c,
+    d: parentWorld.d, tx: parentWorld.tx, ty: parentWorld.ty };
   nativeScreenOverlays.length = 0;
   nativeTileRects = 0;
   var parent = stage.parent;
-  stage.parent = nativeTransformParent;
-  nativeSceneRootTransform = rootTransform || nativeIdentityTransform;
-  nativeSceneRootUsesWorldTransform = !!skipUpdateTransform;
+  var parentReplaced = !skipUpdateTransform;
+  if (parentReplaced) stage.parent = nativeTransformParent;
+  nativeSceneRootTransform = rootTransform &&
+    (rootTransform.a !== 1 || rootTransform.b !== 0 || rootTransform.c !== 0 ||
+      rootTransform.d !== 1 || rootTransform.tx !== 0 || rootTransform.ty !== 0) ?
+    rootTransform : nativeIdentityTransform;
+  nativeSceneRootUsesWorldTransform = !!skipUpdateTransform ||
+    nativeSceneRootTransform !== nativeIdentityTransform;
   nativeSceneFilterResolution = Math.max(0.000001,
     Number(filterResolution) || 1);
   nativeSceneRoundPixels = !!roundPixels;
-  var parentWorld = nativeTransformParent.transform.worldTransform;
-  if (parentWorld.a !== nativeSceneRootTransform.a || parentWorld.b !== nativeSceneRootTransform.b ||
-      parentWorld.c !== nativeSceneRootTransform.c || parentWorld.d !== nativeSceneRootTransform.d ||
-      parentWorld.tx !== nativeSceneRootTransform.tx || parentWorld.ty !== nativeSceneRootTransform.ty) {
+  if (parentWorld.a !== 1 || parentWorld.b !== 0 || parentWorld.c !== 0 ||
+      parentWorld.d !== 1 || parentWorld.tx !== 0 || parentWorld.ty !== 0) {
     // Pixi caches descendants against the parent's world-transform generation.
     nativeTransformParent.transform._worldID++;
   }
-  parentWorld.a = nativeSceneRootTransform.a;
-  parentWorld.b = nativeSceneRootTransform.b;
-  parentWorld.c = nativeSceneRootTransform.c;
-  parentWorld.d = nativeSceneRootTransform.d;
-  parentWorld.tx = nativeSceneRootTransform.tx;
-  parentWorld.ty = nativeSceneRootTransform.ty;
+  parentWorld.identity();
   var map = globalThis.$gameMap;
   var cameraX = map && map._displayX;
   var cameraY = map && map._displayY;
@@ -824,30 +891,42 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   try {
     if (NativeHost.scene) {
       if (newStage) renderNativeStage._tilemaps = collectNativeTilemaps(stage, []);
-      nativeSceneUsePixiWorldState = !!skipUpdateTransform || options.worldState === 'pixi';
-      if (nativeSceneUsePixiWorldState && !skipUpdateTransform && typeof stage.updateTransform === 'function') {
-        stage.updateTransform();
+      var plan = !skipUpdateTransform && options.worldState !== 'pixi' &&
+        pmjsPixiRenderPreflight.transformPlan(stage);
+      nativeSceneUsePixiWorldState = !!skipUpdateTransform || !!plan || options.worldState === 'pixi' ||
+        typeof stage.updateTransform === 'function';
+      nativeSceneTransformsPrepared = nativeSceneUsePixiWorldState;
+      if (!skipUpdateTransform) {
+        if (plan) PMJS.pixi4.scenePreparation.transforms(plan, stage);
+        else if (typeof stage.updateTransform === 'function') stage.updateTransform();
       }
-      if (!nativeSceneUsePixiWorldState && typeof prepareNativeMvWindowTransforms === 'function') {
+      if (!nativeSceneTransformsPrepared && typeof prepareNativeMvWindowTransforms === 'function') {
         prepareNativeMvWindowTransforms(stage);
       }
+      if (parentReplaced) {
+        stage.parent = parent;
+        parentReplaced = false;
+      }
+      if (bindTarget) bindTarget();
       submitNativeScene(stage, backgroundColor);
     }
   } catch (error) {
     renderNativeStage._ready = false;
     throw error;
   } finally {
-    nativeSceneUsePixiWorldState = false;
-    nativeSceneRootTransform = nativeIdentityTransform;
-    nativeSceneRootUsesWorldTransform = false;
-    nativeSceneFilterResolution = 1;
-    nativeSceneRoundPixels = false;
-    if (parentWorld.a !== 1 || parentWorld.b !== 0 || parentWorld.c !== 0 ||
-        parentWorld.d !== 1 || parentWorld.tx !== 0 || parentWorld.ty !== 0) {
+    nativeSceneUsePixiWorldState = previousContext.worldState;
+    nativeSceneTransformsPrepared = previousContext.prepared;
+    nativeSceneRootTransform = previousContext.root;
+    nativeSceneRootUsesWorldTransform = previousContext.usesWorld;
+    nativeSceneFilterResolution = previousContext.resolution;
+    nativeSceneRoundPixels = previousContext.roundPixels;
+    if (parentWorld.a !== previousParentWorld.a || parentWorld.b !== previousParentWorld.b ||
+        parentWorld.c !== previousParentWorld.c || parentWorld.d !== previousParentWorld.d ||
+        parentWorld.tx !== previousParentWorld.tx || parentWorld.ty !== previousParentWorld.ty) {
       nativeTransformParent.transform._worldID++;
     }
-    parentWorld.identity();
-    stage.parent = parent;
+    Object.assign(parentWorld, previousParentWorld);
+    if (parentReplaced) stage.parent = parent;
   }
   renderNativeStage._ready = true;
   renderNativeStage._framesTotal = (renderNativeStage._framesTotal || 0) + 1;

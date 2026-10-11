@@ -564,6 +564,75 @@ napi_value releaseVideo(napi_env env, napi_callback_info info) try {
 }
 
 
+napi_value audioContextTime(napi_env env, napi_callback_info) try {
+  return number(env, host(env).core.media().contextTime());
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value setAudioContextSuspended(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 1);
+  host(env).core.media().suspendContext(asBoolean(env, a.at(0)));
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value bindAudioContext(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 1);
+  return boolean(env, host(env).core.media().bindContext(asUint32(env, a.at(0))));
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value createAudioGain(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 1);
+  return uint32(env, host(env).core.media().createGainAutomation(asNumber(env, a.at(0))));
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value scheduleAudioGain(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 5);
+  const bool scheduled = host(env).core.media().scheduleGain(asUint32(env, a.at(0)),
+    asBoolean(env, a.at(1)), asNumber(env, a.at(2)), asNumber(env, a.at(3)),
+    a.size() > 4 && asBoolean(env, a[4]));
+  if (!scheduled) throw std::invalid_argument("invalid gain automation event");
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value cancelAudioGain(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 2);
+  if (!host(env).core.media().cancelGain(asUint32(env, a.at(0)), asNumber(env, a.at(1))))
+    throw std::invalid_argument("invalid gain automation cancellation");
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value audioGainValue(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 1);
+  return number(env, host(env).core.media().gainValue(asUint32(env, a.at(0))));
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value bindAudioGain(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 2);
+  return boolean(env, host(env).core.media().bindGain(asUint32(env, a.at(0)), asUint32(env, a.at(1))));
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value releaseAudioGain(napi_env env, napi_callback_info info) try {
+  auto a = arguments(env, info, 1);
+  return boolean(env, host(env).core.media().releaseGain(asUint32(env, a.at(0))));
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
 void registerMediaBindings(napi_env env, napi_value exports) {
   napi_value media = moduleObject(env);
   method(env, media, "loadAudio", loadAudio);
@@ -572,6 +641,15 @@ void registerMediaBindings(napi_env env, napi_value exports) {
   method(env, media, "playAudio", playAudio);
   method(env, media, "stopAudio", stopAudio);
   method(env, media, "setAudioSuspended", setAudioSuspended);
+  method(env, media, "audioContextTime", audioContextTime);
+  method(env, media, "setAudioContextSuspended", setAudioContextSuspended);
+  method(env, media, "bindAudioContext", bindAudioContext);
+  method(env, media, "createAudioGain", createAudioGain);
+  method(env, media, "scheduleAudioGain", scheduleAudioGain);
+  method(env, media, "cancelAudioGain", cancelAudioGain);
+  method(env, media, "audioGainValue", audioGainValue);
+  method(env, media, "bindAudioGain", bindAudioGain);
+  method(env, media, "releaseAudioGain", releaseAudioGain);
   method(env, media, "setAudioParameters", setAudioParameters);
   method(env, media, "setAudioEqualPowerPan", setAudioEqualPowerPan);
   method(env, media, "fadeAudio", fadeAudio);

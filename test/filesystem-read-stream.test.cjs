@@ -11,12 +11,12 @@ const filename = path.resolve(__dirname, '../js/pmjs-web/filesystem.js');
 function fixture(contents = Buffer.from('René')) {
   const tasks = [], reads = [], chunks = [];
   let started = false, closed = 0;
-  function openRead(file, start) {
+  async function openReadAsync(file, start) {
     reads.push(file);
     if (contents === null) return null;
     let offset = start, destroyed = false;
     return {
-      read(size) {
+      async readAsync(size) {
         assert.equal(destroyed, false);
         chunks.push(size);
         const result = contents.subarray(offset, offset + size); offset += result.length; return result;
@@ -25,7 +25,7 @@ function fixture(contents = Buffer.from('René')) {
     };
   }
   const context = vm.createContext({ Buffer, Error, __pmjsBuiltinRequire: require,
-    NativeHost: { fs: { openRead }, storage: { openRead(file, start) { return openRead('save:' + file, start); } } },
+    NativeHost: { fs: { openReadAsync }, storage: { openReadAsync(file, start) { return openReadAsync('save:' + file, start); } } },
     PMJS: { config: { virtualFiles: { extensionAliases: { '.txt': '.data' } } },
       tasks: { enqueue(callback) { if (started) setImmediate(callback); else tasks.push(callback); } } } });
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context);
@@ -123,7 +123,7 @@ test('unhandled read errors and guest callback exceptions surface as they do in 
         let fileErrors = 0, stream;
         if (${JSON.stringify(implementation)} === 'guest') {
           const c = vm.createContext({ Buffer, Error, __pmjsBuiltinRequire: require,
-            NativeHost: { fs: { openRead() { return ${mode === 'missing' ? 'null' : "{ read() { return Buffer.from('data'); }, close() {} }"}; } } },
+            NativeHost: { fs: { async openReadAsync() { return ${mode === 'missing' ? 'null' : "{ async readAsync() { return Buffer.from('data'); }, close() {} }"}; } } },
             PMJS: { config: {}, tasks: { enqueue(fn) { setImmediate(fn); } } } });
           vm.runInContext(fs.readFileSync(${JSON.stringify(filename)}, 'utf8'), c);
           stream = c.fsModule.createReadStream('missing');
@@ -218,8 +218,36 @@ test('configured missing text files retain byte ranges without ordinary full-fil
 test('chunk failures close the captured reader and report the original error', async () => {
   const f = fixture(); let closes = 0;
   const failure = Object.assign(new Error('read failed'), { code: 'EIO' });
-  f.context.NativeHost.fs.openRead = () => ({ read() { throw failure; }, close() { closes++; } });
+  f.context.NativeHost.fs.openReadAsync = async () => ({ async readAsync() { throw failure; }, close() { closes++; } });
   assert.deepEqual((await observe(() => f.guest.createReadStream('input'), f.drain)).events,
     [['open'], ['ready'], ['error', 'EIO'], ['close']]);
   assert.equal(closes, 1);
+});
+
+test('destruction while a worker read is outstanding suppresses data and retains one close', async () => {
+  const f = fixture(); let finish, closes = 0;
+  let readStarted;
+  const started = new Promise(resolve => { readStarted = resolve; });
+  f.context.NativeHost.fs.openReadAsync = async () => ({
+    readAsync() { return new Promise(resolve => { finish = resolve; readStarted(); }); }, close() { closes++; }
+  });
+  const stream = f.guest.createReadStream('input'), data = [];
+  stream.on('data', chunk => data.push(chunk));
+  f.drain(); await started;
+  const closed = new Promise(resolve => stream.once('close', resolve));
+  stream.destroy(); finish(Buffer.from('late')); await closed; await turn();
+  assert.deepEqual(data, []); assert.equal(closes, 1);
+});
+
+test('dispatcher shutdown closes a paused stream without delivering guest events', async t => {
+  const f = fixture();
+  f.context.performance = performance;
+  f.context.NativeHost.runtime = { scheduling: require('node:timers') };
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), f.context);
+  t.after(() => f.context.PMJS.tasks.stop());
+  const stream = f.guest.createReadStream('input'), events = [];
+  stream.on('data', chunk => events.push(chunk)); stream.pause();
+  await f.context.PMJS.tasks.idle();
+  f.context.PMJS.tasks.stop(); await turn();
+  assert.equal(f.closed, 1); assert.deepEqual(events, []);
 });

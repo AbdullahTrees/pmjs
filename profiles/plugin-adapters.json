@@ -1,6 +1,11 @@
 {
   "adapters": [
     {
+      "plugins": ["YEP_CoreEngine"],
+      "modules": ["js/pmjs-plugins/yanfly/core-transforms.js",
+        "js/pmjs-plugins/yanfly/core-character-presentation.js"]
+    },
+    {
       "plugins": [
         "AudioStreaming"
       ],

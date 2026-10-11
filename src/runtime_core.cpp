@@ -44,7 +44,7 @@ bool RuntimeCore::submitScene(std::uint32_t version,
     const auto kind = static_cast<scene_packet::NodeKind>(
       sceneMetadataScratch_[offset]);
     if (sceneMetadataScratch_[offset] >
-        static_cast<std::uint32_t>(scene_packet::NodeKind::effect)) {
+        static_cast<std::uint32_t>(scene_packet::NodeKind::clearRect)) {
       return false;
     }
     if (sceneMetadataScratch_[offset + 5] &

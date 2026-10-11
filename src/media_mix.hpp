@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include "media_decoder.hpp"
+#include "audio_automation.hpp"
 
 namespace pmjs {
 
@@ -20,6 +21,7 @@ struct PreparedAudioAsset : DecodedAudio {
 };
 
 struct VoiceMixState {
+  GainAutomation* automation = nullptr;
   std::shared_ptr<const PreparedAudioAsset> asset;
   std::deque<float> samples;  // interleaved stereo frames
   double phase = 0;
@@ -50,8 +52,9 @@ inline std::array<float, 4> equalPowerPanMatrix(int channels, float position) {
 }
 
 inline void mixVoiceInto(VoiceMixState& voice, float* output, int frames,
-                         float master) {
+                         float master, std::uint64_t contextFrame = 0) {
   if (!voice.playing || voice.suspended) return;
+  const auto* gains = voice.automation ? &voice.automation->renderBlock(contextFrame, frames) : nullptr;
   const auto advanceGain = [&voice]() {
     if (voice.gainStep != 0) {
       const double next = voice.gain + voice.gainStep;
@@ -68,39 +71,7 @@ inline void mixVoiceInto(VoiceMixState& voice, float* output, int frames,
       }
     }
   };
-  for (int frame = 0; frame < frames; ++frame) {
-    std::uint64_t nextSampleFrame = voice.positionFrame + 1;
-    if (voice.asset) {
-      const auto length = voice.asset->samples.size() / 2;
-      const auto end = voice.loop && voice.loopEnd > voice.loopStart
-        ? voice.loopEnd : length;
-      if (voice.loop && nextSampleFrame >= end) nextSampleFrame = voice.loopStart;
-      if (voice.positionFrame >= length || nextSampleFrame >= length) {
-        voice.playing = false;
-        break;
-      }
-    } else if (voice.samples.size() < 4) {
-      if (voice.eof) voice.playing = false;
-      break;
-    }
-    if (!voice.absoluteGainEnvelope) advanceGain();
-    if (!voice.playing) break;
-    const float fraction = static_cast<float>(voice.phase);
-    const auto sample = [&](int channel, bool next) {
-      if (voice.asset) return voice.asset->samples[
-        (next ? nextSampleFrame : voice.positionFrame) * 2 + channel];
-      return voice.samples[(next ? 2 : 0) + channel];
-    };
-    const float left = sample(0, false) * (1 - fraction) + sample(0, true) * fraction;
-    const float right = sample(1, false) * (1 - fraction) + sample(1, true) * fraction;
-    const float leftGain =
-        voice.volume * voice.gain * voice.leftGain * (voice.pan > 0 ? 1 - voice.pan : 1);
-    const float rightGain =
-        voice.volume * voice.gain * voice.rightGain * (voice.pan < 0 ? 1 + voice.pan : 1);
-    output[frame * 2] += (left * voice.panMatrix[0] + right * voice.panMatrix[1]) * leftGain * master;
-    output[frame * 2 + 1] += (left * voice.panMatrix[2] + right * voice.panMatrix[3]) * rightGain * master;
-    if (voice.absoluteGainEnvelope) advanceGain();
-    voice.phase += voice.pitch;
+  const auto consumeSourcePhase = [&voice]() {
     while (voice.phase >= 1 && (voice.asset
         ? (voice.loop || voice.positionFrame < voice.asset->samples.size() / 2)
         : voice.samples.size() >= 2)) {
@@ -113,13 +84,59 @@ inline void mixVoiceInto(VoiceMixState& voice, float* output, int frames,
       if (voice.asset && voice.loop && voice.positionFrame >=
           (voice.loopEnd > voice.loopStart ? voice.loopEnd : voice.asset->samples.size() / 2))
         voice.positionFrame = voice.loopStart;
-      else if (voice.loop && voice.loopEnd > voice.loopStart &&
-          voice.positionFrame >= voice.loopEnd)
+      else if (voice.loop && voice.loopEnd > voice.loopStart && voice.positionFrame >= voice.loopEnd)
         voice.positionFrame = voice.loopStart;
       else if (voice.loop && voice.duration > 0 &&
                voice.positionFrame >= (voice.asset ? voice.asset->samples.size() / 2
                  : static_cast<std::uint64_t>(voice.duration * 48000)))
         voice.positionFrame = 0;
+    }
+  };
+  for (int frame = 0; frame < frames; ++frame) {
+    if (gains) voice.gain = (*gains)[frame];
+    // Consume pending source advancement before interpolating new PCM.
+    if (!voice.asset && voice.phase >= 1) consumeSourcePhase();
+    std::uint64_t nextSampleFrame = voice.positionFrame + 1;
+    if (voice.asset) {
+      const auto length = voice.asset->samples.size() / 2;
+      const auto end = voice.loop && voice.loopEnd > voice.loopStart
+        ? voice.loopEnd : length;
+      if (voice.loop && nextSampleFrame >= end) nextSampleFrame = voice.loopStart;
+      if (voice.positionFrame >= length) {
+        voice.playing = false;
+        break;
+      }
+    } else if (voice.samples.size() < 4) {
+      if (voice.eof && voice.samples.empty()) { voice.playing = false; break; }
+      if (!voice.eof) {
+        continue;
+      }
+    }
+    if (!voice.automation && !voice.absoluteGainEnvelope) advanceGain();
+    if (!voice.playing) break;
+    const float fraction = static_cast<float>(voice.phase);
+    const auto sample = [&](int channel, bool next) {
+      const auto index = voice.asset ?
+        (next ? nextSampleFrame : voice.positionFrame) * 2 + channel :
+        static_cast<std::uint64_t>((next ? 2 : 0) + channel);
+      if (voice.asset) return index < voice.asset->samples.size() ? voice.asset->samples[index] : 0.0F;
+      return index < voice.samples.size() ? voice.samples[index] : 0.0F;
+    };
+    const float left = sample(0, false) * (1 - fraction) + sample(0, true) * fraction;
+    const float right = sample(1, false) * (1 - fraction) + sample(1, true) * fraction;
+    const float leftGain =
+        voice.volume * voice.gain * voice.leftGain * (voice.pan > 0 ? 1 - voice.pan : 1);
+    const float rightGain =
+        voice.volume * voice.gain * voice.rightGain * (voice.pan < 0 ? 1 + voice.pan : 1);
+    output[frame * 2] += (left * voice.panMatrix[0] + right * voice.panMatrix[1]) * leftGain * master;
+    output[frame * 2 + 1] += (left * voice.panMatrix[2] + right * voice.panMatrix[3]) * rightGain * master;
+    if (!voice.automation && voice.absoluteGainEnvelope) advanceGain();
+    voice.phase += voice.pitch;
+    consumeSourcePhase();
+    if (!voice.loop && (voice.asset ? voice.positionFrame >= voice.asset->samples.size() / 2
+                                  : voice.eof && voice.samples.empty())) {
+      voice.playing = false;
+      break;
     }
   }
 }

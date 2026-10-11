@@ -14,6 +14,11 @@ function NativeImage() {
   this._pmjsPreparedTileSet = PMJS.images.preparedTileSet || "";
   this._pmjsLoadFailed = false;
   this._pmjsLoadError = null;
+  if (!Object.prototype.hasOwnProperty.call(PMJS.images, 'pendingLoads')) {
+    Object.defineProperty(PMJS.images, 'pendingLoads', {
+      get: function() { return pendingNativeImageLoads; }
+    });
+  }
 }
 
 var pendingNativeImageLoads = 0;
@@ -52,99 +57,60 @@ Object.defineProperty(NativeImage.prototype, 'src', {
     image._pmjsLoadFailed = false;
     image._pmjsLoadError = null;
     PMJS.tasks.enqueue(function() {
-      if (objectUrl) {
-        pendingNativeImageLoads++;
-        var objectBlob = typeof globalThis.pmjsResolveObjectURL === 'function'
-          ? globalThis.pmjsResolveObjectURL(source) : null;
-        var objectLoad = objectBlob
-          ? objectBlob.arrayBuffer().then(function(buffer) {
-              var retain = PMJS.images.shouldRetainPixels(source);
-              return NativeHost.images.loadBytesAsync(buffer, retain);
-            })
-          : Promise.reject(new Error('object URL is unavailable'));
-        objectLoad.then(function(result) {
-          var loaded = trackNativeResource(result, 'image');
-          if (generation !== image._loadGeneration) {
-            releaseNativeResource(loaded, 'image');
+      if (generation !== image._loadGeneration) return;
+      pendingNativeImageLoads++;
+      function current() { return generation === image._loadGeneration; }
+      var loading = Promise.resolve().then(function() {
+        if (objectUrl) {
+          var blob = typeof globalThis.pmjsResolveObjectURL === 'function'
+            ? globalThis.pmjsResolveObjectURL(source) : null;
+          if (!blob) throw new Error('object URL is unavailable');
+          return blob.arrayBuffer().then(function(buffer) {
+            if (!current() || PMJS.tasks.stopped) return null;
+            return NativeHost.images.loadBytesAsync(buffer, PMJS.images.shouldRetainPixels(source));
+          });
+        }
+        var prefix = 'generated-assets:/';
+        var generated = path.indexOf(prefix) === 0;
+        var loader = generated ? NativeHost.assets : NativeHost.images;
+        return (generated ? loader.loadImageAsync : loader.loadAsync).call(loader,
+          generated ? path.slice(prefix.length) : path,
+          PMJS.images.shouldRetainPixels(path), preparedTileSet);
+      });
+      function deliver(result, error) {
+        var loaded = result ? trackNativeResource(result, 'image') : null;
+        function discardLoaded() {
+          try { releaseNativeResource(loaded, 'image'); }
+          finally { pendingNativeImageLoads--; }
+        }
+        PMJS.tasks.enqueue(function() {
+          if (!current()) {
+            discardLoaded();
             return;
           }
-          releaseNativeResource(image._nativeImage, 'image');
-          image._nativeImage = loaded;
-          image.width = image.naturalWidth = loaded.width;
-          image.height = image.naturalHeight = loaded.height;
-          image.complete = true;
-          image.dispatchEvent({ type: 'load', target: image });
-          PMJS.images.loadCompleted(image);
-        }, function(error) {
-          if (generation !== image._loadGeneration) return;
-          releaseNativeResource(image._nativeImage, 'image');
-          image._nativeImage = null;
-          image.width = image.naturalWidth = 0;
-          image.height = image.naturalHeight = 0;
-          image.complete = true;
-          image._pmjsLoadFailed = true;
-          image._pmjsLoadError = error;
-          image.dispatchEvent({ type: 'error', target: image });
-        }).then(function() { pendingNativeImageLoads--; }, function(error) {
-          pendingNativeImageLoads--;
-          console.error(error && error.stack || error);
-        });
-        return;
-      }
-      var generatedPrefix = 'generated-assets:/';
-      var generated = path.indexOf(generatedPrefix) === 0;
-      var relativePath = generated ? path.slice(generatedPrefix.length) : path;
-      var loader = generated ? NativeHost.assets : NativeHost.images;
-      var load = generated ? loader.loadImage : loader.load;
-      var loadAsync = generated ? loader.loadImageAsync : loader.loadAsync;
-      var retainCpuPixels = PMJS.images.shouldRetainPixels(path);
-
-      pendingNativeImageLoads++;
-      new Promise(function(resolve) {
-        resolve(typeof loadAsync === 'function'
-          ? loadAsync.call(loader, relativePath, retainCpuPixels, preparedTileSet)
-          : load.call(loader, relativePath, retainCpuPixels, preparedTileSet));
-      }).then(function(result) {
-        var loaded = trackNativeResource(result, 'image');
-        if (generation !== image._loadGeneration) {
-          releaseNativeResource(loaded, 'image');
-          return;
-        }
-        releaseNativeResource(image._nativeImage, 'image');
-        image._nativeImage = loaded;
-        image.width = image.naturalWidth = image._nativeImage.width;
-        image.height = image.naturalHeight = image._nativeImage.height;
-        image.complete = true;
-        image._pmjsLoadFailed = false;
-        image._pmjsLoadError = null;
-        image.dispatchEvent({ type: 'load', target: image });
-        PMJS.images.loadCompleted(image);
-      }, function(error) {
-        if (generation !== image._loadGeneration) return;
-        console.warn('[pmjs] image load failed, rendering fallback checkerboard: ' + path +
-          (error ? ' (' + (error.message || error) + ')' : ''));
-        releaseNativeResource(image._nativeImage, 'image');
-        image._nativeImage = null;
-        try {
-          if (typeof NativeHost !== 'undefined' && NativeHost.images &&
-              typeof NativeHost.images.fallbackImage === 'function') {
-            image._nativeImage = trackNativeResource(NativeHost.images.fallbackImage(), 'image');
+          try {
+            releaseNativeResource(image._nativeImage, 'image');
+            image._nativeImage = loaded;
+            image.width = image.naturalWidth = loaded ? loaded.width : 0;
+            image.height = image.naturalHeight = loaded ? loaded.height : 0;
+            image.complete = true;
+            image._pmjsLoadFailed = !loaded;
+            image._pmjsLoadError = error || null;
+            if (!loaded && !objectUrl && typeof NativeHost.images.fallbackImage === 'function') {
+              image._nativeImage = trackNativeResource(NativeHost.images.fallbackImage(), 'image');
+            }
+            return pmjsDispatchHostEvent(image, { type: loaded ? 'load' : 'error', target: image }, current)
+              .then(function(valid) {
+                if (valid && loaded) PMJS.images.loadCompleted(image);
+              }).finally(function() { pendingNativeImageLoads--; }).catch(pmjsReportEventError);
+          } catch (failure) {
+            pendingNativeImageLoads--;
+            throw failure;
           }
-        } catch (_) {}
-        // Keep dimensions at 0: preserve genuine browser failure semantics so
-        // RPG Maker sprite frame math (naturalWidth / columns) is not corrupted.
-        image.width = image.naturalWidth = 0;
-        image.height = image.naturalHeight = 0;
-        image.complete = true;
-        image._pmjsLoadFailed = true;
-        image._pmjsLoadError = error;
-        image.dispatchEvent({ type: 'error', target: image });
-      }).then(function() { pendingNativeImageLoads--; },
-        function(err) {
-          pendingNativeImageLoads--;
-          console.error(err && err.stack || err);
-        });
-    });
+        }, { errorMode: 'event', discard: discardLoaded });
+      }
+      loading.then(function(result) { deliver(result, null); }, function(error) { deliver(null, error); });
+    }, { errorMode: 'event' });
   }
 });
 

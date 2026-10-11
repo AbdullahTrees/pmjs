@@ -2,7 +2,7 @@
 
 (function() {
   function tick(now) {
-    globalThis.pmjsRunRpgMakerTick(now);
+    return globalThis.pmjsRunRpgMakerTick(now);
   }
 
   // MZ renders from its ticker during the update phase.

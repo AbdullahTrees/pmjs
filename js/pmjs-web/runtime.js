@@ -132,6 +132,12 @@ var nativeGamepads = [];
 var nativeGamepadExposed = false;
 var pendingKeyReleases = [];
 var pendingPadReleases = [];
+var pendingGamepadRemovals = [];
+PMJS.web.consumeGamepadRemovals = function() {
+  var removals = pendingGamepadRemovals;
+  pendingGamepadRemovals = [];
+  return removals;
+};
 function dispatchNativeKey(source) {
   if (!globalThis.document || typeof document.dispatchEvent !== 'function') return;
   var event = { type: source.down ? 'keydown' : 'keyup',
@@ -182,7 +188,6 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: t
 globalThis.__pmjsReceiveInput = function(state) {
   if (!state) return;
   globalThis.__pmjsInputSnapshot = state;
-  if (PMJS.web.input) PMJS.web.input.dispatchEvent({ type: 'snapshot', snapshot: state });
   if (PMJS.web.presentation) PMJS.web.presentation.sync();
   (state.pointerEvents || []).forEach(dispatchNativePointer);
   var pads = state.gamepads || [];
@@ -215,9 +220,7 @@ globalThis.__pmjsReceiveInput = function(state) {
       oldPad.connected = false;
       for (var cleared = 0; cleared < oldPad.buttons.length; cleared++) oldPad.buttons[cleared]._value = 0;
       oldPad.axes = [0, 0, 0, 0];
-      if (globalThis.Input && typeof Input._updateGamepadState === 'function') {
-        Input._updateGamepadState(oldPad);
-      }
+      if (nativeGamepadExposed) pendingGamepadRemovals.push(oldPad.index);
       nativeGamepads[index] = null;
     }
   }
@@ -270,6 +273,7 @@ globalThis.__pmjsReceiveInput = function(state) {
         heldKeys.indexOf(source.keyCode) < 0) pendingKeyReleases.push(source);
     else dispatchNativeKey(source);
   }
+  if (PMJS.web.input) PMJS.web.input.dispatchEvent({ type: 'snapshot', snapshot: state });
 };
 globalThis.__pmjsFinishInputStep = function() {
   for (var i = 0; i < pendingKeyReleases.length; i++) dispatchNativeKey(pendingKeyReleases[i]);

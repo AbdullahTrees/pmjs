@@ -20,6 +20,29 @@
         });
       });
     }
+    var originalPoll = Input._pollGamepads;
+    if (typeof originalPoll === 'function') {
+      Input._pollGamepads = function() {
+        var removals = PMJS.web && PMJS.web.consumeGamepadRemovals
+          ? PMJS.web.consumeGamepadRemovals() : [];
+        var affected = Object.create(null);
+        for (var index = 0; index < removals.length; index++) {
+          var padIndex = removals[index];
+          var buttons = this._gamepadStates[padIndex] || [];
+          for (var button = 0; button < buttons.length; button++) {
+            if (buttons[button] && this.gamepadMapper[button]) {
+              affected[this.gamepadMapper[button]] = true;
+            }
+          }
+          delete this._gamepadStates[padIndex];
+        }
+        var result = originalPoll.apply(this, arguments);
+        var snapshot = globalThis.__pmjsInputSnapshot || {};
+        var keys = (snapshot.keysDown || []).concat(snapshot.keysPressed || []);
+        for (var action in affected) this._currentState[action] = actionHeld(this, action, keys);
+        return result;
+      };
+    }
     function nativeInputUpdate() {
       if (globalThis.__pmjsInputSnapshot && this.keyMapper && this.gamepadMapper) {
         var keys = (globalThis.__pmjsInputSnapshot.keysDown || []).concat(

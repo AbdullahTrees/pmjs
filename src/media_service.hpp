@@ -55,6 +55,7 @@ class MediaService {
   bool play(std::uint32_t handle, bool loop, double offset);
   bool stop(std::uint32_t handle);
   bool setSuspended(std::uint32_t handle, bool suspended);
+  bool bindContext(std::uint32_t handle);
   bool setParameters(std::uint32_t handle, float volume, float pitch, float pan);
   bool setStereoGains(std::uint32_t handle, float left, float right);
   bool setEqualPowerPan(std::uint32_t handle, float pan);
@@ -69,6 +70,14 @@ class MediaService {
   std::size_t bufferedFrames(std::uint32_t handle) const;
   bool release(std::uint32_t handle);
   bool audioAvailable() const;
+  double contextTime() const;
+  void suspendContext(bool suspended);
+  std::uint32_t createGainAutomation(double initial);
+  bool scheduleGain(std::uint32_t handle, bool linear, double value, double time, bool intrinsic = false);
+  bool cancelGain(std::uint32_t handle, double time);
+  double gainValue(std::uint32_t handle) const;
+  bool bindGain(std::uint32_t voice, std::uint32_t automation);
+  bool releaseGain(std::uint32_t handle);
 
  private:
   struct Impl;

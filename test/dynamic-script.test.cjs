@@ -7,7 +7,7 @@ const test = require('node:test');
 
 function fixture() {
   const errors = [];
-  const context = vm.createContext({ console, performance: { now: () => 0 }, PMJS: {},
+  const context = vm.createContext({ console, __pmjsBuiltinRequire: require, performance: { now: () => 0 }, PMJS: {},
     CanvasContext2D: function() {},
     nativeWindowState: { focused: true, visible: true },
     pmjsGameConfig: {}, NativeHost: { runtime: {

@@ -26,7 +26,7 @@ function loadWriterSources() {
     fs.readFileSync(path.join(root, relative), 'utf8')).join('\n');
 }
 
-function makeHarness() {
+function makeHarness(options = {}) {
   let nextHandle = 100;
   const compatHits = [];
   const compatObserved = [];
@@ -122,7 +122,9 @@ function makeHarness() {
   }
 
   class Tilemap extends Container {}
-  class Window extends Container {}
+  class Window extends Container {
+    get openness() { return this._openness; }
+  }
   class WindowLayer extends Container {}
   class BlurFilter {
     constructor(blur, quality) {
@@ -207,6 +209,7 @@ function makeHarness() {
   sandbox.globalThis = sandbox;
   sandbox.window = sandbox;
   vm.createContext(sandbox);
+  if (options.beforeWriter) options.beforeWriter(sandbox);
   vm.runInContext(loadWriterSources(), sandbox,
     { filename: 'scene-writer.js' });
   const filterPlanner = sandbox.nativeSceneFilter;

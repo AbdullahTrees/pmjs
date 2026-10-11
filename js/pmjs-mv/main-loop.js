@@ -1,7 +1,7 @@
 'use strict';
 
 (function() {
-  function beforeServices() {
+  function afterServices() {
     if (typeof SceneManager !== 'undefined' &&
         SceneManager.ticker &&
         SceneManager.ticker._pmjsHostDriven &&
@@ -11,7 +11,7 @@
   }
 
   function pmjsMvTick(now) {
-    globalThis.pmjsRunRpgMakerTick(now, beforeServices);
+    return globalThis.pmjsRunRpgMakerTick(now, afterServices);
   }
 
   function pmjsMvRender(now) {

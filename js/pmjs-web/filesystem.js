@@ -57,10 +57,24 @@ pathModule.posix = pathModule;
 
 function fsReadContents(path, options) {
   var writable = writablePath(path);
-  var encoding = typeof options === 'string' ? options : options && options.encoding;
   var host = writable !== null && NativeHost.storage ? NativeHost.storage : NativeHost.fs;
   var resolved = writable !== null && NativeHost.storage ? writable : gameReadPath(path);
   var result = host.readBytes(resolved);
+  return fsDecodeContents(path, options, result);
+}
+
+function fsReadContentsAsync(path, options) {
+  var writable = writablePath(path);
+  var host = writable !== null && NativeHost.storage ? NativeHost.storage : NativeHost.fs;
+  var resolved = writable !== null && NativeHost.storage ? writable : gameReadPath(path);
+  return host.readBytesAsync(resolved).then(function(result) {
+    return fsDecodeContents(path, options, result);
+  });
+}
+
+function fsDecodeContents(path, options, result) {
+  var writable = writablePath(path);
+  var encoding = typeof options === 'string' ? options : options && options.encoding;
   var missingFiles = PMJS.config.missingTextFiles || {};
   if (result === null && writable !== null &&
       Object.prototype.hasOwnProperty.call(missingFiles, writable)) {
@@ -75,6 +89,21 @@ function fsReadContents(path, options) {
     ? Buffer.from(result.buffer, result.byteOffset, result.byteLength)
     : Buffer.from(result);
   return encoding ? buffer.toString(encoding) : Buffer.from(buffer);
+}
+
+function fsCloseDiscardedReader(reader) {
+  Promise.resolve().then(function() { return reader.close(); }).catch(function(error) {
+    console.error('[pmjs] file close failed:', error);
+  });
+}
+
+function fsReaderStopListener(reader) {
+  // A shutdown listener must not retain an abandoned reader.
+  var weak = new WeakRef(reader);
+  return PMJS.tasks.onStop(function() {
+    var opened = weak.deref();
+    if (opened) fsCloseDiscardedReader(opened);
+  });
 }
 
 function FsReadStream(path, options) {
@@ -98,56 +127,77 @@ function FsReadStream(path, options) {
   }
   var Readable = globalThis.__pmjsBuiltinRequire('stream').Readable;
   var reader, demand = 0, queued = false, position = start;
+  function discardReader() {
+    var closing = reader; reader = null;
+    if (closing) fsCloseDiscardedReader(closing);
+  }
   function scheduleRead() {
     if (!reader || !demand || queued || stream.destroyed) return;
     queued = true;
     PMJS.tasks.enqueue(function() {
-      queued = false;
-      if (stream.destroyed) return;
+      if (stream.destroyed) { queued = false; return; }
       var size = Math.min(demand, end === Infinity ? Infinity : end - position + 1);
+      var reading = reader;
       demand = 0;
-      var contents;
-      try { contents = reader.read(size); }
-      catch (error) { stream.destroy(error); return; }
-      position += contents.byteLength;
-      if (!contents.byteLength) { stream.push(null); return; }
-      stream.push(contents);
-      if (!stream.destroyed && position > end) stream.push(null);
-    });
+      Promise.resolve().then(function() { return reading.readAsync(size); }).then(function(contents) {
+        PMJS.tasks.enqueue(function() {
+          queued = false;
+          if (stream.destroyed) return;
+          position += contents.byteLength;
+          if (!contents.byteLength) { stream.push(null); return; }
+          stream.push(contents);
+          if (!stream.destroyed && position > end) stream.push(null);
+          scheduleRead();
+        }, { discard: discardReader });
+      }, function(error) {
+        PMJS.tasks.enqueue(function() { queued = false; stream.destroy(error); }, { discard: discardReader });
+      });
+    }, { discard: discardReader });
   }
+
   var stream = new Readable({
     encoding: options.encoding,
     highWaterMark: options.highWaterMark === undefined ? 64 * 1024 : options.highWaterMark,
     read: function(size) { demand = size || 1; scheduleRead(); },
     destroy: function(error, callback) {
-      try { if (reader) reader.close(); }
-      catch (closeError) { error = error || closeError; }
-      reader = null;
-      callback(error);
+      if (removeStopListener) removeStopListener();
+      var closing = reader; reader = null;
+      Promise.resolve().then(function() { if (closing) return closing.close(); }).then(
+        function() { callback(error); }, function(closeError) { callback(error || closeError); });
     }
   });
+  var removeStopListener;
   stream.path = path;
   PMJS.tasks.enqueue(function() {
     if (stream.destroyed) return;
-    try {
+    Promise.resolve().then(function() {
       var writable = writablePath(path);
       var host = writable !== null && NativeHost.storage ? NativeHost.storage : NativeHost.fs;
       var resolved = writable !== null && NativeHost.storage ? writable : gameReadPath(path);
-      reader = host.openRead(resolved, start);
-      var missingFiles = PMJS.config.missingTextFiles || {};
-      if (!reader && writable !== null && Object.prototype.hasOwnProperty.call(missingFiles, writable)) {
-        var bytes = Buffer.from(String(missingFiles[writable]), 'utf8'), offset = start;
-        reader = { read: function(size) {
-          var chunk = bytes.subarray(offset, offset + size); offset += chunk.length; return chunk;
-        }, close: function() { bytes = null; } };
-      }
-      if (!reader) {
-        var error = new Error('ENOENT: ' + path); error.code = 'ENOENT'; throw error;
-      }
-    } catch (error) { stream.destroy(error); return; }
-    stream.emit('open', 0);
-    stream.emit('ready');
-    scheduleRead();
+      return host.openReadAsync(resolved, start).then(function(opened) {
+        var missingFiles = PMJS.config.missingTextFiles || {};
+        if (!opened && writable !== null && Object.prototype.hasOwnProperty.call(missingFiles, writable)) {
+          var bytes = Buffer.from(String(missingFiles[writable]), 'utf8'), offset = start;
+          opened = { readAsync: function(size) {
+            var chunk = bytes.subarray(offset, offset + size); offset += chunk.length;
+            return Promise.resolve(chunk);
+          }, close: function() { bytes = null; } };
+        }
+        if (!opened) {
+          var error = new Error('ENOENT: ' + path); error.code = 'ENOENT'; throw error;
+        }
+        PMJS.tasks.enqueue(function() {
+          if (stream.destroyed) { fsCloseDiscardedReader(opened); return; }
+          reader = opened;
+          if (PMJS.tasks.onStop) removeStopListener = fsReaderStopListener(opened);
+          stream.emit('open', 0);
+          stream.emit('ready');
+          scheduleRead();
+        }, { discard: function() {
+          fsCloseDiscardedReader(opened);
+        } });
+      });
+    }).catch(function(error) { PMJS.tasks.enqueue(function() { stream.destroy(error); }); });
   });
   return stream;
 }
@@ -164,10 +214,10 @@ var fsModule = {
   },
   readFile: function(path, options, callback) {
     if (typeof options === 'function') { callback = options; options = null; }
-    var result = null, error = null;
-    try { result = fsReadContents(path, options); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() {
-      callback(error, result);
+      Promise.resolve().then(function() { return fsReadContentsAsync(path, options); }).then(
+        function(result) { PMJS.tasks.enqueue(function() { callback(null, result); }); },
+        function(error) { PMJS.tasks.enqueue(function() { callback(error, null); }); });
     });
   },
   createReadStream: function(path, options) { return new FsReadStream(path, options); },

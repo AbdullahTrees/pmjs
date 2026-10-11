@@ -156,7 +156,7 @@ PMJS.methods.wrap({
   wrap: function(stockRefresh) {
     var neutralTone = [0, 0, 0, 0];
     var neutralBlend = [0, 0, 0, 0];
-    return function() {
+    var nativeRefresh = function() {
       if (this instanceof Sprite &&
           this._refresh === Sprite.prototype._refresh &&
           this._executeTint === Sprite.prototype._executeTint &&
@@ -181,5 +181,10 @@ PMJS.methods.wrap({
       }
       return stockRefresh.apply(this, arguments);
     };
+    var presentation = PMJS.mv && PMJS.mv.characterPresentation;
+    if (presentation) {
+      presentation.registerRefreshEquivalent(nativeRefresh, stockRefresh, function() { return true; });
+    }
+    return nativeRefresh;
   }
 });

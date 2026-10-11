@@ -4,8 +4,10 @@ PMJS.pixi4.isNativeRenderer = function(renderer) {
   return nativePixiRenderers.has(renderer);
 };
 PMJS.pixi4.renderStageToCanvas = function(stage, canvas, roundPixels) {
-  NativeHost.render.setRenderTargetSize(canvas.width, canvas.height);
-  renderNativeStage(stage, nativeIdentityTransform, 1, roundPixels);
+  renderNativeStage(stage, nativeIdentityTransform, 1, roundPixels, false,
+    null, undefined, function() {
+      NativeHost.render.setRenderTargetSize(canvas.width, canvas.height);
+    });
   NativeHost.render.renderToCanvas(canvas._ensureNativeCanvas().handle);
 };
 
@@ -343,12 +345,12 @@ function createNativePixiRenderer(width, height, options) {
       this.renderingToScreen = !renderTexture;
       this._nextTextureLocation = 0;
       if (typeof this.emit === 'function') this.emit('prerender');
+      var renderOwner = this;
       if (renderTexture) {
         var base = renderTexture.baseTexture;
         if (!base || base.width <= 0 || base.height <= 0) {
           throw new Error('native RenderTexture has invalid dimensions');
         }
-        this.renderTexture.bind(renderTexture);
         var resolution = Math.max(0.000001, Number(base.resolution) || 1);
         var targetWidth = Math.ceil(base.width * resolution);
         var targetHeight = Math.ceil(base.height * resolution);
@@ -363,35 +365,38 @@ function createNativePixiRenderer(width, height, options) {
           target.width = targetWidth;
           target.height = targetHeight;
         }
-        if (clear === false) {
-          NativeHost.render.image(target._ensureNativeCanvas().handle,
-            1, 0, 0, 1, 0, 0, 0, 0, targetWidth, targetHeight,
-            1, 0xffffff, 0);
-        }
-        NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
         var resolutionTransform = { a: resolution, b: 0, c: 0,
           d: resolution, tx: 0, ty: 0 };
         renderNativeStage(stage, transform ?
           nativeComposeTransform(resolutionTransform, transform) :
           resolutionTransform, resolution, this.roundPixels,
-          skipUpdateTransform, null, PMJS.pixi4.getStageRenderOptions(stage));
+          skipUpdateTransform, null, PMJS.pixi4.getStageRenderOptions(stage), function() {
+            renderOwner.renderTexture.bind(renderTexture);
+            NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
+            if (clear === false) {
+              NativeHost.render.image(target._ensureNativeCanvas().handle,
+                1, 0, 0, 1, 0, 0, 0, 0, targetWidth, targetHeight,
+                1, 0xffffff, 0);
+            }
+          });
         NativeHost.render.renderToCanvas(target._ensureNativeCanvas().handle);
         target._pmjsContentChanged();
         this.textureGC.update();
         if (typeof this.emit === 'function') this.emit('postrender');
         return;
       }
-      this.renderTexture.bind(null);
       var screenWidth = this.width;
       var screenHeight = this.height;
-      NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
       var screenTransform = { a: this.resolution, b: 0, c: 0,
         d: this.resolution, tx: 0, ty: 0 };
       renderNativeStage(stage, transform ?
         nativeComposeTransform(screenTransform, transform) : screenTransform,
       this.resolution, this.roundPixels, skipUpdateTransform,
       this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
-      PMJS.pixi4.getStageRenderOptions(stage));
+      PMJS.pixi4.getStageRenderOptions(stage), function() {
+        renderOwner.renderTexture.bind(null);
+        NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
+      });
       this.textureGC.update();
       if (typeof this.emit === 'function') this.emit('postrender');
     },
@@ -553,11 +558,12 @@ function createNativePixiRenderer(width, height, options) {
       this.renderingToScreen = false;
       this._nextTextureLocation = 0;
       if (typeof this.emit === 'function') this.emit('prerender');
-      NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
       var resolutionTransform = { a: resolution, b: 0, c: 0,
         d: resolution, tx: -region.x * resolution, ty: -region.y * resolution };
       renderNativeStage(displayObject, resolutionTransform, resolution,
-        this.roundPixels, false, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(displayObject), options));
+        this.roundPixels, false, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(displayObject), options), function() {
+          NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
+        });
       var resource = NativeHost.render.renderToImage(targetWidth, targetHeight,
         { alphaMode: options && options.alphaMode || 'straight' });
       var source = nativeImageFromResource(resource);

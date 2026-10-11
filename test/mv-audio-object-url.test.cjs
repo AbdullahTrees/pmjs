@@ -20,6 +20,8 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
   const loadedBytes = [];
   const loadedOptions = [];
   const released = [];
+  const gainEvents = [];
+  let gainValue = 1;
   const context = {
     Blob,
     URL: function URL() {},
@@ -32,6 +34,16 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
     gamePath: function(value) { return value; },
     NativeHost: {
       media: {
+        createAudioGain: () => 1,
+        scheduleAudioGain: (handle, linear, value, time) => {
+          gainEvents.push([handle, linear, value, time]);
+          if (!linear) gainValue = value;
+        },
+        cancelAudioGain: (handle, time) => gainEvents.push(['cancel', handle, time]),
+        audioGainValue: () => gainValue,
+        bindAudioGain: () => true,
+        releaseAudioGain: () => true,
+        audioContextTime: () => clock.now() / 1000,
         loadAudio: function() { throw new Error('path loader used'); },
         loadAudioBytes: function(buffer, options) {
           loadedOptions.push(options);
@@ -49,6 +61,9 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
       }
     }
   };
+  context.gainEvents = gainEvents;
+  context.setGainValue = (value) => { gainValue = value; };
+  context.NativeHost.media.audioContextTime = () => 0;
   vm.createContext(context);
   vm.runInContext(objectUrlSource, context);
   vm.runInContext(audioSource, context);
@@ -335,13 +350,15 @@ test('clearing an in-flight object URL load skips native decoding', async () => 
   assert.equal(audio.isReady(), false);
 });
 
-test('a stop listener can restart audio without losing completion polling', () => {
+test('a stop listener can restart audio without losing completion polling', async () => {
   const context = contextFor({ hasEncryptedAudio: false });
   let playing = false;
   let nextHandle = 100;
   context.NativeHost.media.loadAudio = () => ({ handle: nextHandle++, duration: 1 });
   context.NativeHost.media.playAudio = () => { playing = true; return true; };
   context.NativeHost.media.audioIsPlaying = () => playing;
+  context.__pmjsBuiltinRequire = require; context.performance = performance;
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
   vm.runInContext(mainLoopSource, context);
   const tracked = () => context.PMJS.rpgmaker.audio.update();
   const audio = new context.WebAudio('audio/se/restart.ogg');
@@ -353,12 +370,13 @@ test('a stop listener can restart audio without losing completion polling', () =
   });
   audio.play(false, 0);
   playing = false;
-  context.pmjsRunRpgMakerTick(1);
+  await context.pmjsRunRpgMakerTick(1);
   assert.equal(playing, true);
   assert.equal(audio.isPlaying(), true);
   assert.equal(tracked(), 1);
   playing = false;
-  context.pmjsRunRpgMakerTick(2);
+  await context.pmjsRunRpgMakerTick(2);
+  context.PMJS.tasks.stop();
   assert.equal(completions, 2);
   assert.equal(tracked(), 0);
 });
@@ -381,8 +399,8 @@ test('pending fade-in starts after native play and before load listeners', async
   const context = contextFor({ hasEncryptedAudio: false });
   const calls = [];
   context.NativeHost.media.playAudio = () => { calls.push('play'); return true; };
-  context.NativeHost.media.fadeAudio = (_handle, from, to, duration) => {
-    calls.push(['fade', from, to, duration]);
+  context.NativeHost.media.scheduleAudioGain = (_handle, linear, value, time) => {
+    calls.push(['gain', linear, value, time]);
   };
   const url = context.URL.createObjectURL(new Blob([Uint8Array.from([1])]));
   const audio = new context.WebAudio(url);
@@ -390,7 +408,8 @@ test('pending fade-in starts after native play and before load listeners', async
   audio.fadeIn(2);
   audio.addLoadListener(() => calls.push('loaded'));
   await settle();
-  assert.deepEqual(calls, ['play', ['fade', 0, 1, 2], 'loaded']);
+  assert.deepEqual(calls, [['gain', false, 1, 0], 'play',
+    ['gain', false, 0, 0], ['gain', true, 1, 2], 'loaded']);
 });
 
 test('stop before load drains listeners and cancels later playback', async () => {
@@ -444,7 +463,8 @@ test('MV fadeOut fades gain without stopping the source', () => {
   };
   const audio = new context.WebAudio('audio/se/fade.ogg');
   audio.fadeOut(1.5);
-  assert.deepEqual(calls, [[5, 1, 0, 1.5, false]]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(context.gainEvents, [[1, false, 1, 0], [1, true, 0, 1.5]]);
 });
 
 test('MV fadeTo reaches native audio without stopping', () => {
@@ -456,7 +476,8 @@ test('MV fadeTo reaches native audio without stopping', () => {
   };
   const audio = new context.WebAudio('audio/se/fade.ogg');
   audio._fadeTo(0.5, 2);
-  assert.deepEqual(calls, [[5, 1, 0.5, 2, false]]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(context.gainEvents, [[1, false, 1, 0], [1, true, 0.5, 2]]);
 });
 
 test('MV clear drains a stop listener before releasing', () => {
@@ -484,25 +505,36 @@ test('MV provides engine intent without native path classification', () => {
   assert.deepEqual(intents, ['effect', 'music', 'ambient', 'jingle']);
 });
 
-test('MV gain reads and interrupted ramps preserve instantaneous gain and engine volume', () => {
-  let now = 0;
-  const clock = class extends Date { static now() { return now; } };
-  const context = contextFor({ hasEncryptedAudio: false }, undefined, clock);
+test('MV gain reads come from native automation and scheduling preserves future events', () => {
+  const context = contextFor({ hasEncryptedAudio: false });
   context.NativeHost.media.loadAudio = () => ({ handle: 5, duration: 4 });
-  const ramps = [];
-  context.NativeHost.media.fadeAudio = (...args) => ramps.push(args);
   const audio = new context.WebAudio('audio/bgm/ramp.ogg');
-  audio.volume = 0.5;
-  audio._fadeTo(0, 2);
-  now = 1000;
-  assert.equal(audio._gainNode.gain.value, 0.25);
-  audio.linearRampToValueAtTime(0.75, 3);
-  assert.deepEqual(ramps.at(-1), [5, 0.25, 0.75, 2, false, true]);
-  now = 2000;
-  assert.equal(audio._gainNode.gain.value, 0.5);
-  now = 3000;
+  audio.setValueAtTime(0, 0);
+  audio.linearRampToValueAtTime(1, 2);
+  context.NativeHost.media.audioContextTime = () => 0.5;
+  audio.volume = 0.25;
+  assert.deepEqual(context.gainEvents, [[1, false, 0, 0], [1, true, 1, 2], [1, false, 0.25, 0.5]]);
+  context.setGainValue(0.75);
   assert.equal(audio._gainNode.gain.value, 0.75);
-  assert.equal(audio.volume, 0.5);
+  assert.equal(audio.volume, 0.25);
+  audio.cancelScheduledValues(1.5);
+  assert.deepEqual(context.gainEvents.at(-1), ['cancel', 1, 1.5]);
+});
+
+test('MV gain values use AudioParam float precision while event times remain double', () => {
+  const context = contextFor({ hasEncryptedAudio: false });
+  context.NativeHost.media.loadAudio = () => ({ handle: 5, duration: 4 });
+  const audio = new context.WebAudio('audio/bgm/ramp.ogg');
+  audio.setValueAtTime(1 / 3, 1 / 3);
+  assert.deepEqual(context.gainEvents.at(-1), [1, false, Math.fround(1 / 3), 1 / 3]);
+  context.setGainValue(1 / 3);
+  assert.equal(audio.value, Math.fround(1 / 3));
+  assert.throws(() => audio.setValueAtTime(1e300, 1), /invalid gain/);
+  const assignments = [];
+  context.NativeHost.media.scheduleAudioGain = (...args) => assignments.push(args);
+  audio.value = 1 / 3;
+  assert.deepEqual(assignments, [[1, false, Math.fround(1 / 3), 0, true]],
+    'current value assignment also updates the native intrinsic value');
 });
 
 test('MV pending fade-in uses engine volume after asynchronous loading', async () => {
@@ -515,32 +547,23 @@ test('MV pending fade-in uses engine volume after asynchronous loading', async (
   audio.play(true, 0);
   audio.fadeIn(2);
   await settle();
-  assert.deepEqual(ramps, [[1, 0, 0.5, 2, false, true]]);
+  assert.deepEqual(ramps, []);
+  assert.deepEqual(context.gainEvents.slice(-2), [[1, false, 0, 0], [1, true, 0.5, 2]]);
   assert.equal(audio.volume, 0.5);
   context.URL.revokeObjectURL(url);
 });
 
 
-test('MV interrupted gains above one preserve engine volume and native scaling', () => {
-  let now = 0;
-  const clock = class extends Date { static now() { return now; } };
-  const context = contextFor({ hasEncryptedAudio: false }, undefined, clock);
-  const parameters = [], ramps = [];
+test('MV gains above one remain absolute and use the same native schedule', () => {
+  const context = contextFor({ hasEncryptedAudio: false });
   context.NativeHost.media.loadAudio = () => ({ handle: 5, duration: 4 });
-  context.NativeHost.media.setAudioParameters = (...args) => parameters.push(args);
-  context.NativeHost.media.fadeAudio = (...args) => ramps.push(args);
   const audio = new context.WebAudio('audio/bgm/ramp.ogg');
   audio.volume = 0.5;
   audio.linearRampToValueAtTime(2, 2);
-  assert.deepEqual(parameters.at(-1), [5, 2, 1, 0]);
-  assert.deepEqual(ramps.at(-1), [5, 0.25, 1, 2, false, true]);
-  now = 1000;
+  context.setGainValue(1.25);
   assert.equal(audio.value, 1.25);
   audio.linearRampToValueAtTime(3, 3);
-  assert.deepEqual(parameters.at(-1), [5, 3, 1, 0]);
-  assert.deepEqual(ramps.at(-1), [5, 1.25 / 3, 1, 2, false, true]);
-  now = 2000;
-  assert.equal(audio.value, 2.125);
+  assert.deepEqual(context.gainEvents, [[1, false, 0.5, 0], [1, true, 2, 2], [1, true, 3, 3]]);
   assert.equal(audio.volume, 0.5);
 });
 

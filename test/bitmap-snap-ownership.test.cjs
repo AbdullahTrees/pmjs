@@ -87,10 +87,11 @@ test('Pixi capture renders current authored state before readback and preserves 
       setRenderTargetSize(width, height) { calls.push(['size', width, height]); },
       renderToCanvas(handle) { calls.push(['readback', handle]); },
     } },
-    renderNativeStage(received, transform, alpha, roundPixels) {
+    renderNativeStage(received, transform, alpha, roundPixels, _skip, _background, _options, bindTarget) {
       assert.equal(received, stage);
       assert.equal(transform, identity);
       calls.push(['render', received.color, alpha, roundPixels]);
+      bindTarget();
     },
   };
   vm.runInNewContext(rendererSource, context);
@@ -98,7 +99,7 @@ test('Pixi capture renders current authored state before readback and preserves 
   context.PMJS.pixi4.renderStageToCanvas(stage, canvas, true);
   assert.equal(context.PMJS.pixi4, pixi4);
   assert.deepEqual(calls, [
-    ['size', 128, 96], ['render', 'updated-before-presentation', 1, true],
+    ['render', 'updated-before-presentation', 1, true], ['size', 128, 96],
     'canvas', ['readback', 77],
   ]);
 });

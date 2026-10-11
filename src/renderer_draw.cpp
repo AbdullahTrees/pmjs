@@ -271,7 +271,7 @@ void Renderer::computeFilterContentBounds() {
     if (stack.empty()) continue;
     Accumulator& top = stack.back();
     if (top.unbounded) continue;
-    if (command.appliesColorMatrix) {
+    if (command.action == RenderCommand::Action::clearRect || command.appliesColorMatrix) {
       top.unbounded = true;
       continue;
     }
@@ -940,6 +940,29 @@ void Renderer::renderScene() {
       filterRegions{};
   applyBlendMode(activeBlend);
   for (const auto& operation : operations) {
+    if (operation.action == RenderCommand::Action::clearRect) {
+      if (filterDepth == 0) throw std::logic_error("rectangle clear requires an isolated target");
+      const auto& rectangle = operation.command->clearRectangle;
+      const float left = std::max(0.0F, rectangle[0] - rasterFrame[0]);
+      const float top = std::max(0.0F, rectangle[1] - rasterFrame[1]);
+      // Clip to the allocated target; viewport clipping can leave fractional edges uncleared.
+      const auto& target = groupTargets_[filterDepth - 1];
+      const float right = std::min(target.width / rasterResolution,
+        rectangle[0] + rectangle[2] - rasterFrame[0]);
+      const float bottom = std::min(target.height / rasterResolution,
+        rectangle[1] + rectangle[3] - rasterFrame[1]);
+      glEnable(GL_SCISSOR_TEST);
+      const float clearResolution = operation.command->clearResolution;
+      glScissor(static_cast<int>(left * clearResolution), static_cast<int>(top * clearResolution),
+        static_cast<int>(std::max(0.0F, right - left) * clearResolution),
+        static_cast<int>(std::max(0.0F, bottom - top) * clearResolution));
+      glClearColor(0, 0, 0, 0);
+      glClear(GL_COLOR_BUFFER_BIT);
+      if (scissorActive) rasterScissor(activeClip[0], height_ - activeClip[3],
+        std::max(0, activeClip[2] - activeClip[0]), std::max(0, activeClip[3] - activeClip[1]));
+      else glDisable(GL_SCISSOR_TEST);
+      continue;
+    }
     if (operation.action == RenderCommand::Action::filterBegin) {
       targetYDown = true;
       rasterResolution = operation.command->customFilterPlan ?

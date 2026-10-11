@@ -652,6 +652,7 @@ var nativeIdentityTransform = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
 var nativeSceneRootTransform = nativeIdentityTransform;
 var nativeSceneRootUsesWorldTransform = false;
 var nativeSceneUsePixiWorldState = false;
+var nativeSceneTransformsPrepared = false;
 var nativeSceneFilterResolution = 1;
 var nativeSceneRoundPixels = false;
 
@@ -667,6 +668,9 @@ function nativeComposeTransform(parent, local) {
 }
 
 function nativeMaskWorldTransform(mask) {
+  if (nativeSceneUsePixiWorldState && mask.worldTransform) {
+    return nativeComposeTransform(nativeSceneRootTransform, mask.worldTransform);
+  }
   var chain = [];
   var current = mask;
   while (current && current !== nativeTransformParent) {
@@ -694,6 +698,7 @@ function nativeMaskWorldTransform(mask) {
 }
 
 function nativeMaskWorldAlpha(mask) {
+  if (nativeSceneUsePixiWorldState && Number.isFinite(mask.worldAlpha)) return mask.worldAlpha;
   var alpha = 1;
   var current = mask;
   while (current && current !== nativeTransformParent) {

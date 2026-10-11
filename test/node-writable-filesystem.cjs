@@ -104,7 +104,7 @@ test('binary and encoded writes match Node and are visible to fs, fetch and XHR'
   fs.writeFileSync(reference, source); guest.writeFileSync('/game/data/Binary.bin', source);
   assert.deepEqual(guest.readFileSync('data/binary.BIN'), fs.readFileSync(reference));
   assert.deepEqual(Buffer.from(host.readBytes('DATA/Binary.bin')), source);
-  const promise = context.fetch('data/Binary.bin'); context.PMJS.tasks.drain();
+  const promise = context.fetch('data/Binary.bin'); await context.PMJS.tasks.idle();
   assert.deepEqual(Buffer.from(await (await promise).arrayBuffer()), source);
   const request = new context.XMLHttpRequest();
   request.open('GET', 'data/Binary.bin', false); request.responseType = 'arraybuffer'; request.send();
@@ -248,13 +248,13 @@ test('native image decoding reads a generated file through the shared VFS', asyn
   native.images.release(image.handle);
 });
 
-test('async writes preserve callback ordering and report failures without losing the previous file', t => {
+test('async writes preserve callback ordering and report failures without losing the previous file', async t => {
   const { guest, context, host } = fixture(t);
   const calls = [];
   guest.writeFile('result', 'success', error => calls.push(error));
-  assert.deepEqual(calls, []); context.PMJS.tasks.drain(); assert.deepEqual(calls, [null]);
+  assert.deepEqual(calls, []); await context.PMJS.tasks.idle(); assert.deepEqual(calls, [null]);
   guest.writeFile('missing/result', 'failure', error => calls.push(error.code));
-  context.PMJS.tasks.drain(); assert.deepEqual(calls, [null, 'ENOENT']);
+  await context.PMJS.tasks.idle(); assert.deepEqual(calls, [null, 'ENOENT']);
   assert.equal(host.readText('result'), 'success');
 });
 

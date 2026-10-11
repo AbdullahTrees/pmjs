@@ -44,8 +44,11 @@ function setup() {
       }
       this._gamepadStates[pad.index] = next;
     },
-    update() {
+    _pollGamepads() {
       for (const pad of context.navigator.getGamepads()) if (pad?.connected) this._updateGamepadState(pad);
+    },
+    update() {
+      this._pollGamepads();
       if (this._currentState[this._latestButton]) this._pressedTime++;
       else this._latestButton = null;
       for (const action in this._currentState) {
@@ -244,4 +247,44 @@ test('gamepad remap includes a latched keyboard press', () => {
   ctx.Input.update();
   assert.equal(ctx.Input.isPressed('ok'), true);
   assert.equal(ctx.Input.isPressed('tag'), true);
+});
+
+test('hidden disconnect never invokes a guest hook', () => {
+  const { context: ctx } = setup();
+  ctx.Input._updateGamepadState = () => { throw new Error('guest scene is not ready'); };
+  ctx.__pmjsReceiveInput(snapshot([], [], [], [pad()]));
+  ctx.__pmjsReceiveInput(snapshot());
+  ctx.Input.update();
+  assert.equal(ctx.navigator.getGamepads().length, 0);
+});
+
+test('disconnect reconciliation waits for polling and preserves keyboard ownership', () => {
+  const { context: ctx } = setup();
+  ctx.Input.gamepadMapper[3] = 'ok';
+  ctx.__pmjsReceiveInput(snapshot([67], [67], [key(67, true)], [pad([3])]));
+  ctx.Input.update();
+  let calls = 0;
+  ctx.Input._updateGamepadState = () => { calls++; };
+  ctx.__pmjsReceiveInput(snapshot([67]));
+  assert.equal(calls, 0);
+  assert.equal(ctx.Input.isPressed('ok'), true);
+  ctx.Input.update();
+  assert.equal(calls, 0);
+  assert.equal(ctx.Input.isPressed('ok'), true);
+  ctx.__pmjsReceiveInput(snapshot([], [], [key(67, false)]));
+  ctx.Input.update();
+  assert.equal(ctx.Input.isPressed('ok'), false);
+});
+
+test('device replacement and surviving controller retain shared actions', () => {
+  const { context: ctx } = setup();
+  const second = { ...pad([3]), index: 1, instance: 8 };
+  ctx.__pmjsReceiveInput(snapshot([], [], [], [pad([3]), second]));
+  ctx.Input.update();
+  ctx.__pmjsReceiveInput(snapshot([], [], [], [{ ...pad(), instance: 9 }, second]));
+  ctx.Input.update();
+  assert.equal(ctx.Input.isPressed('tag'), true);
+  ctx.__pmjsReceiveInput(snapshot([], [], [], [{ ...pad(), instance: 9 }]));
+  ctx.Input.update();
+  assert.equal(ctx.Input.isPressed('tag'), false);
 });

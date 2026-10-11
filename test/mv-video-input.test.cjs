@@ -11,7 +11,7 @@ function makeHarness(withUnlockHook = true) {
   const calls = [];
   const context = vm.createContext({
     console, Utils: {}, PMJS: {},
-    performance: { now: () => 1000 },
+    __pmjsBuiltinRequire: require, performance: { now: () => 1000 },
     CanvasContext2D: function CanvasContext2D() {},
     releaseNativeResource() {},
     trackNativeResource: resource => resource,
@@ -67,11 +67,11 @@ async function firstInputProbe(type) {
   const failedVideo = context.document.createElement('video');
   context.NativeHost.media.loadVideoAsync = () => Promise.reject(new Error('decode failed'));
   failedVideo.src = 'movies/missing.webm';
-  const failedPlay = failedVideo.play();
+  const failedPlay = assert.rejects(failedVideo.play(), /decode failed/);
   const errorEvents = [];
   failedVideo.addEventListener('error', event => errorEvents.push(event.error.message));
-  context.PMJS.tasks.drain();
-  await assert.rejects(failedPlay, /decode failed/);
+  await context.PMJS.tasks.idle();
+  await failedPlay;
   assert.deepEqual(errorEvents, ['decode failed']);
 }
 
@@ -113,7 +113,7 @@ if (process.argv[2] === '--first-input-probe') {
     };
     context.PMJS.methods.install();
     graphics._video.src = 'movies/opening.webm';
-    context.PMJS.tasks.drain();
+    await context.PMJS.tasks.idle();
     await Promise.resolve();
     graphics._video.style.opacity = 1;
     const event = { type: 'keydown' };

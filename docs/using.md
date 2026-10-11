@@ -29,6 +29,8 @@ Only run games you trust. Game and plugin scripts have access to Node APIs. PMJS
 - `prepare --config FILE`: load runtime configuration.
 - `prepare --manifest FILE`: select plugin adapters through a manifest.
 - `--state DIR`: choose the preparation directory. Use it for both `prepare` and `run`.
+- `preserveBitmapReloadPixels` (default: `true`) keeps the previous image visible
+  while the same image reloads. Set it to `false` for the original loading behavior.
 - `run --save-root DIR`: choose a save directory, including an existing one.
 
 Prepared files default to `XDG_CACHE_HOME`; saves default to `XDG_DATA_HOME`,

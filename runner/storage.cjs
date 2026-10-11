@@ -48,6 +48,38 @@ function createStorage(root) {
       try { return fs.readFileSync(resolve(relative)); }
       catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     },
+    async readBytesAsync(relative) {
+      try { return await fs.promises.readFile(resolve(relative)); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    },
+    async openReadAsync(relative, start = 0) {
+      if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('invalid read position');
+      let file;
+      try { file = await fs.promises.open(resolve(relative), 'r'); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+      let position = start, reading = false, closed = false;
+      return {
+        async readAsync(maxBytes) {
+          if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 0xffffffff) {
+            throw new RangeError('invalid read size');
+          }
+          if (closed) throw Object.assign(new Error('read after close'), { code: 'EBADF' });
+          if (reading) throw new Error('file read already in progress');
+          reading = true;
+          try {
+            const bytes = Buffer.allocUnsafe(maxBytes);
+            const { bytesRead } = await file.read(bytes, 0, maxBytes, position);
+            position += bytesRead;
+            return bytes.subarray(0, bytesRead);
+          } finally { reading = false; }
+        },
+        close() {
+          if (closed) return;
+          closed = true;
+          return file.close();
+        }
+      };
+    },
     openRead(relative, start = 0) {
       if (!Number.isSafeInteger(start) || start < 0) throw new RangeError('invalid read position');
       let descriptor;

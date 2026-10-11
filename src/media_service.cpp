@@ -35,6 +35,15 @@ std::uint64_t audioThreadMicros() {
 }
 }
 struct MediaService::Impl {
+  struct Automation {
+    explicit Automation(double initial) : timeline(initial) {}
+    mutable std::mutex mutex;
+    GainAutomation timeline;
+  };
+  std::unordered_map<std::uint32_t, std::shared_ptr<Automation>> automations;
+  std::uint32_t nextAutomation = 1;
+  std::atomic<std::uint64_t> contextFrames{0};
+  std::atomic<bool> contextSuspended{false};
   static constexpr std::size_t bufferFrames = 48000, decodeFrames = 8192;
   struct Voice {
     explicit Voice(std::unique_ptr<AudioDecoderSession> source)
@@ -53,6 +62,8 @@ struct MediaService::Impl {
     const int sourceChannels;
     mutable std::mutex mutex;
     VoiceMixState mix;
+    std::shared_ptr<Automation> automation;
+    bool contextOwned = false;
     std::uint64_t producerFrame = 0, generation = 0;
     std::optional<double> requestedSeek;
     bool decoding = false;
@@ -103,12 +114,21 @@ struct MediaService::Impl {
     auto* output = reinterpret_cast<float*>(bytes);
     const int frames = byteCount / static_cast<int>(sizeof(float) * 2);
     std::fill(output, output + frames * 2, 0.0F);
+    const bool suspended = self.contextSuspended.load(std::memory_order_acquire);
+    const auto contextFrame = self.contextFrames.load(std::memory_order_relaxed);
     const float master = self.masterVolume.load(std::memory_order_relaxed);
     for (const auto& voice : self.snapshot()) {
       std::lock_guard lock(voice->mutex);
-      mixVoiceInto(voice->mix, output, frames, master);
+      if (suspended && voice->contextOwned) continue;
+      if (voice->automation) {
+        std::lock_guard automationLock(voice->automation->mutex);
+        voice->mix.automation = &voice->automation->timeline;
+        mixVoiceInto(voice->mix, output, frames, master, contextFrame);
+        voice->mix.automation = nullptr;
+      } else mixVoiceInto(voice->mix, output, frames, master, contextFrame);
     }
     clampStereoMix(output, frames);
+    if (!suspended) self.contextFrames.fetch_add(frames, std::memory_order_release);
   }
   void fill(const std::shared_ptr<Voice>& voice) {
     if (!voice->decoder) return;
@@ -407,6 +427,12 @@ bool MediaService::setSuspended(std::uint32_t handle, bool suspended) {
   voice->mix.suspended = suspended;
   return true;
 }
+bool MediaService::bindContext(std::uint32_t handle) {
+  auto voice = impl_->voice(handle); if (!voice) return false;
+  std::lock_guard lock(voice->mutex);
+  voice->contextOwned = true;
+  return true;
+}
 bool MediaService::stop(std::uint32_t handle) {
   auto voice = impl_->voice(handle); if (!voice) return false;
   std::lock_guard lock(voice->mutex); voice->mix.playing = false;
@@ -473,6 +499,72 @@ bool MediaService::release(std::uint32_t handle) {
   std::lock_guard lock(impl_->mutex); return impl_->voices.erase(handle) != 0;
 }
 bool MediaService::audioAvailable() const { return impl_->device != 0; }
+
+double MediaService::contextTime() const {
+  return static_cast<double>(impl_->contextFrames.load(std::memory_order_acquire)) / 48000;
+}
+void MediaService::suspendContext(bool suspended) {
+  if (impl_->device) SDL_LockAudioDevice(impl_->device);
+  impl_->contextSuspended.store(suspended, std::memory_order_release);
+  if (impl_->device) SDL_UnlockAudioDevice(impl_->device);
+}
+std::uint32_t MediaService::createGainAutomation(double initial) {
+  if (!std::isfinite(initial)) throw std::invalid_argument("gain must be finite");
+  std::lock_guard lock(impl_->mutex);
+  const auto handle = impl_->nextAutomation++;
+  impl_->automations.emplace(handle, std::make_shared<Impl::Automation>(initial));
+  return handle;
+}
+bool MediaService::scheduleGain(std::uint32_t handle, bool linear, double value, double time, bool intrinsic) {
+  std::shared_ptr<Impl::Automation> automation;
+  { std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->automations.find(handle);
+    if (found == impl_->automations.end()) return false;
+    automation = found->second;
+  }
+  std::lock_guard lock(automation->mutex);
+  if (intrinsic) return automation->timeline.setValue(value, contextTime());
+  return automation->timeline.schedule(linear ? GainAutomation::Kind::linear : GainAutomation::Kind::set,
+    value, time, contextTime());
+}
+bool MediaService::cancelGain(std::uint32_t handle, double time) {
+  std::shared_ptr<Impl::Automation> automation;
+  { std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->automations.find(handle);
+    if (found == impl_->automations.end()) return false;
+    automation = found->second;
+  }
+  std::lock_guard lock(automation->mutex);
+  return automation->timeline.cancel(time);
+}
+double MediaService::gainValue(std::uint32_t handle) const {
+  std::shared_ptr<Impl::Automation> automation;
+  { std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->automations.find(handle);
+    if (found == impl_->automations.end()) throw std::invalid_argument("gain handle is unavailable");
+    automation = found->second;
+  }
+  std::lock_guard lock(automation->mutex);
+  return automation->timeline.value();
+}
+bool MediaService::bindGain(std::uint32_t handle, std::uint32_t automationHandle) {
+  const auto voice = impl_->voice(handle);
+  if (!voice) return false;
+  std::shared_ptr<Impl::Automation> automation;
+  { std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->automations.find(automationHandle);
+    if (found == impl_->automations.end()) return false;
+    automation = found->second;
+  }
+  std::lock_guard lock(voice->mutex);
+  voice->automation = std::move(automation);
+  voice->contextOwned = true;
+  return true;
+}
+bool MediaService::releaseGain(std::uint32_t handle) {
+  std::lock_guard lock(impl_->mutex);
+  return impl_->automations.erase(handle) != 0;
+}
 void MediaService::setMasterVolume(float volume) {
   if (std::isfinite(volume)) {
     impl_->masterVolume.store(std::clamp(volume, 0.0F, 1.0F), std::memory_order_relaxed);

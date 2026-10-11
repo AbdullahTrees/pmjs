@@ -2,13 +2,14 @@ var pmjsAudio = PMJS.rpgmaker.audio;
 
 function MvNativeWebAudio(url, intent) {
   this._url = String(url || '');
-  this._voice = pmjsAudio.createVoice(intent, { equalPowerPan: true });
+  this._gainAutomation = pmjsAudio.createGain(1);
+  this._voice = pmjsAudio.createVoice(intent, {
+    equalPowerPan: true, gainAutomation: this._gainAutomation
+  });
   this._loadListeners = [];
   this._stopListeners = [];
   this._playGeneration = 0;
   this._volume = 1;
-  this._gainValue = 1;
-  this._gainRamp = null;
   this._pendingFadeIn = null;
   this._loadEpoch = 0;
 
@@ -82,13 +83,8 @@ Object.defineProperties(MvNativeWebAudio.prototype, {
     configurable: true
   },
   value: {
-    get: function() {
-      var ramp = this._gainRamp;
-      if (!ramp) return this._gainValue;
-      var progress = Math.max(0, Math.min(1, (pmjsAudio.now() - ramp.start) / ramp.duration));
-      return ramp.from + (ramp.to - ramp.from) * progress;
-    },
-    set: function(value) { this.setValueAtTime(value); },
+    get: function() { return this._gainAutomation.value; },
+    set: function(value) { this._gainAutomation.value = value; },
     configurable: true
   },
   _autoPlay: {
@@ -102,19 +98,24 @@ MvNativeWebAudio.prototype._rampGain = function(from, to, duration) {
   var time = Math.max(0, Number(duration) || 0);
   from = Math.max(0, Number(from) || 0);
   to = Math.max(0, Number(to) || 0);
-  this._gainValue = to;
-  this._gainRamp = time > 0
-    ? { from: from, to: to, start: pmjsAudio.now(), duration: time } : null;
-  this._voice.rampAbsoluteGain(from, to, time);
+  var now = pmjsAudio.now();
+  this.setValueAtTime(from, now);
+  this.linearRampToValueAtTime(to, now + time);
 };
 
-MvNativeWebAudio.prototype.setValueAtTime = function(value) {
-  this._rampGain(value, value, 0);
+MvNativeWebAudio.prototype.setValueAtTime = function(value, time) {
+  this._gainAutomation.schedule(false, value, time);
+  return this;
 };
 
 MvNativeWebAudio.prototype.linearRampToValueAtTime = function(value, endTime) {
-  var duration = Math.max(0, Number(endTime - pmjsAudio.now()) || 0);
-  this._rampGain(this.value, value, duration);
+  this._gainAutomation.schedule(true, value, Number(endTime));
+  return this;
+};
+
+MvNativeWebAudio.prototype.cancelScheduledValues = function(time) {
+  this._gainAutomation.cancel(time);
+  return this;
 };
 
 MvNativeWebAudio.prototype.isReady = function() {
@@ -153,8 +154,8 @@ MvNativeWebAudio.prototype.clear = function() {
   this.stop();
   this._voice.resetForClear({ duration: 0, offset: 0 });
   this._volume = 1;
-  this._gainValue = 1;
-  this._gainRamp = null;
+  this.cancelScheduledValues(0);
+  this.setValueAtTime(1);
   this._loadListeners.length = 0;
   this._stopListeners.length = 0;
 };

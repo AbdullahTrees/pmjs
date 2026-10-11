@@ -40,6 +40,7 @@ function NativeAudioVoice(intent, settings) {
   this.pan = 0;
   this.equalPowerPan = settings.equalPowerPan === true;
   this.absoluteGain = settings.absoluteGain === undefined ? null : settings.absoluteGain;
+  this.gainAutomation = settings.gainAutomation || null;
   this.loop = false;
   this.offset = 0;
   this.autoPlay = false;
@@ -64,8 +65,12 @@ NativeAudioVoice.prototype.install = function(loaded, generation) {
     NativeHost.media.releaseAudio(this.handle);
   }
   this.handle = loaded.handle;
+  if (NativeHost.media.bindAudioContext) NativeHost.media.bindAudioContext(this.handle);
+  if (this.gainAutomation && this.gainAutomation.handle) {
+    NativeHost.media.bindAudioGain(this.handle, this.gainAutomation.handle);
+  }
   contextAudioHandles.add(this.handle);
-  if (NativeAudioVoice.clock.state === 'suspended') {
+  if (NativeAudioVoice.clock.state === 'suspended' && !NativeHost.media.setAudioContextSuspended) {
     NativeHost.media.setAudioSuspended(this.handle, true);
   }
   this.duration = loaded.duration;
@@ -326,31 +331,30 @@ NativeAudioVoice.prototype.pollNative = function() {
   return playing ? 'playing' : 'idle';
 };
 
-var nativeAudioContextStartTime = Date.now();
-var suspendedAt = null;
 NativeAudioVoice.clock = {
   state: 'running',
   get currentTime() {
-    return ((suspendedAt === null ? Date.now() : suspendedAt) -
-      nativeAudioContextStartTime) / 1000;
+    return NativeHost.media && typeof NativeHost.media.audioContextTime === 'function'
+      ? NativeHost.media.audioContextTime() : 0;
   },
   resume: function() {
-    if (suspendedAt !== null) {
-      contextAudioHandles.forEach(function(handle) {
+    if (this.state === 'suspended') {
+      if (NativeHost.media && NativeHost.media.setAudioContextSuspended) {
+        NativeHost.media.setAudioContextSuspended(false);
+      } else contextAudioHandles.forEach(function(handle) {
         NativeHost.media.setAudioSuspended(handle, false);
       });
-      nativeAudioContextStartTime += Date.now() - suspendedAt;
-      suspendedAt = null;
       this.state = 'running';
     }
     return Promise.resolve();
   },
   suspend: function() {
-    if (suspendedAt === null) {
-      contextAudioHandles.forEach(function(handle) {
+    if (this.state !== 'suspended') {
+      if (NativeHost.media && NativeHost.media.setAudioContextSuspended) {
+        NativeHost.media.setAudioContextSuspended(true);
+      } else contextAudioHandles.forEach(function(handle) {
         NativeHost.media.setAudioSuspended(handle, true);
       });
-      suspendedAt = Date.now();
       this.state = 'suspended';
     }
     return Promise.resolve();
@@ -359,6 +363,43 @@ NativeAudioVoice.clock = {
 };
 NativeAudioVoice.now = function() {
   return NativeAudioVoice.clock.currentTime;
+};
+
+var nativeGainFinalizer = typeof FinalizationRegistry === 'function'
+  ? new FinalizationRegistry(function(handle) {
+      try { NativeHost.media.releaseAudioGain(handle); } catch (_) {}
+    }) : null;
+
+function NativeAudioGain(initial) {
+  initial = Math.fround(Number(initial));
+  this.handle = NativeHost.media ? NativeHost.media.createAudioGain(initial) : 0;
+  this.silentValue = initial;
+  if (this.handle && nativeGainFinalizer) nativeGainFinalizer.register(this, this.handle);
+}
+Object.defineProperty(NativeAudioGain.prototype, 'value', {
+  get: function() {
+    return Math.fround(this.handle ? NativeHost.media.audioGainValue(this.handle) : this.silentValue);
+  },
+  set: function(value) {
+    value = Math.fround(Number(value));
+    if (!Number.isFinite(value)) throw new TypeError('invalid gain value');
+    if (this.handle) NativeHost.media.scheduleAudioGain(this.handle, false, value, NativeAudioVoice.now(), true);
+    else this.silentValue = value;
+  }
+});
+NativeAudioGain.prototype.schedule = function(linear, value, time) {
+  value = Math.fround(Number(value));
+  time = time === undefined ? NativeAudioVoice.now() : Number(time);
+  if (!Number.isFinite(value) || !Number.isFinite(time) || time < 0) {
+    throw new TypeError('invalid gain automation event');
+  }
+  if (this.handle) NativeHost.media.scheduleAudioGain(this.handle, linear, value, time);
+  else this.silentValue = value;
+};
+NativeAudioGain.prototype.cancel = function(time) {
+  time = Number(time);
+  if (!Number.isFinite(time) || time < 0) throw new TypeError('invalid gain cancellation');
+  if (this.handle) NativeHost.media.cancelAudioGain(this.handle, time);
 };
 NativeAudioVoice.masterVolume = 1;
 NativeAudioVoice.setMasterVolume = function(value) {
@@ -380,6 +421,7 @@ PMJS.rpgmaker.audio = {
   createVoice: function(intent, settings) {
     return new NativeAudioVoice(intent, settings);
   },
+  createGain: function(initial) { return new NativeAudioGain(initial); },
   track: function(buffer) {
     if (trackedAudioBuffers.indexOf(buffer) < 0) trackedAudioBuffers.push(buffer);
   },

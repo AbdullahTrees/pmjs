@@ -5,273 +5,125 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const timers = require('node:timers');
 
-function loadSchedulerContext(extraSetup) {
-  const schedulerCode = fs.readFileSync(
-    path.join(__dirname, '../js/pmjs-web/scheduler.js'),
-    'utf8'
-  );
-  const context = {
-    PMJS: {},
-    console: console,
-    performance: performance,
-    Math: Math,
-    Number: Number,
-    TypeError: TypeError,
-    Map: Map
-  };
-  context.globalThis = context;
-  context.window = context;
-  if (typeof extraSetup === 'function') {
-    extraSetup(context);
-  }
-  vm.createContext(context);
-  vm.runInContext(schedulerCode, context);
-  return context;
+function fixture(t) {
+  const errors = [], fatals = [];
+  const context = vm.createContext({ PMJS: {}, performance, console,
+    NativeHost: { runtime: { scheduling: { ...timers, onFatal: error => fatals.push(error) } } },
+    pmjsReportEventError: error => errors.push(error) });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  t.after(() => context.PMJS.tasks.stop());
+  return { context, errors, fatals };
 }
 
-test('RAF recursion: RAF scheduled inside an RAF waits until next frame', () => {
-  const ctx = loadSchedulerContext();
-  const result = [];
-
-  ctx.requestAnimationFrame(() => {
-    result.push('first');
-    ctx.requestAnimationFrame(() => {
-      result.push('second');
-    });
+for (const count of [2, 130]) test('FIFO callbacks checkpoint chained Promises, count=' + count, async t => {
+  const { context } = fixture(t), trace = [];
+  for (let i = 0; i < count; i++) context.PMJS.tasks.enqueue(() => {
+    trace.push('task:' + i);
+    Promise.resolve().then(() => Promise.resolve()).then(() => trace.push('micro:' + i));
   });
-
-  ctx.pmjsDrainScheduler(100);
-  assert.deepEqual(result, ['first']);
-
-  ctx.pmjsDrainScheduler(116);
-  assert.deepEqual(result, ['first', 'second']);
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(trace, Array.from({ length: count }, (_, i) => ['task:' + i, 'micro:' + i]).flat());
 });
 
-test('RAF cancellation: cancelled callback does not execute', () => {
-  const ctx = loadSchedulerContext();
-  let ran = false;
-
-  const id = ctx.requestAnimationFrame(() => {
-    ran = true;
+test('work enqueued by a task follows existing tasks and its microtasks', async t => {
+  const { context } = fixture(t), trace = [];
+  context.PMJS.tasks.enqueue(() => {
+    trace.push('A'); context.PMJS.tasks.enqueue(() => trace.push('C'));
+    Promise.resolve().then(() => trace.push('micro'));
   });
-
-  ctx.cancelAnimationFrame(id);
-  ctx.pmjsDrainScheduler(100);
-
-  assert.equal(ran, false);
+  context.PMJS.tasks.enqueue(() => trace.push('B'));
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(trace, ['A', 'micro', 'B', 'C']);
 });
 
-test('Timer non-reentrancy: setTimeout scheduled from callback runs on subsequent frame', () => {
-  const ctx = loadSchedulerContext();
-  const result = [];
-
-  ctx.setTimeout(() => {
-    result.push(1);
-    ctx.setTimeout(() => {
-      result.push(2);
-    }, 0);
-  }, 0);
-
-  ctx.pmjsDrainScheduler(performance.now());
-  assert.deepEqual(result, [1]);
-
-  ctx.pmjsDrainScheduler(performance.now() + 16);
-  assert.deepEqual(result, [1, 2]);
-});
-
-test('Timer deadlines and intervals: fires only when deadline reached and re-arms', () => {
-  const ctx = loadSchedulerContext();
-  const result = [];
-
-  const base = performance.now();
-  ctx.setTimeout((msg) => { result.push(msg); }, 50, 'timeout-50');
-  const intervalId = ctx.setInterval((msg) => { result.push(msg); }, 30, 'interval-30');
-
-  // At base + 10ms: nothing due
-  ctx.pmjsDrainScheduler(base + 10);
-  assert.deepEqual(result, []);
-
-  // At base + 35ms: interval-30 due once
-  ctx.pmjsDrainScheduler(base + 35);
-  assert.deepEqual(result, ['interval-30']);
-
-  // At base + 65ms: timeout-50 (deadline +50) and second interval-30 (deadline +60) due in deadline order
-  ctx.pmjsDrainScheduler(base + 65);
-  assert.deepEqual(result, ['interval-30', 'timeout-50', 'interval-30']);
-
-  // Clear interval and advance
-  ctx.clearInterval(intervalId);
-  ctx.pmjsDrainScheduler(base + 120);
-  assert.deepEqual(result, ['interval-30', 'timeout-50', 'interval-30']);
-});
-
-test('Plugin override preservation: SceneManager.updateMain override executes naturally via RAF', () => {
-  const ctx = loadSchedulerContext((context) => {
-    context.SceneManager = {
-      _stopped: false,
-      update() {
-        this.updateMain();
-      },
-      updateMain() {
-        this.rendered = true;
-        this.requestUpdate();
-      },
-      requestUpdate() {
-        if (!this._stopped) {
-          context.requestAnimationFrame(this.update.bind(this));
-        }
-      }
-    };
-  });
-
-  let pluginOverrideCalled = false;
-  const originalUpdateMain = ctx.SceneManager.updateMain;
-  ctx.SceneManager.updateMain = function() {
-    pluginOverrideCalled = true;
-    return originalUpdateMain.apply(this, arguments);
-  };
-
-  // Initial boot schedules first update
-  ctx.SceneManager.requestUpdate();
-
-  // Host frame 1 arrives
-  ctx.pmjsDrainScheduler(100);
-  assert.equal(pluginOverrideCalled, true);
-  assert.equal(ctx.SceneManager.rendered, true);
-
-  // Host frame 2 arrives: next frame's RAF was queued by requestUpdate inside updateMain
-  let secondOverrideCalled = false;
-  ctx.SceneManager.updateMain = function() {
-    secondOverrideCalled = true;
-  };
-  ctx.pmjsDrainScheduler(116);
-  assert.equal(secondOverrideCalled, true);
-});
-
-test('Ordering: RAF callback runs before next frame timers', async () => {
-  const ctx = loadSchedulerContext();
-  const order = [];
-
-  ctx.requestAnimationFrame(() => {
-    order.push('raf-1');
+test('rAF snapshots retain cancellation, timestamps and next-frame registrations', async t => {
+  const { context } = fixture(t), trace = [];
+  let cancelled;
+  context.requestAnimationFrame(now => {
+    trace.push(['A', now]); context.cancelAnimationFrame(cancelled);
     Promise.resolve().then(() => {
-      order.push('promise-microtask');
+      trace.push(['micro']); context.requestAnimationFrame(time => trace.push(['next', time]));
     });
-    ctx.setTimeout(() => {
-      order.push('timer-after-raf');
-    }, 0);
   });
-
-  ctx.pmjsDrainScheduler(100);
-  // Wait microtask tick
-  await Promise.resolve();
-  assert.deepEqual(order, ['raf-1', 'promise-microtask']);
-
-  ctx.pmjsDrainScheduler(116);
-  assert.deepEqual(order, ['raf-1', 'promise-microtask', 'timer-after-raf']);
+  cancelled = context.requestAnimationFrame(() => trace.push(['cancelled']));
+  context.requestAnimationFrame(now => trace.push(['B', now]));
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(100));
+  assert.deepEqual(trace, [['A', 100], ['micro'], ['B', 100]]);
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(116));
+  assert.deepEqual(trace.at(-1), ['next', 116]);
 });
 
-test('Intra-snapshot RAF cancellation: callback A cancels callback B scheduled in same snapshot', () => {
-  const ctx = loadSchedulerContext();
-  let bRan = false;
-  let bId;
-
-  ctx.requestAnimationFrame(() => {
-    ctx.cancelAnimationFrame(bId);
+test('rendering checkpoints hold resource callbacks and timer callbacks until submission', async t => {
+  const { context } = fixture(t), trace = [];
+  context.requestAnimationFrame(() => {
+    trace.push('A'); context.PMJS.tasks.enqueue(() => trace.push('resource'));
+    context.setTimeout(() => trace.push('timer'), 0);
+    Promise.resolve().then(() => trace.push('micro'));
+    Promise.resolve().then(() => context.PMJS.tasks.invoke(() => trace.push('io-completion')));
   });
-
-  bId = ctx.requestAnimationFrame(() => {
-    bRan = true;
-  });
-
-  ctx.pmjsDrainScheduler(100);
-  assert.equal(bRan, false, 'Callback B should have been cancelled by callback A in same snapshot');
+  context.requestAnimationFrame(() => trace.push('B'));
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(1).then(() => trace.push('submit')));
+  assert.deepEqual(trace.slice(0, 4), ['A', 'micro', 'B', 'submit']);
+  await new Promise(resolve => timers.setTimeout(resolve, 10));
+  await context.PMJS.tasks.idle();
+  assert.ok(trace.includes('resource')); assert.ok(trace.includes('timer'));
+  assert.ok(trace.indexOf('io-completion') > trace.indexOf('submit'));
 });
 
-test('Clock unification: timer scheduled during drain bases deadline on schedulerNow', () => {
-  const ctx = loadSchedulerContext();
-  let timerFired = false;
-
-  ctx.requestAnimationFrame(() => {
-    ctx.setTimeout(() => {
-      timerFired = true;
-    }, 50);
-  });
-
-  // Drain at scheduler frame timestamp 1000: deadline should be 1000 + 50 = 1050
-  ctx.pmjsDrainScheduler(1000);
-  assert.equal(timerFired, false);
-
-  // At frame timestamp 1040: not yet due
-  ctx.pmjsDrainScheduler(1040);
-  assert.equal(timerFired, false);
-
-  // At frame timestamp 1050: due and fires
-  ctx.pmjsDrainScheduler(1050);
-  assert.equal(timerFired, true);
+test('uncapped rendering admits backlog work without draining the queue first', async t => {
+  const { context } = fixture(t), trace = [];
+  for (let i = 0; i < 130; i++) context.PMJS.tasks.enqueue(() => trace.push('task'));
+  for (let i = 0; i < 5; i++) await context.PMJS.tasks.runFrame(() => trace.push('frame'));
+  assert.deepEqual(trace.slice(0, 10), Array(5).fill(['task', 'frame']).flat());
+  await context.PMJS.tasks.idle();
+  assert.equal(trace.filter(entry => entry === 'task').length, 130);
 });
 
-test('RAF error isolation: error in first callback does not prevent second callback from running', () => {
-  const ctx = loadSchedulerContext();
-  let secondRan = false;
-
-  ctx.requestAnimationFrame(() => {
-    throw new Error('boom');
-  });
-  ctx.requestAnimationFrame(() => {
-    secondRan = true;
-  });
-
-  // Does not throw out of pmjsDrainScheduler and runs second callback
-  ctx.pmjsDrainScheduler(100);
-  assert.equal(secondRan, true);
+test('timers run without frames, checkpoint, accept arguments and cancel', async t => {
+  const { context } = fixture(t), trace = [];
+  const cancelled = context.setTimeout(() => trace.push('cancelled'), 0);
+  context.clearTimeout(cancelled);
+  context.setTimeout(value => {
+    trace.push(value); Promise.resolve().then(() => trace.push('micro'));
+  }, 0, 'A');
+  await new Promise(resolve => context.setTimeout(() => { trace.push('B'); resolve(); }, 5));
+  assert.deepEqual(trace, ['A', 'micro', 'B']);
 });
 
-test('deferred tasks preserve FIFO order including work queued during drain', () => {
-  const ctx = loadSchedulerContext();
-  const order = [];
-  ctx.PMJS.tasks.enqueue(() => {
-    order.push('first');
-    ctx.PMJS.tasks.enqueue(() => order.push('third'));
+test('intervals skip elapsed periods and stop after cancellation inside the callback', async t => {
+  const { context } = fixture(t), trace = [];
+  const completed = new Promise(resolve => {
+    const id = context.setInterval(() => {
+      trace.push(performance.now());
+      if (trace.length === 2) { context.clearInterval(id); resolve(); }
+    }, 2);
   });
-  ctx.PMJS.tasks.enqueue(() => order.push('second'));
-  ctx.PMJS.tasks.drain();
-  ctx.PMJS.tasks.drain();
-  assert.deepEqual(order, ['first', 'second', 'third']);
+  await completed;
+  await new Promise(resolve => timers.setTimeout(resolve, 10));
+  assert.equal(trace.length, 2);
 });
 
-test('deferred tasks carry work across count and time budgets without duplication', () => {
-  let now = 0;
-  const ctx = loadSchedulerContext(context => {
-    context.performance = { now() { return now; } };
-  });
-  const completed = [];
-  for (let i = 0; i < 140; i++) {
-    ctx.PMJS.tasks.enqueue(() => completed.push(i));
-  }
-  ctx.PMJS.tasks.drain();
-  assert.equal(completed.length, 64);
-  ctx.PMJS.tasks.drain();
-  assert.equal(completed.length, 128);
-  ctx.PMJS.tasks.drain();
-  assert.deepEqual(completed, Array.from({ length: 140 }, (_, i) => i));
-
-  ctx.PMJS.tasks.enqueue(() => { now += 4; completed.push('slow'); });
-  ctx.PMJS.tasks.enqueue(() => completed.push('later'));
-  ctx.PMJS.tasks.drain();
-  assert.equal(completed.at(-1), 'slow');
-  ctx.PMJS.tasks.drain();
-  assert.equal(completed.at(-1), 'later');
+test('browser callback errors report and preserve subsequent work', async t => {
+  const { context, errors, fatals } = fixture(t), trace = [];
+  context.PMJS.tasks.enqueue(() => { throw new Error('event failure'); }, { errorMode: 'event' });
+  context.PMJS.tasks.enqueue(() => trace.push('next'));
+  context.requestAnimationFrame(() => { throw new Error('raf failure'); });
+  context.requestAnimationFrame(() => trace.push('raf'));
+  await context.PMJS.tasks.idle();
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(10));
+  assert.deepEqual(errors.map(e => e.message), ['event failure', 'raf failure']);
+  assert.deepEqual(fatals, []); assert.deepEqual(trace, ['next', 'raf']);
 });
 
-test('deferred task errors propagate and remaining work resumes on the next drain', () => {
-  const ctx = loadSchedulerContext();
-  let completed = false;
-  ctx.PMJS.tasks.enqueue(() => { throw new Error('task failed'); });
-  ctx.PMJS.tasks.enqueue(() => { completed = true; });
-  assert.throws(() => ctx.PMJS.tasks.drain(), /task failed/);
-  assert.equal(completed, false);
-  ctx.PMJS.tasks.drain();
-  assert.equal(completed, true);
+test('fatal callbacks stop delivery and discard retained results', async t => {
+  const { context, fatals } = fixture(t), trace = [];
+  context.PMJS.tasks.enqueue(() => { throw new Error('node callback'); });
+  context.PMJS.tasks.enqueue(() => trace.push('unexpected'), { discard: () => trace.push('released') });
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(fatals.map(e => e.message), ['node callback']);
+  assert.deepEqual(trace, ['released']);
+  assert.equal(context.PMJS.tasks.enqueue(() => trace.push('late'), { discard: () => trace.push('late release') }), false);
+  assert.deepEqual(trace, ['released', 'late release']);
 });

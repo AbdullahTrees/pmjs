@@ -78,6 +78,13 @@ async function main() {
   assert.equal(view.handle,shared.handle);
   const original = native.images.load('source.png');
   assert.notEqual(view.handle,original.handle);
+  const cachedView = native.images.acquireCached('source.png', 'set-a');
+  const cachedOriginal = native.images.acquireCached('source.png');
+  assert.equal(cachedView.handle, view.handle);
+  assert.equal(cachedOriginal.handle, original.handle);
+  native.images.release(cachedView.handle);
+  native.images.release(cachedOriginal.handle);
+  assert.deepEqual([view.width,view.height],[512,512], 'cache-only owners leave existing representation owners valid');
   assert.deepEqual([view.width,view.height],[512,512]);
   const transforms = [[1,0,0,1,5,6],[2,0,0,2,5.25,6.5],[1.31,0.17,-0.2,1.19,28.25,15.5],[-1.75,0,0,1.5,94,20]];
   const program=native.render.createFilterProgram(
@@ -132,7 +139,8 @@ async function main() {
   native.images.release(original.handle);native.canvas.release(snapshot.handle);native.canvas.release(ordinarySlot.handle);
   native.beginFrame();
   assert.equal(native.images.memory().warmFileCount,0,'zero-budget tile eviction retained warm file ownership');
-  assert.equal(native.images.memory().tileHits,diagnostics ? 1 : 0);
+  assert.equal(native.images.memory().tileHits,diagnostics ? 2 : 0,
+    'shared loading and cache-only acquisition each reuse the prepared representation');
   // Invalid pages leave existing owners intact and load the captured ordinary source.
   const corruptDirectory=path.join(root,'corrupt-set');fs.mkdirSync(corruptDirectory);
   const corruptDescriptor=await native.assets.processTiles([{file:path.join(root,'snapshot.png'),rectangles}],corruptDirectory);

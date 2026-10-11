@@ -15,13 +15,13 @@ const mvMainLoopSource = fs.readFileSync(
   path.resolve(__dirname, '../js/pmjs-mv/main-loop.js'), 'utf8');
 
 function makeHarness(videoResource, runtimeEnv) {
-  const calls = { loadVideo: [], loadVideoProfiles: [], releaseVideo: [], updateVideo: [] };
+  const calls = { loadVideo: [], loadVideoProfiles: [], releaseVideo: [], releaseAudio: [], updateVideo: [] };
   const telemetry = [];
   let nextVideo = 10;
   const context = {
     console: { log(line) { telemetry.push(String(line)); } },
     PMJS: { images: { preparedTileSet: '' } },
-    performance: { now() { return 1000; } },
+    __pmjsBuiltinRequire: require, performance: { now() { return 1000; } },
     pmjsGameConfig: {},
     nativeWindowState: { focused: true, visible: true },
     CanvasContext2D: function CanvasContext2D() {},
@@ -41,7 +41,7 @@ function makeHarness(videoResource, runtimeEnv) {
         },
         releaseVideo(handle) { calls.releaseVideo.push(handle); },
         loadAudio() { throw new Error('no audio stream'); },
-        releaseAudio() {},
+        releaseAudio(handle) { calls.releaseAudio.push(handle); },
         updateVideo(handle, time) {
           calls.updateVideo.push([handle, time]);
           return time;
@@ -160,7 +160,7 @@ test('video src selection loads asynchronously after listeners can be installed'
 
   assert.equal(video.readyState, video.HAVE_NOTHING);
   assert.equal(calls.loadVideo.length, 0);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   assert.deepEqual(calls.loadVideo, ['movies/Opening.mp4']);
@@ -180,7 +180,7 @@ test('media property handlers keep their registration order with listeners', asy
   video.addEventListener('loadeddata', () => events.push('listener-data'));
   video.onloadeddata = () => events.push('property-data');
 
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   assert.deepEqual(events, [
@@ -193,7 +193,7 @@ test('video lifecycle telemetry measures queued-to-frame readiness when enabled'
   const { context, telemetry } = makeHarness(undefined, '1');
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   const records = telemetry.filter(line =>
@@ -234,7 +234,7 @@ test('MV load returns before loadeddata and video-playing state clears on end', 
   assert.equal(graphics._videoLoading, true);
   assert.equal(video.style.opacity, undefined);
   assert.equal(graphics.isVideoPlaying(), true);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   assert.equal(graphics._videoLoading, false);
@@ -252,7 +252,7 @@ test('src followed by play queues one asynchronous native load', async () => {
   video.src = 'movies/Opening.mp4';
   const playback = video.play();
   assert.equal(video._loading, true);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   assert.deepEqual(calls.loadVideo, ['movies/Opening.mp4']);
   assert.equal(video.paused, false);
@@ -270,7 +270,7 @@ test('load followed by play reuses queued work and pause cancels play intent', a
   assert.equal(video._loading, true);
   video.pause();
   await interrupted;
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   assert.deepEqual(calls.loadVideo, ['movies/Opening.mp4']);
   assert.equal(video.paused, true);
@@ -288,7 +288,7 @@ test('Pixi 4 VideoBaseTexture becomes valid after asynchronous data readiness', 
   texture.baseTexture.autoPlay = false;
   assert.equal(texture.baseTexture.hasLoaded, false);
   assert.equal(texture.valid, false);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   assert.equal(texture.baseTexture.hasLoaded, true);
@@ -302,7 +302,7 @@ test('video exposes one stable native image while decoded frames advance', async
   const { context, calls } = makeHarness();
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   const source = video._pmjsNativeTextureSource();
 
@@ -390,7 +390,7 @@ test('video exposes its async native image texture contract', async () => {
   const { context } = makeHarness();
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   assert.equal(video._pmjsNativeTextureSource().handle, 510);
@@ -403,7 +403,7 @@ test('an ended handler can start another source without losing video updates', a
   vm.runInContext(mainLoopSource, context);
   const video = context.document.createElement('video');
   video.src = 'movies/one.webm';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   let completions = 0;
   video.onended = () => {
@@ -416,7 +416,7 @@ test('an ended handler can start another source without losing video updates', a
   video.play();
   video._startedAt = -12000;
   context.pmjsRunRpgMakerTick(1);
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(video.src, 'movies/two.webm');
@@ -458,13 +458,14 @@ test('extract.image exposes a native canvas handle and releases it on src change
   replacement.src = 'other.png';
   assert.equal(replacement._nativeCanvas, null);
   assert.deepEqual(released.at(-1), [replacementHandle, 'canvas']);
+  context.PMJS.tasks.stop();
 });
 
 test('removing video src releases media and load with no source stays empty', async () => {
   const { context, calls } = makeHarness();
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
 
   video.pause();
@@ -483,7 +484,7 @@ test('a replaced src cannot run its stale deferred load', async () => {
   const video = context.document.createElement('video');
   video.src = 'movies/first.mp4';
   video.src = 'movies/second.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   assert.deepEqual(calls.loadVideo, ['movies/second.mp4']);
 });
@@ -504,14 +505,12 @@ test('a source replaced by a readiness handler receives no stale readiness event
       });
     }
     video.src = 'movies/first.mp4';
-    context.PMJS.tasks.drain();
+    await context.PMJS.tasks.idle();
     await Promise.resolve();
-    assert.deepEqual(events.map(event => event[0]),
+    const originalEvents = events.filter(event => event[1] === 'movies/first.mp4');
+    assert.deepEqual(originalEvents.map(event => event[0]),
       readinessEvents.slice(0, readinessEvents.indexOf(replacementEvent) + 1));
-    assert.ok(events.every(event => event[1] === 'movies/first.mp4' && event[2] === video.HAVE_ENOUGH_DATA));
-    assert.equal(video.readyState, video.HAVE_NOTHING);
-    context.PMJS.tasks.drain();
-    await Promise.resolve();
+    assert.ok(originalEvents.every(event => event[2] === video.HAVE_ENOUGH_DATA));
     assert.deepEqual(calls.loadVideo, ['movies/first.mp4', 'movies/second.mp4']);
     assert.deepEqual(calls.releaseVideo, [10]);
     assert.deepEqual(events.slice(-4).map(event => event.slice(0, 2)),
@@ -531,16 +530,16 @@ test('a stale async media completion is released after source replacement', asyn
   video.src = 'movies/first.mp4';
   const playback = video.play();
   const interrupted = assert.rejects(playback, { name: 'AbortError' });
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   video.src = 'movies/second.mp4';
   await interrupted;
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
 
   resolveLoads[0]({ handle: 30, image: 130, width: 960, height: 720,
     duration: 12, audio: null });
   resolveLoads[1]({ handle: 31, image: 131, width: 960, height: 720,
     duration: 12, audio: null });
-  await Promise.resolve();
+  await context.PMJS.tasks.idle();
 
   assert.deepEqual(calls.releaseVideo, [30]);
   assert.equal(video._media.handle, 31);
@@ -553,9 +552,9 @@ test('play rejects when loading fails or no source is available', async () => {
   video.src = 'movies/Opening.mp4';
   context.NativeHost.media.loadVideoAsync = () =>
     Promise.reject(new Error('decode failed'));
-  const playback = video.play();
-  context.PMJS.tasks.drain();
-  await assert.rejects(playback, /decode failed/);
+  const playback = assert.rejects(video.play(), /decode failed/);
+  await context.PMJS.tasks.idle();
+  await playback;
 
   const emptyVideo = context.document.createElement('video');
   await assert.rejects(emptyVideo.play(), /No video source is available/);
@@ -565,7 +564,7 @@ test('video owner snapshots diagnostics and removes finished playback without ex
   const { context } = makeHarness();
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   await video.play();
   assert.equal(context.nativeVideos, undefined);
@@ -586,7 +585,7 @@ test('video owner keeps a same-source replay started by its ended handler', asyn
   const { context, calls } = makeHarness();
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   await video.play();
   video.onended = () => { video.currentTime = 0; video.play(); };
@@ -603,7 +602,7 @@ test('video routes canvas and presentation separately without changing playback'
   context.NativeHost.media.videoCanvasImage = handle => handle + 900;
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   assert.deepEqual(calls.loadVideoProfiles, ['chromium65']);
   const presentation = video._pmjsNativePresentationSource();
@@ -625,7 +624,38 @@ test('video honours the explicit ordinary colour profile', async () => {
   context.PMJS.config = { videoColorProfile: 'ffmpeg' };
   const video = context.document.createElement('video');
   video.src = 'movies/Opening.mp4';
-  context.PMJS.tasks.drain();
+  await context.PMJS.tasks.idle();
   await Promise.resolve();
   assert.deepEqual(calls.loadVideoProfiles, ['ffmpeg']);
+});
+
+test('dispatcher shutdown releases late video and audio results without readiness delivery', async () => {
+  const { context, calls } = makeHarness();
+  let finish, delivered = 0;
+  context.NativeHost.media.loadVideoAsync = () => new Promise(resolve => { finish = resolve; });
+  const video = context.document.createElement('video');
+  video.onloadeddata = video.onerror = () => delivered++;
+  video.src = 'movies/late.webm'; await context.PMJS.tasks.idle();
+  context.PMJS.tasks.stop();
+  finish({ handle: 30, image: 130, width: 16, height: 16, duration: 1, audio: 40 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls.releaseVideo, [30]);
+  assert.deepEqual(calls.releaseAudio, [40]);
+  assert.equal(delivered, 0); assert.equal(video.readyState, video.HAVE_NOTHING);
+});
+
+test('video completions settling during rendering wait until submission', async () => {
+  const { context } = makeHarness();
+  let finish;
+  context.NativeHost.media.loadVideoAsync = () => new Promise(resolve => { finish = resolve; });
+  const video = context.document.createElement('video');
+  video.src = 'movies/phase.webm'; await context.PMJS.tasks.idle();
+  context.requestAnimationFrame(() => finish({ handle: 30, image: 130, width: 16, height: 16, duration: 1, audio: null }));
+  context.requestAnimationFrame(() => assert.equal(video.readyState, video.HAVE_NOTHING));
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(1).then(() => {
+    assert.equal(video.readyState, video.HAVE_NOTHING);
+  }));
+  await context.PMJS.tasks.idle();
+  assert.equal(video.readyState, video.HAVE_ENOUGH_DATA);
+  video.src = ''; context.PMJS.tasks.stop();
 });

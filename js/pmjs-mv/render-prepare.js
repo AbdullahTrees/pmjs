@@ -12,26 +12,29 @@ function prepareNativeMvWindowTransforms(node) {
   }
 }
 
-function prepareNativeMvSceneNode(node) {
+function prepareNativeMvSceneNode(node, transformsPrepared, transformKind) {
   if (typeof WindowLayer === 'function' && node instanceof WindowLayer &&
       node.filterArea && typeof node.filterArea.copy === 'function') {
     node.filterArea.copy(node);
   }
-  if (typeof Tilemap === 'function' && node instanceof Tilemap) {
-    if (typeof node._pmjsPrepareTiles === 'function' && node._pmjsPrepareTiles()) return;
-    var ox = node.roundPixels ? Math.floor(node.origin.x) : node.origin.x;
-    var oy = node.roundPixels ? Math.floor(node.origin.y) : node.origin.y;
+  if (!transformsPrepared && typeof Tilemap === 'function' && node instanceof Tilemap) {
+    if (!transformKind && typeof node._pmjsPrepareTiles === 'function' && node._pmjsPrepareTiles()) return;
+    var rounded = transformKind === 'Tilemap' || node.roundPixels;
+    var ox = rounded ? Math.floor(node.origin.x) : node.origin.x;
+    var oy = rounded ? Math.floor(node.origin.y) : node.origin.y;
     var startX = Math.floor((ox - node._margin) / node._tileWidth);
     var startY = Math.floor((oy - node._margin) / node._tileHeight);
     node._updateLayerPositions(startX, startY);
-    var animationChanged = node._lastAnimationFrame !== undefined &&
+    var animationChanged = transformKind !== 'ShaderTilemap' &&
+      (transformKind === 'Tilemap' || node._lastAnimationFrame !== undefined) &&
       node._lastAnimationFrame !== node.animationFrame;
     var indexedAnimation = node._pmjsIndexedAnimation === true &&
       typeof node._paintAnimTiles === 'function';
     var fullRepaint = node._needsRepaint ||
       node._lastStartX !== startX || node._lastStartY !== startY;
     if (fullRepaint || (!indexedAnimation && animationChanged)) {
-      if (node._lastAnimationFrame !== undefined) {
+      if (transformKind !== 'ShaderTilemap' &&
+          (transformKind === 'Tilemap' || node._lastAnimationFrame !== undefined)) {
         node._frameUpdated = animationChanged;
         node._lastAnimationFrame = node.animationFrame;
       }

@@ -338,7 +338,7 @@ test('greenworks compatibility registers its supported module aliases', () => {
   assert.equal(statsResult, true);
 });
 
-test('one physical host tick executes ticker, audio, video, and scheduled MV update', () => {
+test('one physical host tick executes ticker, audio, video, and scheduled MV update', async () => {
   let tickerUpdates = 0;
   let audioPolls = 0;
   let videoUpdates = 0;
@@ -352,7 +352,7 @@ test('one physical host tick executes ticker, audio, video, and scheduled MV upd
     fs.readFileSync(path.join(jsDir, 'pmjs-mv/main-loop.js'), 'utf8');
 
   const context = {
-    console: console,
+    console: console, __pmjsBuiltinRequire: require,
     performance: { now: () => 1000 },
     Math: Math,
     Number: Number,
@@ -394,7 +394,8 @@ test('one physical host tick executes ticker, audio, video, and scheduled MV upd
   context.SceneManager.requestUpdate();
 
   assert.equal(typeof context.__pmjsTick, 'function');
-  context.__pmjsTick(1000);
+  await context.__pmjsTick(1000);
+  context.PMJS.tasks.stop();
 
   assert.equal(tickerUpdates, 1, 'Ticker should update exactly once per host tick');
   assert.equal(audioPolls, 1, 'Audio should poll exactly once per host tick');

@@ -5,7 +5,7 @@
 
 namespace pmjs::scene_packet {
 
-constexpr std::uint32_t version = 29;
+constexpr std::uint32_t version = 30;
 constexpr std::size_t metadataStride = 7;
 constexpr std::size_t valueStride = 41;
 // filterBegin's unused slot preserves zero/normal in existing version 28 writers.
@@ -26,6 +26,7 @@ enum class NodeKind : std::uint32_t {
   mesh = 8,
   // Effect: viewport 0..3; projection 7..22; camera 23..38; reset size 39..40.
   effect = 9,
+  clearRect = 10,
 };
 
 enum class FilterKind : std::uint32_t {
@@ -85,6 +86,7 @@ enum NodeFlags : std::uint32_t {
   mipmapSampling = 1U << 16U,
   floatSpriteUv = 1U << 17U,
   repeatSpriteSampling = 1U << 18U,
+  preparedWorldState = 1U << 19U,
 };
 
 // All packet validators share this mask so accepted flags cannot diverge.
@@ -95,7 +97,7 @@ constexpr std::uint32_t kAllowedNodeFlags =
     NodeFlags::roundPixels | NodeFlags::hasMeshPostTintOverlay |
     NodeFlags::premultipliedSpriteTexture | NodeFlags::packedSpriteColor |
     NodeFlags::spriteWorldVertices | NodeFlags::standaloneBitmapRegion | NodeFlags::hasMvBitmapBlend |
-    NodeFlags::clampedTilingSampling | NodeFlags::mipmapSampling | NodeFlags::floatSpriteUv | NodeFlags::repeatSpriteSampling;
+    NodeFlags::clampedTilingSampling | NodeFlags::mipmapSampling | NodeFlags::floatSpriteUv | NodeFlags::repeatSpriteSampling | NodeFlags::preparedWorldState;
 
 static_assert((kAllowedNodeFlags & NodeFlags::roundPixels) != 0U,
               "scene packet validators must accept roundPixels");

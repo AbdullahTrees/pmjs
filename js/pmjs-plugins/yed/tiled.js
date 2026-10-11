@@ -156,6 +156,14 @@
         prepare(this);
       };
       prototype._pmjsPrepareTiles = function() { return prepare(this); };
+      if (typeof pmjsPixiRenderPreflight !== 'undefined') {
+        var containerUpdateTransform = PIXI.Container.prototype.updateTransform;
+        pmjsPixiRenderPreflight.registerTransformPreparation(effective.updateTransform,
+          prepare, function(instance) { return PIXI.Container.prototype.updateTransform === containerUpdateTransform &&
+            eligible(instance) && names.every(function(name) {
+            return prototype[name] === effective[name];
+          }); });
+      }
       prototype._pmjsIndexedPaintLoops = true;
       prototype._pmjsIndexedAnimation = animation;
     }

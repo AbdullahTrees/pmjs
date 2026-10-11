@@ -17,7 +17,7 @@ State::State(const std::string& root, int initWidth, int initHeight,
 
 State::~State() = default;
 
-std::unique_ptr<State> state;
+std::shared_ptr<State> state;
 void check(napi_env env, napi_status status, const char* message) {
   if (status != napi_ok) {
     napi_throw_error(env, nullptr, message);

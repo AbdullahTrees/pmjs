@@ -11,56 +11,202 @@ std::uint64_t readPosition(napi_env env, napi_value value) {
       std::floor(position) != position) throw std::runtime_error("read position must be a non-negative safe integer");
   return static_cast<std::uint64_t>(position);
 }
-pmjs::FileReader& fileReader(napi_env env, napi_callback_info info) {
+struct ReaderOwner {
+  std::shared_ptr<pmjs::FileReader> reader;
+  bool reading = false;
+};
+ReaderOwner& fileReader(napi_env env, napi_callback_info info) {
   napi_value self;
   check(env, napi_get_cb_info(env, info, nullptr, nullptr, &self, nullptr), "cannot read file receiver");
   void* reader = nullptr;
   check(env, napi_unwrap(env, self, &reader), "invalid file reader");
   if (!reader) throw std::runtime_error("invalid file reader");
-  return *static_cast<pmjs::FileReader*>(reader);
+  return *static_cast<ReaderOwner*>(reader);
+}
+const char* fileErrorCode(int code) {
+  switch (code) {
+    case EBADF: return "EBADF";
+    case EISDIR: return "EISDIR";
+    case EACCES: return "EACCES";
+    case EINVAL: return "EINVAL";
+    case EIO: return "EIO";
+    case ENOENT: return "ENOENT";
+    default: return "EIO";
+  }
 }
 napi_value throwFileError(napi_env env, const std::exception& error) {
   const auto* system = dynamic_cast<const std::system_error*>(&error);
-  const char* code = nullptr;
-  if (system) switch (system->code().value()) {
-    case EBADF: code = "EBADF"; break;
-    case EISDIR: code = "EISDIR"; break;
-    case EACCES: code = "EACCES"; break;
-    case EINVAL: code = "EINVAL"; break;
-    case EIO: code = "EIO"; break;
-  }
-  napi_throw_error(env, code, error.what());
+  napi_throw_error(env, system ? fileErrorCode(system->code().value()) : nullptr, error.what());
   return nullptr;
 }
 napi_value readFileChunk(napi_env env, napi_callback_info info) try {
   const auto args = arguments(env, info, 1);
   const auto length = readPosition(env, args.at(0));
   if (length > 0xffffffffU) throw std::runtime_error("read size exceeds buffer limit");
-  const auto bytes = fileReader(env, info).read(static_cast<std::size_t>(length));
+  auto& owner = fileReader(env, info);
+  if (!owner.reader) throw std::system_error(EBADF, std::generic_category(), "read");
+  if (owner.reading) throw std::runtime_error("file read already in progress");
+  const auto bytes = owner.reader->read(static_cast<std::size_t>(length));
   napi_value result;
   check(env, napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &result), "cannot create file chunk");
   return result;
 } catch (const std::exception& error) { return throwFileError(env, error); }
 napi_value closeFileReader(napi_env env, napi_callback_info info) try {
-  fileReader(env, info).close();
+  // An active worker retains the descriptor until its completion on the main thread.
+  fileReader(env, info).reader.reset();
   return undefined(env);
 } catch (const std::exception& error) { return throwFileError(env, error); }
-}
 
+enum class FileOperation { bytes, open, chunk };
+struct AsyncFileRead {
+  napi_env env = nullptr;
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  napi_ref receiver = nullptr;
+  std::shared_ptr<State> owner;
+  std::shared_ptr<pmjs::FileReader> reader;
+  ReaderOwner* receiverOwner = nullptr;
+  FileOperation operation = FileOperation::bytes;
+  std::string path, error;
+  int errorCode = EIO;
+  std::uint64_t start = 0;
+  std::size_t length = 0;
+  std::vector<std::uint8_t> bytes;
+  bool missing = false;
+  ~AsyncFileRead() {
+    if (receiverOwner) receiverOwner->reading = false;
+    if (receiver) napi_delete_reference(env, receiver);
+    if (work) napi_delete_async_work(env, work);
+  }
+};
+void rejectFileRead(napi_env env, napi_deferred deferred, const std::string& message, int code) {
+  bool pending = false;
+  napi_value error;
+  napi_is_exception_pending(env, &pending);
+  if (pending) napi_get_and_clear_last_exception(env, &error);
+  else napi_create_error(env, string(env, fileErrorCode(code)), string(env, message), &error);
+  napi_reject_deferred(env, deferred, error);
+}
+napi_value rejectedFileRead(napi_env env, const std::exception& error) {
+  napi_value promise, original;
+  napi_deferred deferred;
+  bool pending = false;
+  napi_is_exception_pending(env, &pending);
+  if (pending) napi_get_and_clear_last_exception(env, &original);
+  const auto* system = dynamic_cast<const std::system_error*>(&error);
+  check(env, napi_create_promise(env, &deferred, &promise), "cannot create file promise");
+  if (pending) napi_reject_deferred(env, deferred, original);
+  else rejectFileRead(env, deferred, error.what(), system ? system->code().value() : EIO);
+  return promise;
+}
+napi_value readFileChunkAsync(napi_env env, napi_callback_info info);
+napi_value wrapReader(napi_env env, std::shared_ptr<pmjs::FileReader> reader) {
+  auto owner = std::make_unique<ReaderOwner>();
+  owner->reader = std::move(reader);
+  napi_value result = moduleObject(env);
+  method(env, result, "read", readFileChunk);
+  method(env, result, "readAsync", readFileChunkAsync);
+  method(env, result, "close", closeFileReader);
+  check(env, napi_wrap(env, result, owner.get(), [](napi_env, void* value, void*) {
+    delete static_cast<ReaderOwner*>(value);
+  }, nullptr, nullptr), "cannot attach file reader");
+  owner.release();
+  return result;
+}
+void executeFileRead(napi_env, void* opaque) noexcept {
+  auto& load = *static_cast<AsyncFileRead*>(opaque);
+  try {
+    if (load.operation != FileOperation::chunk) {
+      load.reader = load.owner->vfs.openRead(load.path, load.start);
+      if (!load.reader) { load.missing = true; return; }
+    }
+    if (load.operation == FileOperation::chunk) load.bytes = load.reader->read(load.length);
+    else if (load.operation == FileOperation::bytes) {
+      for (;;) {
+        auto chunk = load.reader->read(64 * 1024);
+        if (chunk.empty()) break;
+        load.bytes.insert(load.bytes.end(), chunk.begin(), chunk.end());
+      }
+    }
+  } catch (const std::system_error& error) {
+    load.error = error.what(); load.errorCode = error.code().value();
+  } catch (const std::exception& error) { load.error = error.what(); }
+  catch (...) { load.error = "file read failed"; }
+}
+void completeFileRead(napi_env env, napi_status status, void* opaque) {
+  std::unique_ptr<AsyncFileRead> load(static_cast<AsyncFileRead*>(opaque));
+  try {
+    if (status != napi_ok || !load->error.empty()) {
+      rejectFileRead(env, load->deferred, load->error.empty() ? "file read cancelled" : load->error, load->errorCode);
+      return;
+    }
+    napi_value result = null(env);
+    if (!load->missing) {
+      if (load->operation == FileOperation::open) result = wrapReader(env, std::move(load->reader));
+      else check(env, napi_create_buffer_copy(env, load->bytes.size(), load->bytes.data(), nullptr, &result),
+        "cannot create file bytes");
+    }
+    napi_resolve_deferred(env, load->deferred, result);
+  } catch (const std::exception& error) {
+    rejectFileRead(env, load->deferred, error.what(), EIO);
+  }
+}
+napi_value queueFileRead(napi_env env, std::unique_ptr<AsyncFileRead> load) {
+  load->env = env;
+  napi_value promise;
+  check(env, napi_create_promise(env, &load->deferred, &promise), "cannot create file promise");
+  try {
+    check(env, napi_create_async_work(env, nullptr, string(env, "pmjs.file.read"),
+      executeFileRead, completeFileRead, load.get(), &load->work), "cannot create file work");
+    check(env, napi_queue_async_work(env, load->work), "cannot queue file read");
+    load.release();
+  } catch (const std::exception& error) {
+    rejectFileRead(env, load->deferred, error.what(), EIO);
+  }
+  return promise;
+}
+napi_value readFileChunkAsync(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  auto load = std::make_unique<AsyncFileRead>();
+  load->operation = FileOperation::chunk;
+  load->length = readPosition(env, args.at(0));
+  if (load->length > 0xffffffffU) throw std::runtime_error("read size exceeds buffer limit");
+  auto& owner = fileReader(env, info);
+  if (!owner.reader) throw std::system_error(EBADF, std::generic_category(), "read");
+  if (owner.reading) throw std::runtime_error("file read already in progress");
+  napi_value self;
+  check(env, napi_get_cb_info(env, info, nullptr, nullptr, &self, nullptr), "cannot read file receiver");
+  check(env, napi_create_reference(env, self, 1, &load->receiver), "cannot retain file reader");
+  load->reader = owner.reader;
+  load->receiverOwner = &owner;
+  owner.reading = true;
+  return queueFileRead(env, std::move(load));
+} catch (const std::exception& error) { return rejectedFileRead(env, error); }
 napi_value openRead(napi_env env, napi_callback_info info) try {
   const auto args = arguments(env, info, 2);
   const auto start = args.size() > 1 ? readPosition(env, args[1]) : 0;
   auto reader = host(env).vfs.openRead(asString(env, args.at(0)), start);
-  if (!reader) return null(env);
-  napi_value result = moduleObject(env);
-  method(env, result, "read", readFileChunk);
-  method(env, result, "close", closeFileReader);
-  check(env, napi_wrap(env, result, reader.get(), [](napi_env, void* value, void*) {
-    delete static_cast<pmjs::FileReader*>(value);
-  }, nullptr, nullptr), "cannot attach file reader");
-  reader.release();
-  return result;
+  return reader ? wrapReader(env, std::move(reader)) : null(env);
 } catch (const std::exception& error) { return throwFileError(env, error); }
+napi_value openReadAsync(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 2);
+  host(env);
+  auto load = std::make_unique<AsyncFileRead>();
+  load->owner = state;
+  load->operation = FileOperation::open;
+  load->path = asString(env, args.at(0));
+  load->start = args.size() > 1 ? readPosition(env, args[1]) : 0;
+  return queueFileRead(env, std::move(load));
+} catch (const std::exception& error) { return rejectedFileRead(env, error); }
+napi_value readBytesAsync(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  host(env);
+  auto load = std::make_unique<AsyncFileRead>();
+  load->owner = state;
+  load->path = asString(env, args.at(0));
+  return queueFileRead(env, std::move(load));
+} catch (const std::exception& error) { return rejectedFileRead(env, error); }
+}
 
 napi_value updateWritableOverlay(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 2);
@@ -231,7 +377,9 @@ void registerPlatformBindings(napi_env env, napi_value exports) {
   method(env, fs, "updateWritableOverlay", updateWritableOverlay);
   method(env, fs, "readText", readText);
   method(env, fs, "readBytes", readBytes);
+  method(env, fs, "readBytesAsync", readBytesAsync);
   method(env, fs, "openRead", openRead);
+  method(env, fs, "openReadAsync", openReadAsync);
   method(env, fs, "readDirectory", readDirectory);
   method(env, fs, "exists", exists);
   method(env, fs, "isDirectory", isDirectory);

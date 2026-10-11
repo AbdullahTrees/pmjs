@@ -6,6 +6,15 @@ native.initialize({gameRoot:path.resolve(process.argv[3]),assetRoot:'',width:640
 
 async function main() {
   const ordinary = await native.images.loadAsync('fixture.png');
+  const decodeJobs = native.images.memory(20).decodeJobs;
+  const cached = native.images.acquireCached('fixture.png');
+  if (!cached || cached.handle !== ordinary.handle) throw new Error('cache-only acquisition missed a live source');
+  native.images.release(ordinary.handle);
+  if (!native.images.memory(20).largest.some(item => item.handle === cached.handle && item.references === 1)) {
+    throw new Error('cache acquisition did not retain independent ownership');
+  }
+  if (native.images.acquireCached('not-present.png') !== null ||
+      native.images.memory(20).decodeJobs !== decodeJobs) throw new Error('cache-only lookup started decoding');
   let mem = native.images.memory(20);
   if (mem.warmBudgetBytes !== 4 * 1024 * 1024) {
     throw new Error(`expected default warm budget to be 4 MiB, got ${mem.warmBudgetBytes}`);
@@ -51,7 +60,7 @@ async function main() {
   }
 
   native.canvas.release(canvas.handle);
-  native.images.release(ordinary.handle);
+  native.images.release(cached.handle);
   native.images.release(primed.handle);
   native.images.release(retained.handle);
   console.log('[pmjs-node-image-retention] ready');

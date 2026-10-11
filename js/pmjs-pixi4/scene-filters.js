@@ -40,8 +40,7 @@ function nativeRecordCustomFilter(filter, node, filters) {
   var resolution = filter.resolution === undefined ? 1 : Number(filter.resolution);
   var padding = filter.padding === undefined ? 4 : Number(filter.padding) | 0;
   if (!Number.isFinite(resolution) || resolution <= 0 || resolution > 16 || padding < 0) return null;
-  // The packet writer normally computes transforms without updating Pixi's
-  // world state. Authored filters still need current upstream world bounds.
+  // Encoding must not repeat transform callbacks while reading filter bounds.
   var bounds = node.filterArea || (node.getBounds && node.getBounds(
     typeof nativeSceneUsePixiWorldState !== 'undefined' && nativeSceneUsePixiWorldState));
   if (!bounds) return null;
@@ -167,13 +166,25 @@ function nativeRecordCustomFilter(filter, node, filters) {
     else manager.applyFilter(currentFilter, flip, destination, !last);
     if (!last) { flop = flip; flip = destination; }
   }
+  var projection = nativeSceneRootTransform;
+  if (projection !== nativeIdentityTransform && projection.b === 0 &&
+      projection.c === 0 && projection.a > 0 && projection.a === projection.d &&
+      filters.every(nativeFilterCopiesPixels)) {
+    // Preserve the physical sampling grid when projecting logical filter frames.
+    var scale = projection.a;
+    plan.frame = [frame.x * scale + projection.tx, frame.y * scale + projection.ty,
+      frame.width * scale, frame.height * scale];
+    plan.resolutions = plan.resolutions.map(function(value, index) {
+      return index === 1 ? value : value / scale;
+    });
+  }
   var resource = NativeHost.render.createFilterPlan(plan);
   nativeCustomFilterPlans.push(resource);
-  return { kind: 31, resource: resource.handle, parameters: [padding] };
+  return { kind: 31, resource: resource.handle, parameters: [padding], frame: frame };
 }
 
 var nativeCoreFilterContracts = [];
-['ColorMatrixFilter', 'AlphaFilter', 'BlurFilter', 'BlurXFilter', 'BlurYFilter',
+['ColorMatrixFilter', 'AlphaFilter', 'VoidFilter', 'BlurFilter', 'BlurXFilter', 'BlurYFilter',
   'FXAAFilter'].forEach(function(name) {
   var Constructor = PIXI.filters && PIXI.filters[name];
   if (typeof Constructor !== 'function') return;
@@ -183,6 +194,17 @@ var nativeCoreFilterContracts = [];
     resolution: instance.resolution, padding: instance.padding, autoFit: instance.autoFit,
     blendMode: instance.blendMode });
 });
+
+function nativeFilterCopiesPixels(filter) {
+  if (filter.constructor !== PIXI.filters.VoidFilter &&
+      filter.constructor !== PIXI.filters.AlphaFilter) return false;
+  var alpha = filter.alpha === undefined && filter.uniforms ? filter.uniforms.uAlpha : filter.alpha;
+  if (alpha !== undefined && Number(alpha) !== 1) return false;
+  return nativeCoreFilterContracts.some(function(contract) {
+    return filter.constructor === contract.Constructor && filter.vertexSrc === contract.vertex &&
+      filter.fragmentSrc === contract.fragment && filter.apply === contract.apply;
+  });
+}
 
 function nativeFilterNeedsAuthoredProgram(filter) {
   if (!filter || !filter.fragmentSrc) return false;
@@ -210,9 +232,28 @@ function nativeCustomFilterGroup(filter, node) {
   }
 }
 
+function nativeWindowLayerHasContent(node) {
+  var children = node.children || [];
+  for (var index = 0; index < children.length; index++) {
+    var child = children[index];
+    if (child._isWindow && child.visible && child.openness > 0) return true;
+  }
+  return false;
+}
+
 function nativeSceneFilter(node, activeFilters) {
   if (!activeFilters.length) {
     return { blur: 0, groups: [], unsupported: false };
+  }
+  var windowFilter = activeFilters.length === 1 && activeFilters[0];
+  if (typeof WindowLayer === 'function' && node instanceof WindowLayer &&
+      windowFilter === WindowLayer.voidFilter && windowFilter.fragmentSrc && !nativeWindowLayerHasContent(node) &&
+      !nativeFilterNeedsAuthoredProgram(windowFilter)) {
+    var emptyWindowAlpha = windowFilter.alpha === undefined && windowFilter.uniforms ?
+      windowFilter.uniforms.uAlpha : windowFilter.alpha;
+    if (emptyWindowAlpha === undefined || Number(emptyWindowAlpha) === 1) {
+      return { blur: 0, groups: [], unsupported: false };
+    }
   }
   if (typeof NativeHost.render.createFilterPlan === 'function' &&
       activeFilters.some(function(filter) {
@@ -271,6 +312,8 @@ function nativeSceneFilter(node, activeFilters) {
   var FXAAFilter = PIXI.filters && PIXI.filters.FXAAFilter;
   var effectiveFilters = activeFilters.filter(function(filter) {
     if (!filter || filter.enabled === false) return false;
+    if (typeof WindowLayer === 'function' && node instanceof WindowLayer &&
+        filter === WindowLayer.voidFilter) return true;
     if (AlphaFilter && filter instanceof AlphaFilter) {
       var filterAlpha = filter.alpha === undefined && filter.uniforms ?
         filter.uniforms.uAlpha : filter.alpha;
@@ -308,7 +351,13 @@ function nativeSceneFilter(node, activeFilters) {
     node instanceof WindowLayer && filter === WindowLayer.voidFilter;
   var neutralStageFilter = typeof Sprite === 'function' &&
     filter === Sprite.voidFilter;
-  if (neutralWindowFilter || neutralStageFilter) {
+  if (neutralWindowFilter) {
+    var windowGroup = nativeRecordCustomFilter(filter, node);
+    if (windowGroup) return { blur: 0, groups: [windowGroup], unsupported: false };
+    PMJS.compat.hit('render.window-layer', 'isolated filter target is unavailable');
+    return { blur: 0, groups: [], unsupported: true };
+  }
+  if (neutralStageFilter) {
     return { blur: 0, groups: [], unsupported: false };
   }
   if (nativeFilterMatches(filter, MvToneFilter, 'ToneFilter') &&

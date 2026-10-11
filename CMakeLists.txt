@@ -227,6 +227,10 @@ if(BUILD_TESTING)
     SDL_AUDIODRIVER=dummy LIBGL_ALWAYS_SOFTWARE=1
     PMJS_NATIVE_ADDON=$<TARGET_FILE:pmjs_native>
     ${NODE_EXECUTABLE} --test ${CMAKE_CURRENT_SOURCE_DIR}/test/node-writable-filesystem.cjs)
+  add_test(NAME node-async-loading COMMAND ${XVFB_RUN} -a ${CMAKE_COMMAND} -E env
+    SDL_AUDIODRIVER=dummy LIBGL_ALWAYS_SOFTWARE=1
+    PMJS_NATIVE_ADDON=$<TARGET_FILE:pmjs_native>
+    ${NODE_EXECUTABLE} --test ${CMAKE_CURRENT_SOURCE_DIR}/test/node-async-loading.cjs)
   pmjs_add_cpp_test(pmjs-checked-bounds-test native-checked-bounds test/checked-bounds.cpp)
   add_test(NAME node-image-recovery COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-image-recovery.cjs" $<TARGET_FILE:pmjs_native>)
@@ -240,7 +244,8 @@ if(BUILD_TESTING)
   pmjs_add_cpp_test(pmjs-media-mix-test native-audio-mix-unit test/media-mix.cpp)
   target_compile_definitions(pmjs-media-mix-test PRIVATE
     PMJS_EFFECT_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/mz-effects/audio.tsv"
-    PMJS_MZ_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/mz-pan.tsv")
+    PMJS_MZ_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/mz-pan.tsv"
+    PMJS_GAIN_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/gain-automation.tsv")
   add_executable(pmjs-image-capabilities-test test/image-capabilities.cpp)
   target_include_directories(pmjs-image-capabilities-test PRIVATE src)
   target_compile_options(pmjs-image-capabilities-test PRIVATE -Wall -Wextra -Wpedantic)
@@ -315,7 +320,7 @@ if(BUILD_TESTING)
   target_link_libraries(pmjs-canvas-upload-test PRIVATE pmjs_runtime)
   target_compile_options(pmjs-canvas-upload-test PRIVATE -UNDEBUG)
   add_test(NAME native-canvas-upload COMMAND pmjs-canvas-upload-test)
-  foreach(PMJS_NODE_TEST IN ITEMS node-identity-filter-shader node-nearest-tile-shader node-scene node-sprite-byte-precision node-pixi4-clear node-mask-pixels node-renderer-stats node-empty-sprite node-preparation-progress node-derived-sprite node-uniform-inline-matrix node-filter-coordinates node-filter-input node-bitmap-region-batching node-bitmap-region-flash node-mv-bitmap-filtering node-tile-edge-filtering node-four-texture-tiles node-yed-retained-tiles node-presentation-byte-precision node-render-to-image node-render-to-canvas node-render-target-filters node-image-coalesce node-image-retention node-image-warm-cache node-image-no-warm-cache node-image-fallback node-image-bytes node-audio-bytes node-video-texture node-video-color node-canvas-deferred node-canvas-pixels node-canvas-webp node-canvas-radial-gradient node-primitive-surface node-filter-bounds node-tone-boundary-pixels node-mz-color-pixels node-pixi5-zoom-pixels node-pixi5-tiling-pixels node-pixi5-sprite-rounding-pixels node-mz-host-contracts node-mz-canvas-pixels node-mz-sampling-pixels node-mesh-post-tint-overlay node-glyph-cache node-text-layout node-text-layout-cache node-text-upload node-freetype-facade node-primitive-canvas)
+  foreach(PMJS_NODE_TEST IN ITEMS node-identity-filter-shader node-nearest-tile-shader node-scene node-sprite-byte-precision node-pixi4-clear node-window-layer-clears node-mask-pixels node-renderer-stats node-empty-sprite node-preparation-progress node-derived-sprite node-uniform-inline-matrix node-filter-coordinates node-filter-input node-bitmap-region-batching node-bitmap-region-flash node-mv-bitmap-filtering node-tile-edge-filtering node-four-texture-tiles node-yed-retained-tiles node-presentation-byte-precision node-render-to-image node-render-to-canvas node-render-target-filters node-image-coalesce node-image-retention node-image-warm-cache node-image-no-warm-cache node-image-fallback node-image-bytes node-audio-bytes node-video-texture node-video-color node-canvas-deferred node-canvas-pixels node-canvas-webp node-canvas-radial-gradient node-primitive-surface node-filter-bounds node-tone-boundary-pixels node-mz-color-pixels node-pixi5-zoom-pixels node-pixi5-tiling-pixels node-pixi5-sprite-rounding-pixels node-mz-host-contracts node-mz-canvas-pixels node-mz-sampling-pixels node-mesh-post-tint-overlay node-glyph-cache node-text-layout node-text-layout-cache node-text-upload node-freetype-facade node-primitive-canvas)
     if(NOT PMJS_ENABLE_SKIA65 AND PMJS_NODE_TEST STREQUAL "node-mz-canvas-pixels")
       continue()
     endif()
@@ -331,6 +336,7 @@ if(BUILD_TESTING)
   set_tests_properties(node-presentation-byte-precision PROPERTIES ENVIRONMENT
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
   set_tests_properties(node-derived-sprite node-uniform-inline-matrix PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  set_tests_properties(node-audio-bytes PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-pixi4-tiling-pixels COMMAND ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-pixi4-tiling-pixels.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-pixi4-tiling-pixels PROPERTIES ENVIRONMENT

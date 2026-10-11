@@ -16,21 +16,27 @@ globalThis.fetch = function(url) {
     var encoded = target.split('?')[0].replace(/^file:\/\/\/game\//, '')
       .replace(/^\.\//, '').replace(/%(?![0-9a-f]{2})/gi, '%25');
     var path = gameReadPath(decodeURIComponent(encoded));
+    function deliver(bytes, error) {
+      PMJS.tasks.enqueue(function() {
+        if (error) { reject(error); return; }
+        try {
+          var status = bytes === null ? 404 : 200;
+          var body = bytes === null ? new ArrayBuffer(0) : requestArrayBuffer(bytes);
+          var text = function() { return new TextDecoder().decode(body); };
+          resolve({
+            ok: status >= 200 && status < 300, status: status,
+            statusText: status === 200 ? 'OK' : 'Not Found', url: target,
+            headers: { get: function() { return null; } },
+            text: function() { return Promise.resolve(text()); },
+            json: function() { return Promise.resolve().then(function() { return JSON.parse(text()); }); },
+            arrayBuffer: function() { return Promise.resolve(body.slice(0)); }
+          });
+        } catch (failure) { reject(failure); }
+      }, { errorMode: 'event' });
+    }
     PMJS.tasks.enqueue(function() {
-      try {
-        var bytes = NativeHost.fs.readBytes(path);
-        var status = bytes === null ? 404 : 200;
-        var body = bytes === null ? new ArrayBuffer(0) : requestArrayBuffer(bytes);
-        var text = function() { return new TextDecoder().decode(body); };
-        resolve({
-          ok: status >= 200 && status < 300, status: status,
-          statusText: status === 200 ? 'OK' : 'Not Found', url: target,
-          headers: { get: function() { return null; } },
-          text: function() { return Promise.resolve(text()); },
-          json: function() { return Promise.resolve().then(function() { return JSON.parse(text()); }); },
-          arrayBuffer: function() { return Promise.resolve(body.slice(0)); }
-        });
-      } catch (error) { reject(error); }
+      Promise.resolve().then(function() { return NativeHost.fs.readBytesAsync(path); }).then(
+        function(bytes) { deliver(bytes, null); }, function(error) { deliver(null, error); });
     });
   });
 };
@@ -102,37 +108,91 @@ XMLHttpRequest.prototype.send = function() {
     throw invalidState;
   }
   if (this._method !== 'GET') throw new Error('XMLHttpRequest only supports GET');
-  var request = this;
-  var generation = this._requestGeneration;
+  var request = this, generation = this._requestGeneration;
   var binary = this.responseType === 'arraybuffer';
+  var url = this._url;
   this._sent = true;
-  function complete() {
-    if (request._requestGeneration !== generation) return;
+  function current() { return request._requestGeneration === generation; }
+  function install(contents) {
+    request.response = contents;
+    if (!binary) request.responseText = contents;
+  }
+  function requestPath() {
+    var encoded = url.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
+    return gamePath(decodeURIComponent(encoded));
+  }
+  if (!this._async) {
     var contents = null;
     try {
-      var encodedPath = request._url.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
-      var resolved = gamePath(decodeURIComponent(encodedPath));
-      contents = binary ? NativeHost.fs.readBytes(resolved) : NativeHost.fs.readText(resolved);
-      if (contents === null && /\/maps\/Map\d+\.json$/i.test(resolved)) {
-        var alternate = resolved.replace(/\/maps\/Map(\d+)\.json$/i, '/maps/map$1.json');
-        contents = binary ? NativeHost.fs.readBytes(alternate) : NativeHost.fs.readText(alternate);
+      var path = requestPath();
+      contents = binary ? NativeHost.fs.readBytes(path) : NativeHost.fs.readText(path);
+      if (contents === null && /\/maps\/Map\d+\.json$/i.test(path)) {
+        path = path.replace(/\/maps\/Map(\d+)\.json$/i, '/maps/map$1.json');
+        contents = binary ? NativeHost.fs.readBytes(path) : NativeHost.fs.readText(path);
       }
       if (contents !== null && binary) contents = requestArrayBuffer(contents);
-    } catch (_) {
-      contents = null;
-    }
+    } catch (_) { contents = null; }
     request._sent = false;
     request.status = contents === null ? 404 : 200;
     request.readyState = request.DONE;
-    if (contents !== null) {
-      request.response = contents;
-      if (!binary) request.responseText = contents;
-    }
+    if (contents !== null) install(contents);
     if (!request._emit('readystatechange', generation)) return;
     if (!request._emit(contents === null ? 'error' : 'load', generation)) return;
     request._emit('loadend', generation);
+    return;
   }
-  if (this._async) PMJS.tasks.enqueue(complete);
-  else complete();
+  if (!this._emit('loadstart', generation)) return;
+  function notify(type, bytes) {
+    return pmjsDispatchHostEvent(request, {
+      type: type, target: request, lengthComputable: bytes !== undefined,
+      loaded: bytes || 0, total: bytes || 0
+    }, current);
+  }
+  function finish(bytes) {
+    var contents = bytes === null ? null : binary ? requestArrayBuffer(bytes) : new TextDecoder().decode(bytes);
+    var length = bytes === null ? 0 : bytes.byteLength;
+    var chain = Promise.resolve();
+    if (contents !== null) {
+      [request.HEADERS_RECEIVED, request.LOADING].forEach(function(state) {
+        chain = chain.then(function() {
+          return PMJS.tasks.invoke(function() {
+            if (!current()) return false;
+            request.status = 200;
+            request.readyState = state;
+            if (state === request.LOADING && !binary) request.responseText = contents;
+            return notify('readystatechange');
+          }, 'event');
+        });
+      });
+      chain = chain.then(function() { if (current()) return notify('progress', length); });
+    }
+    chain.then(function() {
+      return PMJS.tasks.invoke(function() {
+        if (!current()) return false;
+        request._sent = false;
+        request.status = contents === null ? 404 : 200;
+        request.readyState = request.DONE;
+        if (contents !== null) install(contents);
+        return notify('readystatechange');
+      }, 'event');
+    }).then(function(valid) {
+      if (valid) return notify(contents === null ? 'error' : 'load', length);
+      return false;
+    }).then(function(valid) {
+      if (valid) return notify('loadend', length);
+    }).catch(pmjsReportEventError);
+  }
+  PMJS.tasks.enqueue(function() {
+    if (!current()) return;
+    Promise.resolve().then(function() {
+      var path = requestPath();
+      return NativeHost.fs.readBytesAsync(path).then(function(bytes) {
+        if (current() && bytes === null && /\/maps\/Map\d+\.json$/i.test(path)) {
+          return NativeHost.fs.readBytesAsync(path.replace(/\/maps\/Map(\d+)\.json$/i, '/maps/map$1.json'));
+        }
+        return bytes;
+      });
+    }).then(finish, function() { finish(null); }).catch(pmjsReportEventError);
+  }, { errorMode: 'event' });
 };
 globalThis.XMLHttpRequest = XMLHttpRequest;
