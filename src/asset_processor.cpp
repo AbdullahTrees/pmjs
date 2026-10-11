@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <png.h>
 
@@ -167,6 +168,10 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
     throw AssetPreparationUnsupported("preparation crop is outside a cell");
   const auto count = static_cast<std::size_t>(recipe.columns * recipe.rows);
   result.cells.resize(count);
+  // Different full-sized source cells cannot share a prepared tile. Compute their
+  // fingerprints in the existing scan so negative grid decisions need no tiles.
+  std::vector<std::uint64_t> cellHashes;
+  if (count > 1) cellHashes.assign(count, 14695981039346656037ULL);
   for (std::size_t index = 0; index < count; ++index) {
     auto& cell = result.cells[index];
     cell.rect = {static_cast<int>(index % recipe.columns) * cellWidth,
@@ -186,7 +191,14 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
       int left = cellWidth, right = 0;
       const auto* row = input.row.data() + static_cast<std::size_t>(cell.rect[0]) * 4;
       for (int x = 0; x < cellWidth; ++x) {
-        const auto rgba = pixel(row + static_cast<std::size_t>(x) * 4);
+        const auto* bytes = row + static_cast<std::size_t>(x) * 4;
+        const auto rgba = pixel(bytes);
+        if (!cellHashes.empty()) {
+          std::uint32_t word;
+          std::memcpy(&word, bytes, sizeof(word));
+          auto& hash = cellHashes[rowIndex + column];
+          hash = (hash ^ word) * 1099511628211ULL;
+        }
         allUniform = allUniform && rgba == first;
         if (rgba == cell.fill) continue;
         if (recipe.crop && !inside(x, localY, *recipe.crop))
@@ -209,6 +221,22 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
   if (recipe.columns == 1 && recipe.rows == 1 && !recipe.crop &&
       result.cells[0].crop == AssetRect{0, 0, result.width, result.height})
     throw AssetPreparationUnsupported("image has no eligible compact representation");
+  if (!cellHashes.empty()) {
+    std::unordered_set<std::uint64_t> distinctFullCells;
+    for (std::size_t index = 0; index < count; ++index) {
+      if (result.cells[index].crop == AssetRect{0, 0, cellWidth, cellHeight})
+        distinctFullCells.insert(cellHashes[index]);
+    }
+    // Packed pages cannot occupy fewer pixels than the sum of their unique
+    // tiles. Hash collisions only undercount distinct tiles (a safe false
+    // negative); equal full-cell pixels are necessary, not sufficient, for
+    // tile deduplication because the surrounding halo may differ.
+    const auto paddedWidth = static_cast<std::uint64_t>(cellWidth) + 2 * result.halo;
+    const auto paddedHeight = static_cast<std::uint64_t>(cellHeight) + 2 * result.halo;
+    if (static_cast<std::uint64_t>(distinctFullCells.size()) * paddedWidth * paddedHeight >=
+        static_cast<std::uint64_t>(result.width) * result.height)
+      throw AssetPreparationUnsupported("full-cell lower bound cannot reduce decoded storage");
+  }
   std::filesystem::create_directories(staging);
   std::vector<Tile> tiles(count);
   std::vector<std::ofstream> files(count);
@@ -225,6 +253,7 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
   }
   std::size_t openTileFiles = 0, evictionCursor = 0;
   PngRows extraction(source);
+  std::vector<std::uint8_t> haloRow(static_cast<std::size_t>(pageLimit) * 4);
   for (int y = 0; y < result.height; ++y) {
     extraction.read();
     for (std::size_t index = 0; index < count; ++index) {
@@ -247,14 +276,14 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
       const int repetitions = 1 + (y == 0 ? std::max(0, -startY) : 0) +
         (y == result.height - 1 ? std::max(0, startY + tile.height - result.height) : 0);
       const int startX = cell.rect[0] + cell.crop[0] - result.halo;
-      std::vector<std::uint8_t> haloRow(static_cast<std::size_t>(tile.width) * 4);
       for (int x = 0; x < tile.width; ++x) {
         const int sourceX = std::clamp(startX + x, 0, result.width - 1);
         std::memcpy(haloRow.data() + static_cast<std::size_t>(x) * 4,
           extraction.row.data() + static_cast<std::size_t>(sourceX) * 4, 4);
       }
       for (int repeat = 0; repeat < repetitions; ++repeat)
-        files[index].write(reinterpret_cast<const char*>(haloRow.data()), static_cast<std::streamsize>(haloRow.size()));
+        files[index].write(reinterpret_cast<const char*>(haloRow.data()),
+          static_cast<std::streamsize>(tile.width) * 4);
       if (!files[index]) throw std::runtime_error("cannot write preparation tile");
       if (y == lastY) { files[index].close(); --openTileFiles; }
     }
@@ -317,12 +346,18 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
     }
   }
   check.finish();
-  auto pack = [&](int width, bool assign) {
+  auto pack = [&](int width, bool assign, int* nextDifferentWidth = nullptr) {
     std::vector<PreparedAssetPage> pages;
     int page = 0, shelfX = 0, shelfY = 0, shelfHeight = 0, usedWidth = 0, usedHeight = 0;
     for (const auto index : unique) {
       auto& tile = tiles[index];
-      if (shelfX + tile.width > width) { shelfX = 0; shelfY += shelfHeight; shelfHeight = 0; }
+      if (shelfX + tile.width > width) {
+        // Until this exact threshold, every shelf decision (and thus every
+        // resulting page extent) stays identical. No candidate widths are lost.
+        if (nextDifferentWidth)
+          *nextDifferentWidth = std::min(*nextDifferentWidth, shelfX + tile.width);
+        shelfX = 0; shelfY += shelfHeight; shelfHeight = 0;
+      }
       if (shelfY + tile.height > pageLimit) {
         pages.push_back({"page-" + std::to_string(page) + ".png", usedWidth, usedHeight});
         ++page; shelfX = shelfY = shelfHeight = usedWidth = usedHeight = 0;
@@ -348,11 +383,14 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
   int bestWidth = pageLimit;
   const auto originalPages = pack(bestWidth, false);
   auto bestScore = score(originalPages);
-  for (int width = minimumWidth; width < pageLimit; ++width) {
-    const auto pages = pack(width, false);
-    if (pages.size() > originalPages.size()) continue;
-    const auto candidate = score(pages);
-    if (candidate < bestScore) { bestWidth = width; bestScore = candidate; }
+  for (int width = minimumWidth; width < pageLimit;) {
+    int nextDifferentWidth = pageLimit;
+    const auto pages = pack(width, false, &nextDifferentWidth);
+    if (pages.size() <= originalPages.size()) {
+      const auto candidate = score(pages);
+      if (candidate < bestScore) { bestWidth = width; bestScore = candidate; }
+    }
+    width = std::max(width + 1, nextDifferentWidth);
   }
   if (bestScore.first >= static_cast<std::uint64_t>(result.width) * result.height) {
     for (const auto& tile : tiles) if (tile.width) std::filesystem::remove(tile.path);

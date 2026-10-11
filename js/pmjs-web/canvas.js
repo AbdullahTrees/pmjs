@@ -1017,6 +1017,68 @@ CanvasContext2D.prototype.arcTo = function(x1, y1, x2, y2, radius) {
     Math.atan2(tangent1Y - centerY, tangent1X - centerX),
     Math.atan2(tangent2Y - centerY, tangent2X - centerX), cross > 0);
 };
+CanvasContext2D.prototype.ellipse = function(x, y, radiusX, radiusY, rotation, start, end) {
+  if (arguments.length < 7) throw new TypeError('ellipse requires seven arguments');
+  // The reference canvas path stores float geometry, including its angles.
+  x = Math.fround(+x); y = Math.fround(+y);
+  radiusX = Math.fround(+radiusX); radiusY = Math.fround(+radiusY);
+  rotation = Math.fround(+rotation); start = Math.fround(+start); end = Math.fround(+end);
+  var anticlockwise = !!arguments[7];
+  if (![x, y, radiusX, radiusY, rotation, start, end].every(Number.isFinite)) return;
+  if (radiusX < 0 || radiusY < 0) {
+    if (typeof DOMException === 'function') throw new DOMException('negative ellipse radius', 'IndexSizeError');
+    var error = new Error('negative ellipse radius');
+    error.name = 'IndexSizeError'; error.code = 1;
+    throw error;
+  }
+  var transform = this._transform;
+  if (transform[0] * transform[3] - transform[1] * transform[2] === 0) return;
+  var tau = Math.fround(Math.PI * 2), quarter = Math.PI / 2;
+  var normalizedStart = Math.fround(start % tau);
+  if (normalizedStart < 0) {
+    normalizedStart = Math.fround(normalizedStart + tau);
+    if (normalizedStart >= tau) normalizedStart = Math.fround(normalizedStart - tau);
+  }
+  end = Math.fround(end + Math.fround(normalizedStart - start)); start = normalizedStart;
+  var difference = Math.fround(end - start), sweep;
+  if (!anticlockwise && difference >= tau) sweep = tau;
+  else if (anticlockwise && -difference >= tau) sweep = -tau;
+  else if (!anticlockwise && start > end) sweep = tau - Math.fround((start - end) % tau);
+  else if (anticlockwise && start < end) sweep = -(tau - Math.fround((end - start) % tau));
+  else sweep = difference;
+  var cosine = Math.cos(rotation), sine = Math.sin(rotation);
+  var ellipseTransform = multiplyTransform(transform,
+    [cosine * radiusX, sine * radiusX, -sine * radiusY, cosine * radiusY, x, y]);
+  // Skia treats float sweeps within 1/4096 degree of a turn as a full oval.
+  var sweepDegrees = Math.fround(Math.fround(Math.fround(sweep) * 180) / Math.fround(Math.PI));
+  var fullTurn = Math.abs(Math.abs(sweepDegrees) - 360) <= 1 / 4096;
+  this._circlePath = !this._path.length && radiusX && radiusY && fullTurn ?
+    { x: 0, y: 0, radius: 1, transform: ellipseTransform } : null;
+  var context = this;
+  function append(angle) {
+    var u = radiusX * Math.cos(angle), v = radiusY * Math.sin(angle);
+    var local = [x + cosine * u - sine * v, y + sine * u + cosine * v];
+    var point = transformedPoint(context, local[0], local[1]);
+    if (!context._subpath) { context._subpath = [point]; context._path.push(context._subpath); }
+    else context._subpath.push(point);
+    context._currentPathPoint = local;
+  }
+  append(start);
+  if (!sweep || (!radiusX && !radiusY)) return;
+  if (!radiusX || !radiusY) {
+    // A collapsed ellipse still traverses its extrema before reaching the end.
+    var direction = sweep < 0 ? -1 : 1;
+    var extremum = (direction > 0 ? Math.floor(start / quarter) + 1 : Math.ceil(start / quarter) - 1) * quarter;
+    for (; direction * (start + sweep - extremum) > 0; extremum += direction * quarter) append(extremum);
+  } else {
+    var extent = Math.hypot(ellipseTransform[0], ellipseTransform[1]) +
+      Math.hypot(ellipseTransform[2], ellipseTransform[3]);
+    // Bound polygon work for huge radii; ordinary paths target subpixel chords.
+    var segments = Math.min(8192, Math.max(4, Math.ceil(Math.abs(sweep) * Math.sqrt(extent * 2))));
+    for (var index = 1; index < segments; index++) append(start + sweep * index / segments);
+  }
+  append(start + sweep);
+};
 CanvasContext2D.prototype.rect = function(x, y, width, height) {
   this.moveTo(x, y); this.lineTo(x + width, y); this.lineTo(x + width, y + height);
   this.lineTo(x, y + height); this.closePath();

@@ -27,6 +27,7 @@ function harness() {
         create(width, height) { return { handle: ++handle, width, height }; },
         release() {},
         fillRect() {},
+        paintCircle() {},
         clear() {},
         clearRect() {},
         drawText() {},
@@ -75,6 +76,21 @@ test('Canvas mutations and dimension resets invalidate revision-bound proof', ()
   establish();
   canvas._releaseNativeCanvas();
   assert.equal(context.PMJS.web.canvas.unitMaskRect(canvas), null);
+});
+
+test('ellipse construction retains content proof until fill or stroke mutates pixels', () => {
+  const realm = harness();
+  const canvas = new realm.CanvasElement();
+  const context = canvas.getContext('2d');
+  realm.PMJS.web.canvas.trackMaskFill(context, 0, 0, canvas.width, canvas.height,
+    'white', () => { context.fillStyle = 'white'; context.fillRect(0, 0, canvas.width, canvas.height); });
+  const revision = canvas.__pmjsContentRevision;
+  context.beginPath(); context.ellipse(4, 4, 3, 2, 0, 0, Math.PI * 2);
+  assert.equal(canvas.__pmjsContentRevision, revision);
+  assert.ok(realm.PMJS.web.canvas.unitMaskRect(canvas));
+  context.fill();
+  assert.ok(canvas.__pmjsContentRevision > revision);
+  assert.equal(realm.PMJS.web.canvas.unitMaskRect(canvas), null);
 });
 
 test('document ID lookup follows attachment, removal, and live canvas IDs', () => {

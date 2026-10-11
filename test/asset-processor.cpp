@@ -254,6 +254,18 @@ int main() {
     try { pmjs::prepareAssetImage(source, root / "dense"); }
     catch (const pmjs::AssetPreparationUnsupported&) { refused = true; }
     require(refused && !std::filesystem::exists(root / "dense"));
+    write(source, 384, 256, [](int x,int y) {
+      const auto frame = static_cast<std::uint8_t>((y / 64) * 6 + x / 64);
+      return AssetColor{static_cast<std::uint8_t>(frame + 1), 33, 77, 255};
+    });
+    refused = false;
+    try { pmjs::prepareAssetImage(source, root / "dense-grid", {6,4,std::nullopt,{}}); }
+    catch (const pmjs::AssetPreparationUnsupported&) { refused = true; }
+    require(refused && !std::filesystem::exists(root / "dense-grid"));
+    result = check(512, 512, [](int x,int) {
+      return AssetColor{static_cast<std::uint8_t>(x / 128 % 2 ? 71 : 19), 33, 77, 255};
+    }, {4,4,std::nullopt,{}});
+    require(!result.pages.empty());
     write(source, 8, 8, [](int,int) { return AssetColor{13,27,31,0}; }, 0, 16);
     refused = false;
     try { pmjs::prepareAssetImage(source, root / "16bit"); }
