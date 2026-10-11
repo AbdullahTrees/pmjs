@@ -351,6 +351,9 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
   }
   check(env, napi_set_named_property(env, result, "filterApplications",
     filterApplications), "cannot set filter application stats");
+  check(env, napi_set_named_property(env, result, "filterIntermediateCacheHits",
+    number(env, static_cast<double>(stats.filterIntermediateCacheHits))),
+    "cannot set filterIntermediateCacheHits");
   check(env, napi_set_named_property(env, result, "identityFilterShaderDrawCalls",
     number(env, static_cast<double>(stats.identityFilterShaderDrawCalls))),
     "cannot set identity filter shader draws");

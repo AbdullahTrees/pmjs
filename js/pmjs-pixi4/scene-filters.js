@@ -180,7 +180,7 @@ function nativeRecordCustomFilter(filter, node, filters) {
   }
   var resource = NativeHost.render.createFilterPlan(plan);
   nativeCustomFilterPlans.push(resource);
-  return { kind: 31, resource: resource.handle, parameters: [padding], frame: frame };
+  return { kind: 31, resource: resource.handle, parameters: [padding, PMJS.optimizations.isEnabled('scene.filter-intermediate-cache') ? 1 : 0], frame: frame };
 }
 
 var nativeCoreFilterContracts = [];

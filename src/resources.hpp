@@ -184,6 +184,7 @@ class ImageStore {
   std::optional<ImageInfo> createRenderTarget(int width, int height,
                                              bool premultiplied = false);
   bool isRenderTarget(ImageHandle handle) const;
+  std::optional<std::uint64_t> contentRevision(ImageHandle handle) const;
   std::uint64_t textureEpoch() const { return textureEpoch_; }
   bool ensureMipmaps(ImageHandle handle, bool premultiplied);
   const ImagePixels* readPixels(ImageHandle handle) const;
@@ -243,6 +244,7 @@ class ImageStore {
   struct TileLoad;
   struct Slot {
     std::uint16_t generation = 1;
+    std::uint64_t contentRevision = 0;
     std::uint32_t texture = 0;
     std::shared_ptr<PreparedBacking> prepared;
     std::shared_ptr<TileBacking> tiles;

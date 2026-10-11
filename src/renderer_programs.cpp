@@ -615,6 +615,7 @@ Renderer::~Renderer() {
   glDeleteVertexArrays(1, &customFilterVertexArray_);
   glDeleteBuffers(1, &customFilterVertexBuffer_);
   for (auto& target : customPassTargets_) destroyTarget(target);
+  destroyTarget(filterIntermediateTarget_);
   for (auto& cached : filterTargetCache_) destroyTarget(cached.target);
   stats_.rendererTargetCacheBytes = 0;
   for (const auto& filter : filterPrograms_) {

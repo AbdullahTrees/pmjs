@@ -36,11 +36,71 @@ bool Renderer::isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const {
   return matrix && alpha && offset == pass.uniforms.size();
 }
 
+// Cache only isolated, sampler-free chains fed by tracked image draws. The
+// final pass still runs against the live destination, preserving its blending.
+std::string Renderer::filterIntermediateKey(const RenderCommand& command) const {
+  if (offscreenRender_ || command.filterParameters[1] != 1 ||
+      sceneProjection_ != std::array<float, 6>{1, 0, 0, 1, 0, 0} ||
+      !command.customFilterPlan) return {};
+  const auto& plan = *command.customFilterPlan;
+  if (plan.passes.size() < 2 || plan.passes.back().input == 0 ||
+      plan.passes.back().output != 1 ||
+      !std::all_of(plan.resolutions.begin(), plan.resolutions.end(),
+        [](float value) { return value == 1; })) return {};
+  int width = 1, height = 1;
+  while (width < plan.frame[2]) width *= 2;
+  while (height < plan.frame[3]) height *= 2;
+  if (static_cast<std::size_t>(width) * height * 4 > 8U * 1024U * 1024U) return {};
+  std::string key;
+  const auto append = [&](const auto& value) {
+    key.append(reinterpret_cast<const char*>(&value), sizeof(value));
+  };
+  append(width_); append(height_); append(plan.frame); append(command.clip); append(command.clipped);
+  append(plan.passes.size());
+  for (std::size_t index = 0; index < plan.passes.size(); ++index) {
+    const auto& pass = plan.passes[index];
+    if (!pass.samplers.empty() || (index + 1 < plan.passes.size() && pass.output == 1)) return {};
+    append(pass.program); append(pass.input); append(pass.output); append(pass.clear);
+    append(pass.blend); append(pass.transform); append(pass.uniforms.size());
+    for (double value : pass.uniforms) append(value);
+  }
+  const auto begin = static_cast<std::size_t>(&command - frame_.commands.data());
+  bool ended = false;
+  std::size_t draws = 0;
+  for (std::size_t index = begin + 1; index < frame_.commands.size(); ++index) {
+    const auto& draw = frame_.commands[index];
+    if (draw.action == RenderCommand::Action::filterEnd) { ended = true; break; }
+    if (draw.action != RenderCommand::Action::draw || ++draws > 64 ||
+        (draw.primitive != RenderCommand::Primitive::sprite &&
+         draw.primitive != RenderCommand::Primitive::tilingSprite) ||
+        draw.tileLayer || draw.maskImage || draw.appliesColorMatrix || draw.appliesSpriteColor ||
+        draw.appliesMeshPostTintOverlay || draw.blur != 0 || draw.mipmap ||
+        draw.standaloneBitmapRegion || draw.textureRotation) return {};
+    const auto revision = images_.contentRevision(draw.image);
+    if (!revision) return {};
+    append(draw.image); append(*revision); append(draw.primitive);
+    append(draw.transform); append(draw.source); append(draw.destination); append(draw.color);
+    append(draw.blendMode); append(draw.repeat); append(draw.nearest);
+    append(draw.clip); append(draw.clipped); append(draw.roundPixels);
+    append(draw.pixiSpritePacking); append(draw.premultipliedSpriteTexture);
+    append(draw.packedSpriteColor); append(draw.floatSpriteUv); append(draw.spriteWorldVertices);
+    if (draw.spriteWorldVertices) append(draw.spriteVertices);
+    append(draw.clampedTilingSampling); append(draw.atlasTilingSampling);
+    if (draw.clampedTilingSampling) append(draw.tilingUvTransform);
+    if (draw.atlasTilingSampling) { append(draw.tilingAtlasMapping); append(draw.tilingAtlasBounds); }
+  }
+  return ended && draws ? key : std::string{};
+}
+
 void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTarget& source,
                                     const RenderTarget& output, const RenderCommand& command,
                                     float sourceResolution, float outputResolution, bool outputYDown,
-                                    const std::array<float, 4>& outputFrame, bool sourcePaddingKnownZero) {
+                                    const std::array<float, 4>& outputFrame, bool sourcePaddingKnownZero, const std::string& cacheKey) {
   const auto& frame = plan.frame;
+  const bool cacheHit = !cacheKey.empty() && filterIntermediateTarget_.texture &&
+    filterIntermediateSignature_ == cacheKey;
+  if (!cacheKey.empty()) filterIntermediateUsed_ = true;
+  if (cacheHit && diagnostics_) ++stats_.filterIntermediateCacheHits;
   if (frame[2] == 0 || frame[3] == 0) return;
   const auto pot = [this](float value) {
     if (!std::isfinite(value) || value > maxTextureSize_)
@@ -63,7 +123,12 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
   // Targets are reused only after the complete pass sequence has finished.
   if (customPassTargets_.size() < plan.resolutions.size())
     customPassTargets_.resize(plan.resolutions.size());
-  for (std::size_t index = 0; index < plan.resolutions.size(); ++index) {
+  if (!cacheHit && !cacheKey.empty() && filterIntermediateTarget_.texture) {
+    // Changing inputs render live without allocating a new target every frame.
+    filterIntermediateSignature_.clear();
+    std::swap(filterIntermediateTarget_, customPassTargets_[plan.passes.back().input]);
+  }
+  for (std::size_t index = 0; !cacheHit && index < plan.resolutions.size(); ++index) {
     if (index == 1 || (index == 0 && borrowInput)) continue;
     auto& target = customPassTargets_[index];
     ensureFilterTarget(target, pot(frame[2] * plan.resolutions[index]),
@@ -74,11 +139,12 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
     glClear(GL_COLOR_BUFFER_BIT);
     if (diagnostics_) ++stats_.filterTargetClears;
   }
-  const auto& input = borrowInput ? source : customPassTargets_[0];
+  const auto& input = cacheHit ? filterIntermediateTarget_ :
+    borrowInput ? source : customPassTargets_[0];
   const float resolution = plan.resolutions[0];
   const int sourceWidth = static_cast<int>(frame[2] * sourceResolution);
   const int sourceHeight = static_cast<int>(frame[3] * sourceResolution);
-  if (!borrowInput && sourceWidth > 0 && sourceHeight > 0) {
+  if (!cacheHit && !borrowInput && sourceWidth > 0 && sourceHeight > 0) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, source.framebuffer);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, input.framebuffer);
     glBlitFramebuffer(0, 0, sourceWidth, sourceHeight, 0, 0,
@@ -106,7 +172,9 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
   glBindBuffer(GL_ARRAY_BUFFER, customFilterVertexBuffer_);
   glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STREAM_DRAW);
   const bool identity = isIdentityColorMatrixPlan(plan);
-  for (const auto& pass : plan.passes) {
+  for (std::size_t passIndex = cacheHit ? plan.passes.size() - 1 : 0;
+       passIndex < plan.passes.size(); ++passIndex) {
+    const auto& pass = plan.passes[passIndex];
     const auto& custom = filterProgram(pass.program);
     const auto shader = identity ? custom.identityProgram : custom.program;
     const bool final = pass.output == 1;
@@ -149,7 +217,8 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
     glUniform4f(glGetUniformLocation(shader, "filterClamp"), 0, 0,
       (frame[2] - 1) * resolution / input.width, (frame[3] - 1) * resolution / input.height);
     glActiveTexture(GL_TEXTURE0);
-    const auto inputTexture = borrowInput ? input.texture : customPassTargets_[pass.input].texture;
+    const auto inputTexture = cacheHit ? filterIntermediateTarget_.texture :
+      borrowInput ? input.texture : customPassTargets_[pass.input].texture;
     glBindTexture(GL_TEXTURE_2D, inputTexture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -231,6 +300,11 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
   }
   glBindFramebuffer(GL_FRAMEBUFFER, output.framebuffer);
   glViewport(0, 0, static_cast<int>(outputFrame[2] * outputResolution), static_cast<int>(outputFrame[3] * outputResolution));
+  if (!cacheKey.empty() && !cacheHit) {
+    filterIntermediateSignature_ = cacheKey;
+    destroyTarget(filterIntermediateTarget_);
+    std::swap(filterIntermediateTarget_, customPassTargets_[plan.passes.back().input]);
+  }
   glBindVertexArray(vertexArray_);
   glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
   glActiveTexture(GL_TEXTURE0);

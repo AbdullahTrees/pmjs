@@ -388,6 +388,7 @@ void Renderer::renderScene() {
   const bool shouldRenderScene =
       sceneSubmittedThisFrame_ || offscreenRender_ || !hasValidSceneFrame_;
   if (shouldRenderScene) {
+    if (!offscreenRender_) filterIntermediateUsed_ = false;
     // llvmpipe changes interpolation when depth is first attached; keep its scene storage stable.
     if (!offscreenRender_ && (softwareSceneDepth_ || std::any_of(frame_.commands.begin(), frame_.commands.end(), [](const auto& command) {
       return command.primitive == RenderCommand::Primitive::effect;
@@ -958,7 +959,9 @@ void Renderer::renderScene() {
   std::array<std::vector<std::array<int, 4>>, scene_packet::maxFilterDepth>
       filterRegions{};
   applyBlendMode(activeBlend);
+  bool reuseFilterContent = false;
   for (const auto& operation : operations) {
+    if (reuseFilterContent && operation.action == RenderCommand::Action::draw) continue;
     if (operation.action == RenderCommand::Action::clearRect) {
       if (filterDepth == 0) throw std::logic_error("rectangle clear requires an isolated target");
       const auto& rectangle = operation.command->clearRectangle;
@@ -983,6 +986,9 @@ void Renderer::renderScene() {
       continue;
     }
     if (operation.action == RenderCommand::Action::filterBegin) {
+      const auto cacheKey = filterIntermediateKey(*operation.command);
+      reuseFilterContent = !cacheKey.empty() && filterIntermediateTarget_.texture &&
+        filterIntermediateSignature_ == cacheKey;
       targetYDown = true;
       rasterResolution = operation.command->customFilterPlan ?
         operation.command->customFilterPlan->resolutions[0] : 1.0F;
@@ -994,8 +1000,8 @@ void Renderer::renderScene() {
       const auto pot = [](int size) { int result = 1; while (result < size) result *= 2; return result; };
       const int targetWidth = std::max(1, static_cast<int>(rasterFrame[2] * rasterResolution));
       const int targetHeight = std::max(1, static_cast<int>(rasterFrame[3] * rasterResolution));
-      if (diagnostics_) ++stats_.filterTargetAcquires;
-      const bool reused = ensureFilterTarget(groupTargets_[filterDepth],
+      if (!reuseFilterContent && diagnostics_) ++stats_.filterTargetAcquires;
+      const bool reused = !reuseFilterContent && ensureFilterTarget(groupTargets_[filterDepth],
         operation.command->customFilterPlan ? pot(targetWidth) : targetWidth,
         operation.command->customFilterPlan ? pot(targetHeight) : targetHeight,
         customFilterTargetCapacity + filterDepth);
@@ -1033,14 +1039,17 @@ void Renderer::renderScene() {
         glDisable(GL_SCISSOR_TEST);
         scissorActive = false;
       }
-      glClear(GL_COLOR_BUFFER_BIT);
-      if (diagnostics_) ++stats_.filterTargetClears;
+      if (!reuseFilterContent) {
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (diagnostics_) ++stats_.filterTargetClears;
+      }
       activeBlend = BlendMode::normal;
       applyBlendMode(activeBlend);
       ++filterDepth;
       continue;
     }
     if (operation.action == RenderCommand::Action::filterEnd) {
+      reuseFilterContent = false;
       --filterDepth;
       targetYDown = offscreenRender_ || filterDepth > 0;
       const float sourceResolution = rasterResolutions[filterDepth];
@@ -1405,7 +1414,7 @@ void Renderer::renderScene() {
           drawCustomFilterPlan(*filter.customFilterPlan, groupTargets_[filterDepth],
             filterDepth == 0 ? rootTarget : groupTargets_[filterDepth - 1],
             filter, sourceResolution, rasterResolution, targetYDown, rasterFrame,
-            groupPaddingKnownZero[filterDepth]);
+            groupPaddingKnownZero[filterDepth], filterIntermediateKey(filter));
           glUseProgram(program_);
           projectTarget(program_);
           activeProgram = program_;
@@ -1968,6 +1977,10 @@ void Renderer::renderScene() {
   if (scissorActive) glDisable(GL_SCISSOR_TEST);
   applyBlendMode(BlendMode::normal);
   if (diagnostics_) stats_.commands += frame_.commands.size();
+  if (!offscreenRender_ && !filterIntermediateUsed_) {
+    filterIntermediateSignature_.clear();
+    destroyTarget(filterIntermediateTarget_);
+  }
   discardCommandsFrom(0);
   if (!offscreenRender_ && sceneSubmittedThisFrame_) {
     hasValidSceneFrame_ = true;

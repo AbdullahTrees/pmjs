@@ -183,6 +183,7 @@ struct RendererStats {
   std::uint64_t nearestTileShaderFallbackDrawCalls = 0;
   std::uint64_t filterDrawCalls = 0;
   std::uint64_t identityFilterShaderDrawCalls = 0;
+  std::uint64_t filterIntermediateCacheHits = 0;
   std::array<std::uint64_t, filterKindCount> filterApplications{};
   std::uint64_t filterTargetAcquires = 0;
   std::uint64_t filterTargetReuses = 0;
@@ -508,9 +509,13 @@ class Renderer {
   void drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTarget& source,
                             const RenderTarget& output, const RenderCommand& command,
                             float sourceResolution, float outputResolution, bool outputYDown,
-                            const std::array<float, 4>& outputFrame, bool sourcePaddingKnownZero);
+                            const std::array<float, 4>& outputFrame, bool sourcePaddingKnownZero, const std::string& cacheKey = {});
+  std::string filterIntermediateKey(const RenderCommand& command) const;
   std::uint32_t customFilterVertexArray_ = 0, customFilterVertexBuffer_ = 0;
   std::vector<RenderTarget> customPassTargets_;
+  RenderTarget filterIntermediateTarget_;
+  std::string filterIntermediateSignature_;
+  bool filterIntermediateUsed_ = false;
   std::array<CachedFilterTarget, customFilterTargetCapacity + scene_packet::maxFilterDepth> filterTargetCache_{};
   std::uint64_t filterTargetCacheClock_ = 0;
   // Native rendering is shared across facades; the first Pixi renderer fixes precision.

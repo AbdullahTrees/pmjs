@@ -528,6 +528,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   }
   if (index == slots_.size()) slots_.emplace_back();
   auto& slot = slots_[index];
+  ++slot.contentRevision;
   slot.texture = texture;
   slot.prepared.reset();
   slot.mipmapsReady = slot.premultipliedMipmapsReady = false;
@@ -669,6 +670,7 @@ bool ImageStore::updateRgba(ImageHandle handle, const void* pixels) {
   const auto info = lookup(handle);
   if (!info || !pixels) return false;
   auto& slot = slots_[(handle & indexMask) - 1U];
+  ++slot.contentRevision;
   slot.knownAllZero = false;
   clearPrepared(slot);
   clearPremultipliedTexture(slot);
@@ -706,6 +708,7 @@ bool ImageStore::updateRgbaRegion(ImageHandle handle, int x, int y, int width,
       x + width > info->width || y + height > info->height ||
       sourceRowPixels < width) return false;
   auto& slot = slots_[(handle & indexMask) - 1U];
+  ++slot.contentRevision;
   const bool canProveZero = slot.knownAllZero ||
       (x == 0 && y == 0 && width == info->width && height == info->height);
   slot.knownAllZero = false;
@@ -783,6 +786,14 @@ std::optional<ImageInfo> ImageStore::inspect(ImageHandle handle) const {
   if (!slot.live || slot.generation != generation) return std::nullopt;
   return ImageInfo{handle, slot.width, slot.height, slot.texture,
                    slot.premultiplied, slot.knownAllZero};
+}
+
+std::optional<std::uint64_t> ImageStore::contentRevision(ImageHandle handle) const {
+  if (!inspect(handle)) return std::nullopt;
+  const auto& slot = slots_[(handle & indexMask) - 1U];
+  // External framebuffer writes have no tracked content revision.
+  if (slot.gpuOnly || slot.renderTarget || slot.tiles) return std::nullopt;
+  return slot.contentRevision;
 }
 
 bool ImageStore::isRenderTarget(ImageHandle handle) const {
@@ -1214,6 +1225,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
   slot.prepared = std::move(backing);
   slot.width = descriptor.width; slot.height = descriptor.height;
   slot.channels = 4;
+  ++slot.contentRevision;
   slot.texture = slot.premultipliedTexture = 0;
   slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
   slot.cacheKey = source.key(); slot.sourcePath = source.path();
