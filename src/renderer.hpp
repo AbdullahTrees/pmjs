@@ -107,6 +107,10 @@ struct RenderCommand {
   Primitive primitive = Primitive::sprite;
   EffectDraw effect{};
   bool clampedTilingSampling = false;
+  bool atlasTilingSampling = false;
+  std::array<float, 4> tilingUvTransform{};
+  std::array<float, 4> tilingAtlasMapping{};
+  std::array<float, 4> tilingAtlasBounds{};
 };
 
 struct FramePacket {
@@ -541,6 +545,10 @@ class Renderer {
     int frame = -1;
     int standalone = -1;
     int tilingClamp = -1;
+    int tilingAtlas = -1;
+    int tilingTransform = -1;
+    int tilingMapping = -1;
+    int tilingBounds = -1;
     int nearest = -1;
     int textureSize = -1;
     int blur = -1;
@@ -586,6 +594,10 @@ class Renderer {
   int simpleSpritePackingUniform_ = -1;
   int simpleSpritePremultipliedUniform_ = -1;
   int simpleTilingClampUniform_ = -1;
+  int simpleTilingAtlasUniform_ = -1;
+  int simpleTilingTransformUniform_ = -1;
+  int simpleTilingMappingUniform_ = -1;
+  int simpleTilingBoundsUniform_ = -1;
   int simpleTextureSizeUniform_ = -1;
   int textureSizeUniform_ = -1;
   int blurUniform_ = -1;

@@ -2,7 +2,7 @@ PMJS.pixi4.sceneEncoding = (function() {
 function createEmission() {
   return { kind: 0, resource: 0, tint: 0xffffff, texture: null,
   frame: null, nativeImage: null, source: null, localX: 0, localY: 0,
-  destWidth: 0, destHeight: 0, tilingResolution: 1, sampledBaseTexture: null,
+  destWidth: 0, destHeight: 0, tilingResolution: 1, tilingAtlas: false, tilingSimple: false, sampledBaseTexture: null,
   roundPixelsEligible: false, presentation: null, aborted: false };
 }
 
@@ -19,6 +19,8 @@ function resetEmission(scratch, tint) {
   scratch.destWidth = 0;
   scratch.destHeight = 0;
   scratch.tilingResolution = 1;
+  scratch.tilingAtlas = false;
+  scratch.tilingSimple = false;
   scratch.sampledBaseTexture = null;
   scratch.roundPixelsEligible = false;
   scratch.aborted = false;
@@ -61,6 +63,7 @@ function writeNativeSceneSprite(node, type, particleContext, particleValues,
       -anchor.y * original.height;
     scratch.destWidth = trim ? trim.width : original.width;
     scratch.destHeight = trim ? trim.height : original.height;
+    if (nativeSceneRenderer) nativeSceneRenderer.bindTexture(sampledBaseTexture);
     if (presentation) {
       scratch.localX += presentation.offsetX;
       scratch.localY += presentation.offsetY;
@@ -86,7 +89,7 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
   var finiteSampling = matrix && ['a', 'b', 'c', 'd', 'tx', 'ty'].every(function(key) {
     return Number.isFinite(matrix[key]);
   });
-  if (!finiteSampling || matrix.a === 0 || matrix.d === 0) return;
+  if (!finiteSampling) return;
   var resolution = Math.max(0.000001,
     Number(texture && texture.baseTexture && texture.baseTexture.resolution) || 1);
   var sampling = nativeTilingSource(node, matrix.a, matrix.d);
@@ -104,7 +107,8 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
     scratch.aborted = true;
     return;
   }
-  if (texture && !nativeSimpleTilingTexture(texture) && !schema.clampedTilingSampling) {
+  scratch.tilingSimple = !!texture && nativeSimpleTilingTexture(texture, nativeSceneRenderer);
+  if (texture && !scratch.tilingSimple && !schema.clampedTilingSampling) {
     PMJS.compat.hit('render.tiling-clamp', 'host lacks clamped tiling sampling');
     scratch.aborted = true;
     return;
@@ -115,7 +119,8 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
     scratch.aborted = true;
     return;
   }
-  var tilingTexture = ensureNativeTilingTexture(texture);
+  scratch.tilingAtlas = !!schema.atlasTilingSampling && !!nativeDirectTilingAtlas(texture);
+  var tilingTexture = ensureNativeTilingTexture(texture, scratch.tilingAtlas);
   if (tilingTexture && node.width > 0 && node.height > 0) {
     scratch.nativeImage = tilingTexture;
     scratch.tilingResolution = tilingTexture.resolution;
@@ -126,6 +131,7 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
     scratch.localY = -tilingAnchor.y * node.height;
     scratch.destWidth = node.width;
     scratch.destHeight = node.height;
+    if (nativeSceneRenderer) nativeSceneRenderer.bindTexture(texture);
   }
   scratch.texture = texture;
 }

@@ -750,6 +750,7 @@ void registerGraphicsBindings(napi_env env, napi_value exports) {
   napi_set_named_property(env, schema, "transactionalSubmit", boolean(env, true));
   napi_set_named_property(env, schema, "gpuSpriteTextures", boolean(env, true));
   napi_set_named_property(env, schema, "clampedTilingSampling", boolean(env, true));
+  napi_set_named_property(env, schema, "atlasTilingSampling", boolean(env, true));
   napi_set_named_property(env, schema, "floatSpriteUv", boolean(env, true));
   napi_set_named_property(env, schema, "repeatSpriteSampling", boolean(env, true));
   napi_set_named_property(env, schema, "filterCompositeBlend", boolean(env, true));

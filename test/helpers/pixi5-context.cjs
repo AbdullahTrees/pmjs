@@ -107,8 +107,8 @@ function createContext({ strictCompatibility = true } = {}) {
     NativeHost: {
       runtime: { env(name) { return name === 'PMJS_STRICT_COMPAT' && strictCompatibility ? '1' : undefined; } },
       scene: {
-        packetVersion: 29,
-        schema: { version: 29, metadataStride: 7, valueStride: 41,
+        packetVersion: 30,
+        schema: { version: 30, metadataStride: 7, valueStride: 41,
           transactionalSubmit: true, filterCompositeBlend: true, clampedTilingSampling: true, floatSpriteUv: true, repeatSpriteSampling: true },
         submit(version, metadata, values, count) {
           submissions.push({ version, metadata: metadata.slice(),

@@ -158,6 +158,10 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.frame = glGetUniformLocation(effect.program, "spriteFrame");
     effect.standalone = glGetUniformLocation(effect.program, "standaloneBitmapRegion");
     effect.tilingClamp = glGetUniformLocation(effect.program, "clampedTilingSampling");
+    effect.tilingAtlas = glGetUniformLocation(effect.program, "atlasTilingSampling");
+    effect.tilingTransform = glGetUniformLocation(effect.program, "tilingUvTransform");
+    effect.tilingMapping = glGetUniformLocation(effect.program, "tilingAtlasMapping");
+    effect.tilingBounds = glGetUniformLocation(effect.program, "tilingAtlasBounds");
     effect.nearest = glGetUniformLocation(effect.program, "nearestSampling");
     effect.textureSize =
       glGetUniformLocation(effect.program, "imageDimensions");
@@ -393,6 +397,10 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   simpleSpritePackingUniform_ = glGetUniformLocation(simpleProgram_, "pixiSpritePacking");
   simpleSpritePremultipliedUniform_ = glGetUniformLocation(simpleProgram_, "texturePremultiplied");
   simpleTilingClampUniform_ = glGetUniformLocation(simpleProgram_, "clampedTilingSampling");
+  simpleTilingAtlasUniform_ = glGetUniformLocation(simpleProgram_, "atlasTilingSampling");
+  simpleTilingTransformUniform_ = glGetUniformLocation(simpleProgram_, "tilingUvTransform");
+  simpleTilingMappingUniform_ = glGetUniformLocation(simpleProgram_, "tilingAtlasMapping");
+  simpleTilingBoundsUniform_ = glGetUniformLocation(simpleProgram_, "tilingAtlasBounds");
   simpleTextureSizeUniform_ = glGetUniformLocation(simpleProgram_, "imageDimensions");
   simpleDerivedImageUniform_ = glGetUniformLocation(simpleProgram_, "derivedImage");
   simpleDerivedNearestUniform_ = glGetUniformLocation(simpleProgram_, "derivedNearest");

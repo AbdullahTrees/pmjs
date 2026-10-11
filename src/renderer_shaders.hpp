@@ -70,6 +70,8 @@ constexpr const char* vertexSource = R"(#version 300 es
   uniform highp mat3 targetProjection;
   uniform bool spriteWorldVertices;
   uniform mat3 spriteProjection;
+  uniform bool atlasTilingSampling;
+  uniform vec4 tilingUvTransform;
   out vec2 vertexUv;
   out vec2 filterCoord;
   out vec4 vertexColor;
@@ -79,6 +81,11 @@ constexpr const char* vertexSource = R"(#version 300 es
     if (targetYDown && !spriteWorldVertices) gl_Position.y = -gl_Position.y;
     if (!spriteWorldVertices) gl_Position.xy = (targetProjection * vec3(gl_Position.xy, 1.0)).xy;
     vertexUv = uv;
+    if (atlasTilingSampling) {
+      mat3 transform = mat3(tilingUvTransform.x, 0.0, 0.0,
+        0.0, tilingUvTransform.y, 0.0, tilingUvTransform.zw, 1.0);
+      vertexUv = (transform * vec3(uv, 1.0)).xy;
+    }
     filterCoord = vec2(uv.x, 1.0 - uv.y);
     vertexColor = color;
     vertexUvClamp = uvClamp;
@@ -1063,6 +1070,9 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
   uniform bool clampedTilingSampling;
+  uniform bool atlasTilingSampling;
+  uniform highp vec4 tilingAtlasMapping;
+  uniform highp vec4 tilingAtlasBounds;
   uniform highp vec2 imageDimensions;
   uniform bool derivedImage;
   uniform bool derivedNearest;
@@ -1076,9 +1086,13 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   void main() {
     highp vec2 coord = vertexUv;
     if (clampedTilingSampling) {
-      // Pixi 5's general tiling shader repeats the frame, then clamps to texel centers.
+      // Repeat in frame coordinates before mapping and clamping the sampled image.
       highp vec2 margin = vec2(0.5) / imageDimensions;
-      coord = clamp(coord + ceil(-coord), margin, vec2(1.0) - margin);
+      coord = coord + ceil(-coord);
+      if (atlasTilingSampling) {
+        coord = clamp(coord * tilingAtlasMapping.xy + tilingAtlasMapping.zw,
+          tilingAtlasBounds.xy, tilingAtlasBounds.zw);
+      } else coord = clamp(coord, margin, vec2(1.0) - margin);
     }
     highp vec4 sampleColor;
     if (derivedImage) {
@@ -1189,6 +1203,9 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
   uniform bool clampedTilingSampling;
+  uniform bool atlasTilingSampling;
+  uniform highp vec4 tilingAtlasMapping;
+  uniform highp vec4 tilingAtlasBounds;
   uniform bool nearestSampling;
   uniform bool standaloneBitmapRegion;
   uniform highp vec4 spriteFrame;
@@ -1265,7 +1282,11 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       } else {
       if (clampedTilingSampling) {
         highp vec2 margin = vec2(0.5) / imageDimensions;
-        coord = clamp(coord + ceil(-coord), margin, vec2(1.0) - margin);
+        coord = coord + ceil(-coord);
+        if (atlasTilingSampling) {
+          coord = clamp(coord * tilingAtlasMapping.xy + tilingAtlasMapping.zw,
+            tilingAtlasBounds.xy, tilingAtlasBounds.zw);
+        } else coord = clamp(coord, margin, vec2(1.0) - margin);
       }
       sampleColor = texture(image, coord);
       }

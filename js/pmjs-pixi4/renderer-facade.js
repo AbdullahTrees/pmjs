@@ -3,9 +3,9 @@ var nativePixiRenderers = new WeakSet();
 PMJS.pixi4.isNativeRenderer = function(renderer) {
   return nativePixiRenderers.has(renderer);
 };
-PMJS.pixi4.renderStageToCanvas = function(stage, canvas, roundPixels) {
+PMJS.pixi4.renderStageToCanvas = function(stage, canvas, roundPixels, renderer) {
   renderNativeStage(stage, nativeIdentityTransform, 1, roundPixels, false,
-    null, undefined, function() {
+    null, { renderer: renderer }, function() {
       NativeHost.render.setRenderTargetSize(canvas.width, canvas.height);
     });
   NativeHost.render.renderToCanvas(canvas._ensureNativeCanvas().handle);
@@ -370,7 +370,8 @@ function createNativePixiRenderer(width, height, options) {
         renderNativeStage(stage, transform ?
           nativeComposeTransform(resolutionTransform, transform) :
           resolutionTransform, resolution, this.roundPixels,
-          skipUpdateTransform, null, PMJS.pixi4.getStageRenderOptions(stage), function() {
+          skipUpdateTransform, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage),
+            { renderer: this }), function() {
             renderOwner.renderTexture.bind(renderTexture);
             NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
             if (clear === false) {
@@ -393,7 +394,7 @@ function createNativePixiRenderer(width, height, options) {
         nativeComposeTransform(screenTransform, transform) : screenTransform,
       this.resolution, this.roundPixels, skipUpdateTransform,
       this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
-      PMJS.pixi4.getStageRenderOptions(stage), function() {
+      Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this }), function() {
         renderOwner.renderTexture.bind(null);
         NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
       });
@@ -561,7 +562,8 @@ function createNativePixiRenderer(width, height, options) {
       var resolutionTransform = { a: resolution, b: 0, c: 0,
         d: resolution, tx: -region.x * resolution, ty: -region.y * resolution };
       renderNativeStage(displayObject, resolutionTransform, resolution,
-        this.roundPixels, false, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(displayObject), options), function() {
+        this.roundPixels, false, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(displayObject), options,
+          { renderer: this }), function() {
           NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
         });
       var resource = NativeHost.render.renderToImage(targetWidth, targetHeight,

@@ -62,6 +62,9 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
     if (parentIndex != noParent && parentIndex >= index) return false;
     if ((flags & NodeFlags::clampedTilingSampling) &&
         kind != static_cast<std::uint32_t>(NodeKind::tilingSprite)) return false;
+    if ((flags & NodeFlags::atlasTilingSampling) &&
+        (kind != static_cast<std::uint32_t>(NodeKind::tilingSprite) ||
+         !(flags & NodeFlags::clampedTilingSampling))) return false;
     if (flags & ~scene_packet::kAllowedNodeFlags) {
       return false;
     }
@@ -464,6 +467,13 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
     frame_.commands.back().nearest = flags & NodeFlags::nearestSampling;
     frame_.commands.back().mipmap = flags & NodeFlags::mipmapSampling;
     frame_.commands.back().clampedTilingSampling = flags & NodeFlags::clampedTilingSampling;
+    if (flags & NodeFlags::atlasTilingSampling) {
+      auto& command = frame_.commands.back();
+      command.atlasTilingSampling = true;
+      std::copy_n(values + valueOffset + 28, 4, command.tilingUvTransform.begin());
+      std::copy_n(values + valueOffset + 32, 4, command.tilingAtlasMapping.begin());
+      std::copy_n(values + valueOffset + 36, 4, command.tilingAtlasBounds.begin());
+    }
     frame_.commands.back().roundPixels = flags & NodeFlags::roundPixels;
     frame_.commands.back().textureRotation = textureRotation;
     frame_.commands.back().primitive =

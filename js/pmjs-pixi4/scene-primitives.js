@@ -220,7 +220,16 @@ function nativeRotatedTexturePoint(rotation, x, y) {
   return [x, y];
 }
 
-function ensureNativeTilingTexture(texture) {
+function nativeDirectTilingAtlas(texture) {
+  var base = texture && texture.baseTexture;
+  var frame = texture && (texture._frame || texture.frame);
+  var original = texture && texture.orig;
+  return base && frame && original && !texture.rotate && !texture.trim &&
+    frame.width === original.width && frame.height === original.height &&
+    (frame.x !== 0 || frame.y !== 0 || frame.width !== base.width || frame.height !== base.height);
+}
+
+function ensureNativeTilingTexture(texture, directAtlas) {
   var base = texture && texture.baseTexture;
   var source = base && base.source;
   var nativeImage = nativeTextureSource(source);
@@ -233,7 +242,7 @@ function ensureNativeTilingTexture(texture) {
   var resolution = Math.max(0.000001, Number(base.resolution) || 1);
   var fullTexture = !rotation && !trim && frame.x === 0 && frame.y === 0 &&
     frame.width === base.width && frame.height === base.height;
-  if (fullTexture) {
+  if (fullTexture || directAtlas) {
     if (typeof nativeMaterializationStats !== 'undefined') {
       nativeMaterializationStats.tilingDirect++;
     }
@@ -304,6 +313,10 @@ function ensureNativeTilingTexture(texture) {
 }
 
 function nativeTilingSource(sprite, scaleX, scaleY) {
+  if (scaleX === 0 || scaleY === 0) {
+    // Singular diagonal tile transforms collapse both texture coordinates to zero.
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
   var matrix = sprite.tileTransform.localTransform;
   var PictureTilingSprite = PIXI.extras && PIXI.extras.PictureTilingSprite;
   // Picture tiling always includes anchor UVs; ordinary tiling opts in.
@@ -316,15 +329,23 @@ function nativeTilingSource(sprite, scaleX, scaleY) {
     width: sprite.width / scaleX, height: sprite.height / scaleY };
 }
 
-function nativeSimpleTilingTexture(texture) {
+function nativeSimpleTilingTexture(texture, renderer) {
   var base = texture.baseTexture, frame = texture._frame || texture.frame;
   if (!base || !frame) return false;
   var resolution = Number(base.resolution) || 1;
   function powerOfTwo(value) {
     return value > 0 && Number.isInteger(value) && (value & (value - 1)) === 0;
   }
-  return frame.width === base.width && frame.height === base.height &&
+  var simple = frame.width === base.width && frame.height === base.height &&
     powerOfTwo(base.width * resolution) && powerOfTwo(base.height * resolution);
+  if (simple && renderer && PIXI.WRAP_MODES) {
+    if (!base._glTextures || !base._glTextures[renderer.CONTEXT_UID]) {
+      if (base.wrapMode === PIXI.WRAP_MODES.CLAMP) base.wrapMode = PIXI.WRAP_MODES.REPEAT;
+    } else {
+      simple = base.wrapMode !== PIXI.WRAP_MODES.CLAMP;
+    }
+  }
+  return simple;
 }
 
 function tileAnimationOffset(layer) {
@@ -655,6 +676,7 @@ var nativeSceneUsePixiWorldState = false;
 var nativeSceneTransformsPrepared = false;
 var nativeSceneFilterResolution = 1;
 var nativeSceneRoundPixels = false;
+var nativeSceneRenderer = null;
 
 function nativeComposeTransform(parent, local) {
   return {

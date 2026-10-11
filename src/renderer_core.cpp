@@ -485,13 +485,6 @@ bool Renderer::queueTiled(ImageHandle image,
   const auto info = images_.lookup(image);
   if (!info || destination[0] <= 0 || destination[1] <= 0 ||
       !isValidBlendMode(static_cast<std::uint8_t>(blendMode))) return false;
-  auto boundedSource = source;
-  if (std::isfinite(boundedSource[0]) && info->width > 0) {
-    boundedSource[0] = std::fmod(boundedSource[0], static_cast<float>(info->width));
-  }
-  if (std::isfinite(boundedSource[1]) && info->height > 0) {
-    boundedSource[1] = std::fmod(boundedSource[1], static_cast<float>(info->height));
-  }
   const std::array<float, 4> color = {
     static_cast<float>((tint >> 16U) & 0xffU) / 255.0F,
     static_cast<float>((tint >> 8U) & 0xffU) / 255.0F,
@@ -501,7 +494,7 @@ bool Renderer::queueTiled(ImageHandle image,
   if (!images_.beginUse(image)) return false;
   try {
     frame_.commands.push_back(
-        {image, transform, boundedSource, destination, color, blendMode, true});
+        {image, transform, source, destination, color, blendMode, true});
     frame_.commands.back().primitive = RenderCommand::Primitive::tilingSprite;
     sceneSubmittedThisFrame_ = true;
   } catch (...) {

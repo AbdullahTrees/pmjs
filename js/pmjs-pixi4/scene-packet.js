@@ -651,7 +651,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
         texture.baseTexture.scaleMode === PIXI.SCALE_MODES.NEAREST) {
       nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 8;
     }
-    if (!nativeSimpleTilingTexture(texture)) {
+    if (!nativeSceneEmission.tilingSimple) {
       nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 32768;
     }
     var scaleX = node.tileTransform.localTransform.a;
@@ -661,6 +661,40 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     nativeSceneValues[valueOffset + 10] = tilingSource.y * tilingResolution;
     nativeSceneValues[valueOffset + 11] = tilingSource.width * tilingResolution;
     nativeSceneValues[valueOffset + 12] = tilingSource.height * tilingResolution;
+    if (nativeSceneEmission.tilingAtlas) {
+      // Keep the normalized quad and inverse tile matrix separate until vertex shading.
+      nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 1048576;
+      var PictureType = PIXI.extras && PIXI.extras.PictureTilingSprite;
+      var anchorUvs = node.uvRespectAnchor ||
+        typeof PictureType === 'function' && node instanceof PictureType;
+      nativeSceneValues[valueOffset + 9] = anchorUvs ? -node.anchor.x : 0;
+      nativeSceneValues[valueOffset + 10] = anchorUvs ? -node.anchor.y : 0;
+      nativeSceneValues[valueOffset + 11] = anchorUvs ? 1 - node.anchor.x : 1;
+      nativeSceneValues[valueOffset + 12] = anchorUvs ? 1 - node.anchor.y : 1;
+      var tileMatrix = node.tileTransform.localTransform;
+      var tileWidth = texture.width, tileHeight = texture.height;
+      var a = tileMatrix.a * tileWidth / node.width;
+      var d = tileMatrix.d * tileHeight / node.height;
+      var determinant = a * d;
+      var tilingUvTransform = determinant === 0 ? [0, 0, 0, 0] :
+        [d / determinant, a / determinant,
+          -d * (tileMatrix.tx / node.width) / determinant,
+          -a * (tileMatrix.ty / node.height) / determinant];
+      var atlasBase = texture.baseTexture;
+      var atlasFrame = texture._frame || texture.frame;
+      var mapping = [atlasFrame.width / atlasBase.width, atlasFrame.height / atlasBase.height,
+        atlasFrame.x / atlasBase.width, atlasFrame.y / atlasBase.height];
+      var margin = 0.5 / tilingResolution;
+      var bounds = [(atlasFrame.x + margin) / atlasBase.width,
+        (atlasFrame.y + margin) / atlasBase.height,
+        (atlasFrame.x + atlasFrame.width - margin) / atlasBase.width,
+        (atlasFrame.y + atlasFrame.height - margin) / atlasBase.height];
+      for (var component = 0; component < 4; component++) {
+        nativeSceneValues[valueOffset + 28 + component] = tilingUvTransform[component];
+        nativeSceneValues[valueOffset + 32 + component] = mapping[component];
+        nativeSceneValues[valueOffset + 36 + component] = bounds[component];
+      }
+    }
   }
   nativeSceneValues[valueOffset + 13] = destinationWidth;
   nativeSceneValues[valueOffset + 14] = destinationHeight;
@@ -858,7 +892,8 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   var previousContext = {
     worldState: nativeSceneUsePixiWorldState, prepared: nativeSceneTransformsPrepared,
     root: nativeSceneRootTransform, usesWorld: nativeSceneRootUsesWorldTransform,
-    resolution: nativeSceneFilterResolution, roundPixels: nativeSceneRoundPixels
+    resolution: nativeSceneFilterResolution, roundPixels: nativeSceneRoundPixels,
+    renderer: nativeSceneRenderer
   };
   var parentWorld = nativeTransformParent.transform.worldTransform;
   var previousParentWorld = { a: parentWorld.a, b: parentWorld.b, c: parentWorld.c,
@@ -877,6 +912,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   nativeSceneFilterResolution = Math.max(0.000001,
     Number(filterResolution) || 1);
   nativeSceneRoundPixels = !!roundPixels;
+  nativeSceneRenderer = options.renderer || null;
   if (parentWorld.a !== 1 || parentWorld.b !== 0 || parentWorld.c !== 0 ||
       parentWorld.d !== 1 || parentWorld.tx !== 0 || parentWorld.ty !== 0) {
     // Pixi caches descendants against the parent's world-transform generation.
@@ -920,6 +956,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     nativeSceneRootUsesWorldTransform = previousContext.usesWorld;
     nativeSceneFilterResolution = previousContext.resolution;
     nativeSceneRoundPixels = previousContext.roundPixels;
+    nativeSceneRenderer = previousContext.renderer;
     if (parentWorld.a !== previousParentWorld.a || parentWorld.b !== previousParentWorld.b ||
         parentWorld.c !== previousParentWorld.c || parentWorld.d !== previousParentWorld.d ||
         parentWorld.tx !== previousParentWorld.tx || parentWorld.ty !== previousParentWorld.ty) {

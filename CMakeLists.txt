@@ -337,10 +337,10 @@ if(BUILD_TESTING)
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
   set_tests_properties(node-derived-sprite node-uniform-inline-matrix PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   set_tests_properties(node-audio-bytes PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
-  add_test(NAME node-pixi4-tiling-pixels COMMAND ${NODE_EXECUTABLE}
+  add_test(NAME node-pixi4-tiling-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-pixi4-tiling-pixels.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-pixi4-tiling-pixels PROPERTIES ENVIRONMENT
-    "SDL_VIDEODRIVER=offscreen;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=32x24")
+    "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=32x24")
   if(PMJS_ENABLE_SKIA65)
     add_test(NAME node-canvas-composite COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
       "${CMAKE_CURRENT_SOURCE_DIR}/test/node-canvas-composite.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")

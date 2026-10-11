@@ -68,7 +68,7 @@ test('Pixi 5 scene encoder reads resource.source and submits sprites', () => {
 
   assert.equal(fixture.submissions.length, 1);
   const packet = fixture.submissions[0];
-  assert.equal(packet.version, 29);
+  assert.equal(packet.version, 30);
   assert.equal(packet.count, 3, 'background, stage container, sprite');
   assert.equal(packet.metadata[2 * 7], 1);
   assert.equal(packet.metadata[2 * 7 + 2], 42);
@@ -530,8 +530,8 @@ test('MZ rejects later filter drawing overrides before submitting a scene', () =
 
 test('Pixi 5 refuses an older native packet contract', () => {
   const { context } = createContext();
-  context.NativeHost.scene.packetVersion = 27;
-  context.NativeHost.scene.schema.version = 27;
+  context.NativeHost.scene.packetVersion = 29;
+  context.NativeHost.scene.schema.version = 29;
   assert.throws(() => runModule(context, 'js/pmjs-pixi5/scene.js'), /scene schema/);
 });
 

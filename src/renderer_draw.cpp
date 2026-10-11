@@ -559,6 +559,10 @@ void Renderer::renderScene() {
     bool spriteWorldVertices = false;
     bool premultipliedSpriteTexture = false;
     bool clampedTilingSampling = false;
+    bool atlasTilingSampling = false;
+    std::array<float, 4> tilingUvTransform{};
+    std::array<float, 4> tilingAtlasMapping{};
+    std::array<float, 4> tilingAtlasBounds{};
     bool mipmap = false;
     std::array<float, 4> spriteFrame{};
     std::array<float, 4> colorTone{};
@@ -707,7 +711,7 @@ void Renderer::renderScene() {
     }
     const auto info = derived ? std::optional<ImageInfo>{derived->image} :
       command.image == 0 ? std::optional<ImageInfo>{} :
-      (command.pixiSpritePacking && !command.premultipliedSpriteTexture ?
+      (command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture) ?
         images_.lookupPremultiplied(command.image) : images_.lookup(command.image));
     if (command.image != 0 && !info) continue;
     // Raw premultiplied pixels can contain RGB even with zero alpha.
@@ -747,10 +751,14 @@ void Renderer::renderScene() {
     const std::uint32_t texture = info ? info->texture : whiteTexture_;
     const bool texturePremultiplied = command.premultipliedSpriteTexture || (info && info->premultiplied);
     const bool mipmap = command.mipmap && info && images_.ensureMipmaps(command.image, info->premultiplied);
-    const float u0 = command.source[0] / textureWidth;
-    const float v0 = command.source[1] / textureHeight;
-    const float u1 = (command.source[0] + command.source[2]) / textureWidth;
-    const float v1 = (command.source[1] + command.source[3]) / textureHeight;
+    const float uvWidth = command.atlasTilingSampling ? 1.0F : textureWidth;
+    const float uvHeight = command.atlasTilingSampling ? 1.0F : textureHeight;
+    const float u0 = command.source[0] / uvWidth;
+    const float v0 = command.source[1] / uvHeight;
+    const float u1 = command.atlasTilingSampling ? command.source[2] :
+      (command.source[0] + command.source[2]) / uvWidth;
+    const float v1 = command.atlasTilingSampling ? command.source[3] :
+      (command.source[1] + command.source[3]) / uvHeight;
     std::array<std::array<float, 2>, 4> sourceCorners = {
       std::array<float, 2>{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}
     };
@@ -790,7 +798,10 @@ void Renderer::renderScene() {
       }
       color[3] = std::floor(alpha * 255.0F) / 255.0F;
     }
-    const bool worldVertices = (command.spriteWorldVertices || command.pixiSpritePacking) &&
+    // Tiling retains GPU projection so texel-boundary interpolation uses the
+    // same arithmetic as the sprite vertex transform.
+    const bool worldVertices = (command.spriteWorldVertices || command.pixiSpritePacking ||
+                               command.primitive == RenderCommand::Primitive::tilingSprite) &&
                                viewportMapping == std::array<float, 4>{1, 1, 0, 0};
     const auto project = [&](const std::array<float, 2>& pixel) {
       if (worldVertices) return pixel;
@@ -832,6 +843,10 @@ void Renderer::renderScene() {
         operations.back().nearest != command.nearest ||
         operations.back().mipmap != mipmap ||
         operations.back().clampedTilingSampling != command.clampedTilingSampling ||
+        operations.back().atlasTilingSampling != command.atlasTilingSampling ||
+        operations.back().tilingUvTransform != command.tilingUvTransform ||
+        operations.back().tilingAtlasMapping != command.tilingAtlasMapping ||
+        operations.back().tilingAtlasBounds != command.tilingAtlasBounds ||
         operations.back().blur != command.blur ||
         operations.back().maskImage != command.maskImage ||
         operations.back().maskTransform != command.maskTransform ||
@@ -860,6 +875,10 @@ void Renderer::renderScene() {
       operations.back().mipmap = mipmap;
       operations.back().premultipliedSpriteTexture = texturePremultiplied;
       operations.back().clampedTilingSampling = command.clampedTilingSampling;
+      operations.back().atlasTilingSampling = command.atlasTilingSampling;
+      operations.back().tilingUvTransform = command.tilingUvTransform;
+      operations.back().tilingAtlasMapping = command.tilingAtlasMapping;
+      operations.back().tilingAtlasBounds = command.tilingAtlasBounds;
       operations.back().spriteFrame = command.source;
       operations.back().colorTone = command.colorTone;
       operations.back().blendColor = command.blendColor;
@@ -1854,6 +1873,16 @@ void Renderer::renderScene() {
     glUniformMatrix3fv(simpleSprite ? simpleSpriteProjectionUniform_ : spriteEffect.projection, 1, GL_FALSE, projection.data());
     glUniform1i(simpleSprite ? simpleTilingClampUniform_ : spriteEffect.tilingClamp,
                 operation.clampedTilingSampling);
+    glUniform1i(simpleSprite ? simpleTilingAtlasUniform_ : spriteEffect.tilingAtlas,
+                operation.atlasTilingSampling);
+    if (operation.atlasTilingSampling) {
+      glUniform4fv(simpleSprite ? simpleTilingTransformUniform_ : spriteEffect.tilingTransform,
+        1, operation.tilingUvTransform.data());
+      glUniform4fv(simpleSprite ? simpleTilingMappingUniform_ : spriteEffect.tilingMapping,
+        1, operation.tilingAtlasMapping.data());
+      glUniform4fv(simpleSprite ? simpleTilingBoundsUniform_ : spriteEffect.tilingBounds,
+        1, operation.tilingAtlasBounds.data());
+    }
     if (simpleSprite) {
       glUniform2f(simpleTextureSizeUniform_, operation.textureWidth, operation.textureHeight);
       glUniform1i(simpleDerivedImageUniform_, operation.derivedImage);

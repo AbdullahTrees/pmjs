@@ -58,7 +58,7 @@
     }
   });
   var schema = NativeHost.scene && NativeHost.scene.schema;
-  var requiredPacketVersion = 29;
+  var requiredPacketVersion = 30;
   var filterEncoders = [];
   globalThis.pmjsPixi5RegisterFilterEncoder = function(encoder) {
     filterEncoders.push(encoder);
