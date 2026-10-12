@@ -2119,6 +2119,84 @@ test('Sprite vertex packets preserve Pixi Float32 corners and logical GPU bitmap
   }
 });
 
+test('nonfinite leaf quads preserve sibling packets and recover without guest mutation', () => {
+  for (const segmented of [true, false]) {
+    for (const invalid of [NaN, Infinity, -Infinity, undefined, 1e40]) {
+      const harness = preparedHarness(), { sandbox, sprite } = harness;
+      sandbox.PMJS.optimizations.isEnabled = id =>
+        id !== 'scene.plain-sprite-segment' || segmented;
+      sandbox.PIXI.Sprite.prototype.calculateVertices = function() {
+        this.vertexData = new Float32Array([
+          this.worldTransform.tx, 2, this.worldTransform.tx + 8, 2,
+          this.worldTransform.tx + 8, 10, this.worldTransform.tx, 10]);
+      };
+      const root = new sandbox.PIXI.Container();
+      for (let index = 0; index < 5; index++) root.addChild(sprite()).x = index * 10;
+      const subject = root.children[2];
+      sandbox.renderNativeStage(root);
+      const baseline = harness.submitted.at(-1);
+      const prepare = subject.updateTransform;
+      subject.updateTransform = function() {
+        prepare.call(this);
+        this.worldTransform.tx = invalid;
+      };
+      sandbox.renderNativeStage(root);
+      const packet = harness.submitted.at(-1);
+      assert.ok(packet.values.every(Number.isFinite), 'submitted Float32 values remain finite');
+      assert.deepEqual(packet.metadata, baseline.metadata, 'record and parent identities stay stable');
+      for (let index = 0; index < 6; index++) {
+        const actual = packet.values.slice(index * 41, (index + 1) * 41);
+        if (index !== 3) {
+          assert.deepEqual(actual, baseline.values.slice(index * 41, (index + 1) * 41));
+        } else {
+          for (const offset of [0, 1, 2, 3, 4, 5, 15, 16]) assert.equal(actual[offset], 0);
+        }
+      }
+      assert.ok(Object.is(subject.worldTransform.tx, invalid), 'guest world state is unchanged');
+      assert.ok(!Number.isFinite(subject.vertexData[0]), 'guest vertices are unchanged');
+      assert.equal(subject.x, 20);
+      subject.updateTransform = prepare;
+      sandbox.renderNativeStage(root);
+      assert.deepEqual(harness.submitted.at(-1), baseline, 'the same objects recover next frame');
+    }
+  }
+});
+
+test('leaf quad validation includes Float32 overflow after target projection', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const child = sprite();
+  child.calculateVertices = function() {
+    this.vertexData = new Float32Array([2, 2, 10, 2, 10, 10, 2, 10]);
+  };
+  const root = new sandbox.PIXI.Container(); root.addChild(child);
+  sandbox.renderNativeStage(root, { a: 1e38, b: 0, c: 0, d: 1, tx: 0, ty: 0 });
+  const packet = harness.submitted.at(-1);
+  assert.ok(packet.values.every(Number.isFinite));
+  for (const offset of [0, 1, 2, 3, 4, 5, 15, 16]) assert.equal(packet.values[41 + offset], 0);
+  assert.deepEqual(Array.from(child.vertexData), [2, 2, 10, 2, 10, 10, 2, 10]);
+});
+
+test('nonfinite leaf quads retain enclosing masks, filters and sibling traversal', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const root = new sandbox.PIXI.Container();
+  const masked = sprite(); masked.mask = maskSprite(harness);
+  masked._filters = [new sandbox.PIXI.filters.BlurFilter(4, 1)];
+  root.addChild(masked);
+  const subject = masked.addChild(sprite());
+  subject.calculateVertices = function() {
+    this.vertexData = new Float32Array([NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN]);
+  };
+  masked.addChild(sprite()); root.addChild(sprite());
+  sandbox.renderNativeStage(root);
+  const packet = harness.submitted.at(-1);
+  assert.ok(packet.values.every(Number.isFinite));
+  const kinds = packet.metadata.filter((_, index) => index % 7 === 0);
+  assert.equal(kinds.filter(kind => kind === 1).length, 4, 'all sprite records remain reachable');
+  assert.equal(kinds.filter(kind => kind === 6).length, 2);
+  assert.equal(kinds.filter(kind => kind === 7).length, 2);
+  assert.equal(sandbox.nativeSceneFilterDepth, 0);
+});
+
 
 test('an unknown stage transform executes once before encoding', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;

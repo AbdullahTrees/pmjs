@@ -160,6 +160,7 @@ function nativeSpriteVertices(node, nodeIndex, presentation) {
   }
   if (!vertices || vertices.length !== 8) return;
   var offset = nodeIndex * nativeSceneValueStride;
+  var drawable = true;
   for (var corner = 0; corner < 4; corner++) {
     var x = vertices[corner * 2], y = vertices[corner * 2 + 1];
     var destination = offset + (corner < 3 ? corner * 2 : 15);
@@ -171,6 +172,17 @@ function nativeSpriteVertices(node, nodeIndex, presentation) {
     } else {
       nativeSceneValues[destination] = x;
       nativeSceneValues[destination + 1] = y;
+    }
+    drawable = drawable && Number.isFinite(nativeSceneValues[destination]) &&
+      Number.isFinite(nativeSceneValues[destination + 1]);
+  }
+  if (!drawable) {
+    // Nonfinite leaf quads draw no pixels; keep packet values finite without
+    // repairing observable guest transforms or disturbing effect scopes.
+    for (var corner = 0; corner < 4; corner++) {
+      var destination = offset + (corner < 3 ? corner * 2 : 15);
+      nativeSceneValues[destination] = 0;
+      nativeSceneValues[destination + 1] = 0;
     }
   }
   nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 4096;
