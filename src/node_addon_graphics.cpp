@@ -285,6 +285,36 @@ napi_value setPresentationLayers(napi_env env, napi_callback_info info) try {
   napi_throw_type_error(env, nullptr, error.what()); return nullptr;
 }
 
+napi_value setPresentationOverlay(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 6);
+  if (args.size() != 6) {
+    throw std::runtime_error("setPresentationOverlay requires six arguments");
+  }
+  State& value = host(env);
+  const auto canvas = asUint32(env, args[0]);
+  const std::array<float, 5> geometry = {
+    static_cast<float>(asNumber(env, args[1])),
+    static_cast<float>(asNumber(env, args[2])),
+    static_cast<float>(asNumber(env, args[3])),
+    static_cast<float>(asNumber(env, args[4])),
+    static_cast<float>(asNumber(env, args[5]))};
+  if (!std::all_of(geometry.begin(), geometry.end(), [](float number) {
+        return std::isfinite(number);
+      }) || geometry[2] <= 0.0F || geometry[3] <= 0.0F) {
+    throw std::runtime_error("presentation overlay requires finite geometry and positive dimensions");
+  }
+  const auto image = canvas ? value.canvases.prepareImage(canvas)
+                            : std::optional<pmjs::ImageHandle>{0};
+  if (!image) throw std::runtime_error("invalid presentation overlay canvas handle");
+  if (!value.renderer.setPresentationOverlay(*image, geometry[0], geometry[1],
+      geometry[2], geometry[3], geometry[4])) {
+    throw std::runtime_error("could not retain presentation overlay image");
+  }
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_type_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value setRenderTargetSize(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 2);
   if (args.size() != 2 || !host(env).renderer.setRenderTargetSize(
@@ -723,6 +753,7 @@ void registerGraphicsBindings(napi_env env, napi_value exports) {
   napi_set_named_property(env, render, "exceptionalUniforms", boolean(env, true));
   method(env, render, "graphicsInfo", graphicsInfo);
   method(env, render, "setPresentationLayers", setPresentationLayers);
+  method(env, render, "setPresentationOverlay", setPresentationOverlay);
   method(env, render, "setRenderTargetSize", setRenderTargetSize);
   method(env, render, "setScreenRenderSize", setScreenRenderSize);
   method(env, render, "quad", quad);

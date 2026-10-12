@@ -1,9 +1,13 @@
 {
   "adapters": [
     {
-      "plugins": ["YEP_CoreEngine"],
-      "modules": ["js/pmjs-plugins/yanfly/core-transforms.js",
-        "js/pmjs-plugins/yanfly/core-character-presentation.js"]
+      "plugins": [
+        "YEP_CoreEngine"
+      ],
+      "modules": [
+        "js/pmjs-plugins/yanfly/core-transforms.js",
+        "js/pmjs-plugins/yanfly/core-character-presentation.js"
+      ]
     },
     {
       "plugins": [
@@ -95,6 +99,14 @@
       ],
       "modules": [
         "js/pmjs-plugins/startup-fullscreen/desktop.js"
+      ]
+    },
+    {
+      "plugins": [
+        "SRD_BattleStatusCustomizer"
+      ],
+      "modules": [
+        "js/pmjs-plugins/srd/battle-status-gauges.js"
       ]
     }
   ]

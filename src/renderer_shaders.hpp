@@ -1125,6 +1125,7 @@ constexpr const char* generatedTextureFragmentSource = R"(#version 300 es
   }
 )";
 constexpr const char* presentationVertexSource = R"(#version 300 es
+  uniform vec4 presentationRect;
   out vec2 vertexUv;
   void main() {
     const vec2 positions[6] = vec2[6](
@@ -1133,7 +1134,9 @@ constexpr const char* presentationVertexSource = R"(#version 300 es
     const vec2 uvs[6] = vec2[6](
       vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(1.0, 0.0),
       vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(0.0, 0.0));
-    gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+    vec2 offset = vec2(2.0 * presentationRect.x + presentationRect.z - 1.0,
+                       1.0 - 2.0 * presentationRect.y - presentationRect.w);
+    gl_Position = vec4(positions[gl_VertexID] * presentationRect.zw + offset, 0.0, 1.0);
     vertexUv = uvs[gl_VertexID];
   }
 )";

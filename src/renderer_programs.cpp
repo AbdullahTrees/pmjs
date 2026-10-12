@@ -128,6 +128,8 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     glGetUniformLocation(presentationProgram_, "videoImage");
   presentationUpperCanvasUniform_ =
     glGetUniformLocation(presentationProgram_, "upperCanvasImage");
+  presentationRectUniform_ =
+    glGetUniformLocation(presentationProgram_, "presentationRect");
   presentationColorMatrixUniform_ =
     glGetUniformLocation(presentationProgram_, "colorMatrix");
   presentationColorMatrixAlphaUniform_ =
@@ -624,6 +626,7 @@ Renderer::~Renderer() {
   }
   if (presentationVideo_) images_.release(presentationVideo_);
   if (presentationUpperCanvas_) images_.release(presentationUpperCanvas_);
+  if (presentationOverlay_) images_.release(presentationOverlay_);
   while (!tileLayers_.empty()) destroyTileLayer(tileLayers_.begin()->first);
   for (std::size_t index = 0; index < primitiveSurfaces_.size(); ++index) {
     auto& surface = primitiveSurfaces_[index];

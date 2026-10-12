@@ -2024,6 +2024,7 @@ void Renderer::presentToDrawable() {
                       presentation_.filter == PresentFilter::linear ?
                         GL_LINEAR : GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    drawPresentationOverlay();
     return;
   }
   if (diagnostics_) ++stats_.scaledPresentationFrames;
@@ -2065,6 +2066,36 @@ void Renderer::presentToDrawable() {
                     presentation_.filter == PresentFilter::linear ?
                       GL_LINEAR : GL_NEAREST);
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  drawPresentationOverlay();
+}
+
+void Renderer::drawPresentationOverlay() {
+  if (!presentationOverlay_ || presentationOverlayOpacity_ <= 0.0F) return;
+  const auto image = images_.lookup(presentationOverlay_);
+  if (!image) return;
+  const int x = presentation_.viewportX;
+  const int y = presentation_.drawableHeight - presentation_.viewportY -
+    presentation_.viewportHeight;
+  glViewport(x, y, presentation_.viewportWidth, presentation_.viewportHeight);
+  glEnable(GL_SCISSOR_TEST);
+  glScissor(x, y, presentation_.viewportWidth, presentation_.viewportHeight);
+  glEnable(GL_BLEND);
+  applyBlendMode(BlendMode::normal);
+  glUseProgram(presentationProgram_);
+  glBindVertexArray(vertexArray_);
+  glActiveTexture(GL_TEXTURE3);
+  glBindTexture(GL_TEXTURE_2D, image->texture);
+  glUniform1i(presentationUpperCanvasUniform_, 3);
+  glUniform1f(presentationUpperCanvasOpacityUniform_, presentationOverlayOpacity_);
+  glUniform1i(presentationUpperCanvasPremultipliedUniform_, image->premultiplied);
+  glUniform1i(presentationLayerUniform_, 2);
+  glUniform4f(presentationRectUniform_,
+    presentationOverlayRect_[0] / width_, presentationOverlayRect_[1] / height_,
+    presentationOverlayRect_[2] / width_, presentationOverlayRect_[3] / height_);
+  glDrawArrays(GL_TRIANGLES, 0, 6);
+  if (diagnostics_) ++stats_.drawCalls;
+  glActiveTexture(GL_TEXTURE0);
+  glDisable(GL_SCISSOR_TEST);
 }
 
 void Renderer::drawToneComposition(std::uint32_t framebuffer,
@@ -2076,6 +2107,7 @@ void Renderer::drawToneComposition(std::uint32_t framebuffer,
   glDisable(GL_BLEND);
   glDisable(GL_SCISSOR_TEST);
   glUseProgram(presentationProgram_);
+  glUniform4f(presentationRectUniform_, 0.0F, 0.0F, 1.0F, 1.0F);
   glBindVertexArray(vertexArray_);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, sceneTarget_.texture);

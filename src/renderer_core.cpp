@@ -398,6 +398,21 @@ bool Renderer::setPresentationLayers(float canvasOpacity, ImageHandle video,
   return true;
 }
 
+bool Renderer::setPresentationOverlay(ImageHandle image, float x, float y,
+                                      float width, float height, float opacity) {
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(width) ||
+      !std::isfinite(height) || !std::isfinite(opacity) ||
+      width <= 0.0F || height <= 0.0F) return false;
+  if (image && image != presentationOverlay_ && !images_.retain(image)) return false;
+  if (presentationOverlay_ && presentationOverlay_ != image) {
+    images_.release(presentationOverlay_);
+  }
+  presentationOverlay_ = image;
+  presentationOverlayRect_ = {x, y, width, height};
+  presentationOverlayOpacity_ = image ? std::clamp(opacity, 0.0F, 1.0F) : 0.0F;
+  return true;
+}
+
 bool Renderer::setRenderTargetSize(int width, int height) {
   if (width <= 0 || height <= 0) return false;
   if (width > maxTextureSize_ || height > maxTextureSize_) return false;
