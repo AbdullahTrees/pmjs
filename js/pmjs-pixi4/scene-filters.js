@@ -136,14 +136,21 @@ function nativeRecordCustomFilter(filter, node, filters) {
           }
           continue;
         }
-        if (typeof value === 'number' || typeof value === 'boolean') value = [Number(value)];
+        if (typeof value === 'number' || typeof value === 'boolean' ||
+            value === undefined && uniform.size === 1) value = [Number(value)];
         else if (value && uniform.size === 2 && value.x !== undefined) value = [value.x, value.y];
         else if (value && uniform.size === 9 && value.a !== undefined) value = value.toArray(true);
         if (!value || value.length !== uniform.size) throw new Error('invalid filter uniform: ' + uniform.name);
         for (var component = 0; component < uniform.size; component++) {
           var number = Number(value[component]);
-          if (!Number.isFinite(number)) throw new Error('invalid filter uniform: ' + uniform.name);
-          pass.uniforms.push(number);
+          var classification = Number.isNaN(number) ? 1 : number === Infinity ? 2 : number === -Infinity ? 3 : 0;
+          if (classification && !NativeHost.render.exceptionalUniforms)
+            throw new Error('host lacks exceptional filter uniforms: ' + uniform.name);
+          pass.uniforms.push(classification ? 0 : number);
+          if (classification && !pass.uniformClasses) {
+            pass.uniformClasses = pass.uniforms.map(function() { return 0; });
+          } else if (pass.uniformClasses) pass.uniformClasses.push(0);
+          if (classification) pass.uniformClasses[pass.uniforms.length - 1] = classification;
         }
       }
       plan.passes.push(pass);
@@ -333,7 +340,7 @@ function nativeSceneFilter(node, activeFilters) {
       return Number(filter.slices) > 0;
     }
     if (nativeFilterMatches(filter, NoiseFilter, 'NoiseFilter')) {
-      return Number(filter.noise) > 0;
+      return Number(filter.noise) !== 0;
     }
     if (nativeFilterMatches(filter, DisplacementFilter, 'DisplacementFilter')) {
       return !filter.scale || Number(filter.scale.x) !== 0 ||
@@ -433,6 +440,13 @@ function nativeSceneFilter(node, activeFilters) {
         var groupMatrixAlpha = groupFilter.alpha === undefined &&
           groupFilter.uniforms ? groupFilter.uniforms.uAlpha : groupFilter.alpha;
         if (groupMatrixAlpha === undefined) groupMatrixAlpha = 1;
+        if (groupFilter.fragmentSrc && (!Number.isFinite(Math.fround(groupMatrixAlpha)) ||
+            Array.prototype.some.call(groupMatrix, function(value) { return !Number.isFinite(Math.fround(value)); }))) {
+          var exceptionalGroup = nativeCustomFilterGroup(groupFilter, node);
+          if (!exceptionalGroup) return { blur: 0, groups: [], unsupported: true, filters: effectiveFilters };
+          groups.push(exceptionalGroup);
+          continue;
+        }
         groups.push({ kind: 25, resource: 0,
           parameters: Array.prototype.slice.call(groupMatrix).concat(
             Number(groupMatrixAlpha)),

@@ -3,6 +3,7 @@
 #include <GLES3/gl3.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace pmjs {
@@ -13,6 +14,8 @@ bool Renderer::isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const {
   const auto& pass = plan.passes.front();
   if (pass.input != 0 || pass.output != 1 || pass.clear || pass.blend != BlendMode::normal ||
       !pass.samplers.empty() || pass.transform != std::array<float, 6>{1, 0, 0, 1, 0, 0}) return false;
+  if (std::any_of(pass.uniformClasses.begin(), pass.uniformClasses.end(),
+      [](std::uint8_t value) { return value != 0; })) return false;
   const auto& program = filterProgram(pass.program);
   if (!program.identityColorMatrixContract) return false;
   constexpr std::array<double, 20> identity{1, 0, 0, 0, 0, 0, 1, 0, 0, 0,
@@ -63,6 +66,8 @@ std::string Renderer::filterIntermediateKey(const RenderCommand& command) const 
     append(pass.program); append(pass.input); append(pass.output); append(pass.clear);
     append(pass.blend); append(pass.transform); append(pass.uniforms.size());
     for (double value : pass.uniforms) append(value);
+    append(pass.uniformClasses.size());
+    for (auto value : pass.uniformClasses) append(value);
   }
   const auto begin = static_cast<std::size_t>(&command - frame_.commands.data());
   bool ended = false;
@@ -258,7 +263,16 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
       }
       const auto count = uniform.components * uniform.count;
       const auto start = pass.uniforms.begin() + offset;
-      const std::vector<float> floats(start, start + count);
+      std::vector<float> floats(start, start + count);
+      if (!pass.uniformClasses.empty()) {
+        for (int index = 0; index < count; ++index) {
+          switch (pass.uniformClasses[offset + index]) {
+            case 1: floats[index] = std::numeric_limits<float>::quiet_NaN(); break;
+            case 2: floats[index] = std::numeric_limits<float>::infinity(); break;
+            case 3: floats[index] = -std::numeric_limits<float>::infinity(); break;
+          }
+        }
+      }
       const float* data = floats.data();
       std::vector<GLint> integers;
       if (uniform.type == GL_INT || uniform.type == GL_BOOL || uniform.type == GL_INT_VEC2 ||

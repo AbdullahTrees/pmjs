@@ -187,6 +187,19 @@ napi_value createFilterPlan(napi_env env, napi_callback_info info) try {
       throw std::invalid_argument("invalid filter pass targets");
     for (auto component : elements(property(env, item, "uniforms"), 4096))
       pass.uniforms.push_back(finite(component));
+    if (hasProperty(env, item, "uniformClasses")) {
+      for (auto component : elements(property(env, item, "uniformClasses"), 4096)) {
+        const double classification = finite(component);
+        if (classification < 0 || classification > 3 || classification != std::trunc(classification))
+          throw std::invalid_argument("invalid filter uniform classification");
+        pass.uniformClasses.push_back(static_cast<std::uint8_t>(classification));
+      }
+      if (pass.uniformClasses.size() != pass.uniforms.size())
+        throw std::invalid_argument("invalid filter uniform classification count");
+      for (std::size_t index = 0; index < pass.uniforms.size(); ++index)
+        if (pass.uniformClasses[index] && pass.uniforms[index] != 0)
+          throw std::invalid_argument("classified filter uniform requires zero payload");
+    }
     for (auto sampler : elements(property(env, item, "samplers"), 32)) {
       CustomFilterPass::Sampler binding;
       binding.image = asUint32(env, property(env, sampler, "image"));
@@ -209,7 +222,16 @@ napi_value createFilterPlan(napi_env env, napi_callback_info info) try {
     std::size_t components = 0, samplers = 0;
     for (const auto& uniform : program.uniforms) {
       if (uniform.type == GL_SAMPLER_2D) samplers += uniform.count;
-      else components += uniform.components * uniform.count;
+      else {
+        const std::size_t count = uniform.components * uniform.count;
+        const bool floating = uniform.type == GL_FLOAT || uniform.type == GL_FLOAT_VEC2 ||
+          uniform.type == GL_FLOAT_VEC3 || uniform.type == GL_FLOAT_VEC4 ||
+          uniform.type == GL_FLOAT_MAT2 || uniform.type == GL_FLOAT_MAT3 || uniform.type == GL_FLOAT_MAT4;
+        if (!floating && !pass.uniformClasses.empty())
+          for (std::size_t index = components; index < components + count && index < pass.uniformClasses.size(); ++index)
+            if (pass.uniformClasses[index]) throw std::invalid_argument("exceptional integer filter uniform");
+        components += count;
+      }
     }
     GLint textureUnits = 0;
     glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &textureUnits);
@@ -698,6 +720,7 @@ void registerGraphicsBindings(napi_env env, napi_value exports) {
   method(env, render, "configurePixiFragmentPrecision", configurePixiFragmentPrecision);
   method(env, render, "createFilterProgram", createFilterProgram);
   method(env, render, "createFilterPlan", createFilterPlan);
+  napi_set_named_property(env, render, "exceptionalUniforms", boolean(env, true));
   method(env, render, "graphicsInfo", graphicsInfo);
   method(env, render, "setPresentationLayers", setPresentationLayers);
   method(env, render, "setRenderTargetSize", setRenderTargetSize);

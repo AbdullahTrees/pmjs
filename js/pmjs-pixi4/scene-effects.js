@@ -1,3 +1,6 @@
+var nativeSpriteMaskConstructor = PIXI.SpriteMaskFilter;
+var nativeSpriteMaskFilters = new WeakMap();
+
 function nativeNodeNeedsAdvancedEffects(enabledFilterCount, nodeMask,
     forcedMask, pictureBlend) {
   return enabledFilterCount !== 0 || !!nodeMask || !!forcedMask ||
@@ -65,14 +68,29 @@ function resolveNativeAdvancedEffects(node, particleContext, activeFilters,
   var maskClip = scissorClip || (!particleContext && nodeMask && canKeepRectangleMask ?
     nativeRectangleMask(nodeMask) : null);
   var nativeClip = nativeIntersectClip(forcedClip, maskClip);
-  var nativeMask = !particleContext && nodeMask && !maskClip ?
+  var spriteMaskGroup = null;
+  if (!particleContext && nodeMask && nodeMask.texture && !maskClip &&
+      nativeSceneUsePixiWorldState && typeof nativeSpriteMaskConstructor === 'function') {
+    var spriteMaskFilter = nativeSpriteMaskFilters.get(nodeMask);
+    if (!spriteMaskFilter) {
+      spriteMaskFilter = new nativeSpriteMaskConstructor(nodeMask);
+      nativeSpriteMaskFilters.set(nodeMask, spriteMaskFilter);
+    }
+    spriteMaskGroup = nativeCustomFilterGroup(spriteMaskFilter, node);
+    if (!spriteMaskGroup) {
+      PMJS.compat.hit('render.mask', 'sprite mask filter could not be encoded');
+      return null;
+    }
+  }
+  var nativeMask = !spriteMaskGroup && !particleContext && nodeMask && !maskClip ?
     nativeAlphaMask(nodeMask) : null;
-  if (!particleContext && nodeMask && !nativeClip && !nativeMask) {
+  if (!particleContext && nodeMask && !nativeClip && !nativeMask && !spriteMaskGroup) {
 
     PMJS.compat.hit('render.mask',
       node.constructor && node.constructor.name || 'node');
     return null;
   }
+  if (spriteMaskGroup) filterPlan.groups.unshift(spriteMaskGroup);
   var nativeMasks = [];
   if (nativeMask) nativeMasks.push(nativeMask);
   if (forcedMask) nativeMasks.push(forcedMask);

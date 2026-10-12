@@ -63,5 +63,38 @@ async function main() {
   native.renderScene();
   assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied()), pixels,
     'rejected plan changed the retained presentation');
+
+  assert.equal(native.render.exceptionalUniforms, true);
+  const exceptional = native.render.createFilterProgram(
+    'uniform float amount; void main(){gl_FragColor=amount>1.0?vec4(1,0,0,1):amount<0.0?vec4(0,1,0,1):vec4(0,0,1,1);}', vertex);
+  const uniformPlan = { frame: [0, 0, 16, 16], resolutions: [1, 1], passes: [
+    { program: exceptional.handle, input: 0, output: 1, clear: false, blend: 0,
+      uniforms: [0], uniformClasses: [0], samplers: [] },
+  ] };
+  for (const [classification, expected] of [[0, [0, 0, 255, 255]],
+    [1, [0, 0, 255, 255]], [2, [255, 0, 0, 255]], [3, [0, 255, 0, 255]]]) {
+    uniformPlan.passes[0].uniformClasses = [classification];
+    const classified = native.render.createFilterPlan(uniformPlan);
+    metadata[2] = classified.handle;
+    native.beginFrame();
+    native.scene.submit(schema.version, metadata, values, 2);
+    native.renderScene();
+    assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied()).slice(0, 4), expected);
+  }
+  const pass = uniformPlan.passes[0];
+  for (const classes of [[4], [-1], [1.5], [NaN], [], [0, 0]]) {
+    pass.uniformClasses = classes;
+    assert.throws(() => native.render.createFilterPlan(uniformPlan), /filter.*(classification|number)/);
+  }
+  pass.uniformClasses = [1]; pass.uniforms = [0.5];
+  assert.throws(() => native.render.createFilterPlan(uniformPlan), /zero payload/);
+  pass.uniforms = [NaN];
+  assert.throws(() => native.render.createFilterPlan(uniformPlan), /filter plan number/);
+  pass.uniforms = [0];
+  const integer = native.render.createFilterProgram(
+    'uniform int amount; void main(){gl_FragColor=vec4(float(amount),0,0,1);}', vertex);
+  pass.program = integer.handle;
+  assert.throws(() => native.render.createFilterPlan(uniformPlan), /exceptional integer/);
+
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -46,6 +46,8 @@ struct CustomFilterPass {
   bool clear = false;
   BlendMode blend = BlendMode::normal;
   std::vector<double> uniforms;
+  // Optional per-component classification: finite, NaN, positive or negative infinity.
+  std::vector<std::uint8_t> uniformClasses;
   std::array<float, 6> transform{1, 0, 0, 1, 0, 0};
   std::vector<Sampler> samplers;
 };

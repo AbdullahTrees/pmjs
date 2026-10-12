@@ -165,3 +165,32 @@ test('fullscreen filter frames preserve the supported Pixi version padding contr
     assert.deepEqual(plans[0].frame, version.startsWith('4.8.') ? [0, 0, 32, 32] : [-4, -4, 40, 40]);
   }
 });
+
+test('exceptional floating uniforms use finite payloads without changing guest values', () => {
+  const { sandbox, Filter, node, plans } = fixture();
+  sandbox.NativeHost.render.exceptionalUniforms = true;
+  const filter = new Filter();
+  filter.uniforms.amount = undefined;
+  filter.uniforms.tint = [Infinity, -Infinity, NaN];
+  assert.equal(sandbox.nativeSceneFilter(node, [filter]).unsupported, false);
+  assert.deepEqual(plans[0].passes[0].uniforms, [0, 0, 0, 0]);
+  assert.deepEqual(plans[0].passes[0].uniformClasses, [1, 2, 3, 1]);
+  assert.equal(filter.uniforms.amount, undefined);
+  assert.equal(filter.uniforms.tint[0], Infinity);
+  assert.ok(Number.isNaN(filter.uniforms.tint[2]));
+  filter.uniforms.amount = 0.25;
+  filter.uniforms.tint = [1, 0.5, 0.25];
+  assert.equal(sandbox.nativeSceneFilter(node, [filter]).unsupported, false);
+  assert.deepEqual(plans[1].passes[0].uniforms, [0.25, 1, 0.5, 0.25]);
+  assert.equal(plans[1].passes[0].uniformClasses, undefined);
+});
+
+test('a host without exceptional uniforms reports unsupported ColorMatrix encoding', () => {
+  const { sandbox, node, plans, compatHits } = fixture();
+  const filter = new sandbox.PIXI.filters.ColorMatrixFilter();
+  filter.matrix[0] = NaN;
+  filter.uniforms.amount = NaN;
+  assert.equal(sandbox.nativeSceneFilter(node, [filter]).unsupported, true);
+  assert.equal(plans.length, 0);
+  assert.ok(compatHits.some(hit => hit[0] === 'render.filter-program'));
+});

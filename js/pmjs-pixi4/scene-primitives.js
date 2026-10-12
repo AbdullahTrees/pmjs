@@ -315,8 +315,9 @@ function ensureNativeTilingTexture(texture, directAtlas) {
 }
 
 function nativeTilingSource(sprite, scaleX, scaleY) {
-  if (scaleX === 0 || scaleY === 0) {
-    // Singular diagonal tile transforms collapse both texture coordinates to zero.
+  if (scaleX === 0 || scaleY === 0 ||
+      !['a', 'b', 'c', 'd', 'tx', 'ty'].every(function(key) { return Number.isFinite(sprite.tileTransform.localTransform[key]); })) {
+    // Singular or nonfinite tile transforms collapse both texture coordinates to zero.
     return { x: 0, y: 0, width: 0, height: 0 };
   }
   var matrix = sprite.tileTransform.localTransform;

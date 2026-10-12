@@ -89,14 +89,14 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
   var finiteSampling = matrix && ['a', 'b', 'c', 'd', 'tx', 'ty'].every(function(key) {
     return Number.isFinite(matrix[key]);
   });
-  if (!finiteSampling) return;
+  if (!matrix) return;
   var resolution = Math.max(0.000001,
     Number(texture && texture.baseTexture && texture.baseTexture.resolution) || 1);
   var sampling = nativeTilingSource(node, matrix.a, matrix.d);
   if (!['x', 'y', 'width', 'height'].every(function(key) {
     return Number.isFinite(Math.fround(sampling[key] * resolution));
   })) return;
-  if (matrix.b !== 0 || matrix.c !== 0) {
+  if (finiteSampling && (matrix.b !== 0 || matrix.c !== 0)) {
     PMJS.compat.hit('render.tiling-transform', 'rotated or skewed sampling');
     scratch.aborted = true;
     return;
@@ -121,7 +121,8 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
   }
   scratch.tilingAtlas = !!schema.atlasTilingSampling && !!nativeDirectTilingAtlas(texture);
   var tilingTexture = ensureNativeTilingTexture(texture, scratch.tilingAtlas);
-  if (tilingTexture && node.width > 0 && node.height > 0) {
+  if (tilingTexture && Number(node.width) !== 0 && Number(node.height) !== 0 &&
+      Number.isFinite(Math.fround(node.width)) && Number.isFinite(Math.fround(node.height))) {
     scratch.nativeImage = tilingTexture;
     scratch.tilingResolution = tilingTexture.resolution;
     scratch.kind = 2;

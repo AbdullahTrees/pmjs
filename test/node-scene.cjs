@@ -4,6 +4,7 @@ process.env.PMJS_GRAPHICS_DIAGNOSTICS = '1';
 
 // Scene-only: renderScene/captureScene, no window presentation.
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const native = require(path.resolve(process.argv[2]));
 native.initialize({
   gameRoot: path.resolve(process.argv[3]),
@@ -131,4 +132,15 @@ let verticesParentRejected = false;
 try { native.scene.submit(schema.version, parentMetadata, parentValues, 2); }
 catch { verticesParentRejected = true; }
 if (!verticesParentRejected) throw new Error('Sprite world vertices were accepted as a parent transform');
+const expected = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+for (const index of [0, 6, 9]) for (const invalid of [NaN, Infinity, -Infinity]) {
+  const malformed = new Float32Array(vertexValues);
+  malformed[index] = invalid;
+  native.beginFrame();
+  assert.throws(() => native.scene.submit(schema.version, vertexMetadata, malformed, 1),
+    /invalid native scene packet/);
+  native.renderScene();
+  assert.deepEqual(Buffer.from(native.canvas.captureSceneRawPremultiplied()), expected,
+    'rejected nonfinite packet changed the retained frame');
+}
 native.images.release(image.handle);

@@ -483,7 +483,7 @@ bool Renderer::queueTiled(ImageHandle image,
                           const std::array<float, 2>& destination, float alpha,
                           std::uint32_t tint, BlendMode blendMode) {
   const auto info = images_.lookup(image);
-  if (!info || destination[0] <= 0 || destination[1] <= 0 ||
+  if (!info || destination[0] == 0 || destination[1] == 0 ||
       !isValidBlendMode(static_cast<std::uint8_t>(blendMode))) return false;
   const std::array<float, 4> color = {
     static_cast<float>((tint >> 16U) & 0xffU) / 255.0F,

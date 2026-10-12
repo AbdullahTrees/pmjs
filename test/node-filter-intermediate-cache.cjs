@@ -14,13 +14,15 @@ const program = native.render.createFilterProgram(fragment, vertex);
 const schema = native.scene.schema;
 function render(enabled, options = {}) {
   const { amount = 0.83, alpha = 1, x = 3, backdrop = 0.25, blend = 0,
-    frame = [3, 2, 16, 16], resolution = 1, offscreen = false, image = source } = options;
-  const plan = native.render.createFilterPlan({ frame, resolutions: [resolution, 1, resolution], passes: [
-    { program: program.handle, input: 0, output: 2, clear: true, blend: 0, uniforms: [amount], samplers: [] },
+    frame = [3, 2, 16, 16], resolution = 1, offscreen = false, image = source, uniformClasses } = options;
+  const description = { frame, resolutions: [resolution, 1, resolution], passes: [
+    { program: program.handle, input: 0, output: 2, clear: true, blend: 0, uniforms: [amount], uniformClasses, samplers: [] },
     { program: program.handle, input: 2, output: 0, clear: true, blend: 0, uniforms: [0.91], samplers: [] },
     { program: program.handle, input: 0, output: 2, clear: true, blend: 0, uniforms: [0.94], samplers: [] },
     { program: program.handle, input: 2, output: 1, clear: false, blend, uniforms: [1], samplers: [] },
-  ] });
+  ] };
+  if (!uniformClasses) delete description.passes[0].uniformClasses;
+  const plan = native.render.createFilterPlan(description);
   const metadata = [], values = [];
   function record(kind, parent, resource, filter = 0) {
     metadata.push(kind, parent, resource, 0xffffff, filter, 0, 0);
@@ -87,6 +89,9 @@ for (const [label, options] of Object.entries({ uniform: { amount: 0.44 },
 render(true); render(true);
 native.canvas.fillRect(source.handle, 2, 2, 3, 4, 1, 0, 0, 1);
 paired('source mutation');
+for (const classification of [1, 2, 3]) {
+  paired('uniform classification ' + classification, { amount: 0, uniformClasses: [classification] });
+}
 const replacement = native.canvas.create(16, 16);
 native.canvas.writePixels(replacement.handle, 0, 0, 16, 16, pixels);
 paired('source replacement', { image: replacement });

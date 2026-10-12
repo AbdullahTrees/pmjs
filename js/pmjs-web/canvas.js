@@ -77,6 +77,14 @@ function canvasSourcePixels(source, nativeSource, operationId, region) {
   }
 }
 
+Object.defineProperty(CanvasContext2D.prototype, 'globalAlpha', {
+  get: function() { return this._globalAlpha; },
+  set: function(value) {
+    value = +value;
+    if (Number.isFinite(value) && value >= 0 && value <= 1) this._globalAlpha = value;
+  }
+});
+
 Object.defineProperty(CanvasContext2D.prototype, 'lineWidth', {
   get: function() { return this._lineWidth; },
   set: function(value) {
@@ -708,17 +716,17 @@ CanvasContext2D.prototype.restore = function() {
     key === 'clipPaths' ? '_clipPaths' : key] = state[key];
 };
 CanvasContext2D.prototype.setTransform = function(a, b, c, d, e, f) {
-  if (arguments.length === 1 && a) {
-    this._transform = [Number(a.a), Number(a.b), Number(a.c), Number(a.d),
-      Number(a.e), Number(a.f)];
-  } else this._transform = [Number(a), Number(b), Number(c), Number(d), Number(e), Number(f)];
+  var transform = arguments.length === 1 && a ?
+    [Number(a.a), Number(a.b), Number(a.c), Number(a.d), Number(a.e), Number(a.f)] :
+    [Number(a), Number(b), Number(c), Number(d), Number(e), Number(f)];
+  if (transform.every(Number.isFinite)) this._transform = transform;
 };
 CanvasContext2D.prototype.resetTransform = function() {
   this._transform = [1, 0, 0, 1, 0, 0];
 };
 CanvasContext2D.prototype.transform = function(a, b, c, d, e, f) {
-  this._transform = multiplyTransform(this._transform,
-    [Number(a), Number(b), Number(c), Number(d), Number(e), Number(f)]);
+  var transform = [Number(a), Number(b), Number(c), Number(d), Number(e), Number(f)];
+  if (transform.every(Number.isFinite)) this._transform = multiplyTransform(this._transform, transform);
 };
 CanvasContext2D.prototype.scale = function(x, y) { this.transform(x, 0, 0, y, 0, 0); };
 CanvasContext2D.prototype.translate = function(x, y) { this.transform(1, 0, 0, 1, x, y); };

@@ -1264,14 +1264,16 @@ test('tiling prepares pivot sampling and retains finite small scales', () => {
   assert.deepEqual(node.tileTransform.pivot, { x: 1.5, y: 2 });
 });
 
-test('undefined tiling sampling omits only its leaf and preserves visible children', () => {
+test('undefined tiling sampling collapses UVs and preserves visible children', () => {
   for (const scale of [NaN, Infinity, 1e-40]) {
     const harness = makeHarness(), { sandbox, makeTexture, sprite } = harness;
     const root = new sandbox.PIXI.Container();
     const node = new sandbox.PIXI.extras.TilingSprite(makeTexture(4, 4), 20, 16);
     node.tileScale.x = scale; node.addChild(sprite()); root.addChild(node);
     const packet = submitOnly(harness, root);
-    assert.deepEqual(packet.metadata.filter((_, i) => i % 7 === 0), [0, 0, 1]);
+    assert.deepEqual(packet.metadata.filter((_, i) => i % 7 === 0), [0, Number.isFinite(scale) ? 0 : 2, 1]);
+    assert.ok(packet.values.every(Number.isFinite));
+    if (!Number.isFinite(scale)) assert.deepEqual(packet.values.slice(41 + 9, 41 + 13), [0, 0, 0, 0]);
     assert.ok(Object.is(node.tileScale.x, scale));
   }
 });
@@ -2298,4 +2300,54 @@ test('target resolution preserves guest transform generations and logical coordi
   render(1); assert.equal(resolvedX,100);
   assert.equal(parentGeneration,0);
   assert.equal(root.parent,null);
+});
+
+test('nonfinite container world state preserves packet scopes and finite descendant overrides', () => {
+  for (const invalid of [NaN, Infinity, -Infinity, undefined, 1e40]) {
+    const harness = preparedHarness(), { sandbox, sprite } = harness;
+    const root = new sandbox.PIXI.Container();
+    const container = root.addChild(new sandbox.PIXI.Container());
+    const child = container.addChild(sprite());
+    const sibling = root.addChild(sprite()); sibling.x = 40;
+    sandbox.renderNativeStage(root);
+    const baseline = harness.submitted.at(-1);
+    const prepare = container.updateTransform;
+    container.updateTransform = function() {
+      prepare.call(this);
+      this.worldTransform.tx = invalid;
+    };
+    sandbox.renderNativeStage(root);
+    const packet = harness.submitted.at(-1);
+    assert.ok(packet.values.every(Number.isFinite));
+    assert.deepEqual(packet.metadata, baseline.metadata);
+    assert.deepEqual(packet.values.slice(41, 47), [0, 0, 0, 0, 0, 0]);
+    assert.ok(Object.is(container.worldTransform.tx, invalid));
+    assert.equal(child.worldTransform.tx, 0);
+    assert.deepEqual(packet.values.slice(82), baseline.values.slice(82));
+    container.updateTransform = prepare;
+    sandbox.renderNativeStage(root);
+    assert.deepEqual(harness.submitted.at(-1), baseline);
+  }
+});
+
+test('exceptional alpha retains Pixi packed colors and recovers on the same objects', () => {
+  for (const segmented of [true, false]) for (const alpha of [NaN, undefined, Infinity]) {
+    const harness = preparedHarness(), { sandbox, sprite } = harness;
+    sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.plain-sprite-segment' || segmented;
+    const root = new sandbox.PIXI.Container();
+    const child = root.addChild(sprite());
+    child.tint = 0x804020;
+    sandbox.renderNativeStage(root);
+    const baseline = harness.submitted.at(-1);
+    child.alpha = alpha;
+    sandbox.renderNativeStage(root);
+    const packet = harness.submitted.at(-1);
+    assert.ok(packet.values.every(Number.isFinite));
+    assert.equal(packet.metadata[7 + 3], alpha === Infinity ? 0xff804020 : 0x00804020);
+    assert.equal(packet.metadata[7 + 5] & 2048, 2048);
+    assert.ok(Object.is(child.alpha, alpha));
+    child.alpha = 1;
+    sandbox.renderNativeStage(root);
+    assert.deepEqual(harness.submitted.at(-1), baseline);
+  }
 });
