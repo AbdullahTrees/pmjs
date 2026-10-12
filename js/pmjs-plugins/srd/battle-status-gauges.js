@@ -80,6 +80,10 @@
   }
   function state(window) {
     var actor = window._actor;
+    // Status-counter offsets can extend over the bar. Keep their full draw order.
+    if (actor.allIcons().length) return null;
+    var face = ImageManager.loadFace(actor.faceName()), icons = ImageManager.loadSystem('IconSet');
+    if (!face.isReady() || !icons.isReady() || face.width <= 0 || icons.width <= 0) return null;
     var values = [actor.hp, actor.mhp, actor.faceName(), actor.faceIndex(),
       window.hpGaugeColor2(), TextManager.hpA, window.lineHeight(),
       globalThis.Yanfly && Yanfly.Param && Yanfly.Param.BSCShowTurns];
@@ -88,6 +92,11 @@
       var keys = Object.keys(object);
       values.push(key, keys.length);
       keys.forEach(function(name) { values.push(name, object[name]); });
+    });
+    [face, icons].forEach(function(bitmap) {
+      var canvas = bitmap._canvas, image = bitmap._image;
+      values.push(bitmap, bitmap.width, bitmap.height, canvas, canvas && canvas.__pmjsContentRevision,
+        image, image && image._nativeImage && image._nativeImage.handle);
     });
     return values.concat(actor.allIcons());
   }
@@ -135,7 +144,8 @@
       if (window._isMaster && (!previous.masterCanvas ||
           window._statusWindow.contents._canvas !== previous.masterCanvas ||
           previous.masterCanvas.__pmjsContentRevision !== previous.masterRevision)) return false;
-      return equal(state(window), previous.state);
+      var current = state(window);
+      return current && equal(current, previous.state);
     }
 
     function optimizedRefresh() {
@@ -185,6 +195,7 @@
         context.globalCompositeOperation === 'source-over' && context._clipPaths && !context._clipPaths.length &&
         equal(context._transform, [1, 0, 0, 1, 0, 0]) && window._useFace && window._useIcon &&
         !window._texts.length && equal(window._gauges, [1, 5]) &&
+        config.texts && !config.texts[undefined] && !config.gauges[undefined] &&
         matches(config, knownConfig) && matches(config.gauges[1], knownGauges[1]) &&
         matches(config.gauges[5], knownGauges[5]) && !config.gauges[1].absorb && !config.gauges[5].absorb &&
         Object.keys(helpers).every(function(name) { return window[name] === helpers[name]; }) &&
@@ -193,11 +204,13 @@
     function remember(window) {
       var bitmap = window.contents;
       if (!window._actor || !bitmap || !bitmap._canvas || !supported(window)) return;
+      var snapshot = state(window);
+      if (!snapshot) return;
       var masterCanvas = window._isMaster && window._statusWindow.contents._canvas;
       cached.set(window, { actor: window._actor, bitmap: bitmap, skin: window.windowskin,
         revision: bitmap._canvas.__pmjsContentRevision, width: bitmap.width, height: bitmap.height,
         masterCanvas: masterCanvas, masterRevision: masterCanvas && masterCanvas.__pmjsContentRevision,
-        style: styles.map(function(key) { return bitmap[key]; }), state: state(window) });
+        style: styles.map(function(key) { return bitmap[key]; }), state: snapshot });
     }
     function optimizedUpdate() {
       updating.add(this);

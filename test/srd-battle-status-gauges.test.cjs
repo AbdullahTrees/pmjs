@@ -10,6 +10,7 @@ const source = fs.readFileSync(require.resolve('../js/pmjs-plugins/srd/battle-st
 function fixture({ disabled = false, unknown = false, composed = false } = {}) {
   const loaded = new Map(), phases = new Map(), refusals = [], calls = { full: 0, gauge: 0 };
   const config = JSON.parse(source.match(/var knownConfig = ([\s\S]*?);/)[1]);
+  config.texts = [];
   config.gauges = JSON.parse(source.match(/var knownGauges = ([\s\S]*?);/)[1]);
   class Bitmap {
     constructor() {
@@ -67,6 +68,8 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
     contentsHeight() { return this.contents.height; }
     lineHeight() { return 36; }
   }
+  const images = { face: { width: 144, height: 144, ready: true, isReady() { return this.ready; } },
+    icons: { width: 512, height: 512, ready: true, isReady() { return this.ready; } } };
   const originals = { refresh: Status.prototype.refresh, update: Status.prototype.updateRefreshes };
   const digest = fn => crypto.createHash('sha256').update(fn.toString().replace(/\r\n/g, '\n')).digest('hex');
   // Independent fixture pipeline; production fingerprint checks still execute.
@@ -78,6 +81,7 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
   if (unknown) Status.prototype.drawItem = function() { throw new Error('unknown'); };
   if (composed) Status.prototype.updateRefreshes = function() { originals.update.call(this); };
   const context = { __pmjsBuiltinRequire: require, Window_BattleStatusUpgrade: Status,
+    ImageManager: { loadFace() { return images.face; }, loadSystem() { return images.icons; } },
     SRD: { BattleStatusCustomizer: config }, TextManager: { hpA: 'HP' },
     BattleManager: { highestBaseAgi() { return 40; } },
     PMJS: { plugins: {
@@ -87,7 +91,7 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
   vm.runInNewContext(patched, context);
   loaded.get('SRD_BattleStatusCustomizer')();
   phases.get('beforeBoot')();
-  return { actor, Status, Bitmap, config, calls, refusals, originals,
+  return { actor, images, Status, Bitmap, config, calls, refusals, originals,
     window() { const window = new Status(); window.refresh(); return window; },
     speed(window) { window._actor._atbSpeed += 100; window.updateRefreshes(); } };
 }
@@ -109,7 +113,7 @@ test('ATB decreases, zero and full use one authored gauge draw and preserve styl
 
 for (const change of ['HP', 'icons', 'buff turns', 'face', 'contents', 'actor', 'canvas write',
   'master write', 'paint opacity', 'clip', 'transform', 'composite', 'alpha', 'label',
-  'removed gauge', 'font', 'layout', 'late method', 'instance method', 'dependency', 'load', 'range']) {
+  'removed gauge', 'font', 'layout', 'late method', 'instance method', 'dependency', 'load', 'range', 'source replacement', 'source mutation', 'source pending']) {
   test(`${change} uses a complete refresh`, () => {
     const h = fixture(), w = h.window();
     switch (change) {
@@ -134,6 +138,9 @@ for (const change of ['HP', 'icons', 'buff turns', 'face', 'contents', 'actor', 
       case 'instance method': w.drawAllGauges = function() {}; break;
       case 'dependency': w._checkForRefresh.push([0, 'other']); break;
       case 'load': w._redrawForLoad = 4; break;
+      case 'source replacement': h.images.face = { ...h.images.face }; break;
+      case 'source mutation': h.images.icons._canvas = { __pmjsContentRevision: 1 }; break;
+      case 'source pending': h.images.icons.ready = false; break;
       case 'range': h.actor._atbSpeed = 6000; break;
     }
     h.speed(w);
@@ -181,4 +188,13 @@ test('disabled, unknown drawing and unknown refresh compositions keep authored m
     assert.equal(h.Status.prototype.refresh, h.originals.refresh);
     assert.equal(h.refusals.length, options.disabled ? 0 : 1);
   }
+});
+
+
+test('active status icons keep full composition on subsequent ATB changes', () => {
+  const h = fixture(), w = h.window();
+  h.actor.icons = [7]; w.refresh();
+  h.speed(w); assert.equal(h.calls.full, 3);
+  h.actor.icons = []; h.speed(w); assert.equal(h.calls.full, 4);
+  h.speed(w); assert.equal(h.calls.full, 4);
 });
