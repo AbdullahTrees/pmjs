@@ -6,7 +6,8 @@
   var nextId = 1;
   var tasks = [], head = 0, continuations = [];
   var scheduled = null, stopped = false, rendering = false, frame = null;
-  var worked = false, idleWaiters = [];
+  var clock = performance.now.bind(performance);
+  var frameTasks = 0, frameStartedAt = 0, idleWaiters = [];
   var stopListeners = new Set();
   var rafs = new Map(), timers = new Map(), timerWake = null;
 
@@ -71,9 +72,11 @@
   function step() {
     scheduled = null;
     if (stopped) return;
-    if (!rendering && frame && (worked || head === tasks.length)) {
+    // Bound resource admission across host turns without losing Promise checkpoints.
+    if (!rendering && frame && (head === tasks.length || frameTasks >= 64 ||
+      (frameTasks > 0 && clock() - frameStartedAt >= 4))) {
       var active = frame; frame = null;
-      rendering = true; worked = false;
+      rendering = true;
       var result;
       try { result = active.callback(); }
       catch (error) { rendering = false; active.reject(error); return; }
@@ -92,7 +95,10 @@
       }
       return;
     }
-    if (!rendering) worked = true;
+    if (!rendering && frame) {
+      if (frameTasks === 0) frameStartedAt = clock();
+      frameTasks++;
+    }
     try { entry.callback(); }
     catch (error) {
       if (entry.options.errorMode === 'event') report(error);
@@ -118,6 +124,7 @@
         if (stopped) { resolve(); return; }
         if (frame || rendering) { reject(new Error('overlapping rendering phases')); return; }
         frame = { callback: callback, resolve: resolve, reject: reject };
+        frameTasks = 0;
         wake();
       });
     },

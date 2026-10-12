@@ -13,7 +13,9 @@ function runGuest(source, options = {}) {
   const addon = path.join(directory, 'addon.cjs');
   fs.writeFileSync(addon, `let polls=0; module.exports={
     initialize(){}, pollEvents(){return !globalThis.finished && ++polls<200;},
-    beginFrame(){}, renderFrame(){}, swapFrame(){},
+    beginFrame(){}, renderFrame(){}, swapFrame(){
+      if(${Number(options.frameCostMs) || 0})Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${Number(options.frameCostMs) || 0});
+    },
     runtime:{env(){return '';},monotonicNow(){return performance.now();},quit(){}},
     fs:{mountWritableOverlay(){},updateWritableOverlay(){},readBytes(){return Buffer.from('{}');},
       readText(){return '{}';},readBytesAsync(){return Promise.resolve(Buffer.from('{}'));}},
@@ -55,6 +57,34 @@ test('runner checkpoints between deferred tasks, timers, and animation callbacks
   for (let i = 0; i < 99; i++) assert.ok(trace.indexOf('micro:' + i) < trace.indexOf('task:' + (i + 1)), trace.join(','));
   assert.ok(trace.indexOf('timer:micro') < trace.indexOf('timer:B'), trace.join(','));
   assert.ok(trace.indexOf('raf:micro') < trace.indexOf('raf:B'), trace.join(','));
+});
+
+test('warm images become listener-ready before twenty saturated frames', () => {
+  const trace = runGuest(`
+    PMJS.images={shouldRetainPixels(){return false;},loadCompleted(){}};
+    globalThis.trackNativeResource=result=>result;
+    globalThis.releaseNativeResource=()=>{};
+    NativeHost.images.loadAsync=()=>Promise.resolve({width:48,height:32});
+    NativeHost.runtime.runScript(fs.readFileSync(${JSON.stringify(path.resolve(__dirname, '../js/pmjs-web/image-element.js'))},'utf8'));
+    let frames=0,ready=0;
+    const images=[];
+    function draw(){
+      frames++;
+      if(frames===1)for(let i=0;i<17;i++){
+        const image=new NativeImage();images.push(image);
+        image.onload=()=>{
+          if(!image.complete||image.width!==48||image.height!==32)throw new Error('incomplete image');
+          ready++;trace.push(['ready',i,frames]);
+        };
+        image.src='image-'+i+'.png';
+      }
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+    function complete(){return ready===17;}
+  `, { frameCostMs: 20 });
+  assert.equal(trace.length, 17);
+  assert.ok(trace.every(row => row[2] < 20), JSON.stringify(trace));
 });
 
 test('runner rejects a throwing Node filesystem completion instead of delivering more guest work', () => {

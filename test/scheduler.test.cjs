@@ -7,9 +7,9 @@ const path = require('node:path');
 const vm = require('node:vm');
 const timers = require('node:timers');
 
-function fixture(t) {
+function fixture(t, clock = performance) {
   const errors = [], fatals = [];
-  const context = vm.createContext({ PMJS: {}, performance, console,
+  const context = vm.createContext({ PMJS: {}, performance: clock, console,
     NativeHost: { runtime: { scheduling: { ...timers, onFatal: error => fatals.push(error) } } },
     pmjsReportEventError: error => errors.push(error) });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
@@ -72,13 +72,29 @@ test('rendering checkpoints hold resource callbacks and timer callbacks until su
   assert.ok(trace.indexOf('io-completion') > trace.indexOf('submit'));
 });
 
-test('uncapped rendering admits backlog work without draining the queue first', async t => {
-  const { context } = fixture(t), trace = [];
-  for (let i = 0; i < 130; i++) context.PMJS.tasks.enqueue(() => trace.push('task'));
-  for (let i = 0; i < 5; i++) await context.PMJS.tasks.runFrame(() => trace.push('frame'));
-  assert.deepEqual(trace.slice(0, 10), Array(5).fill(['task', 'frame']).flat());
-  await context.PMJS.tasks.idle();
-  assert.equal(trace.filter(entry => entry === 'task').length, 130);
+test('pending frames bound a replenishing queue by callback count', async t => {
+  const { context } = fixture(t, { now: () => 0 });
+  let calls = 0;
+  function replenish() { calls++; context.PMJS.tasks.enqueue(replenish); }
+  context.PMJS.tasks.enqueue(replenish);
+  await context.PMJS.tasks.runFrame(() => assert.equal(calls, 64));
+  const before = calls;
+  await context.PMJS.tasks.runFrame(() => assert.equal(calls - before, 64));
+});
+
+test('admission time includes callback microtasks and resets after expensive frames', async t => {
+  let time = 0, calls = 0;
+  const clock = { now: () => time };
+  const { context } = fixture(t, clock);
+  function replenish() {
+    calls++;
+    Promise.resolve().then(() => { time += 2; context.PMJS.tasks.enqueue(replenish); });
+  }
+  context.PMJS.tasks.enqueue(replenish);
+  await context.PMJS.tasks.runFrame(() => { assert.equal(calls, 2); time += 50; });
+  const before = calls;
+  clock.now = () => 0;
+  await context.PMJS.tasks.runFrame(() => assert.equal(calls - before, 2));
 });
 
 test('timers run without frames, checkpoint, accept arguments and cancel', async t => {
