@@ -17,6 +17,7 @@
     "drawGaugeUpgrade": "6c1a454402d1738caa29e93447d6a364f0036f93d0c8a08927027b763e3e8f81",
     "drawIcons": "f16041bc14f21d1237f4eef9670bd8f1c3803a59fd2e4e69d43a2af04a21b83b"
 };
+  var knownUpdates = ["ffd96184669de4d75cdbcd5ba90ccca6f0c5fa033941f1d020eead313f466154", "08c883b0fc84ea7a10655de81f00fde0b04ffde26ac66013291c2761625ce86a"];
   var knownConfig = {
     "faceX": "(boxWidth - 144) / 2",
     "faceY": "0",
@@ -108,7 +109,8 @@
       return;
     }
     var originalUpdate = prototype.updateRefreshes;
-    if (typeof originalUpdate !== 'function') {
+    if (typeof originalUpdate !== 'function' || knownUpdates.indexOf(crypto.createHash('sha256')
+        .update(Function.prototype.toString.call(originalUpdate).replace(/\r\n/g, '\n')).digest('hex')) < 0) {
       PMJS.optimizations.refuse(id, 'battle status refresh checks unavailable');
       return;
     }
@@ -122,22 +124,14 @@
 
     function eligible(window, previous) {
       var actor = window._actor, bitmap = window.contents;
-      var context = bitmap && bitmap._context;
       if (!previous || actor !== previous.actor || bitmap !== previous.bitmap ||
           window.windowskin !== previous.skin || window._redrawForLoad <= 4 ||
           !bitmap._canvas || bitmap._canvas.__pmjsContentRevision !== previous.revision ||
           !Number.isFinite(previous.revision) || bitmap.width !== previous.width || bitmap.height !== previous.height ||
-          bitmap.paintOpacity !== 255 || !context || context.globalAlpha !== 1 ||
-          context.globalCompositeOperation !== 'source-over' || !context._clipPaths || context._clipPaths.length ||
-          !equal(context._transform, [1, 0, 0, 1, 0, 0]) ||
-          !window._useFace || !window._useIcon || window._texts.length ||
-          !equal(window._gauges, [1, 5]) || window.lineHeight() !== 36 ||
+          !equal(styles.map(function(key) { return bitmap[key]; }), previous.style) ||
+          !supported(window) || window.lineHeight() !== 36 ||
           window.contentsWidth() !== bitmap.width || window.contentsHeight() !== bitmap.height ||
-          !matches(config, knownConfig) || !matches(config.gauges[1], knownGauges[1]) ||
-          !matches(config.gauges[5], knownGauges[5]) || config.gauges[1].absorb || config.gauges[5].absorb ||
-          globalThis.SRD.BattleStatusCustomizer !== config ||
-          !Object.keys(methods).every(function(name) { return window[name] === (name === 'refresh' ? optimizedRefresh : methods[name]); }) ||
-          !Object.keys(helpers).every(function(name) { return window[name] === helpers[name]; })) return false;
+          globalThis.SRD.BattleStatusCustomizer !== config) return false;
       if (window._isMaster && (!previous.masterCanvas ||
           window._statusWindow.contents._canvas !== previous.masterCanvas ||
           previous.masterCanvas.__pmjsContentRevision !== previous.masterRevision)) return false;
@@ -159,7 +153,8 @@
           else speedOnly = false;
         }
       }
-      if (speedOnly && dependency && eligible(this, cached.get(this))) {
+      var previous = speedOnly && cached.get(this);
+      if (speedOnly && dependency && eligible(this, previous)) {
         var max = Math.max(5000, BattleManager.highestBaseAgi() * 100);
         var current = actor._atbSpeed;
         if (Number.isFinite(current) && Number.isFinite(max) && max > 0 && current >= 0 && current <= max) {
@@ -174,7 +169,8 @@
             cached.delete(this);
           }
           dependency[0] = current;
-          remember(this);
+          previous.revision = bitmap._canvas.__pmjsContentRevision;
+          cached.set(this, previous);
           return;
         }
       }
@@ -183,14 +179,25 @@
       remember(this);
       return result;
     }
+    function supported(window) {
+      var bitmap = window.contents, context = bitmap && bitmap._context;
+      return bitmap && bitmap.paintOpacity === 255 && context && context.globalAlpha === 1 &&
+        context.globalCompositeOperation === 'source-over' && context._clipPaths && !context._clipPaths.length &&
+        equal(context._transform, [1, 0, 0, 1, 0, 0]) && window._useFace && window._useIcon &&
+        !window._texts.length && equal(window._gauges, [1, 5]) &&
+        matches(config, knownConfig) && matches(config.gauges[1], knownGauges[1]) &&
+        matches(config.gauges[5], knownGauges[5]) && !config.gauges[1].absorb && !config.gauges[5].absorb &&
+        Object.keys(helpers).every(function(name) { return window[name] === helpers[name]; }) &&
+        Object.keys(methods).every(function(name) { return window[name] === (name === 'refresh' ? optimizedRefresh : methods[name]); });
+    }
     function remember(window) {
       var bitmap = window.contents;
-      if (!window._actor || !bitmap || !bitmap._canvas) return;
+      if (!window._actor || !bitmap || !bitmap._canvas || !supported(window)) return;
       var masterCanvas = window._isMaster && window._statusWindow.contents._canvas;
       cached.set(window, { actor: window._actor, bitmap: bitmap, skin: window.windowskin,
         revision: bitmap._canvas.__pmjsContentRevision, width: bitmap.width, height: bitmap.height,
         masterCanvas: masterCanvas, masterRevision: masterCanvas && masterCanvas.__pmjsContentRevision,
-        state: state(window) });
+        style: styles.map(function(key) { return bitmap[key]; }), state: state(window) });
     }
     function optimizedUpdate() {
       updating.add(this);
