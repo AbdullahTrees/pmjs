@@ -8,7 +8,7 @@ const { performance } = require('node:perf_hooks');
 const { pipeline } = require('node:stream/promises');
 const { preparationFiles } = require('./preparation-files.cjs');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
-const { catalogInvalidator, readCatalog, publishCatalog } = require('./preparation-catalog.cjs');
+const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 
 const CACHE_VERSION = 1;
 const PROCESSOR_IDENTITY = { processor: 'lossless-images-v2', decoder: 'png-rgba-v1', pageSize: 2048 };
@@ -461,13 +461,13 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       for (const filename of await fsp.readdir(cacheRoot)) {
         if (!/^(index|catalog)-/.test(filename) || !filename.endsWith('.json') || filename === indexName) continue;
         const other = await readJson(path.join(cacheRoot, filename));
-        for (const key of other && Array.isArray(other.keys || other.payload?.keys) ? (other.keys || other.payload.keys) : []) if (HASH.test(key)) retained.add(key);
+        for (const key of retainedCatalogKeys(other)) retained.add(key);
       }
       const mapRoot = path.join(cacheRoot, 'maps');
       for (const filename of await fsp.readdir(mapRoot).catch(() => [])) {
         if (!/^catalog-[a-f0-9]{64}\.json$/.test(filename)) continue;
         const catalog = await readJson(path.join(mapRoot, filename));
-        for (const key of Array.isArray(catalog?.payload?.keys) ? catalog.payload.keys : []) if (HASH.test(key)) retained.add(key);
+        for (const key of retainedCatalogKeys(catalog)) retained.add(key);
       }
       if (fs.existsSync(mapRoot)) await retainLeases(mapRoot, retained);
       await retainLeases(cacheRoot, retained);

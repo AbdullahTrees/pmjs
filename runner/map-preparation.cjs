@@ -8,7 +8,7 @@ const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
 const { preparationFiles } = require('./preparation-files.cjs');
-const { catalogInvalidator, readCatalog, publishCatalog, checksum } = require('./preparation-catalog.cjs');
+const { catalogInvalidator, readCatalog, publishCatalog, checksum, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 const { COMPILER_VERSION, mapContract, geometryEstimate, engineTilemap, compileRpgMap, compileTiledMap } = require('./map-demand.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const identity = object => hash(JSON.stringify(object));
@@ -437,7 +437,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
       const retained = new Set([...keys, ...snapshots.keys()]);
       for (const file of await fsp.readdir(root)) if (/^(index|catalog)-[a-f0-9]{64}\.json$/.test(file) && file !== path.basename(indexFile)) {
         const index = await readJson(path.join(root, file)).catch(() => null);
-        for (const key of [...index && (index.keys || index.payload?.keys) || [], ...index && index.snapshots || []]) if (HASH.test(key)) retained.add(key);
+        for (const key of retainedCatalogKeys(index)) retained.add(key);
       }
       await retainLeases(root, retained);
       for (const file of await fsp.readdir(path.join(root, 'entries'))) if (file.startsWith('.stage-') || HASH.test(file) && !retained.has(file))

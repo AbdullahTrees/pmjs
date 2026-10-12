@@ -11,11 +11,11 @@ const HASH = /^[a-f0-9]{64}$/;
 async function readJson(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (_) { return null; }
 }
-async function writeJson(file, data) {
+async function writeJson(file, data, flush = true) {
   const handle = await fsp.open(file, 'wx');
   try {
     await handle.writeFile(JSON.stringify(data) + '\n');
-    await handle.sync();
+    if (flush) await handle.sync();
   } finally { await handle.close(); }
 }
 const activeLeases = new Map();
@@ -37,7 +37,11 @@ function ownerAlive(owner) {
 }
 async function createLease(cacheRoot, keys) {
   const file = path.join(cacheRoot, `.lease-${process.pid}-${crypto.randomBytes(8).toString('hex')}.json`);
-  await writeJson(file, { pid: process.pid, hostname: os.hostname(), start: processStart(process.pid), keys });
+  // The preparation lock serializes every lease reader and writer, so page-cache
+  // visibility is sufficient: leases only protect live processes, making them
+  // meaningless after a crash that durability would survive. Skipping fsync here
+  // removes one slow sync per launch without weakening cleanup safety.
+  await writeJson(file, { pid: process.pid, hostname: os.hostname(), start: processStart(process.pid), keys }, false);
   function release() {
     activeLeases.delete(file);
     try { fs.unlinkSync(file); } catch (_) {}

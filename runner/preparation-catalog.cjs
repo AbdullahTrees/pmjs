@@ -5,6 +5,7 @@ const syncFs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const checksum = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const checksumRaw = value => crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 const HASH = /^[a-f0-9]{64}$/;
 function relative(root, file) {
   const value = path.relative(path.resolve(root), path.resolve(file));
@@ -30,9 +31,19 @@ function paths(payload, root, encode) {
 async function readCatalog(file, binding, root) {
   try {
     const catalog = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (catalog.version !== 2 || catalog.binding !== checksum(binding) || catalog.checksum !== checksum(catalog.payload) ||
-        !Array.isArray(catalog.payload.keys) || !catalog.payload.keys.every(key => HASH.test(key))) return null;
-    const payload = catalog.payload;
+    if (catalog.binding !== checksum(binding)) return null;
+    // Version 3 stores the payload as a string so integrity is verified by
+    // hashing the stored bytes: no canonical re-serialization pass is needed.
+    // Version 2 (payload object, checksum over re-serialization) stays readable
+    // so existing caches keep their fast path across the upgrade.
+    let payload;
+    if (catalog.version === 3 && typeof catalog.payload === 'string') {
+      if (catalog.checksum !== checksumRaw(catalog.payload)) return null;
+      payload = JSON.parse(catalog.payload);
+    } else if (catalog.version === 2 && catalog.checksum === checksum(catalog.payload)) {
+      payload = catalog.payload;
+    } else return null;
+    if (!Array.isArray(payload.keys) || !payload.keys.every(key => HASH.test(key))) return null;
     if (!Array.isArray(payload.entries) || payload.entries.length > 100000 || !payload.summary ||
         payload.summary.installed !== payload.entries.length ||
         !Object.values(payload.summary).every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return null;
@@ -43,13 +54,13 @@ async function readCatalog(file, binding, root) {
   } catch (_) { return null; }
 }
 async function publishCatalog(file, binding, root, payload) {
-  payload = paths(payload, root, true);
+  payload = JSON.stringify(paths(payload, root, true));
   const stage = file+'.stage-'+process.pid;
   await fs.rm(stage, { force: true });
   try {
     const handle = await fs.open(stage, 'wx');
     try {
-      await handle.writeFile(JSON.stringify({ version: 2, binding: checksum(binding), checksum: checksum(payload), payload }));
+      await handle.writeFile(JSON.stringify({ version: 3, binding: checksum(binding), checksum: checksumRaw(payload), payload }));
       await handle.sync();
     } finally { await handle.close(); }
     await fs.rename(stage, file);
@@ -69,4 +80,22 @@ function catalogInvalidator(file, logger) {
     }
   };
 }
-module.exports = { checksum, readCatalog, publishCatalog, catalogInvalidator };
+function retainedCatalogKeys(record) {
+  const keys = [];
+  const collect = value => {
+    if (Array.isArray(value)) for (const key of value) if (HASH.test(key)) keys.push(key);
+  };
+  if (!record || typeof record !== 'object') return keys;
+  collect(record.keys);
+  collect(record.snapshots);
+  let payload = record.payload;
+  // Version 3 stores the payload as a string; retention only needs its keys,
+  // so a damaged payload degrades to retaining nothing extra instead of failing.
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch (_) { return keys; }
+  }
+  collect(payload && payload.keys);
+  return keys;
+}
+
+module.exports = { checksum, readCatalog, publishCatalog, catalogInvalidator, retainedCatalogKeys };
