@@ -424,6 +424,10 @@ async function run(input) {
       displayWidth: physicalDisplay.width,
       displayHeight: physicalDisplay.height
     };
+    if (!native.pollEvents()) { native.runtime.quit(); return; }
+    // Preparation input belongs to the host screen, not the guest's first step.
+    native.input.snapshot();
+    native.input.consumePressed();
     try {
       vm.runInThisContext(fs.readFileSync(options.bootstrap, 'utf8'), {
         filename: options.bootstrap, displayErrors: true,

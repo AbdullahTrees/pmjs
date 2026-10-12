@@ -56,6 +56,10 @@ EventTarget.prototype.addEventListener = function(type, listener) {
   if (!listeners.some(function(entry) { return entry.callback === listener; })) {
     listeners.push({ callback: listener, removed: false });
   }
+  if (typeof documentTarget !== 'undefined' && this === documentTarget &&
+      (type === 'gamepadconnected' || type === 'gamepaddisconnected')) {
+    PMJS.web.observeGamepads();
+  }
 };
 
 EventTarget.prototype.removeEventListener = function(type, listener) {

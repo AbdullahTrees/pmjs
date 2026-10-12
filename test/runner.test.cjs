@@ -17,16 +17,17 @@ function fixture(source) {
   return { addon, gameRoot: root, bootstrap,
     saveRoot: path.join(root, 'save'), width: 320, height: 240, title: 'Test' };
 }
-function native(polls = [false]) {
+function native(polls = [true, false]) {
   let now = 0;
   return { initialize() {}, pollEvents: () => polls.shift() ?? false,
     finishLogicStep() {}, beginFrame() {}, renderFrame() {}, swapFrame() {},
     runtime: { env() { return ''; }, monotonicNow: () => (now += 100), quit() {} },
     fs: { mountWritableOverlay() {}, updateWritableOverlay() {}, readText() { return null; } },
-    render: {}, scene: {}, images: {}, assets: {}, input: {}, canvas: {}, media: {} };
+    render: {}, scene: {}, images: {}, assets: {},
+    input: { snapshot() { return {}; }, consumePressed() {} }, canvas: {}, media: {} };
 }
 
-function writeAddon(root, polls = [false]) {
+function writeAddon(root, polls = [true, false]) {
   const addon = path.join(root, 'addon.cjs');
   fs.writeFileSync(addon, `module.exports = (${native.toString()})(${JSON.stringify(polls)});`);
   return addon;
@@ -180,6 +181,87 @@ test('runner loads its addon and bootstrap while allowing Node jobs to finish', 
   assert.equal(globalThis.NativeHost.render.setLogicalSize, undefined);
 });
 
+for (const preparation of ['off', 'enabled', 'warm']) {
+  for (const held of [false, true]) {
+    test(`guest handoff discards startup input with preparation ${preparation} and controls ${held ? 'held' : 'released'}`, async () => {
+      const options = fixture(`
+        NativeHost.input.checkBoot();
+        globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};
+      `);
+      options.assetPreparation = preparation === 'off' ? 'off' : 'on';
+      options.mapPreparation = 'off';
+      const host = require(options.addon);
+      const calls = [];
+      let booted, state, boots = 0;
+      host.initialize = () => { booted = false; };
+      host.pollEvents = () => {
+        if (booted) return false;
+        calls.push('poll');
+        state = { keysDown: held ? [13] : [], keysPressed: [13],
+          keyEvents: [{ keyCode: 13, down: true }, { keyCode: 13, down: false }],
+          pointerEvents: [{ type: 'mousedown' }, { type: 'mouseup' }],
+          gamepads: [{ index: 0, instance: 7, connected: true,
+            buttonsDown: held ? [0] : [], buttonsPressed: [0], axes: held ? [0.75, 0] : [0, 0] }] };
+        return true;
+      };
+      host.input.snapshot = () => {
+        calls.push('snapshot');
+        const result = structuredClone(state);
+        state.keyEvents = [];
+        state.pointerEvents = [];
+        return result;
+      };
+      host.input.consumePressed = () => {
+        calls.push('consume');
+        state.keysPressed = [];
+        state.gamepads[0].buttonsPressed = [];
+      };
+      host.input.checkBoot = () => {
+        assert.deepEqual(calls.slice(-3), ['poll', 'snapshot', 'consume']);
+        const first = host.input.snapshot();
+        assert.deepEqual(first.keysPressed, []);
+        assert.deepEqual(first.keyEvents, []);
+        assert.deepEqual(first.pointerEvents, []);
+        assert.deepEqual(first.keysDown, held ? [13] : []);
+        assert.deepEqual(first.gamepads, [{ index: 0, instance: 7, connected: true,
+          buttonsDown: held ? [0] : [], buttonsPressed: [], axes: held ? [0.75, 0] : [0, 0] }]);
+        booted = true;
+        boots++;
+      };
+      await run(options);
+      if (preparation === 'warm') await run(options);
+      assert.equal(boots, preparation === 'warm' ? 2 : 1);
+    });
+  }
+}
+
+test('quit in the final event batch closes the host without starting the guest', async () => {
+  const options = fixture('throw new Error("guest must not boot after quit");');
+  options.assetPreparation = 'off';
+  const host = require(options.addon);
+  let quits = 0;
+  host.pollEvents = () => false;
+  host.runtime.quit = () => { quits++; };
+  host.input.snapshot = () => { throw new Error('input must not be sampled after quit'); };
+  host.input.consumePressed = () => { throw new Error('input must not be consumed after quit'); };
+  await run(options);
+  assert.equal(quits, 1);
+});
+
+for (const operation of ['snapshot', 'consumePressed']) {
+  test(`input handoff ${operation} failure closes the host and prevents guest boot`, async () => {
+    const options = fixture('throw new Error("guest must not boot after handoff failure");');
+    options.assetPreparation = 'off';
+    const host = require(options.addon);
+    const failure = new Error('input handoff failed');
+    let quits = 0;
+    host.input[operation] = () => { throw failure; };
+    host.runtime.quit = () => { quits++; };
+    await assert.rejects(run(options), error => error === failure);
+    assert.equal(quits, 1);
+  });
+}
+
 test('runner loads an explicit Greenworks module in the host before bootstrap', async () => {
   const options = fixture(`
     if (!NativeHost.greenworks.hostProcess) throw new Error('backend loaded with guest process');
@@ -225,7 +307,8 @@ test('runner closes the host on frame failure and preserves the original error',
   const options = fixture('globalThis.__pmjsTick=()=>{};globalThis.__pmjsRender=()=>{};');
   const host = require(options.addon);
   const failure = new Error('frame failed');
-  host.pollEvents = () => { throw failure; };
+  let polls = 0;
+  host.pollEvents = () => { if (polls++ === 0) return true; throw failure; };
   let quits = 0;
   host.runtime.quit = () => { quits++; throw new Error('shutdown failed'); };
   await assert.rejects(run(options), error => error === failure);
@@ -267,7 +350,7 @@ test('bootstrap and tick failures reject the run', async () => {
   const bootstrap = fixture('throw new Error("bootstrap failure")');
   await assert.rejects(run(bootstrap), /bootstrap failure/);
   const tick = fixture('globalThis.__pmjsTick=()=>{throw new Error("tick failure")};globalThis.__pmjsRender=()=>{};');
-  tick.addon = writeAddon(tick.gameRoot, [true]);
+  tick.addon = writeAddon(tick.gameRoot, [true, true]);
   await assert.rejects(run(tick), /tick failure/);
 });
 

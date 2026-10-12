@@ -130,6 +130,8 @@ Object.defineProperties(GamepadButton.prototype, {
 globalThis.GamepadButton = GamepadButton;
 var nativeGamepads = [];
 var nativeGamepadExposed = false;
+var nativeGamepadObserving = false;
+var nativeGamepadExposurePending = false;
 var pendingKeyReleases = [];
 var pendingPadReleases = [];
 var pendingGamepadRemovals = [];
@@ -138,6 +140,30 @@ PMJS.web.consumeGamepadRemovals = function() {
   pendingGamepadRemovals = [];
   return removals;
 };
+PMJS.web.observeGamepads = function() {
+  nativeGamepadObserving = true;
+};
+function queueGamepadConnection(pad) {
+  PMJS.tasks.enqueue(function() {
+    if (pad.connected && nativeGamepads[pad.index] === pad) {
+      globalThis.dispatchEvent({ type: 'gamepadconnected', gamepad: pad });
+    }
+  }, { errorMode: 'event' });
+}
+function exposeNativeGamepads() {
+  if (nativeGamepadExposed || nativeGamepadExposurePending) return;
+  nativeGamepadExposurePending = true;
+  PMJS.tasks.enqueue(function() {
+    nativeGamepadExposurePending = false;
+    if (!nativeWindowState.focused || !nativeWindowState.visible) return;
+    nativeGamepadExposed = true;
+    nativeGamepads.forEach(function(pad) {
+      if (pad && pad.connected) {
+        globalThis.dispatchEvent({ type: 'gamepadconnected', gamepad: pad });
+      }
+    });
+  }, { errorMode: 'event' });
+}
 function dispatchNativeKey(source) {
   if (!globalThis.document || typeof document.dispatchEvent !== 'function') return;
   var event = { type: source.down ? 'keydown' : 'keyup',
@@ -183,7 +209,10 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: t
   language: 'en-US',
   isCocoonJS: false,
   plugins: { namedItem: function() { return null; } },
-  getGamepads: function() { return nativeGamepadExposed ? nativeGamepads.slice() : []; }
+  getGamepads: function() {
+    PMJS.web.observeGamepads();
+    return nativeGamepadExposed ? nativeGamepads.slice() : [];
+  }
 } });
 globalThis.__pmjsReceiveInput = function(state) {
   if (!state) return;
@@ -191,27 +220,9 @@ globalThis.__pmjsReceiveInput = function(state) {
   if (PMJS.web.presentation) PMJS.web.presentation.sync();
   (state.pointerEvents || []).forEach(dispatchNativePointer);
   var pads = state.gamepads || [];
-  if (!nativeGamepadExposed && nativeWindowState.focused) {
-    for (var interactionIndex = 0; interactionIndex < pads.length; interactionIndex++) {
-      var interactionPad = pads[interactionIndex];
-      if (!interactionPad || interactionPad.connected === false) continue;
-      var buttonsDown = interactionPad.buttonsDown || [];
-      var buttonsPressed = interactionPad.buttonsPressed || [];
-      var axes = interactionPad.axes || [];
-      var buttonMoved = buttonsDown.length > 0 || buttonsPressed.length > 0;
-      var axisMoved = false;
-      for (var axisIndex = 0; axisIndex < axes.length; axisIndex++) {
-        if (Math.abs(Number(axes[axisIndex]) || 0) > 0.5) {
-          axisMoved = true;
-          break;
-        }
-      }
-      if (buttonMoved || axisMoved) {
-        nativeGamepadExposed = true;
-        break;
-      }
-    }
-  }
+  if (!nativeGamepadObserving) pads = [];
+  var gamepadActive = nativeWindowState.focused && nativeWindowState.visible;
+  var gamepadInteraction = false;
   for (var index = 0; index < nativeGamepads.length; index++) {
     var oldPad = nativeGamepads[index];
     if (oldPad && (!pads[index] || pads[index].connected === false ||
@@ -220,7 +231,14 @@ globalThis.__pmjsReceiveInput = function(state) {
       oldPad.connected = false;
       for (var cleared = 0; cleared < oldPad.buttons.length; cleared++) oldPad.buttons[cleared]._value = 0;
       oldPad.axes = [0, 0, 0, 0];
-      if (nativeGamepadExposed) pendingGamepadRemovals.push(oldPad.index);
+      if (nativeGamepadExposed) {
+        pendingGamepadRemovals.push(oldPad.index);
+        PMJS.tasks.enqueue((function(removed) {
+          return function() {
+            globalThis.dispatchEvent({ type: 'gamepaddisconnected', gamepad: removed });
+          };
+        })(oldPad), { errorMode: 'event' });
+      }
       nativeGamepads[index] = null;
     }
   }
@@ -233,18 +251,38 @@ globalThis.__pmjsReceiveInput = function(state) {
     var pad = nativeGamepads[i];
     if (!pad || pad._instance !== sourcePad.instance) {
       pad = { id: sourcePad.id, index: i, connected: true, mapping: 'standard',
-        timestamp: 0, buttons: [], axes: [0, 0, 0, 0], _instance: sourcePad.instance };
+        timestamp: 0, buttons: [], axes: [0, 0, 0, 0], _instance: sourcePad.instance,
+        _neutralButtons: [], _neutralAxes: [] };
       for (var button = 0; button < 17; button++) pad.buttons.push(new GamepadButton());
       nativeGamepads[i] = pad;
+      if (nativeGamepadExposed) queueGamepadConnection(pad);
     }
     pad.timestamp = Date.now();
     pad.axes = (sourcePad.axes || [0, 0, 0, 0]).slice();
+    for (var axis = 0; axis < pad.axes.length; axis++) {
+      if (!gamepadActive) pad.axes[axis] = 0;
+      // A newly observed control must first report rest before it can interact.
+      if (!pad._neutralAxes[axis]) {
+        if (gamepadActive && Math.abs(pad.axes[axis]) < 0.1) pad._neutralAxes[axis] = true;
+        else pad.axes[axis] = 0;
+      }
+      if (Math.abs(pad.axes[axis]) > 0.5) gamepadInteraction = true;
+    }
     for (var j = 0; j < 17; j++) {
-      var held = sourcePad.buttonsDown.indexOf(j) >= 0;
-      var edge = sourcePad.buttonsPressed.indexOf(j) >= 0;
+      var held = gamepadActive && sourcePad.buttonsDown.indexOf(j) >= 0;
+      var edge = gamepadActive && sourcePad.buttonsPressed.indexOf(j) >= 0;
+      if (!pad._neutralButtons[j]) {
+        if (gamepadActive && !held && !edge) pad._neutralButtons[j] = true;
+        else { held = false; edge = false; }
+      }
+      if (held || edge) gamepadInteraction = true;
       var pending = pendingPadReleases.some(function(release) {
         return release.pad === pad && release.button === j;
       });
+      if (!nativeGamepadExposed && !held && !edge && !pending && pad.buttons[j].pressed) {
+        pendingPadReleases.push({ pad: pad, button: j });
+        pending = true;
+      }
       if (held && pending) {
         pendingPadReleases = pendingPadReleases.filter(function(release) {
           return release.pad !== pad || release.button !== j;
@@ -256,6 +294,9 @@ globalThis.__pmjsReceiveInput = function(state) {
     }
   }
   nativeGamepads.length = pads.length;
+  if (gamepadInteraction && gamepadActive) {
+    exposeNativeGamepads();
+  }
   var events = state.keyEvents || [];
   var pressed = state.keysPressed || [];
   var heldKeys = state.keysDown || [];
@@ -278,6 +319,8 @@ globalThis.__pmjsReceiveInput = function(state) {
 globalThis.__pmjsFinishInputStep = function() {
   for (var i = 0; i < pendingKeyReleases.length; i++) dispatchNativeKey(pendingKeyReleases[i]);
   pendingKeyReleases.length = 0;
+  // A hidden controller's first tap is not consumed by an empty guest poll.
+  if (!nativeGamepadExposed) return;
   for (var j = 0; j < pendingPadReleases.length; j++) {
     var release = pendingPadReleases[j];
     release.pad.buttons[release.button]._value = 0;

@@ -81,6 +81,14 @@ globalThis.CanvasRenderingContext2D = CanvasContext2D;
 globalThis.addEventListener = EventTarget.prototype.addEventListener.bind(documentTarget);
 globalThis.removeEventListener = EventTarget.prototype.removeEventListener.bind(documentTarget);
 globalThis.dispatchEvent = EventTarget.prototype.dispatchEvent.bind(documentTarget);
+['gamepadconnected', 'gamepaddisconnected'].forEach(function(type) {
+  Object.defineProperty(globalThis, 'on' + type, {
+    configurable: true,
+    get: function() { return documentTarget['on' + type]; },
+    set: function(listener) { documentTarget['on' + type] = listener; }
+  });
+  EventTarget.defineEventHandlerProperty(documentTarget, type);
+});
 
 function setNativeFullscreen(enabled, element) {
   NativeHost.runtime.setFullscreen(enabled);

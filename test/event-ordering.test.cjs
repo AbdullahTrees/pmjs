@@ -19,7 +19,8 @@ function runGuest(source, options = {}) {
     runtime:{env(){return '';},monotonicNow(){return performance.now();},quit(){}},
     fs:{mountWritableOverlay(){},updateWritableOverlay(){},readBytes(){return Buffer.from('{}');},
       readText(){return '{}';},readBytesAsync(){return Promise.resolve(Buffer.from('{}'));}},
-    render:{},scene:{},images:{},assets:{},input:{},canvas:{},media:{}
+    render:{},scene:{},images:{},assets:{},
+    input:{snapshot(){return {};},consumePressed(){}},canvas:{},media:{}
   };`);
   const bootstrap = path.join(directory, 'bootstrap.js');
   fs.writeFileSync(bootstrap, `globalThis.PMJS={config:{}};
