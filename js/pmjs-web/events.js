@@ -53,14 +53,20 @@ EventTarget.prototype.addEventListener = function(type, listener) {
     listeners = [];
     this._listeners[type] = listeners;
   }
-  if (listeners.indexOf(listener) < 0) listeners.push(listener);
+  if (!listeners.some(function(entry) { return entry.callback === listener; })) {
+    listeners.push({ callback: listener, removed: false });
+  }
 };
 
 EventTarget.prototype.removeEventListener = function(type, listener) {
   var listeners = this._listeners[type];
   if (!listeners) return;
-  var index = listeners.indexOf(listener);
-  if (index >= 0) listeners.splice(index, 1);
+  var index = listeners.findIndex(function(entry) { return entry.callback === listener; });
+  if (index >= 0) {
+    // Dispatch snapshots retain registrations, so removal must invalidate them too.
+    listeners[index].removed = true;
+    listeners.splice(index, 1);
+  }
 };
 
 EventTarget.defineEventHandlerProperty = function(prototype, type) {
@@ -91,7 +97,7 @@ EventTarget.prototype.dispatchEvent = function(event) {
     if (returned === false && typeof event.preventDefault === 'function') event.preventDefault();
   }
   for (var index = 0; index < listeners.length; index++) {
-    pmjsInvokeEventHandler(this, listeners[index], event);
+    if (!listeners[index].removed) pmjsInvokeEventHandler(this, listeners[index].callback, event);
   }
   return !event.defaultPrevented;
 };
@@ -102,14 +108,14 @@ function pmjsDispatchHostEvent(target, event, isCurrent) {
   event.currentTarget = target;
   var listeners = (target._listeners[event.type] || []).slice();
   if (!target._eventHandlers[event.type] && typeof target['on' + event.type] === 'function') {
-    listeners.unshift(target['on' + event.type]);
+    listeners.unshift({ callback: target['on' + event.type], removed: false });
   }
   var chain = Promise.resolve();
   listeners.forEach(function(listener) {
     chain = chain.then(function() {
       return PMJS.tasks.invoke(function() {
-        if (PMJS.tasks.stopped || isCurrent && !isCurrent()) return;
-        pmjsInvokeEventHandler(target, listener, event);
+        if (listener.removed || PMJS.tasks.stopped || isCurrent && !isCurrent()) return;
+        pmjsInvokeEventHandler(target, listener.callback, event);
       }, 'event');
     });
   });
