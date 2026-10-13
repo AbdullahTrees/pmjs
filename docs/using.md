@@ -10,7 +10,7 @@ Point PMJS at an RPG Maker MV or MZ game:
 The path can be the engine directory or a game installation with `www/`.
 If you are already in that directory, run `pmjs` with no arguments. PMJS
 creates a JavaScript bootstrap in your cache on first launch and refreshes it
-when game scripts, adapter selection, configuration, or runtime modules
+when game scripts, patch selection, configuration, or runtime modules
 change. It does not write to the original game.
 
 Only run games you trust. Game and plugin scripts have access to Node APIs;
@@ -18,11 +18,10 @@ PMJS does not sandbox them.
 
 ## Configuration and saves
 
-Pass `--config FILE` for runtime configuration, `--manifest FILE` for a
-shared adapter selection manifest, and repeat `--adapter FILE` for custom
-JavaScript adapters in load order. These files are included when you make a
-bundle. Adapters are authored compatibility code; PMJS does not create fixes
-for a game's plugins.
+Pass `--config FILE` for runtime configuration, `--manifest FILE` to select
+known plugin patches, and repeat `--patch FILE` for your own JavaScript patches
+in load order. These files are included when you make a bundle. You write
+custom patches yourself; PMJS does not create fixes for a game's plugins.
 
 `--state DIR` chooses the bootstrap cache directory, `--save-root DIR`
 chooses where a game saves, and `--asset-cache-root DIR` chooses where
@@ -38,7 +37,7 @@ it keeps the previous image visible while that image reloads. Set it to
 
 ## Run a bundle
 
-A [game bundle](porting.md) keeps your adapter setup together. Put the
+A [game bundle](porting.md) keeps your patch setup together. Put the
 original game's `www` contents inside its empty `gamedata/` directory,
 then run:
 

@@ -9,7 +9,7 @@ dist/pmjs/bin/pmjs bundle /path/to/game --output /path/to/bundle
 ```
 
 The output contains `pmjs.json`, a JavaScript bootstrap, an asset index,
-your selected configuration and adapters, and an empty `gamedata/`
+your selected configuration and patches, and an empty `gamedata/`
 directory. The original game files stay where they are. Run the bundle
 locally with:
 
@@ -17,18 +17,19 @@ locally with:
 dist/pmjs/bin/pmjs /path/to/bundle --game /path/to/game
 ```
 
-PMJS detects MV or MZ and selects known shared plugin adapters where
-supported. To choose shared adapters explicitly or add your own JavaScript,
+PMJS detects MV or MZ and selects known plugin patches where
+supported. To choose those patches explicitly or add your own JavaScript,
 pass the same options when making the bundle:
 
 ```sh
 dist/pmjs/bin/pmjs bundle /path/to/game --output /path/to/bundle \
   --config /path/to/config.json --manifest /path/to/selection.json \
-  --adapter /path/to/first.js --adapter /path/to/second.js
+  --patch /path/to/first.js --patch /path/to/second.js
 ```
 
-Custom adapters are included in that order. You write them; bundle creation
-does not invent compatibility fixes. Use an empty destination and move the
+Custom patches keep their filenames in `patches/` and load in the order shown
+in `pmjs.json`. Duplicate filenames get a numeric suffix. You write the patches;
+bundle creation does not invent compatibility fixes. Use an empty destination and move the
 completed bundle wherever you need it.
 
 ## Asset preparation
@@ -67,12 +68,20 @@ dist/pmjs/bin/pmjs package /path/to/bundle \
   --runtime dist/pmjs-arm64 --output /path/to/game.zip
 ```
 
-The ZIP contains a PortMaster launcher, your bundle, the ARM64 runtime and
-its notices, and an empty `gamedata/`. It carries the asset index and
+The build host needs `mksquashfs` from `squashfs-tools` for this step.
+
+The ZIP contains a PortMaster launcher, your bundle, a gzip-compressed
+`runtime.squashfs` and an empty `gamedata/`. The launcher mounts the runtime
+read-only while the game runs and unmounts it on exit. The image includes the
+runtime's notices. The ZIP carries the asset index and
 generated pages only if they are in the bundle. The packager checks the
 runtime installation, copies its library closure, strips binaries without
 changing loader symbols, and includes matching source materials where
 required.
+
+The target firmware needs loop-mount and gzip SquashFS support. If it cannot
+mount SquashFS, pass `--flat-runtime` to `pmjs package` to put the runtime
+files directly in the ZIP instead.
 
 Extract the ZIP into the firmware's ports directory and copy the game's
 `www` contents into its `gamedata/` directory. Then launch it from the

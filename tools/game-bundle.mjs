@@ -34,14 +34,15 @@ function regularRelative(root, name) {
 export function readBundle(directory) {
   const root = fs.realpathSync(directory);
   const descriptor = JSON.parse(fs.readFileSync(path.join(root, 'pmjs.json'), 'utf8'));
+  const patches = descriptor.patches ?? descriptor.adapters;
   if (descriptor.schema !== 1 || descriptor.kind !== 'pmjs-game-bundle' ||
-      !Array.isArray(descriptor.adapters) || !descriptor.adapters.every(name => typeof name === 'string')) {
+      !Array.isArray(patches) || !patches.every(name => typeof name === 'string')) {
     throw new Error('unsupported PMJS bundle descriptor');
   }
-  for (const name of [descriptor.bootstrap, descriptor.config, descriptor.manifest, ...descriptor.adapters]) {
+  for (const name of [descriptor.bootstrap, descriptor.config, descriptor.manifest, ...patches]) {
     if (name) regularRelative(root, name);
   }
-  const files = [descriptor.config, descriptor.manifest, ...descriptor.adapters].filter(Boolean);
+  const files = [descriptor.config, descriptor.manifest, ...patches].filter(Boolean);
   const bootstrapCurrent = descriptor.compositionFiles &&
     Object.keys(descriptor.compositionFiles).length === files.length &&
     files.every(name => descriptor.compositionFiles[name] === sha256(path.join(root, name)));
@@ -62,7 +63,7 @@ export function readBundle(directory) {
   return { root, descriptor, assetIndex, bootstrapCurrent,
     config: descriptor.config && path.join(root, descriptor.config),
     manifest: descriptor.manifest && path.join(root, descriptor.manifest),
-    adapters: descriptor.adapters.map(name => path.join(root, name)) };
+    adapters: patches.map(name => path.join(root, name)) };
 }
 
 export async function createBundle({ root, share, game, output, config, manifest, adapters = [],
@@ -106,16 +107,27 @@ export async function createBundle({ root, share, game, output, config, manifest
         fs.writeFileSync(path.join(stage, configName), JSON.stringify(original, null, 2) + '\n');
       }
     }
-    const manifestName = copy(manifest, 'adapters.json');
-    fs.mkdirSync(path.join(stage, 'adapters'));
-    const adapterNames = adapters.map((file, index) =>
-      copy(file, path.join('adapters', `${String(index).padStart(3, '0')}.js`)));
+    const manifestName = copy(manifest, 'plugin-selection.json');
+    fs.mkdirSync(path.join(stage, 'patches'));
+    const usedNames = new Set();
+    const patchNames = adapters.map(file => {
+      const original = path.basename(file);
+      if (!original || original.includes('\\')) throw new Error(`invalid patch filename: ${file}`);
+      const extension = path.extname(original);
+      const stem = original.slice(0, original.length - extension.length);
+      let name = original;
+      for (let suffix = 2; usedNames.has(name.toLowerCase()); ++suffix) {
+        name = `${stem}-${suffix}${extension}`;
+      }
+      usedNames.add(name.toLowerCase());
+      return copy(file, path.join('patches', name));
+    });
     const bootstrap = 'bootstrap.js';
     const args = [path.join(share, 'tools/build-js-runtime.mjs'), '--game', game,
       '--output', path.join(stage, bootstrap)];
     if (configName) args.push('--config', path.join(stage, configName));
     if (manifestName) args.push('--manifest', path.join(stage, manifestName));
-    for (const name of adapterNames) args.push('--adapter', path.join(stage, name));
+    for (const name of patchNames) args.push('--adapter', path.join(stage, name));
     const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`bootstrap generation failed (${result.signal || result.status})`);
@@ -134,9 +146,9 @@ export async function createBundle({ root, share, game, output, config, manifest
     const descriptor = { schema: 1, kind: 'pmjs-game-bundle', title, game: 'gamedata',
       bootstrap, bootstrapSha256: sha256(path.join(stage, bootstrap)),
       runtimeIdentity, bootstrapGameInputs: gameDeclarations(game),
-      compositionFiles: Object.fromEntries([configName, manifestName, ...adapterNames]
+      compositionFiles: Object.fromEntries([configName, manifestName, ...patchNames]
         .filter(Boolean).map(name => [name, sha256(path.join(stage, name))])),
-      config: configName, manifest: manifestName, adapters: adapterNames,
+      config: configName, manifest: manifestName, patches: patchNames,
       assetIndex: index ? 'asset-index.json' : null,
       assetIndexSha256: index ? sha256(path.join(stage, 'asset-index.json')) : null,
       assets: includeAssets ? 'assets' : null };

@@ -14,11 +14,11 @@ const args = process.argv.slice(3);
 const first = args.shift();
 const help = `PMJS ${info.version} (${info.source.commit.slice(0, 12)}${info.source.dirty ? ', modified' : ''})
 Usage:
-  pmjs GAME [--config FILE] [--manifest FILE] [--adapter FILE ...]
+  pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
-      [--config FILE] [--manifest FILE] [--adapter FILE ...]
+      [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs BUNDLE [--game DIR]
-  pmjs package BUNDLE --runtime DIR --output ZIP
+  pmjs package BUNDLE --runtime DIR --output ZIP [--flat-runtime]
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
@@ -37,12 +37,12 @@ function parse(values, names, requireGame = true) {
   const result = { adapters: [] };
   for (let index = 0; index < values.length; index += 2) {
     const key = values[index];
-    if (!names.includes(key) || (key !== '--adapter' && result[key]) ||
+    if (!names.includes(key) || (key !== '--adapter' && key !== '--patch' && result[key]) ||
         !values[index + 1] || values[index + 1].startsWith('--')) {
       throw new Error(`invalid argument: ${key}`);
     }
     const value = path.resolve(values[index + 1]);
-    if (key === '--adapter') result.adapters.push(value);
+    if (key === '--adapter' || key === '--patch') result.adapters.push(value);
     else result[key] = value;
   }
   if (requireGame && !result['--game']) throw new Error('--game is required');
@@ -148,7 +148,7 @@ async function main() {
     if (args.filter(value => value === '--include-assets').length > 1 ||
         args.filter(value => value === '--no-index').length > 1) throw new Error('duplicate bundle option');
     const options = parse(args.filter(value => value !== '--include-assets' && value !== '--no-index'),
-      ['--output', '--config', '--manifest', '--adapter'], false);
+      ['--output', '--config', '--manifest', '--patch', '--adapter'], false);
     if (!options['--output']) throw new Error('--output is required');
     const game = gameDirectory(gameArgument);
     if (includeAssets) console.warn('[pmjs] Generated pages can contain game artwork. Share this bundle only when allowed.');
@@ -161,11 +161,14 @@ async function main() {
   if (first === 'package') {
     const bundleArgument = args.shift();
     if (!bundleArgument || bundleArgument.startsWith('--')) throw new Error('package requires a bundle directory');
-    const options = parse(args, ['--runtime', '--output'], false);
+    const flatRuntime = args.includes('--flat-runtime');
+    if (args.filter(value => value === '--flat-runtime').length > 1) throw new Error('duplicate --flat-runtime option');
+    const options = parse(args.filter(value => value !== '--flat-runtime'), ['--runtime', '--output'], false);
     if (!options['--runtime'] || !options['--output']) throw new Error('package requires --runtime and --output');
     const bundle = readBundle(bundleArgument);
     const result = spawnSync('python3', [path.join(share, 'tools/portmaster.py'),
-      '--stage', options['--runtime'], '--bundle', bundle.root, '--output', options['--output']],
+      '--stage', options['--runtime'], '--bundle', bundle.root, '--output', options['--output'],
+      ...(flatRuntime ? ['--flat-runtime'] : [])],
     { stdio: 'inherit', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`packaging failed (${result.signal || result.status})`);
@@ -175,7 +178,7 @@ async function main() {
   let options;
   let bundle = null;
   if (first === 'prepare' || first === 'run') {
-    options = parse(args, ['--game', '--state', '--save-root', '--asset-cache-root', '--config', '--manifest', '--adapter']);
+    options = parse(args, ['--game', '--state', '--save-root', '--asset-cache-root', '--config', '--manifest', '--patch', '--adapter']);
   } else if (!first || first.startsWith('--')) {
     if (first) throw new Error(`unknown command: ${first}`);
     if (fs.existsSync(path.join(process.cwd(), 'pmjs.json'))) bundle = readBundle(process.cwd());
@@ -186,7 +189,7 @@ async function main() {
     options = { '--game': bundle ? path.join(bundle.root, bundle.descriptor.game) : process.cwd(), adapters: [] };
   } else {
     command = 'run';
-    options = parse(args, ['--state', '--save-root', '--asset-cache-root', '--game', '--config', '--manifest', '--adapter'], false);
+    options = parse(args, ['--state', '--save-root', '--asset-cache-root', '--game', '--config', '--manifest', '--patch', '--adapter'], false);
     if (fs.existsSync(path.join(path.resolve(first), 'pmjs.json'))) bundle = readBundle(first);
     if (!bundle || !options['--game']) options['--game'] = first;
   }

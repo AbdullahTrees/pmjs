@@ -56,8 +56,11 @@ try {
   fs.writeFileSync(manifest, '{"adapters":"auto"}');
   const firstAdapter = path.join(temporary, 'first.js');
   const secondAdapter = path.join(temporary, 'second.js');
+  const duplicateAdapter = path.join(temporary, 'other', 'first.js');
   fs.writeFileSync(firstAdapter, 'globalThis.firstBundleAdapter = true;');
   fs.writeFileSync(secondAdapter, 'globalThis.secondBundleAdapter = true;');
+  fs.mkdirSync(path.dirname(duplicateAdapter));
+  fs.writeFileSync(duplicateAdapter, 'globalThis.thirdBundlePatch = true;');
   const dataRoot = path.join(temporary, 'data-default');
   function cliAt(data, ...args) {
     return spawnSync(path.join(stage, 'bin/pmjs'), args, { cwd: temporary, encoding: 'utf8',
@@ -86,15 +89,17 @@ try {
   const originalImageHash = crypto.createHash('sha256').update(
     fs.readFileSync(path.join(game, 'img/pictures/fixture.png'))).digest('hex');
   const bundled = cli('bundle', game, '--output', bundle, '--config', config, '--manifest', manifest,
-    '--adapter', firstAdapter, '--adapter', secondAdapter);
+    '--patch', firstAdapter, '--patch', secondAdapter, '--patch', duplicateAdapter);
   assert.equal(bundled.status, 0, bundled.stdout + bundled.stderr);
   assert.deepEqual(fs.readdirSync(path.join(bundle, 'gamedata')), []);
   const descriptor = JSON.parse(fs.readFileSync(path.join(bundle, 'pmjs.json'), 'utf8'));
   assert.equal(descriptor.game, 'gamedata');
   assert.equal(descriptor.config, 'config.json');
-  assert.deepEqual(descriptor.adapters, ['adapters/000.js', 'adapters/001.js']);
+  assert.deepEqual(descriptor.patches, ['patches/first.js', 'patches/second.js', 'patches/first-2.js']);
+  assert.equal(descriptor.manifest, 'plugin-selection.json');
   const bundleBootstrap = fs.readFileSync(path.join(bundle, 'bootstrap.js'), 'utf8');
   assert.ok(bundleBootstrap.indexOf('firstBundleAdapter') < bundleBootstrap.indexOf('secondBundleAdapter'));
+  assert.ok(bundleBootstrap.indexOf('secondBundleAdapter') < bundleBootstrap.indexOf('thirdBundlePatch'));
   assert.equal(descriptor.assetIndex, 'asset-index.json');
   const index = JSON.parse(fs.readFileSync(path.join(bundle, 'asset-index.json')));
   assert.equal(index.images.length, 1);
@@ -123,6 +128,15 @@ try {
   'bundle creation leaves original game files unchanged');
   const movedBundle = path.join(temporary, 'moved bundle');
   fs.renameSync(bundle, movedBundle);
+  const oldBundle = path.join(temporary, 'older descriptor bundle');
+  fs.cpSync(movedBundle, oldBundle, { recursive: true });
+  const oldDescriptorPath = path.join(oldBundle, 'pmjs.json');
+  const oldDescriptor = JSON.parse(fs.readFileSync(oldDescriptorPath));
+  oldDescriptor.adapters = oldDescriptor.patches;
+  delete oldDescriptor.patches;
+  fs.writeFileSync(oldDescriptorPath, JSON.stringify(oldDescriptor));
+  const oldRun = cliAt(path.join(temporary, 'older descriptor data'), oldBundle, '--game', game);
+  assert.equal(oldRun.status, 0, oldRun.stdout + oldRun.stderr);
   const indexedData = path.join(temporary, 'data-indexed');
   const bundledRun = cliAt(indexedData, movedBundle, '--game', game,
     '--state', path.join(temporary, 'bundle state'));

@@ -16,6 +16,7 @@ from release import checked_manifest, digest, elf, inventory, static_audit
 PORTMASTER_LAUNCHER = '''#!/bin/bash
 entry_dir=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
 runtime_pid=""
+runtime_mounted=0
 finish() {
   local status=$? child watchdog_pid
   trap - EXIT HUP INT TERM
@@ -41,6 +42,12 @@ finish() {
       fi
     done
     wait "$runtime_pid" 2>/dev/null || true
+  fi
+  if [ "$runtime_mounted" -eq 1 ]; then
+    if ! $ESUDO umount "$port/runtime"; then
+      echo 'PMJS runtime unmount failed' >&2
+      [ "$status" -ne 0 ] || status=1
+    fi
   fi
   if type pm_finish >/dev/null 2>&1 && ! pm_finish; then
     echo 'PortMaster cleanup failed' >&2
@@ -81,6 +88,22 @@ exec > "$port/log.txt" 2>&1 || exit 1
 [ -f gamedata/index.html ] || { echo 'Missing gamedata/index.html'; exit 1; }
 mkdir -p saves || exit 1
 [ -w saves ] || { echo 'Save directory is not writable'; exit 1; }
+if [ -f "$port/runtime.squashfs" ]; then
+  mkdir -p "$port/runtime" || exit 1
+  if mountpoint -q "$port/runtime"; then
+    echo 'PMJS runtime mount is already in use' >&2
+    exit 1
+  fi
+  $ESUDO mount -t squashfs -o loop,ro "$port/runtime.squashfs" "$port/runtime" || {
+    echo 'Could not mount PMJS runtime SquashFS' >&2
+    exit 1
+  }
+  runtime_mounted=1
+fi
+[ -x "$port/runtime/bin/pmjs" ] && [ -x "$port/runtime/bin/node" ] || {
+  echo 'PMJS runtime is incomplete' >&2
+  exit 1
+}
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
 if [ "${PMJS_EXIT_HOTKEY+x}" != x ]; then
   case "${HOTKEY:-}" in
@@ -133,11 +156,12 @@ def checked_bundle(bundle):
         raise ValueError('PortMaster bundles must use an empty gamedata directory')
     if not (bundle / 'gamedata').is_dir() or any((bundle / 'gamedata').iterdir()):
         raise ValueError('Bundle gamedata must be empty')
-    if not isinstance(descriptor.get('adapters'), list):
-        raise ValueError('Bundle adapters must be an array')
+    patches = descriptor.get('patches', descriptor.get('adapters'))
+    if not isinstance(patches, list):
+        raise ValueError('Bundle patches must be an array')
     expected = {'pmjs.json'}
     for name in (descriptor.get('bootstrap'), descriptor.get('config'), descriptor.get('manifest'),
-                 *descriptor['adapters'], descriptor.get('assetIndex')):
+                 *patches, descriptor.get('assetIndex')):
         if name is not None:
             expected.add(relative(name))
     bootstrap = bundle / relative(descriptor.get('bootstrap'))
@@ -194,7 +218,8 @@ def checked_bundle(bundle):
 
 
 def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=None,
-               bundle=None, host_runtime=None, no_index=False, include_assets=False, manifest=None):
+               bundle=None, host_runtime=None, no_index=False, include_assets=False, manifest=None,
+               flat_runtime=False, extra_notices=()):
     info = checked_manifest(stage)
     if not (stage / 'bin/node').is_file():
         raise ValueError('PortMaster packaging requires a runtime with bundled target Node')
@@ -222,6 +247,8 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
                            if shutil.which(tool)), None)
     if not strip:
         raise ValueError('Install llvm-strip or specify --strip; package binaries must be stripped')
+    if not flat_runtime and not shutil.which('mksquashfs'):
+        raise ValueError('Install mksquashfs (squashfs-tools), or use --flat-runtime')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='pmjs-portmaster-', dir=output.parent) as temporary:
         workspace = Path(temporary)
@@ -292,6 +319,8 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
         with (runtime / 'LICENSES.txt').open('w') as licenses:
             for notice in notices:
                 licenses.write(f'===== {notice.relative_to(stage)} =====\n\n{notice.read_text().rstrip()}\n\n')
+            for notice in extra_notices:
+                licenses.write(f'===== {notice.name} =====\n\n{notice.read_text().rstrip()}\n\n')
         # Only the bundled LGPL media libraries require matching source here.
         if any(file.name.startswith('libav') for file in copied):
             sources = stage / 'share/pmjs/sources'
@@ -309,6 +338,15 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
                 target = runtime / 'sources' / file.relative_to(sources)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(file, target)
+        if not flat_runtime:
+            image = port / 'runtime.squashfs'
+            subprocess.run(['mksquashfs', runtime, image, '-comp', 'gzip', '-b', '131072',
+                            '-noappend', '-no-progress', '-no-xattrs', '-processors', '1',
+                            '-mkfs-time', str(info['source']['sourceDateEpoch']),
+                            '-all-time', str(info['source']['sourceDateEpoch'])],
+                           check=True, stdout=subprocess.DEVNULL)
+            shutil.rmtree(runtime)
+            runtime.mkdir()
         launcher = payload / (name + '.sh')
         launcher.write_text(PORTMASTER_LAUNCHER.replace('@ID@', identifier))
         launcher.chmod(0o755)
@@ -332,18 +370,22 @@ def main():
     parser.add_argument('--name', help='Launcher name; defaults to the game title')
     parser.add_argument('--config', type=Path)
     parser.add_argument('--manifest', type=Path)
-    parser.add_argument('--adapter', type=Path, action='append', default=[], help='Register a port adapter before engine boot')
+    parser.add_argument('--patch', '--adapter', dest='adapter', type=Path, action='append', default=[],
+                        help='Load a custom JavaScript patch before engine boot')
     parser.add_argument('--host-runtime', type=Path)
     parser.add_argument('--no-index', action='store_true')
     parser.add_argument('--include-assets', action='store_true')
     parser.add_argument('--strip', help='Target-capable strip executable')
+    parser.add_argument('--flat-runtime', action='store_true', help='Store runtime files directly instead of gzip SquashFS')
+    parser.add_argument('--notice', type=Path, action='append', default=[], help='Add a port-specific license notice')
     args = parser.parse_args()
     try:
         portmaster(args.stage.resolve(), args.game.resolve() if args.game else None, args.output.resolve(), args.name,
                    args.config.resolve() if args.config else None, [file.resolve() for file in args.adapter], args.strip,
                    args.bundle.resolve() if args.bundle else None,
                    args.host_runtime.resolve() if args.host_runtime else None,
-                   args.no_index, args.include_assets, args.manifest.resolve() if args.manifest else None)
+                   args.no_index, args.include_assets, args.manifest.resolve() if args.manifest else None,
+                   args.flat_runtime, [file.resolve() for file in args.notice])
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 
