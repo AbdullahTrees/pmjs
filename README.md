@@ -1,18 +1,26 @@
-# PMJS: Native Runtime for RPG Maker MV/MZ
+# PMJS
 
-Run RPG Maker MV/MZ games natively on Linux handhelds without NW.js or a browser. PMJS runs the game's original JavaScript through Node/V8 while native C++ handles rendering, audio, input, canvas operations, and storage.
+A native runtime for RPG Maker MV/MZ games
 
-RPG Maker MV games are essentially web-games, which means to run it, you have to run an entire browser. Low-end handhelds like the RG35XX Plus have a lot of limitations like 1GB of RAM, a really slow CPU, and an SD card for I/O. Not a great combination.
-PMJS replaces the browser side with the small set of APIs these games need. There is no DOM layout engine and no JavaScript renderer.
+[Using PMJS](docs/using.md) · [Building](docs/building.md) · [Releases](https://github.com/bbbreaddd/pmjs)
 
+This project started because I wanted to run In Stars and Time on my RG35XX Plus, but there didn't seem to be any known way to do it. I started trying to get Electron working on it, but Electron has a lot of limitations and quirks so I just made my own runtime that runs it natively, without a browser.
 
-PMJS is experimental and still has a lot of work to be done before I consider it usable. Currently, I'm focusing on getting it to work properly with OMORI on the RG35XX Plus.
+Currently only officially supports Linux ARM64.
 
-PMJS uses the stock RPG Maker MV 1.6.2 stack as its compatibility reference: PixiJS 4.5.4 and NW.js 0.29.0, which includes Chromium 65.0.3325.146 and Node.js 9.7.1.
+## Current status
+
+PMJS is experimental, but playable (hopefully). I've been focusing on ISAT, but I've also tested other games as well and it surprisingly works well. 
+
+## Compatibility
+
+The MV reference is stock RPG Maker MV 1.6.2, PixiJS 4.5.4 and NW.js 0.29.0, which includes Chromium 65.0.3325.146 and Node.js 9.7.1.
 
 The MZ reference is stock RPG Maker MZ 1.10.0, PixiJS 5.3.12 and NW.js 0.48.4, which includes Chromium 85.0.4183.121 and Node.js 14.12.0.
 
-## Requirements
+These references guide compatibility work. Some RPG Maker MV/MZ games use different versions so behavior might not be exactly the same, but a majority of the time, it's *very* tiny differences that don't affect the experience.
+
+## Build requirements
 
 - CMake 3.20 or newer
 - A C++20 compiler
@@ -25,12 +33,11 @@ The MZ reference is stock RPG Maker MZ 1.10.0, PixiJS 5.3.12 and NW.js 0.48.4, w
 - libpng, zlib, libjpeg, FreeType, and HarfBuzz
 - FFmpeg libraries: avformat, avcodec, avutil, swresample, and swscale
 
-> [!NOTE]
-> I do use AI for this project. No, I am not proud of it. It's still very early in development so it's likely going to be a mess. Don't expect much right now.
+See [Building](docs/building.md) for detailed instructions.
 
-### Third-party software
+## Third-party software
 
-PMJS uses the following software
+PMJS uses the following software:
 
 - [Node.js](https://nodejs.org/) and [V8](https://v8.dev/) to execute game JavaScript
 - [SDL2](https://www.libsdl.org/) for windows, input, and platform integration
@@ -45,8 +52,4 @@ PMJS uses the following software
 
 The build and test workflow uses CMake, pkg-config, ESLint, and Xvfb.
 
-## Build, install and run
-
-- [Building](docs/building.md)
-- [Using PMJS](docs/using.md): prepare and run games, saves and troubleshooting.
-- [Releases](docs/releases.md): install, verify and package the runtime.
+AI is used to develop this project.
