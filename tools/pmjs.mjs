@@ -18,7 +18,7 @@ Usage:
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
       [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs BUNDLE [--game DIR]
-  pmjs package BUNDLE --runtime DIR --output ZIP [--flat-runtime]
+  pmjs package BUNDLE --runtime DIR --output ZIP
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
@@ -161,14 +161,11 @@ async function main() {
   if (first === 'package') {
     const bundleArgument = args.shift();
     if (!bundleArgument || bundleArgument.startsWith('--')) throw new Error('package requires a bundle directory');
-    const flatRuntime = args.includes('--flat-runtime');
-    if (args.filter(value => value === '--flat-runtime').length > 1) throw new Error('duplicate --flat-runtime option');
-    const options = parse(args.filter(value => value !== '--flat-runtime'), ['--runtime', '--output'], false);
+    const options = parse(args, ['--runtime', '--output'], false);
     if (!options['--runtime'] || !options['--output']) throw new Error('package requires --runtime and --output');
     const bundle = readBundle(bundleArgument);
     const result = spawnSync('python3', [path.join(share, 'tools/portmaster.py'),
-      '--stage', options['--runtime'], '--bundle', bundle.root, '--output', options['--output'],
-      ...(flatRuntime ? ['--flat-runtime'] : [])],
+      '--stage', options['--runtime'], '--bundle', bundle.root, '--output', options['--output']],
     { stdio: 'inherit', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`packaging failed (${result.signal || result.status})`);

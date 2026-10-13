@@ -76,27 +76,26 @@ class PortMasterPackage(unittest.TestCase):
             names = package.namelist()
             self.assertIn('Minimal Game.sh', names)
             self.assertIn('minimal-game/gamedata/', names)
-            self.assertIn('minimal-game/runtime.squashfs', names)
-            self.assertNotIn('minimal-game/runtime/lib/librequired.so.1', names)
-            image = self.root / 'runtime.squashfs'
-            image.write_bytes(package.read('minimal-game/runtime.squashfs'))
-            self.assertIn('gzip', subprocess.check_output(['unsquashfs', '-s', image], text=True))
-            extracted = self.root / 'extracted-runtime'
-            subprocess.run(['unsquashfs', '-quiet', '-d', extracted, image], check=True)
-            self.assertTrue((extracted / 'lib/librequired.so.1').is_file())
-            licenses = (extracted / 'LICENSES.txt').read_text()
+            self.assertIn('minimal-game/runtime/lib/librequired.so.1', names)
+            self.assertNotIn('minimal-game/runtime.squashfs', names)
+            licenses = package.read('minimal-game/runtime/LICENSES.txt').decode()
             self.assertIn('Node.LICENSE', licenses)
             self.assertIn('fixture notice', licenses)
-            self.assertFalse((extracted / 'lib/libunused.so.1').exists())
-            self.assertFalse((extracted / 'share/pmjs/sources/unused-source.tar.xz').exists())
+            self.assertFalse(any('libunused' in name or '/sources/' in name
+                                 for name in names))
             self.assertIn('minimal-game/pmjs.json', names)
-            self.assertTrue((extracted / 'share/pmjs/tools/pmjs.mjs').is_file())
-            self.assertTrue((extracted / 'build-info.json').is_file())
+            self.assertIn('minimal-game/runtime/share/pmjs/tools/pmjs.mjs', names)
+            self.assertIn('minimal-game/runtime/build-info.json', names)
+            packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            expected_runtime_files = {name.removeprefix('minimal-game/runtime/') for name in names
+                                      if name.startswith('minimal-game/runtime/') and not name.endswith('/')
+                                      and name != 'minimal-game/runtime/build-info.json'}
+            self.assertEqual(set(packaged_info['files']), expected_runtime_files)
             self.assertEqual([name for name in names if '/gamedata/' in name], ['minimal-game/gamedata/'])
             self.assertEqual(package.getinfo('Minimal Game.sh').external_attr >> 16 & 0o777, 0o755)
             binary = self.root / 'pmjs_native.node'
-            binary.write_bytes((extracted / 'lib/pmjs_native.node').read_bytes())
-            (self.root / 'librequired.so.1').write_bytes((extracted / 'lib/librequired.so.1').read_bytes())
+            binary.write_bytes(package.read('minimal-game/runtime/lib/pmjs_native.node'))
+            (self.root / 'librequired.so.1').write_bytes(package.read('minimal-game/runtime/lib/librequired.so.1'))
             sections = subprocess.check_output(['readelf', '-S', '--wide', binary], text=True)
             self.assertNotIn('.debug', sections)
             self.assertNotIn('.symtab', sections)
@@ -106,12 +105,6 @@ class PortMasterPackage(unittest.TestCase):
         checksum = release.digest(self.output)
         portmaster.portmaster(self.stage, self.game, self.output)
         self.assertEqual(release.digest(self.output), checksum, 'deterministic ZIP')
-
-    def test_flat_runtime_opt_out(self):
-        portmaster.portmaster(self.stage, self.game, self.output, flat_runtime=True)
-        with zipfile.ZipFile(self.output) as package:
-            self.assertIn('minimal-game/runtime/lib/pmjs_native.node', package.namelist())
-            self.assertNotIn('minimal-game/runtime.squashfs', package.namelist())
 
     def test_adapter_configuration_and_mz(self):
         adapter = self.root / 'adapter.js'
@@ -336,30 +329,6 @@ return "${MODULE_STATUS:-0}"
         self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)
         self.assertIn('PortMaster cleanup failed', (self.port / 'log.txt').read_text())
         self.assertEqual(self.run_launcher(FINISH_STATUS='9', NODE_STATUS='23').returncode, 23)
-
-    def test_squashfs_mounts_before_launch_and_unmounts_on_exit(self):
-        (self.port / 'runtime.squashfs').write_bytes(b'fixture image')
-        commands = self.root / 'commands'
-        commands.mkdir()
-        for name, body in {
-            'mountpoint': 'exit "${ALREADY_MOUNTED:-1}"',
-            'mount': 'printf "mount:%s\\n" "$*" >> "$EVENTS"; exit "${MOUNT_STATUS:-0}"',
-            'umount': 'printf "umount:%s\\n" "$*" >> "$EVENTS"; exit "${UMOUNT_STATUS:-0}"'
-        }.items():
-            command = commands / name
-            command.write_text('#!/bin/sh\n' + body + '\n')
-            command.chmod(0o755)
-        (self.control / 'control.txt').write_text('ESUDO=\n' + (self.control / 'control.txt').read_text())
-        self.env['PATH'] = str(commands) + os.pathsep + os.environ['PATH']
-        self.assertEqual(self.run_launcher().returncode, 0)
-        events = self.events.read_text().splitlines()
-        self.assertTrue(events[0].startswith('mount:-t squashfs -o loop,ro '), events)
-        self.assertTrue(events[-2].startswith('umount:'), events)
-        self.assertEqual(self.run_launcher(MOUNT_STATUS='1').returncode, 1)
-        self.assertFalse(self.capture.exists())
-        self.assertFalse(any(event.startswith('umount:') for event in self.events.read_text().splitlines()))
-        self.assertEqual(self.run_launcher(NODE_STATUS='23').returncode, 23)
-        self.assertTrue(any(event.startswith('umount:') for event in self.events.read_text().splitlines()))
 
     def test_unusable_log_directory_stops_before_startup(self):
         (self.port / 'log.txt').mkdir()

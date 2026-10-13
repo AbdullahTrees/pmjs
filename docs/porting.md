@@ -68,20 +68,12 @@ dist/pmjs/bin/pmjs package /path/to/bundle \
   --runtime dist/pmjs-arm64 --output /path/to/game.zip
 ```
 
-The build host needs `mksquashfs` from `squashfs-tools` for this step.
-
-The ZIP contains a PortMaster launcher, your bundle, a gzip-compressed
-`runtime.squashfs` and an empty `gamedata/`. The launcher mounts the runtime
-read-only while the game runs and unmounts it on exit. The image includes the
-runtime's notices. The ZIP carries the asset index and
+The ZIP contains a PortMaster launcher, your bundle, the ARM64 runtime and
+its notices, and an empty `gamedata/`. It carries the asset index and
 generated pages only if they are in the bundle. The packager checks the
 runtime installation, copies its library closure, strips binaries without
 changing loader symbols, and includes matching source materials where
 required.
-
-The target firmware needs loop-mount and gzip SquashFS support. If it cannot
-mount SquashFS, pass `--flat-runtime` to `pmjs package` to put the runtime
-files directly in the ZIP instead.
 
 Extract the ZIP into the firmware's ports directory and copy the game's
 `www` contents into its `gamedata/` directory. Then launch it from the
