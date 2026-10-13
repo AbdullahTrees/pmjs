@@ -356,8 +356,6 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
     if (tile.width > pageLimit || tile.height > pageLimit)
       throw AssetPreparationUnsupported("prepared crop exceeds the page limit");
     tile.path = staging / (".tile-" + std::to_string(index));
-    std::ofstream file(tile.path, std::ios::binary | std::ios::trunc);
-    if (!file) throw std::runtime_error("cannot create preparation tile");
   }
   std::size_t openTileFiles = 0, evictionCursor = 0;
   PngRows extraction(source);
@@ -435,16 +433,17 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& source,
           }
           verification[index].open(tiles[canonical[index]].path, std::ios::binary);
           if (!verification[index]) throw std::runtime_error("cannot open preparation verification tile");
+          // Cropped rows are contiguous in the padded tile; seek only on open.
+          const auto offset = static_cast<std::streamoff>(localY - cell.crop[1] + result.halo) * tiles[index].width * 4;
+          verification[index].seekg(offset);
           ++openVerificationFiles;
         }
-        const auto offset = static_cast<std::streamoff>(localY - cell.crop[1] + result.halo) * tiles[index].width * 4 + result.halo * 4;
-        verification[index].seekg(offset);
-        if (!verification[index].read(reinterpret_cast<char*>(tileRow.data()), cell.crop[2] * 4))
+        if (!verification[index].read(reinterpret_cast<char*>(tileRow.data()), tiles[index].width * 4))
           throw std::runtime_error("cannot verify preparation tile");
       }
       for (int x = 0; x < cellWidth; ++x) {
         const bool stored = inside(x, localY, cell.crop);
-        const auto actual = stored ? pixel(tileRow.data() + static_cast<std::size_t>(x - cell.crop[0]) * 4) : cell.fill;
+        const auto actual = stored ? pixel(tileRow.data() + static_cast<std::size_t>(x - cell.crop[0] + result.halo) * 4) : cell.fill;
         if (actual != pixel(check.row.data() + static_cast<std::size_t>(cell.rect[0] + x) * 4))
           throw std::runtime_error("prepared image reconstruction differs");
       }

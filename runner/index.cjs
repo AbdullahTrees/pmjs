@@ -374,12 +374,16 @@ async function run(input) {
       native.assets.preparationStats = preparationStats;
       console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
         `decrypted=${preparation.decrypted} fallback=${preparation.fallback} ` +
+        `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
+        `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
+        `unindexed_processed=${preparation.unindexedProcessed} ` +
         `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
         `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
       if (preparation.maps) {
         const maps = preparation.maps;
         console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
           `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
+          `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
           `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
           `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
       }

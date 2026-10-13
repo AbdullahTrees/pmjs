@@ -64,6 +64,8 @@ test('Tiled recursively covers chunks, flipped GIDs, objects, spacing and arbitr
 test('cache shares encoded snapshots, reuses positive entries, validates corruption and stale map inputs',async t=>{
   const f=fixture(t),a=await prepareMaps(f);
   assert.equal(a.selected,1);assert.equal(a.installed,1);assert.equal(f.jobs,1);
+  assert.equal(a.nativePacks,1);
+  assert.equal(a.indexedCopies,0);
   assert.equal(fs.readdirSync(path.join(f.cacheRoot,'maps/sources')).length,1);
   assert.equal(f.installed[0].descriptor.sources[1].regions.length,0,'unused sheet is a sparse logical view');
   assert.equal((await prepareMaps(f)).hits,1);assert.equal(f.jobs,1);

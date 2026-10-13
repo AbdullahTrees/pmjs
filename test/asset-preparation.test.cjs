@@ -321,6 +321,8 @@ test('portable negative image decisions skip processing without reading pages', 
     portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
       encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } });
   assert.equal(result.fallback, 1);
+  assert.equal(result.indexedNegative, 1);
+  assert.equal(result.unindexedProcessed, 0);
   assert.equal(f.jobs, 0);
   assert.deepEqual(f.warnings, []);
 });

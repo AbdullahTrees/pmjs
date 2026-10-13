@@ -120,7 +120,8 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
   const offline = preparationContext === 'offline';
   const started = performance.now(), root = path.join(cacheRoot, 'maps');
   const result = { enabled: true, selected: 0, refused: 0, generated: 0, hits: 0, negativeHits: 0,
-    installed: 0, compilationHits: 0, verifiedRegions: 0, identityRefreshes: 0, snapshotBytes: 0, additionalSnapshotBytes: 0, pageBytes: 0, durationMs: 0, cancelled: false, maps: [], index: {} };
+    installed: 0, compilationHits: 0, indexedCopies: 0, nativePacks: 0,
+    verifiedRegions: 0, identityRefreshes: 0, snapshotBytes: 0, additionalSnapshotBytes: 0, pageBytes: 0, durationMs: 0, cancelled: false, maps: [], index: {} };
   const catalogFile = path.join(root, 'catalog-'+checksum(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
@@ -396,13 +397,14 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
                     throw new Error('indexed map page changed while copying');
                 }
                 descriptor = indexed.descriptor;
+                ++result.indexedCopies;
               } catch (_) {
                 for (const page of indexed.descriptor.pages)
                   await fsp.rm(path.join(stage, page.path), { force: true });
               }
             }
           }
-          if (!reason && !descriptor) try { descriptor = await native.assets.processTiles(inputs, stage); }
+          if (!reason && !descriptor) try { ++result.nativePacks; descriptor = await native.assets.processTiles(inputs, stage); }
           catch (error) { if (error.code !== 'PMJS_TILE_UNSUPPORTED') throw error; reason = error.message; }
           if (descriptor && (!validTileDescriptor(descriptor) || descriptor.sources.length !== inputs.length)) throw new Error('invalid tile descriptor');
           const pageBytes = descriptor ? descriptor.pages.reduce((n, p) => n+p.width*p.height*4, 0) : 0;

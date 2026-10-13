@@ -609,10 +609,12 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
   if (count > 100000) throw std::runtime_error("too many prepared image entries");
   value.images.clearPreparedIndex();
   std::uint32_t installed = 0;
+  std::uint32_t missingSource = 0, changedSource = 0, missingPage = 0, invalidEntry = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
     napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid prepared entry");
-    const auto path = value.vfs.resolve(asString(env, property(env, entry, "source")));
-    if (!path) continue;
+    const auto sourceName = asString(env, property(env, entry, "source"));
+    const auto path = value.vfs.resolve(sourceName);
+    if (!path) { ++missingSource; continue; }
     const auto directory = std::filesystem::path(asString(env, property(env, entry, "directory")));
     if (!directory.is_absolute()) throw std::runtime_error("prepared directory must be absolute");
     const auto object = property(env, entry, "descriptor");
@@ -658,6 +660,9 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
       }
     }
     std::vector<std::string> captured;
+    std::vector<std::filesystem::path> pagePaths;
+    pagePaths.reserve(descriptor.pages.size());
+    for (const auto& page : descriptor.pages) pagePaths.push_back(directory / page.path);
     if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr)) {
       ++installed;
       if (capture) {
@@ -665,8 +670,21 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
         for (std::size_t j = 0; j < captured.size(); ++j) check(env, napi_set_element(env, list, j, string(env, captured[j])), "cannot set identity");
         check(env, napi_set_named_property(env, entry, "pageIdentities", list), "cannot set page identities");
       }
-    }
+    } else if (const auto current = Vfs::fileIdentity(*path); current != identity) {
+      if (changedSource < 3)
+        std::cerr << "[pmjs] prepared source identity differs " << sourceName
+          << " expected=" << identity << " actual=" << current << '\n';
+      ++changedSource;
+    } else if (std::any_of(pagePaths.begin(), pagePaths.end(), [](const auto& file) {
+      std::error_code error;
+      return !std::filesystem::is_regular_file(file, error);
+    })) ++missingPage;
+    else ++invalidEntry;
   }
+  if (installed != count)
+    std::cerr << "[pmjs] prepared install failures missing_source=" << missingSource
+      << " changed_source=" << changedSource << " missing_page=" << missingPage
+      << " invalid_entry=" << invalidEntry << '\n';
   return number(env, installed);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;

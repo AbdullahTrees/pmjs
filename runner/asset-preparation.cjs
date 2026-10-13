@@ -243,6 +243,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   const started = performance.now();
   const result = { enabled: true, total: 0, completed: 0, generated: 0, hits: 0, negativeHits: 0,
     fallback: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
+    indexedNegative: 0, indexedLayoutAttempts: 0, indexedZeroPage: 0,
+    indexedPageCopies: 0, unindexedProcessed: 0,
     cancelled: false, entries: [], decryptedEntries: [], decisions: [], durationMs: 0 };
   const catalogFile = path.join(cacheRoot, 'catalog-'+identity(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
@@ -382,6 +384,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               record.descriptor && validDescriptor(record.descriptor)));
           let descriptor = null, copied = false;
           const indexedFallback = indexed?.descriptor === null;
+          if (indexedFallback) ++result.indexedNegative;
           if (indexed?.descriptor && portableAssetRoot && Array.isArray(indexed.outputs) &&
               indexed.outputs.length === indexed.descriptor.pages.length) {
             const pages = indexed.descriptor.pages;
@@ -407,12 +410,18 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               }
               descriptor = indexed.descriptor;
               copied = true;
+              if (pages.length) ++result.indexedPageCopies;
+              else ++result.indexedZeroPage;
             } catch (_) {
               for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
             }
           }
-          if (!copied && !indexedFallback && extension === '.png') descriptor = await native.assets.processImage(source, stage, recipe || null,
-            input, ...(indexed ? [indexed.descriptor] : []));
+          if (!copied && !indexedFallback && extension === '.png') {
+            if (indexed) ++result.indexedLayoutAttempts;
+            else ++result.unindexedProcessed;
+            descriptor = await native.assets.processImage(source, stage, recipe || null,
+              input, ...(indexed ? [indexed.descriptor] : []));
+          }
           if (cancelled()) break;
           if (descriptor !== null && !validDescriptor(descriptor)) throw new Error('processor returned invalid logical image descriptor');
           if (await hashFile(file) !== sourceHash) throw new Error('source changed during image preparation');
