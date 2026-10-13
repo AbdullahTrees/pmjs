@@ -78,7 +78,21 @@ port="$entry_dir/@ID@"
 [ -z "${directory:-}" ] || port="/${directory#/}/ports/@ID@"
 cd "$port" || exit 1
 exec > "$port/log.txt" 2>&1 || exit 1
-[ -f gamedata/index.html ] || { echo 'Missing gamedata/index.html'; exit 1; }
+game="$port/gamedata"
+if [ -f "$game/index.html" ]; then
+  :
+elif [ -f "$game/www/index.html" ]; then
+  game="$game/www"
+else
+  found=""
+  for entry in "$game"/*/www/index.html; do
+    [ -f "$entry" ] || continue
+    [ -z "$found" ] || { echo 'Multiple games found in gamedata; keep only one game folder'; exit 1; }
+    found="${entry%/index.html}"
+  done
+  [ -n "$found" ] || { echo 'Missing game: copy the game folder, www folder, or its contents into gamedata'; exit 1; }
+  game="$found"
+fi
 mkdir -p saves || exit 1
 [ -w saves ] || { echo 'Save directory is not writable'; exit 1; }
 [ -x "$port/runtime/bin/pmjs" ] && [ -x "$port/runtime/bin/node" ] || {
@@ -100,7 +114,7 @@ fi
 (
   export LD_LIBRARY_PATH="$port/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export XDG_CACHE_HOME="$port/.cache"
-  exec "$port/runtime/bin/pmjs" "$port" --save-root "$port/saves" --asset-cache-root "$port/.cache"
+  exec "$port/runtime/bin/pmjs" "$port" --game "$game" --save-root "$port/saves" --asset-cache-root "$port/.cache"
 ) &
 runtime_pid=$!
 wait "$runtime_pid"

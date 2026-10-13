@@ -305,6 +305,30 @@ return "${MODULE_STATUS:-0}"
             self.assertNotIn(name, env)
         self.assertEqual(env['SDL_GAMECONTROLLERCONFIG'], 'firmware-map')
 
+    def test_game_folder_layouts(self):
+        (self.port / 'gamedata/index.html').unlink()
+        for relative in ('gamedata', 'gamedata/www', 'gamedata/Game With Spaces/www'):
+            with self.subTest(layout=relative):
+                directory = self.port / relative
+                directory.mkdir(parents=True, exist_ok=True)
+                index = directory / 'index.html'
+                index.touch()
+                self.assertEqual(self.run_launcher().returncode, 0)
+                arguments = json.loads(self.capture.read_text())['argv']
+                self.assertEqual(arguments[arguments.index('--game') + 1], str(directory))
+                self.assertIn(str(self.port), arguments)
+                index.unlink()
+
+    def test_ambiguous_nested_games_are_rejected(self):
+        (self.port / 'gamedata/index.html').unlink()
+        for name in ('First Game', 'Second Game'):
+            directory = self.port / 'gamedata' / name / 'www'
+            directory.mkdir(parents=True)
+            (directory / 'index.html').touch()
+        self.assertEqual(self.run_launcher().returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertIn('Multiple games found', (self.port / 'log.txt').read_text())
+
     def test_firmware_exit_chords_and_explicit_override(self):
         for hotkey, expected in (('l3', 'leftstick'), ('r3', 'rightstick'), ('select', 'back'),
                                  ('back', 'back'), ('guide', 'guide')):

@@ -76,7 +76,10 @@ changing loader symbols, and includes matching source materials where
 required.
 
 Extract the ZIP into the firmware's ports directory and copy the game's
-`www` contents into its `gamedata/` directory. Then launch it from the
+folder containing `www`, the `www` folder itself, or its contents into
+`gamedata/`. The launcher recognizes `gamedata/Game Folder/www/index.html`,
+`gamedata/www/index.html`, and `gamedata/index.html`. Keep only one game
+folder when using the nested layout. Then launch it from the
 firmware menu. Logs go to `log.txt`, saves to `saves/`, and caches to
 `.cache/`. The launcher uses PortMaster's control and platform helpers and
 cleans up the runtime when the game exits.
