@@ -314,6 +314,17 @@ test('unsupported images reuse a negative entry; transient failures retry next l
   assert.equal(calls, 3);
 });
 
+test('portable negative image decisions skip processing without reading pages', async () => {
+  const f = fixture();
+  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
+  const result = await prepareAssets({ ...f, portableAssetRoot: f.root,
+    portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
+      encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } });
+  assert.equal(result.fallback, 1);
+  assert.equal(f.jobs, 0);
+  assert.deepEqual(f.warnings, []);
+});
+
 test('concurrent preparers serialize and reuse completed output', async () => {
   const f = fixture();
   const original = f.native.assets.processImage;

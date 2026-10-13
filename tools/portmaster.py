@@ -93,12 +93,10 @@ fi
 if type pm_platform_helper >/dev/null 2>&1; then
   pm_platform_helper "$port/runtime/bin/node" || exit 1
 fi
-args=(--addon "$port/runtime/lib/pmjs_native.node" --game-root "$port/gamedata"
-      --save-root "$port/saves" --bootstrap "$port/bootstrap.js" --asset-cache-root "$port/.cache")
-[ ! -f config.json ] || args+=(--config "$port/config.json")
 (
   export LD_LIBRARY_PATH="$port/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  exec "$port/runtime/bin/node" --expose-gc "$port/runtime/share/pmjs/runner/cli.cjs" "${args[@]}"
+  export XDG_CACHE_HOME="$port/.cache"
+  exec "$port/runtime/bin/pmjs" "$port" --save-root "$port/saves" --asset-cache-root "$port/.cache"
 ) &
 runtime_pid=$!
 wait "$runtime_pid"
@@ -122,13 +120,97 @@ def write_zip(directory, output, epoch):
                             compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
-def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=None):
+def checked_bundle(bundle):
+    descriptor = json.loads((bundle / 'pmjs.json').read_text())
+    if descriptor.get('schema') != 1 or descriptor.get('kind') != 'pmjs-game-bundle':
+        raise ValueError('Unsupported PMJS bundle')
+    def relative(name):
+        if not isinstance(name, str) or not name or '\\' in name or name.startswith('/') or (
+                any(part in ('', '.', '..') for part in name.split('/'))):
+            raise ValueError('Invalid path in PMJS bundle')
+        return name
+    if descriptor.get('game') != 'gamedata':
+        raise ValueError('PortMaster bundles must use an empty gamedata directory')
+    if not (bundle / 'gamedata').is_dir() or any((bundle / 'gamedata').iterdir()):
+        raise ValueError('Bundle gamedata must be empty')
+    if not isinstance(descriptor.get('adapters'), list):
+        raise ValueError('Bundle adapters must be an array')
+    expected = {'pmjs.json'}
+    for name in (descriptor.get('bootstrap'), descriptor.get('config'), descriptor.get('manifest'),
+                 *descriptor['adapters'], descriptor.get('assetIndex')):
+        if name is not None:
+            expected.add(relative(name))
+    bootstrap = bundle / relative(descriptor.get('bootstrap'))
+    if digest(bootstrap) != descriptor.get('bootstrapSha256'):
+        raise ValueError('Bundle bootstrap checksum differs from pmjs.json')
+    if descriptor.get('config'):
+        config = json.loads((bundle / descriptor['config']).read_text())
+        preparation = config.get('assetPreparation') if isinstance(config, dict) else None
+        recipe = preparation.get('recipes') if isinstance(preparation, dict) else None
+        if isinstance(recipe, str):
+            expected.add(relative(recipe))
+    if descriptor.get('assetIndex'):
+        index_file = bundle / descriptor['assetIndex']
+        if digest(index_file) != descriptor.get('assetIndexSha256'):
+            raise ValueError('Bundle asset index checksum differs from pmjs.json')
+        index = json.loads(index_file.read_text())
+        if index.get('schema') != 1 or index.get('kind') != 'pmjs-asset-index':
+            raise ValueError('Unsupported bundle asset index')
+        images = index.get('images')
+        map_index = index.get('maps')
+        if map_index is not None and not isinstance(map_index, dict):
+            raise ValueError('Invalid bundle map index')
+        maps = (map_index or {}).get('entries', [])
+        if not isinstance(images, list) or not isinstance(maps, list) or not all(
+                isinstance(entry, dict) and isinstance(entry.get('outputs'), list)
+                for entry in images + maps):
+            raise ValueError('Invalid bundle asset index entries')
+        outputs = [page for entry in images + maps for page in entry['outputs']]
+        if descriptor.get('assets'):
+            if descriptor['assets'] != 'assets':
+                raise ValueError('Unsupported bundle asset directory')
+            for page in outputs:
+                if not isinstance(page, dict):
+                    raise ValueError('Invalid generated asset reference')
+                name = relative(page.get('path'))
+                checksum = page.get('hash')
+                if not name.startswith('assets/') or not isinstance(checksum, str) or not re.fullmatch(r'[a-f0-9]{64}', checksum):
+                    raise ValueError('Invalid generated asset reference')
+                expected.add(name)
+                if digest(bundle / name) != page['hash']:
+                    raise ValueError('Generated asset checksum differs from asset index')
+    elif descriptor.get('assets'):
+        raise ValueError('Generated assets require an asset index')
+    actual = set()
+    for file in bundle.rglob('*'):
+        if file.is_symlink():
+            raise ValueError('Bundle cannot contain symbolic links')
+        if file.is_file():
+            actual.add(file.relative_to(bundle).as_posix())
+    if actual != expected:
+        raise ValueError('Bundle contains missing or undeclared files: ' +
+                         ', '.join(sorted(actual.symmetric_difference(expected))[:5]))
+    return descriptor
+
+
+def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=None,
+               bundle=None, host_runtime=None, no_index=False, include_assets=False, manifest=None):
     info = checked_manifest(stage)
     if not (stage / 'bin/node').is_file():
         raise ValueError('PortMaster packaging requires a runtime with bundled target Node')
-    if output.is_relative_to(stage) or output.is_relative_to(game):
+    if output.is_relative_to(stage) or (game and output.is_relative_to(game)) or (bundle and output.is_relative_to(bundle)):
         raise ValueError('Package output must be outside the runtime and game directories')
-    if name is None:
+    if (game is None) == (bundle is None):
+        raise ValueError('Provide exactly one of --game or --bundle')
+    if include_assets and no_index:
+        raise ValueError('--include-assets requires an asset index')
+    if bundle and (config or adapters or manifest or no_index or include_assets):
+        raise ValueError('Bundle options are set when creating the bundle, not when packaging it')
+    if bundle:
+        descriptor = checked_bundle(bundle)
+        if name is None:
+            name = descriptor.get('title')
+    elif name is None:
         name = json.loads((game / 'data/System.json').read_text())['gameTitle']
     if not isinstance(name, str) or not name.strip() or re.search(r'[/\\\x00-\x1f]', name) or name.strip() in ('.', '..'):
         raise ValueError('Use a nonempty game name without path separators or control characters')
@@ -146,18 +228,31 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
         payload = workspace / 'payload'
         port = payload / identifier
         runtime = port / 'runtime'
-        runtime.mkdir(parents=True)
-        (port / 'gamedata').mkdir()
-        if config:
-            shutil.copyfile(config, port / 'config.json')
-        bootstrap = port / 'bootstrap.js'
-        command = ['node', stage / 'share/pmjs/tools/build-js-runtime.mjs', '--game', game, '--output', bootstrap]
-        if config:
-            command.extend(['--config', port / 'config.json'])
-        for adapter in adapters:
-            command.extend(['--adapter', adapter])
-        subprocess.run(command, check=True)
-        subprocess.run(['node', '--check', bootstrap], check=True)
+        if bundle is None:
+            bundle = workspace / 'generated-bundle'
+            host = host_runtime or (Path(__file__).resolve().parent.parent / 'dist/pmjs')
+            if (host / 'bin/pmjs').is_file():
+                command = [host / 'bin/pmjs', 'bundle', game, '--output', bundle]
+                if config:
+                    command.extend(['--config', config])
+                if manifest:
+                    command.extend(['--manifest', manifest])
+                for adapter in adapters:
+                    command.extend(['--adapter', adapter])
+                if no_index:
+                    command.append('--no-index')
+                if include_assets:
+                    command.append('--include-assets')
+            elif no_index and manifest is None:
+                command = ['node', Path(__file__).resolve().parent / 'game-bundle.mjs',
+                           game, bundle, str(config) if config else '', '', *adapters]
+            else:
+                raise ValueError('Build a local host PMJS installation or pass --host-runtime to generate the asset index')
+            subprocess.run([str(value) for value in command], check=True)
+        checked_bundle(bundle)
+        shutil.copytree(bundle, port)
+        runtime.mkdir()
+        subprocess.run(['node', '--check', port / 'bootstrap.js'], check=True)
 
         # Follow the installed dependency closure; firmware providers stay external.
         pending = [stage / 'bin/node', stage / 'lib/pmjs_native.node']
@@ -182,7 +277,16 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
             pending.extend(stage / 'lib' / dependency for dependency in elf(file)['needed']
                            if (stage / 'lib' / dependency).is_file())
         static_audit(runtime, info)
+        shutil.copy2(stage / 'bin/pmjs', runtime / 'bin/pmjs')
+        shutil.copy2(stage / 'build-info.json', runtime / 'build-info.json')
         shutil.copytree(stage / 'share/pmjs/runner', runtime / 'share/pmjs/runner')
+        shutil.copytree(stage / 'share/pmjs/js', runtime / 'share/pmjs/js')
+        shutil.copytree(stage / 'share/pmjs/profiles', runtime / 'share/pmjs/profiles')
+        tools = runtime / 'share/pmjs/tools'
+        tools.mkdir()
+        for tool_name in ('pmjs.mjs', 'build-js-runtime.mjs', 'game-inspect.mjs',
+                          'game-bundle.mjs', 'package-self-test.cjs'):
+            shutil.copy2(stage / 'share/pmjs/tools' / tool_name, tools / tool_name)
         notices = [stage / 'LICENSE', stage / 'THIRD_PARTY_NOTICES.md',
                    *sorted(file for file in (stage / 'share/pmjs/notices').rglob('*') if file.is_file())]
         with (runtime / 'LICENSES.txt').open('w') as licenses:
@@ -220,16 +324,26 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('stage', 'game', 'output'):
+    for name in ('stage', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--game', type=Path)
+    source.add_argument('--bundle', type=Path)
     parser.add_argument('--name', help='Launcher name; defaults to the game title')
     parser.add_argument('--config', type=Path)
+    parser.add_argument('--manifest', type=Path)
     parser.add_argument('--adapter', type=Path, action='append', default=[], help='Register a port adapter before engine boot')
+    parser.add_argument('--host-runtime', type=Path)
+    parser.add_argument('--no-index', action='store_true')
+    parser.add_argument('--include-assets', action='store_true')
     parser.add_argument('--strip', help='Target-capable strip executable')
     args = parser.parse_args()
     try:
-        portmaster(args.stage.resolve(), args.game.resolve(), args.output.resolve(), args.name,
-                   args.config.resolve() if args.config else None, [file.resolve() for file in args.adapter], args.strip)
+        portmaster(args.stage.resolve(), args.game.resolve() if args.game else None, args.output.resolve(), args.name,
+                   args.config.resolve() if args.config else None, [file.resolve() for file in args.adapter], args.strip,
+                   args.bundle.resolve() if args.bundle else None,
+                   args.host_runtime.resolve() if args.host_runtime else None,
+                   args.no_index, args.include_assets, args.manifest.resolve() if args.manifest else None)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

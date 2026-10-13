@@ -1,5 +1,6 @@
 """Exercise minimal packaging with real ELF fixtures and MV/MZ inspection."""
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ class PortMasterPackage(unittest.TestCase):
         (self.stage / 'bin').mkdir(parents=True)
         (self.stage / 'lib').mkdir()
         shutil.copy2('/bin/true', self.stage / 'bin/node')
+        shutil.copy2(ROOT / 'bin/pmjs', self.stage / 'bin/pmjs')
         for name, source, flags in [
             ('librequired.so.1', 'int required(void) { return 42; }', []),
             ('libunused.so.1', 'int unused(void) { return 0; }', []),
@@ -40,7 +42,8 @@ class PortMasterPackage(unittest.TestCase):
         for directory in ('js', 'runner', 'profiles'):
             shutil.copytree(ROOT / directory, share / directory)
         (share / 'tools').mkdir()
-        for file in ('build-js-runtime.mjs', 'game-inspect.mjs'):
+        for file in ('build-js-runtime.mjs', 'game-inspect.mjs', 'game-bundle.mjs',
+                     'pmjs.mjs', 'package-self-test.cjs'):
             shutil.copy2(ROOT / 'tools' / file, share / 'tools' / file)
         (share / 'notices').mkdir()
         (share / 'notices/Node.LICENSE').write_text('fixture notice')
@@ -77,9 +80,11 @@ class PortMasterPackage(unittest.TestCase):
             licenses = package.read('minimal-game/runtime/LICENSES.txt').decode()
             self.assertIn('Node.LICENSE', licenses)
             self.assertIn('fixture notice', licenses)
-            self.assertFalse(any('libunused' in name or '/sources/' in name or '/tools/' in name or
-                                 '/profiles/' in name or name.endswith(('port.json', 'config.json', 'build-info.json'))
+            self.assertFalse(any('libunused' in name or '/sources/' in name
                                  for name in names))
+            self.assertIn('minimal-game/pmjs.json', names)
+            self.assertIn('minimal-game/runtime/share/pmjs/tools/pmjs.mjs', names)
+            self.assertIn('minimal-game/runtime/build-info.json', names)
             self.assertEqual([name for name in names if '/gamedata/' in name], ['minimal-game/gamedata/'])
             self.assertEqual(package.getinfo('Minimal Game.sh').external_attr >> 16 & 0o777, 0o755)
             binary = self.root / 'pmjs_native.node'
@@ -117,6 +122,43 @@ class PortMasterPackage(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             portmaster.portmaster(self.stage, self.game, self.output, strip='/bin/false')
         self.assertEqual(self.output.read_bytes(), b'existing package')
+
+    def test_bundle_rejects_extra_files_and_carries_declared_generated_pages(self):
+        bundle = self.root / 'portable bundle'
+        subprocess.run(['node', ROOT / 'tools/game-bundle.mjs', self.game, bundle, '', ''], check=True)
+        extra = bundle / 'unexpected-game-file.png'
+        extra.write_bytes(b'not declared')
+        with self.assertRaisesRegex(ValueError, 'undeclared files'):
+            portmaster.portmaster(self.stage, None, self.output, bundle=bundle)
+        self.assertFalse(self.output.exists())
+        extra.unlink()
+        page = 'assets/images/' + 'a' * 64 + '/page-0.png'
+        target = bundle / page
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b'generated page fixture')
+        index = {'schema': 1, 'kind': 'pmjs-asset-index',
+                 'images': [{'outputs': [{'path': page,
+                                          'hash': hashlib.sha256(target.read_bytes()).hexdigest()}]}],
+                 'maps': None}
+        index_file = bundle / 'asset-index.json'
+        index_file.write_text(json.dumps(index))
+        descriptor_file = bundle / 'pmjs.json'
+        descriptor = json.loads(descriptor_file.read_text())
+        descriptor.update(assetIndex='asset-index.json',
+                          assetIndexSha256=hashlib.sha256(index_file.read_bytes()).hexdigest(),
+                          assets='assets')
+        descriptor_file.write_text(json.dumps(descriptor))
+        portmaster.portmaster(self.stage, None, self.output, bundle=bundle)
+        with zipfile.ZipFile(self.output) as package:
+            self.assertEqual(package.read('minimal-game/' + page), target.read_bytes())
+
+    def test_legacy_packaging_without_host_runtime_can_skip_index(self):
+        portmaster.portmaster(self.stage, self.game, self.output,
+                              host_runtime=self.root / 'missing-host-runtime', no_index=True)
+        with zipfile.ZipFile(self.output) as package:
+            descriptor = json.loads(package.read('minimal-game/pmjs.json'))
+            self.assertIsNone(descriptor['assetIndex'])
+            self.assertNotIn('minimal-game/asset-index.json', package.namelist())
 
     def test_wrong_strip_tool_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'left debug information'):
@@ -171,6 +213,7 @@ if 'READY_FD' in os.environ:
 sys.exit(int(os.environ.get('NODE_STATUS', '0')))
 ''')
         node.chmod(0o755)
+        shutil.copy2(node, self.port / 'runtime/bin/pmjs')
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(('SDL_', 'PMJS_', 'PORTMASTER_')) and
                     key not in ('controlfolder', 'directory', 'HOTKEY', 'LD_LIBRARY_PATH')}
@@ -237,7 +280,9 @@ return "${MODULE_STATUS:-0}"
                 self.assertEqual(capture['env']['LD_LIBRARY_PATH'], str(self.port / 'runtime/lib') + ':/firmware/lib')
                 self.assertEqual(capture['env']['SDL_GAMECONTROLLERCONFIG_FILE'], str(self.control / 'gamecontrollerdb.txt'))
                 self.assertIn('platform:' + str(self.port / 'runtime/bin/node'), self.events.read_text())
-                self.assertIn(str(self.port / 'gamedata'), capture['argv'])
+                self.assertIn(str(self.port), capture['argv'])
+                self.assertIn(str(self.port / 'saves'), capture['argv'])
+                self.assertIn(str(self.port / '.cache'), capture['argv'])
 
     def test_xdg_discovery_adjacent_game_and_absent_display_settings(self):
         (self.control / 'control.txt').write_text((self.control / 'control.txt').read_text().replace(

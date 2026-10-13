@@ -1,18 +1,21 @@
 # Releases
+(Written by AI. Not finalized yet)
 
-Build a [release preset](building.md) before packaging. Linux ARM64 is the first
-release target; x64 builds are for development and testing.
+
+Build the ARM64 installation with [build.sh](building.md) before release work.
+Linux ARM64 is the first release target; local x64 builds are for development
+and testing.
 
 ## Stage the runtime
 
-Install into an empty directory:
+The build command installs to `dist/pmjs-arm64`:
 
 ```sh
-python3 tools/release.py stage --build build/release-linux-arm64 --output dist/stage-arm64
+./build.sh --target arm64
 ```
 
-For x64, use `--build build/release-x64 --output dist/stage-x64`.
-The staging command builds the addon before installing it.
+For a separate x64 release build, use `cmake --preset release-x64`, build
+`pmjs_native`, then stage with `tools/release.py stage`.
 
 ```text
 bin/pmjs           launcher
@@ -44,7 +47,7 @@ python3 tools/release.py verify --stage dist/stage-x64 \
 On an x64 host, an ARM64 package can only be checked statically:
 
 ```sh
-python3 tools/release.py verify --stage dist/stage-arm64 \
+python3 tools/release.py verify --stage dist/pmjs-arm64 \
   --report dist/static-arm64.json --static
 ```
 
@@ -63,9 +66,9 @@ Save its final JSON line as `dist/device-receipt.json` on the build host.
 Verify the device receipt against the staged package, then archive it:
 
 ```sh
-python3 tools/release.py verify --stage dist/stage-arm64 \
+python3 tools/release.py verify --stage dist/pmjs-arm64 \
   --receipt dist/device-receipt.json --report dist/verification-arm64.json
-python3 tools/release.py archive --stage dist/stage-arm64 \
+python3 tools/release.py archive --stage dist/pmjs-arm64 \
   --report dist/verification-arm64.json --output dist/pmjs-linux-arm64.tar.gz
 ```
 
@@ -77,7 +80,7 @@ The archive includes the verification report and gets a sibling `.sha256` file.
 Creating it does not publish it. For a local candidate without device testing:
 
 ```sh
-python3 tools/release.py archive --stage dist/stage-arm64 \
+python3 tools/release.py archive --stage dist/pmjs-arm64 \
   --report dist/static-arm64.json --output dist/pmjs-development.tar.gz --development
 ```
 
@@ -86,29 +89,8 @@ controls, frame pacing and return to the menu on the intended device and firmwar
 
 ## PortMaster ZIP
 
-Package an installation with bundled Node and an MV/MZ game directory:
-
-```sh
-python3 tools/portmaster.py --stage dist/stage-arm64 \
-  --game /path/to/game/www --output dist/game.zip
-```
-
-- `--name TITLE`: override the game's title for the launcher.
-- `--config FILE`: include runtime configuration.
-- `--adapter FILE`: add a JavaScript adapter before engine startup. Repeat for more adapters.
-- `--strip TOOL`: choose a target-capable strip tool; otherwise LLVM strip is used when available.
-
-The command writes one ZIP with a launcher, empty `gamedata/`, prepared bootstrap,
-stripped runtime and license notices. Matching FFmpeg source/build materials stay
-in the ZIP when its libraries are bundled.
-Game assets and catalog metadata are omitted. The original game and installation
-stay unchanged.
-
-Extract it into the firmware's ports directory and copy the game's `www` contents
-into `gamedata/`. Launch from the firmware menu. PortMaster supplies controls and
-platform helpers; logs go to `log.txt`, saves to `saves/` and caches to `.cache/`.
-
-The firmware must provide `libSDL2-2.0.so.0`, `libEGL.so.1` and `libGLESv2.so.2`,
+See [Porting a game](porting.md) to make a bundle and package it. The firmware
+must provide `libSDL2-2.0.so.0`, `libEGL.so.1`, and `libGLESv2.so.2`,
 with a working SDL backend and GLES 3 context. See [system requirements](using.md#system-requirements).
 Test the actual ZIP on each target firmware before distributing it.
 

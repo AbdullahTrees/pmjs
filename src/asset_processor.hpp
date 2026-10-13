@@ -44,5 +44,6 @@ void writePreparedPng(const std::filesystem::path& path, int width, int height,
                       const std::vector<std::uint8_t>& bytes);
 PreparedAsset prepareAssetImage(const std::filesystem::path& source,
                                const std::filesystem::path& staging,
-                               const AssetRecipe& recipe = {});
+                               const AssetRecipe& recipe = {},
+                               const PreparedAsset* layout = nullptr);
 }

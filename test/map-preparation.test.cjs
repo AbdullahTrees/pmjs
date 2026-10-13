@@ -118,6 +118,37 @@ test('warm compilation preserves descriptors and map contracts; changed and dama
   const changedFlags=await prepareMaps(f);
   assert.equal(changedFlags.compilationHits,0);assert.notDeepEqual(changedFlags.index,beforeFlags);
 });
+test('portable map metadata and atlas pages are checked against recipient inputs',async t=>{
+  const f=fixture(t),cold=await prepareMaps(f);
+  assert.equal(cold.selected,1);
+  const identity=Object.values(cold.index)[0].identity;
+  const entryDirectory=path.join(f.cacheRoot,'maps/entries',identity);
+  const manifest=JSON.parse(fs.readFileSync(path.join(entryDirectory,'manifest.json')));
+  const bundle=temporaryDirectory('pmjs-map-index-');
+  const output=path.join(bundle,'assets/maps',identity,'tiles-0.png');
+  fs.mkdirSync(path.dirname(output),{recursive:true});
+  fs.copyFileSync(path.join(entryDirectory,'tiles-0.png'),output);
+  const portableIndex={compiler:manifest.compiler,compilations:cold.compilations,
+    mapInputs:Object.fromEntries(Object.entries(cold.mapInputs).map(([name,input])=>
+      [name,{...input,dependencies:input.dependencies.map(({logical,hash})=>({logical,hash}))}])),
+    entries:[{identity,descriptor:manifest.descriptor,
+      outputs:[{path:path.posix.join('assets/maps',identity,'tiles-0.png'),
+        hash:crypto.createHash('sha256').update(fs.readFileSync(output)).digest('hex')}]}]};
+  const imported=await prepareMaps({...f,cacheRoot:path.join(bundle,'recipient-cache'),
+    portableIndex,portableAssetRoot:bundle});
+  assert.equal(imported.selected,1);
+  assert.equal(imported.compilationHits,1);
+  assert.equal(f.jobs,1,'valid indexed atlas avoids native repacking');
+  fs.appendFileSync(output,'damaged');
+  const damaged=await prepareMaps({...f,cacheRoot:path.join(bundle,'damaged-cache'),
+    portableIndex,portableAssetRoot:bundle});
+  assert.equal(damaged.selected,1);
+  assert.equal(f.jobs,2,'corrupt page falls back to native preparation');
+  fs.appendFileSync(path.join(f.gameRoot,'data/Map001.json'),' ');
+  const stale=await prepareMaps({...f,cacheRoot:path.join(bundle,'stale-cache'),
+    portableIndex,portableAssetRoot:bundle});
+  assert.equal(stale.compilationHits,0,'changed map input rejects compiled metadata');
+});
 
 test('unchanged map validation preserves published receipts and compilation index',async t=>{
   const f=fixture(t);

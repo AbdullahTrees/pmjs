@@ -108,14 +108,18 @@ struct AssetWork {
   struct stat snapshot{};
   std::filesystem::path staging;
   AssetRecipe recipe;
+  std::optional<PreparedAsset> layout;
   std::optional<PreparedAsset> result;
   std::string error;
   bool unsupported = false;
 };
+std::uint32_t arrayLength(napi_env env, napi_value value, std::uint32_t limit);
+napi_value element(napi_env env, napi_value value, std::uint32_t index);
 void executeAsset(napi_env, void* opaque) noexcept {
   auto& work = *static_cast<AssetWork*>(opaque);
   try {
-    work.result = prepareAssetImage("/proc/self/fd/" + std::to_string(work.sourceFd), work.staging, work.recipe);
+    work.result = prepareAssetImage("/proc/self/fd/" + std::to_string(work.sourceFd), work.staging,
+      work.recipe, work.layout ? &*work.layout : nullptr);
     struct stat current{};
     if (::fstat(work.sourceFd, &current) != 0 || current.st_size != work.snapshot.st_size ||
         current.st_mtim.tv_sec != work.snapshot.st_mtim.tv_sec || current.st_mtim.tv_nsec != work.snapshot.st_mtim.tv_nsec ||
@@ -141,7 +145,7 @@ void completeAsset(napi_env env, napi_status status, void* opaque) {
   napi_delete_async_work(env, work->work);
 }
 napi_value processImage(napi_env env, napi_callback_info info) try {
-  const auto args = arguments(env, info, 4);
+  const auto args = arguments(env, info, 5);
   auto work = std::make_unique<AssetWork>();
   const auto source = args.size() > 3
     ? std::optional<std::filesystem::path>(asString(env, args[3]))
@@ -157,6 +161,39 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
     napi_valuetype type;
     check(env, napi_typeof(env, args[2], &type), "cannot inspect preparation recipe");
     if (type != napi_undefined && type != napi_null) work->recipe = recipeValue(env, args[2]);
+  }
+  if (args.size() > 4) {
+    const auto value = args[4];
+    PreparedAsset layout;
+    if (integer(env, property(env, value, "version")) != 1)
+      throw std::runtime_error("unsupported indexed image layout");
+    layout.width = integer(env, property(env, value, "width"));
+    layout.height = integer(env, property(env, value, "height"));
+    layout.halo = integer(env, property(env, value, "halo"));
+    if (hasProperty(env, value, "uniform"))
+      layout.uniform = color(env, property(env, value, "uniform"));
+    const auto cells = property(env, value, "cells");
+    for (std::uint32_t i = 0, n = arrayLength(env, cells, 4096); i < n; ++i) {
+      const auto item = element(env, cells, i);
+      PreparedAssetCell cell;
+      cell.rect = integers<4>(env, property(env, item, "rect"));
+      cell.crop = integers<4>(env, property(env, item, "crop"));
+      cell.fill = color(env, property(env, item, "fill"));
+      const auto page = asNumber(env, property(env, item, "page"));
+      if (!std::isfinite(page) || page != std::floor(page) || page < -1 || page > 4095)
+        throw std::runtime_error("invalid indexed page number");
+      cell.page = static_cast<int>(page);
+      cell.atlas = integers<4>(env, property(env, item, "atlas"));
+      layout.cells.push_back(cell);
+    }
+    const auto pages = property(env, value, "pages");
+    for (std::uint32_t i = 0, n = arrayLength(env, pages, 4096); i < n; ++i) {
+      const auto item = element(env, pages, i);
+      PreparedAssetPage page{asString(env, property(env, item, "path")),
+        integer(env, property(env, item, "width")), integer(env, property(env, item, "height"))};
+      layout.pages.push_back(std::move(page));
+    }
+    work->layout = std::move(layout);
   }
   napi_value promise;
   check(env, napi_create_promise(env, &work->deferred, &promise), "cannot create asset preparation promise");

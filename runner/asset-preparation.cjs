@@ -235,11 +235,15 @@ async function cachedEntry(directory, key, sourceHash, files) {
 
 async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProgress = () => {},
   shouldCancel = () => false, logger = console, verifyHashes = false,
+  preparationContext = 'live',
+  portableIndex = null, portableAssetRoot = null,
   processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY }) {
+  if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
+  const offline = preparationContext === 'offline';
   const started = performance.now();
   const result = { enabled: true, total: 0, completed: 0, generated: 0, hits: 0, negativeHits: 0,
     fallback: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
-    cancelled: false, entries: [], decryptedEntries: [], durationMs: 0 };
+    cancelled: false, entries: [], decryptedEntries: [], decisions: [], durationMs: 0 };
   const catalogFile = path.join(cacheRoot, 'catalog-'+identity(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
@@ -263,14 +267,15 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     report('discover');
     if (cancelled()) return result;
     validRecipes(recipes);
-    if (!native.assets || typeof native.assets.processImage !== 'function' || typeof native.assets.installPrepared !== 'function') {
+    if (!native.assets || typeof native.assets.processImage !== 'function' ||
+        (!offline && typeof native.assets.installPrepared !== 'function')) {
       throw new Error('image preparation is unavailable in this addon');
     }
 
     const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes };
     const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
       typeof native.assets.installDerivedCatalog === 'function';
-    if (!verifyHashes && catalogCapable) {
+    if (!offline && !verifyHashes && catalogCapable) {
       await fsp.mkdir(cacheRoot, { recursive: true });
       release = await acquireLock(cacheRoot, cancelled, () => report('wait'));
       if (!release) return result;
@@ -306,8 +311,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     if (!sources.length) {
       report('install');
       if (cancelled()) return result;
-      await native.assets.installPrepared([]);
-      if (native.assets.installDecrypted) native.assets.installDecrypted([]);
+      if (!offline) {
+        await native.assets.installPrepared([]);
+        if (native.assets.installDecrypted) native.assets.installDecrypted([]);
+      }
       return result;
     }
     await fsp.mkdir(path.join(cacheRoot, 'entries'), { recursive: true });
@@ -337,7 +344,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         const logicalSource = decryptedPath || source;
         const extension = path.extname(logicalSource).toLowerCase();
         if (encrypted && (!settings.key || !(extension === '.png' ? settings.images : settings.audio) ||
-            typeof native.assets.installDecrypted !== 'function')) throw new Error('cached decryption is unavailable');
+            (!offline && typeof native.assets.installDecrypted !== 'function'))) throw new Error('cached decryption is unavailable');
         if (encrypted && fs.existsSync(path.join(gameRoot, logicalSource))) throw new Error('plaintext source path already exists');
         const file = sourceFile(native, gameRoot, source);
         let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
@@ -368,15 +375,51 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             if (!recipe) recipe = await automaticRecipe(input, logicalSource, sourceHash);
           }
           if (cancelled()) break;
-          const descriptor = extension === '.png' ? await native.assets.processImage(source, stage, recipe || null,
-            ...(encrypted ? [input] : [])) : null;
+          const indexed = portableIndex?.images?.find(record => record.source === source &&
+            record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
+            record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
+            (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||
+              record.descriptor && validDescriptor(record.descriptor)));
+          let descriptor = null, copied = false;
+          const indexedFallback = indexed?.descriptor === null;
+          if (indexed?.descriptor && portableAssetRoot && Array.isArray(indexed.outputs) &&
+              indexed.outputs.length === indexed.descriptor.pages.length) {
+            const pages = indexed.descriptor.pages;
+            try {
+              for (let i = 0; i < pages.length; ++i) {
+                const item = indexed.outputs[i];
+                if (!item || typeof item.path !== 'string' || !/^assets\/images\/[a-f0-9]{64}\/page-\d+\.png$/.test(item.path) ||
+                    path.basename(item.path) !== pages[i].path || !HASH.test(item.hash)) throw new Error('invalid indexed page');
+                const candidate = path.join(portableAssetRoot, item.path);
+                if (await hashFile(candidate) !== item.hash) throw new Error('indexed page checksum differs');
+                const header = Buffer.alloc(24);
+                const handle = await fsp.open(candidate, 'r');
+                try {
+                  if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24 ||
+                      !header.subarray(0, 8).equals(PNG) ||
+                      header.readUInt32BE(16) !== pages[i].width ||
+                      header.readUInt32BE(20) !== pages[i].height)
+                    throw new Error('indexed page header differs');
+                } finally { await handle.close(); }
+                await fsp.copyFile(candidate, path.join(stage, pages[i].path));
+                if (await hashFile(path.join(stage, pages[i].path)) !== item.hash)
+                  throw new Error('indexed page changed while copying');
+              }
+              descriptor = indexed.descriptor;
+              copied = true;
+            } catch (_) {
+              for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
+            }
+          }
+          if (!copied && !indexedFallback && extension === '.png') descriptor = await native.assets.processImage(source, stage, recipe || null,
+            input, ...(indexed ? [indexed.descriptor] : []));
           if (cancelled()) break;
           if (descriptor !== null && !validDescriptor(descriptor)) throw new Error('processor returned invalid logical image descriptor');
           if (await hashFile(file) !== sourceHash) throw new Error('source changed during image preparation');
           const outputs = {};
           if (decrypted) outputs[decrypted] = await hashFile(input);
           for (const page of descriptor ? descriptor.pages : []) outputs[page.path] = await hashFile(path.join(stage, page.path));
-          manifest = { version: CACHE_VERSION, key, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
+          manifest = { version: CACHE_VERSION, key, source, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
             ...(decrypted ? { decrypted } : {}) };
           // Cache entries are disposable and hash-validated; locks, leases and indexes still flush.
           await writeJson(path.join(stage, 'manifest.json'), manifest, false);
@@ -389,6 +432,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           result.generated += 1;
         }
         sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
+        if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
+          encryptionSettingsSha256: encrypted ? settings.hash : null,
+          descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
+            .filter(([name]) => name !== manifest.decrypted)) });
         if (encrypted) settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
         keys.push(key);
         if (manifest.decrypted) {
@@ -419,6 +466,12 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           entry.sourceIdentity = await refreshIdentity(entry.source, entry.sourceHash, entry.sourceIdentity);
           entry.settingsIdentity = settings.sourceIdentity;
         }
+      }
+      if (offline) {
+        result.prepared = result.installed = result.entries.length;
+        result.decrypted = result.decryptedEntries.length;
+        await files.save();
+        return result;
       }
       const releaseCacheLease = await createImageLease(cacheRoot, keys, native.assets);
       const previousLease = installedLeases.get(native.assets);

@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export function preparationInputs(gameDir, config, manifest) {
+export function preparationInputs(gameDir, config, manifest, adapters = []) {
   const candidates = ['js/rpg_core.js', 'js/rpg_managers.js', 'js/rmmz_core.js',
     'js/libs/pixi.js', 'js/pixi.js', 'js/libs/pixi-tilemap.js', 'js/pixi-tilemap.js', 'js/plugins.js'];
   const files = candidates.map(name => path.join(gameDir, name));
   if (config) files.push(config);
   if (manifest) files.push(manifest);
+  files.push(...adapters);
   return Object.fromEntries(files.map(file => [file, fs.existsSync(file) ?
     crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null]));
 }

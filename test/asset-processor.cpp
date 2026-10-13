@@ -161,6 +161,23 @@ int main() {
     }, {2,1,std::nullopt,{}});
     require(result.cells.size() == 2 && result.cells[0].crop[2] == 1);
     require(result.cells[0].atlas == result.cells[1].atlas);
+    const auto replayed = pmjs::prepareAssetImage(source, root / "indexed", {2,1,std::nullopt,{}}, &result);
+    verify(source, root / "indexed", replayed);
+    require(replayed.cells.size() == result.cells.size() && replayed.pages.size() == result.pages.size());
+    for (std::size_t index = 0; index < result.pages.size(); ++index) {
+      auto bytes = [](const std::filesystem::path& file) {
+        std::ifstream input(file, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+      };
+      require(bytes(root / "output" / result.pages[index].path) ==
+              bytes(root / "indexed" / replayed.pages[index].path));
+    }
+    auto malformed = result;
+    malformed.cells[0].crop[2] = 0;
+    const auto recovered = pmjs::prepareAssetImage(source, root / "invalid-layout",
+      {2,1,std::nullopt,{}}, &malformed);
+    verify(source, root / "invalid-layout", recovered);
+    require(recovered.pages.size() == result.pages.size());
     result = check(40, 20, [](int x, int y) {
       return y == 10 && (x == 19 || x == 20) ? AssetColor{67, 89, 23, 128} : AssetColor{};
     }, {2,1,std::nullopt,{}});

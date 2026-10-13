@@ -1,53 +1,96 @@
 # Building PMJS
+(Written by AI. Not finalized yet)
 
-Build on Linux. Run the commands below from the repository root.
+
+On Linux, from the PMJS source directory:
+
+```sh
+./build.sh
+```
+
+This builds a local development runtime and installs it at `dist/pmjs`. The
+last line prints the path to `bin/pmjs`. Try it with a game:
+
+```sh
+dist/pmjs/bin/pmjs /path/to/game
+```
+
+PMJS accepts either the game's engine directory or an installation containing
+`www/`. The local build uses FreeType and your system Node. The command checks
+an existing installation before replacing it and keeps it if a build fails.
 
 ## Requirements
 
-- A C++20 compiler
-- CMake 3.20+, Ninja and pkg-config
-- Node.js with Node-API 8+ and its development headers
-- Git and Python 3.12+
+You need Linux, a C++20 compiler, CMake 3.20 or newer, Ninja, pkg-config,
+Node.js with Node-API 8 or newer and development headers, Git, and Python 3.12
+or newer. The native libraries are SDL2, EGL, OpenGL ES, libpng, libwebp, zlib,
+libjpeg, FreeType, HarfBuzz, and FFmpeg's avformat, avcodec, avutil, swresample,
+and swscale libraries.
 
-On Ubuntu 24.04:
+On Ubuntu 24.04, install the system packages first:
 
 ```sh
 sudo apt-get install build-essential cmake ninja-build pkg-config git python3 \
-  libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev libpng-dev \
-  zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
+  nodejs libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev \
+  libpng-dev libwebp-dev zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
   libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev
 ```
 
-## Get the source
+`build.sh` reports missing build tools. It prepares pinned dependencies when
+the selected target needs them, but it does not install system packages.
+
+## x64 release build
+
+The public `./build.sh` command makes a FreeType development installation.
+For an x64 release candidate with Skia65, install Clang/LLVM 20.1.2
+(`clang-20`, `clang++-20`, `llvm-ar-20`, and `llvm-strip-20`), then:
 
 ```sh
-git clone https://github.com/bbbreaddd/pmjs.git
-cd pmjs
+export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/x64"
+python3 tools/skia65/build.py --arch x64 --output "$PMJS_SKIA65_COMPONENT_DIR" --reuse
+cmake --preset release-x64
+cmake --build --preset release-x64 --target pmjs_native --parallel 4
+python3 tools/release.py stage --build build/release-x64 --output dist/stage-x64
 ```
 
-## Build
+Use an empty destination for `release.py stage`. Skia65 is checked and
+reused on later builds.
 
-The development build uses FreeType for text rendering.
+## ARM64 handheld build
+
+On an x86-64 Linux host:
 
 ```sh
-cmake --preset dev -DBUILD_TESTING=OFF
-cmake --build --preset dev --target pmjs_native --parallel 4
+./build.sh --target arm64
 ```
 
-The addon is written to `build/dev/pmjs_native.node`.
+The installation goes to `dist/pmjs-arm64`. The command also builds the local
+host installation used to make game bundles. It prepares the pinned ARM64 SDK,
+Node, Effekseer, and Skia component, then builds and stages the runtime.
+Later builds reuse their checked caches.
 
-## Tests
+The host also needs curl, Make, `dpkg-deb`, `readelf`, and Clang/LLVM 20.1.2:
+`clang-20`, `clang++-20`, `llvm-ar-20`, and `llvm-strip-20`.
+The target needs glibc 2.28 or newer and working SDL2, EGL, and GLES 3
+libraries from its firmware.
+Keep `.cache/linux-arm64/downloads`; the installation includes matching
+dependency source materials.
 
-Native tests need Xvfb. Enable tests and build their executables:
+Use `--jobs N` to set parallel build jobs and `--output DIR` to choose an
+installation directory. An existing output must be a complete PMJS
+installation; unrelated files are never overwritten.
+
+## Tests and release work
+
+For native tests, install Xvfb and xauth, then run:
 
 ```sh
-sudo apt-get install xvfb xauth
 cmake --preset dev
 cmake --build --preset dev --parallel 4
 ctest --preset dev --output-on-failure
 ```
 
-Run the JavaScript checks separately:
+The JavaScript checks run separately:
 
 ```sh
 npm ci
@@ -56,60 +99,7 @@ npm run licensing
 npm test
 ```
 
-## x64 release build
-
-Release builds use Skia65. Install Clang/LLVM 20.1.2, including `clang-20`,
-`clang++-20`, `llvm-ar-20` and `llvm-strip-20`, then build the component:
-
-```sh
-export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/x64"
-python3 tools/skia65/build.py --arch x64 --output "$PMJS_SKIA65_COMPONENT_DIR" --reuse
-cmake --preset release-x64
-cmake --build --preset release-x64 --target pmjs_native --parallel 4
-```
-
-Skia65 is reused on later builds.
-
-## Cross-compile for Linux ARM64
-
-Use an x86-64 Linux host with curl, Make, `dpkg-deb`, `readelf` and LLVM strip 20.1.2.
-The target needs glibc 2.28 or newer and its own SDL2, EGL and GLES 3 libraries.
-
-Prepare the SDK, Node, Effekseer and Skia65, then build:
-
-```sh
-export PMJS_SDK_ROOT="$PWD/.cache/linux-arm64/sdk"
-export PMJS_NODE_ROOT="$PWD/.cache/linux-arm64/node"
-export PMJS_EFFEKSEER_ARCHIVE="$PWD/.cache/effekseer/source.tar.gz"
-export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/arm64"
-
-python3 tools/linux-arm64/prepare-sdk.py --sdk "$PMJS_SDK_ROOT" --jobs 4
-python3 tools/linux-arm64/prepare-node.py --output "$PMJS_NODE_ROOT"
-mkdir -p .cache/effekseer
-curl --fail --location "$(python3 -c 'import json; print(json.load(open("tools/effekseer.lock.json"))["url"])')" \
-  --output "$PMJS_EFFEKSEER_ARCHIVE"
-python3 tools/skia65/build.py --arch arm64 --sdk "$PMJS_SDK_ROOT" \
-  --output "$PMJS_SKIA65_COMPONENT_DIR" --reuse
-
-cmake --preset release-linux-arm64
-cmake --build --preset release-linux-arm64 --target pmjs_native --parallel 4
-```
-
-Preparation downloads pinned dependencies. Later builds reuse them.
-CMake verifies the Effekseer archive, extracts it and applies the patch for both
-online and offline builds.
-Keep `.cache/linux-arm64/downloads`; installation includes dependency sources.
-If you change SDK build behavior, increase `revision` in
-`tools/linux-arm64/sdk-recipes.json`.
-
-## Install
-
-Install a release build into an empty directory:
-
-```sh
-python3 tools/release.py stage --build build/release-linux-arm64 --output dist/pmjs
-```
-
-For x64, use `--build build/release-x64`.
-See [using PMJS](using.md) to run a game and [releases](releases.md) to verify
-or package an installation.
+`./build.sh` makes a runnable installation. A public release also needs
+the verification and device checks in [Releases](releases.md).
+See [Using PMJS](using.md) to run a game and [Porting a game](porting.md) to
+make a bundle or PortMaster ZIP.

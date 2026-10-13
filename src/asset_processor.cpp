@@ -141,6 +141,106 @@ struct Tile {
   int page = -1, x = 0, y = 0;
   std::size_t size() const { return static_cast<std::size_t>(width) * height * 4; }
 };
+PreparedAsset replayLayout(const std::filesystem::path& source,
+                           const std::filesystem::path& staging,
+                           const AssetRecipe& recipe, const PreparedAsset& layout) {
+  PngRows input(source);
+  const int width = input.width, height = input.height;
+  if (layout.width != width || layout.height != height || layout.halo !=
+      (std::max(width, height) + 1023) / 1024 + 2 ||
+      recipe.columns <= 0 || recipe.rows <= 0 || recipe.columns > 4096 ||
+      recipe.rows > 4096 / recipe.columns || width % recipe.columns || height % recipe.rows)
+    throw AssetPreparationUnsupported("indexed image layout is incompatible");
+  const auto sourceBytes = static_cast<std::uint64_t>(width) * height * 4;
+  if (sourceBytes > 128U * 1024U * 1024U)
+    throw AssetPreparationUnsupported("indexed image exceeds replay memory limit");
+  std::vector<std::uint8_t> pixels(static_cast<std::size_t>(sourceBytes));
+  for (int y = 0; y < height; ++y) {
+    input.read();
+    std::memcpy(pixels.data() + static_cast<std::size_t>(y) * width * 4,
+                input.row.data(), input.row.size());
+  }
+  input.finish();
+  const auto sourcePixel = [&](int x, int y) {
+    const auto offset = (static_cast<std::size_t>(std::clamp(y, 0, height - 1)) * width +
+                         std::clamp(x, 0, width - 1)) * 4;
+    return pixel(pixels.data() + offset);
+  };
+  if (layout.uniform) {
+    if (!layout.cells.empty() || !layout.pages.empty())
+      throw AssetPreparationUnsupported("invalid indexed uniform image");
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+      if (sourcePixel(x, y) != *layout.uniform)
+        throw AssetPreparationUnsupported("indexed uniform color differs");
+    return layout;
+  }
+  const int cellWidth = width / recipe.columns, cellHeight = height / recipe.rows;
+  if (layout.cells.size() != static_cast<std::size_t>(recipe.columns * recipe.rows) ||
+      layout.pages.size() > 4096)
+    throw AssetPreparationUnsupported("indexed cells do not match the recipe");
+  std::uint64_t totalBytes = sourceBytes;
+  std::uint64_t pagePixels = 0;
+  std::vector<std::vector<std::uint8_t>> pages, written;
+  for (std::size_t index = 0; index < layout.pages.size(); ++index) {
+    const auto& page = layout.pages[index];
+    if (page.path != "page-" + std::to_string(index) + ".png" ||
+        page.width <= 0 || page.height <= 0 || page.width > pageLimit || page.height > pageLimit)
+      throw AssetPreparationUnsupported("invalid indexed page");
+    const auto area = static_cast<std::uint64_t>(page.width) * page.height;
+    pagePixels += area;
+    totalBytes += area * 5;
+    if (totalBytes > 192U * 1024U * 1024U)
+      throw AssetPreparationUnsupported("indexed pages exceed replay memory limit");
+    pages.emplace_back(static_cast<std::size_t>(area) * 4);
+    written.emplace_back(static_cast<std::size_t>(area));
+  }
+  if (pagePixels >= static_cast<std::uint64_t>(width) * height)
+    throw AssetPreparationUnsupported("indexed pages do not reduce decoded storage");
+  for (std::size_t index = 0; index < layout.cells.size(); ++index) {
+    const auto& cell = layout.cells[index];
+    const AssetRect expected{static_cast<int>(index % recipe.columns) * cellWidth,
+      static_cast<int>(index / recipe.columns) * cellHeight, cellWidth, cellHeight};
+    if (cell.rect != expected || cell.crop[0] < 0 || cell.crop[1] < 0 ||
+        cell.crop[2] < 0 || cell.crop[3] < 0 ||
+        cell.crop[0] > cellWidth - cell.crop[2] ||
+        cell.crop[1] > cellHeight - cell.crop[3] ||
+        (cell.crop[2] == 0) != (cell.crop[3] == 0) ||
+        (recipe.crop && cell.fill != recipe.backdrop))
+      throw AssetPreparationUnsupported("invalid indexed crop");
+    for (int y = 0; y < cellHeight; ++y) for (int x = 0; x < cellWidth; ++x) {
+      const auto current = sourcePixel(cell.rect[0] + x, cell.rect[1] + y);
+      if ((!inside(x, y, cell.crop) && current != cell.fill) ||
+          (recipe.crop && !inside(x, y, *recipe.crop) && current != recipe.backdrop))
+        throw AssetPreparationUnsupported("indexed crop discards source pixels");
+    }
+    if (!cell.crop[2]) continue;
+    if (cell.page < 0 || static_cast<std::size_t>(cell.page) >= pages.size() ||
+        cell.atlas[2] != cell.crop[2] || cell.atlas[3] != cell.crop[3])
+      throw AssetPreparationUnsupported("invalid indexed atlas");
+    const auto& page = layout.pages[cell.page];
+    const int paddedX = cell.atlas[0] - layout.halo, paddedY = cell.atlas[1] - layout.halo;
+    const int paddedWidth = cell.crop[2] + layout.halo * 2;
+    const int paddedHeight = cell.crop[3] + layout.halo * 2;
+    if (paddedX < 0 || paddedY < 0 || paddedX > page.width - paddedWidth ||
+        paddedY > page.height - paddedHeight)
+      throw AssetPreparationUnsupported("indexed atlas exceeds its page");
+    for (int y = 0; y < paddedHeight; ++y) for (int x = 0; x < paddedWidth; ++x) {
+      const auto color = sourcePixel(cell.rect[0] + cell.crop[0] + x - layout.halo,
+                                     cell.rect[1] + cell.crop[1] + y - layout.halo);
+      const auto position = static_cast<std::size_t>(paddedY + y) * page.width + paddedX + x;
+      auto* target = pages[cell.page].data() + position * 4;
+      if (written[cell.page][position] && pixel(target) != color)
+        throw AssetPreparationUnsupported("indexed shared tile differs");
+      std::copy(color.begin(), color.end(), target);
+      written[cell.page][position] = 1;
+    }
+  }
+  std::filesystem::create_directories(staging);
+  for (std::size_t index = 0; index < pages.size(); ++index)
+    writePng(staging / layout.pages[index].path, layout.pages[index].width,
+             layout.pages[index].height, pages[index]);
+  return layout;
+}
 }
 
 void writePreparedPng(const std::filesystem::path& path, int width, int height,
@@ -152,7 +252,15 @@ void writePreparedPng(const std::filesystem::path& path, int width, int height,
 
 PreparedAsset prepareAssetImage(const std::filesystem::path& source,
                                const std::filesystem::path& staging,
-                               const AssetRecipe& recipe) {
+                               const AssetRecipe& recipe, const PreparedAsset* layout) {
+  if (layout) {
+    try { return replayLayout(source, staging, recipe, *layout); }
+    catch (const AssetPreparationUnsupported&) {}
+    catch (const std::exception&) {}
+    for (const auto& page : layout->pages)
+      if (page.path.filename() == page.path)
+        std::filesystem::remove(staging / page.path);
+  }
   PngRows input(source);
   PreparedAsset result;
   result.width = input.width; result.height = input.height;

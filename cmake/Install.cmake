@@ -30,8 +30,10 @@ endif()
 install(PROGRAMS bin/pmjs DESTINATION bin)
 install(DIRECTORY js runner profiles DESTINATION share/pmjs
   FILES_MATCHING PATTERN "*.js" PATTERN "*.cjs" PATTERN "*.json" PATTERN "*.ttf" PATTERN "*.LICENSE")
-install(FILES tools/build-js-runtime.mjs tools/game-inspect.mjs tools/pmjs.mjs
-  tools/package-self-test.cjs DESTINATION share/pmjs/tools)
+install(FILES tools/build-js-runtime.mjs tools/game-inspect.mjs tools/game-bundle.mjs tools/pmjs.mjs
+  tools/package-self-test.cjs tools/portmaster.py tools/release.py
+  DESTINATION share/pmjs/tools)
+install(FILES tools/linux-arm64/audit-abi.py DESTINATION share/pmjs/tools/linux-arm64)
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION .)
 install(DIRECTORY third_party/ DESTINATION share/pmjs/notices
   FILES_MATCHING PATTERN "*.LICENSE" PATTERN "*.GPLv2")

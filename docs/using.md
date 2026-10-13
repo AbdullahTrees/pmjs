@@ -1,59 +1,79 @@
 # Using PMJS
+(Written by AI. Not finalized yet)
 
-Check the archive checksum, then unpack it:
-
-```sh
-sha256sum -c pmjs-linux-arm64.tar.gz.sha256
-tar -xzf pmjs-linux-arm64.tar.gz
-```
-
-## Run a game
-
-Use a game directory containing its original MV/MZ engine and plugin scripts:
+Point PMJS at an RPG Maker MV or MZ game:
 
 ```sh
-./pmjs-linux-arm64/bin/pmjs --version
-./pmjs-linux-arm64/bin/pmjs self-test
-./pmjs-linux-arm64/bin/pmjs prepare --game /path/to/game
-./pmjs-linux-arm64/bin/pmjs run --game /path/to/game
+/path/to/pmjs/bin/pmjs /path/to/game
 ```
 
-Preparation creates a bootstrap in your cache and leaves the game files unchanged.
-Prepare again after changing game scripts, plugins, configuration or the runtime.
-Running uses the prepared bootstrap.
+The path can be the engine directory or a game installation with `www/`.
+If you are already in that directory, run `pmjs` with no arguments. PMJS
+creates a JavaScript bootstrap in your cache on first launch and refreshes it
+when game scripts, adapter selection, configuration, or runtime modules
+change. It does not write to the original game.
 
-Only run games you trust. Game and plugin scripts have access to Node APIs. PMJS does not sandbox them.
+Only run games you trust. Game and plugin scripts have access to Node APIs;
+PMJS does not sandbox them.
 
 ## Configuration and saves
 
-- `prepare --config FILE`: load runtime configuration.
-- `prepare --manifest FILE`: select plugin adapters through a manifest.
-- `--state DIR`: choose the preparation directory. Use it for both `prepare` and `run`.
-- `preserveBitmapReloadPixels` (default: `true`) keeps the previous image visible
-  while the same image reloads. Set it to `false` for the original loading behavior.
-- `run --save-root DIR`: choose a save directory, including an existing one.
+Pass `--config FILE` for runtime configuration, `--manifest FILE` for a
+shared adapter selection manifest, and repeat `--adapter FILE` for custom
+JavaScript adapters in load order. These files are included when you make a
+bundle. Adapters are authored compatibility code; PMJS does not create fixes
+for a game's plugins.
 
-Prepared files default to `XDG_CACHE_HOME`; saves default to `XDG_DATA_HOME`,
-with a separate directory for each game. If unset, these use `~/.cache` and
-`~/.local/share`. Back up existing saves before testing PMJS.
+`--state DIR` chooses the bootstrap cache directory, `--save-root DIR`
+chooses where a game saves, and `--asset-cache-root DIR` chooses where
+prepared images and maps are cached. By default, bootstraps live under
+`XDG_CACHE_HOME/pmjs` and saves under `XDG_DATA_HOME/pmjs`, with a separate
+directory for each resolved game path. Without those environment variables,
+PMJS uses `~/.cache` and `~/.local/share`. Existing save locations and game
+identities still apply. Back up existing saves before trying a new game.
+
+The `preserveBitmapReloadPixels` configuration option defaults to `true`;
+it keeps the previous image visible while that image reloads. Set it to
+`false` for the original loading behavior.
+
+## Run a bundle
+
+A [game bundle](porting.md) keeps your adapter setup together. Put the
+original game's `www` contents inside its empty `gamedata/` directory,
+then run:
+
+```sh
+pmjs /path/to/bundle
+```
+
+You can also keep the game separate:
+
+```sh
+pmjs /path/to/bundle --game /path/to/game
+```
+
+PMJS stores any refreshed bootstrap in your cache; moving a bundle does not
+require editing it. An asset index may speed preparation when it matches the
+recipient's game and runtime. If it does not match, ordinary preparation runs.
 
 ## System requirements
 
-ARM64 packages include Node and nongraphics libraries. The system must provide
-SDL2, EGL and GLES 3.0 or newer, with glibc 2.28 or newer. The bundled Node 22
-targets Linux 4.18 or newer; older kernels need separate testing.
-x64 installations use system Node and the native libraries used to build them,
-unless Node was explicitly bundled.
+ARM64 installations include Node and nongraphics libraries. The system must
+provide SDL2, EGL, and GLES 3.0 or newer, with glibc 2.28 or newer. Bundled
+Node 22 targets Linux 4.18 or newer; older kernels need separate testing.
+Local x64 installations use system Node and the native libraries used to
+build them.
 
-The compatibility references are MV 1.6.2/Pixi 4.5.4 and MZ 1.10.0/Pixi 5.3.12.
-Game and plugin support is still experimental. Test each device and firmware.
+The compatibility references are MV 1.6.2/Pixi 4.5.4 and MZ 1.10.0/Pixi
+5.3.12. Game and plugin support is experimental; test each game and device.
 
 ## Troubleshooting
 
-`self-test` checks package files and addon loading. `self-test --graphics` also
-checks startup, rendering and shutdown. Run graphics tests in the firmware's
-normal display session. Stop its menu through the normal lifecycle before testing,
-then restore it afterward. The test needs exclusive use of the display.
+`pmjs self-test` checks the installed files and native addon.
+`pmjs self-test --graphics` also checks startup, rendering, and shutdown.
+Run graphics tests in the firmware's normal display session. Stop its menu
+through the normal lifecycle first, then restore it afterward. The test needs
+exclusive use of the display.
 
 For additional logging:
 
@@ -63,6 +83,6 @@ For additional logging:
 - `PMJS_STRICT_COMPAT=1`: stop at the first unsupported operation.
 
 When reporting a problem, include `--version`, the log, firmware and kernel
-versions, self-test output, and the game's engine and plugin versions.
-Missing shared libraries must be supplied by the supported system environment;
-keep graphics drivers matched to the firmware.
+versions, self-test output, and the game's engine and plugin versions. Missing
+shared libraries must come from the supported system environment; keep
+graphics drivers matched to the firmware.
