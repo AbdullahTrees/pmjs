@@ -675,8 +675,8 @@ std::uint32_t Renderer::createOrdinaryTileLayer(std::vector<TileLayerTile> tiles
     }
     layer.images.push_back(image);
   }
-  std::vector<float> vertices;
-  vertices.reserve(tiles.size() * 60U);
+  std::vector<float> vertices(tiles.size() * 60U);
+  std::size_t vertexCount = 0;
   for (const auto& tile : tiles) {
     const auto& image = imageInfo.at(tile.image);
     const float left = tile.position[0];
@@ -688,9 +688,18 @@ std::uint32_t Renderer::createOrdinaryTileLayer(std::vector<TileLayerTile> tiles
     const float sourceRight = sourceLeft + tile.source[2];
     const float sourceBottom = sourceTop + tile.source[3];
     const auto append = [&](float x, float y, float u, float v) {
-      vertices.insert(vertices.end(), {x, y, u, v,
-        tile.animation[0], tile.animation[1],
-        sourceLeft+0.5F, sourceTop+0.5F, sourceRight-0.5F, sourceBottom-0.5F});
+      auto* vertex = vertices.data() + vertexCount * 10U;
+      vertex[0] = x;
+      vertex[1] = y;
+      vertex[2] = u;
+      vertex[3] = v;
+      vertex[4] = tile.animation[0];
+      vertex[5] = tile.animation[1];
+      vertex[6] = sourceLeft + 0.5F;
+      vertex[7] = sourceTop + 0.5F;
+      vertex[8] = sourceRight - 0.5F;
+      vertex[9] = sourceBottom - 0.5F;
+      ++vertexCount;
     };
     append(left, top, sourceLeft, sourceTop);
     append(right, top, sourceRight, sourceTop);
@@ -700,7 +709,7 @@ std::uint32_t Renderer::createOrdinaryTileLayer(std::vector<TileLayerTile> tiles
     append(left, bottom, sourceLeft, sourceBottom);
     if (layer.batches.empty() || layer.batches.back().texture != image.texture) {
       layer.batches.push_back({image.texture, image.width, image.height,
-        static_cast<std::int32_t>(vertices.size() / 10U - 6U), 6, image.premultiplied, tile.image});
+        static_cast<std::int32_t>(vertexCount - 6U), 6, image.premultiplied, tile.image});
     } else {
       layer.batches.back().count += 6;
     }
