@@ -14,6 +14,8 @@ if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
     fallback: 're-rasterize the tiling source canvas on every use' });
   PMJS.optimizations.register({ id: 'scene.filter-intermediate-cache', owner: 'pmjs-pixi4',
     fallback: 'execute every authored filter pass each frame' });
+  PMJS.optimizations.register({ id: 'scene.constant-black-group', owner: 'pmjs-pixi4',
+    fallback: 'draw every source primitive of the black color-matrix group' });
   PMJS.optimizations.register({ id: 'scene.graphics-cache', owner: 'pmjs-pixi4',
     fallback: 're-rasterize vector graphics on every use' });
   PMJS.optimizations.register({ id: 'scene.retained-mesh-geometry', owner: 'pmjs-pixi4',
@@ -282,30 +284,41 @@ function ensureNativeTilingTexture(texture, directAtlas) {
     cropContext.drawImage(source, frame.x * resolution, frame.y * resolution,
       frame.width * resolution, frame.height * resolution,
       0, 0, crop.width, crop.height);
-    var packed = cropContext.getImageData(0, 0, crop.width, crop.height).data;
-    var output = new Uint8ClampedArray(width * height * 4);
     var target = trim ||
       { x: 0, y: 0, width: original.width, height: original.height };
     var targetWidth = Math.max(0, Math.ceil(target.width * resolution));
     var targetHeight = Math.max(0, Math.ceil(target.height * resolution));
-    for (var y = 0; y < targetHeight; y++) for (var x = 0; x < targetWidth; x++) {
-      var point = nativeRotatedTexturePoint(rotation / 2,
-        (x + 0.5) / targetWidth, (y + 0.5) / targetHeight);
-      var sourceX = Math.max(0, Math.min(crop.width - 1,
-        Math.floor(point[0] * crop.width)));
-      var sourceY = Math.max(0, Math.min(crop.height - 1,
-        Math.floor(point[1] * crop.height)));
-      var targetX = Math.floor((Number(target.x) || 0) * resolution) + x;
-      var targetY = Math.floor((Number(target.y) || 0) * resolution) + y;
-      if (targetX < 0 || targetY < 0 || targetX >= width || targetY >= height) continue;
-      var sourceOffset = (sourceY * crop.width + sourceX) * 4;
-      var targetOffset = (targetY * width + targetX) * 4;
-      output[targetOffset] = packed[sourceOffset];
-      output[targetOffset + 1] = packed[sourceOffset + 1];
-      output[targetOffset + 2] = packed[sourceOffset + 2];
-      output[targetOffset + 3] = packed[sourceOffset + 3];
+    var targetLeft = Math.floor((Number(target.x) || 0) * resolution);
+    var targetTop = Math.floor((Number(target.y) || 0) * resolution);
+    var nativeBounds = [targetLeft, targetTop, targetWidth, targetHeight].every(function(value) {
+      return Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+    });
+    if (nativeBounds && NativeHost.canvas && typeof NativeHost.canvas.copyTransformedPixels === 'function') {
+      NativeHost.canvas.copyTransformedPixels(canvas._ensureNativeCanvas().handle,
+        crop._ensureNativeCanvas().handle, targetLeft, targetTop, targetWidth, targetHeight, rotation / 2);
+      canvas._pmjsContentChanged();
+    } else {
+      var packed = cropContext.getImageData(0, 0, crop.width, crop.height).data;
+      var output = new Uint8ClampedArray(width * height * 4);
+      for (var y = 0; y < targetHeight; y++) for (var x = 0; x < targetWidth; x++) {
+        var point = nativeRotatedTexturePoint(rotation / 2,
+          (x + 0.5) / targetWidth, (y + 0.5) / targetHeight);
+        var sourceX = Math.max(0, Math.min(crop.width - 1,
+          Math.floor(point[0] * crop.width)));
+        var sourceY = Math.max(0, Math.min(crop.height - 1,
+          Math.floor(point[1] * crop.height)));
+        var targetX = Math.floor((Number(target.x) || 0) * resolution) + x;
+        var targetY = Math.floor((Number(target.y) || 0) * resolution) + y;
+        if (targetX < 0 || targetY < 0 || targetX >= width || targetY >= height) continue;
+        var sourceOffset = (sourceY * crop.width + sourceX) * 4;
+        var targetOffset = (targetY * width + targetX) * 4;
+        output[targetOffset] = packed[sourceOffset];
+        output[targetOffset + 1] = packed[sourceOffset + 1];
+        output[targetOffset + 2] = packed[sourceOffset + 2];
+        output[targetOffset + 3] = packed[sourceOffset + 3];
+      }
+      canvas.getContext('2d').putImageData(new ImageData(output, width, height), 0, 0);
     }
-    canvas.getContext('2d').putImageData(new ImageData(output, width, height), 0, 0);
   } finally {
     crop._releaseNativeCanvas();
   }

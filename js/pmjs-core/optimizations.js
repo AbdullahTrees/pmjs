@@ -143,6 +143,10 @@ PMJS.optimizations = {
     state.enabled = false;
     state.disabledBy = 'refusal';
     state.refusalReason = reason;
+    try {
+      console.warn('[pmjs-opt] ' + id + ' refused: ' + reason +
+        '; fallback: ' + state.fallback);
+    } catch (_) {}
     return state.disabledBy;
   },
   ids: function() {

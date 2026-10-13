@@ -39,7 +39,7 @@ target_include_directories(pmjs-skia65 SYSTEM PRIVATE
   "${chromium}/third_party/freetype/include"
   "${chromium}/third_party/freetype/include/freetype-custom-config"
   "${ft}/include" "${hb}" "${skia}/include/core" "${skia}/include/effects" "${skia}/include/ports"
-  "${skia}/src/core" "${skia}/src/shaders" "${skia}/include/config" "${skia}/include/private" "${skia}/include/gpu" "${icu}/source/common" "${icu}/source/i18n")
+  "${skia}/src/core" "${skia}/src/effects" "${skia}/src/shaders" "${skia}/include/config" "${skia}/include/private" "${skia}/include/gpu" "${icu}/source/common" "${icu}/source/i18n")
 target_compile_definitions(pmjs-skia65 PRIVATE
   FT2_BUILD_LIBRARY PDFIUM_REQUIRED_MODULES CHROMIUM_RESTRICT_VISIBILITY
   HAVE_UNISTD_H HAVE_FCNTL_H HAVE_OT HAVE_INTEL_ATOMIC_PRIMITIVES HAVE_ICU HAVE_ICU_BUILTIN

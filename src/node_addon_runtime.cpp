@@ -373,6 +373,18 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
   check(env, napi_set_named_property(env, result, "filterIntermediateCacheHits",
     number(env, static_cast<double>(stats.filterIntermediateCacheHits))),
     "cannot set filterIntermediateCacheHits");
+  check(env, napi_set_named_property(env, result, "constantBlackGroups",
+    number(env, static_cast<double>(stats.constantBlackGroups))),
+    "cannot set constantBlackGroups");
+  check(env, napi_set_named_property(env, result, "constantBlackGroupsSkipped",
+    number(env, static_cast<double>(stats.constantBlackGroupsSkipped))),
+    "cannot set constantBlackGroupsSkipped");
+  check(env, napi_set_named_property(env, result, "constantBlackSourceDraws",
+    number(env, static_cast<double>(stats.constantBlackSourceDraws))),
+    "cannot set constantBlackSourceDraws");
+  check(env, napi_set_named_property(env, result, "constantBlackBorderDraws",
+    number(env, static_cast<double>(stats.constantBlackBorderDraws))),
+    "cannot set constantBlackBorderDraws");
   check(env, napi_set_named_property(env, result, "identityFilterShaderDrawCalls",
     number(env, static_cast<double>(stats.identityFilterShaderDrawCalls))),
     "cannot set identity filter shader draws");

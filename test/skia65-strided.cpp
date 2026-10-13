@@ -36,6 +36,13 @@ int main() {
   uint8_t target[4]={};
   assert(pmjs_skia65_image_bgra_strided(target,1,1,4,0,0,pixel,1,1,4,full,full,1,0));
   assert(std::all_of(target,target+4,[](uint8_t c) { return c == 0; }));
+  // The tightly packed BGRA wrapper must preserve the same channel order.
+  const uint8_t colored[]={11, 37, 89, 255};
+  uint8_t wrapped[4]={}, strided[4]={};
+  assert(pmjs_skia65_image_bgra(wrapped,1,1,0,0,colored,1,1,full,full,1,0));
+  assert(pmjs_skia65_image_bgra_strided(strided,1,1,4,0,0,colored,1,1,4,full,full,1,0));
+  assert(std::equal(wrapped,wrapped+4,colored));
+  assert(std::equal(wrapped,wrapped+4,strided));
   // Frozen Chromium 65 mixed-alpha source-over results, including scalar tails.
   for (int w : {16,17,32}) for (int green : {0,8,w-1}) for (bool background : {false,true}) {
     std::vector<uint8_t> source(w*4), actual(w*4), expected(w*4);

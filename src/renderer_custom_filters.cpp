@@ -5,10 +5,18 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace pmjs {
 
 bool Renderer::isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const {
+  constexpr std::array<double, 20> identity{1, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+                                          0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
+  return matchesColorMatrixPlan(plan, identity);
+}
+
+bool Renderer::matchesColorMatrixPlan(const CustomFilterPlan& plan,
+                                     const std::array<double, 20>& expected) const {
   if (plan.resolutions.size() != 2 || plan.resolutions[0] != 1 ||
       plan.resolutions[1] != 1 || plan.passes.size() != 1) return false;
   const auto& pass = plan.passes.front();
@@ -18,18 +26,16 @@ bool Renderer::isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const {
       [](std::uint8_t value) { return value != 0; })) return false;
   const auto& program = filterProgram(pass.program);
   if (!program.identityColorMatrixContract) return false;
-  constexpr std::array<double, 20> identity{1, 0, 0, 0, 0, 0, 1, 0, 0, 0,
-                                          0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
   std::size_t offset = 0;
   bool matrix = false, alpha = false;
   for (const auto& uniform : program.uniforms) {
     const std::size_t count = uniform.components * uniform.count;
     if (offset + count > pass.uniforms.size() || uniform.type != GL_FLOAT) return false;
-    if ((uniform.name == "m" || uniform.name == "m[0]") && count == identity.size() && !matrix) {
+    if ((uniform.name == "m" || uniform.name == "m[0]") && count == expected.size() && !matrix) {
       matrix = true;
       for (std::size_t index = 0; index < count; ++index)
         if (!std::isfinite(pass.uniforms[offset + index]) ||
-            pass.uniforms[offset + index] != identity[index]) return false;
+            pass.uniforms[offset + index] != expected[index]) return false;
     } else if (uniform.name == "uAlpha" && count == 1 && !alpha) {
       alpha = true;
       if (pass.uniforms[offset] != 1) return false;
@@ -37,6 +43,136 @@ bool Renderer::isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const {
     offset += count;
   }
   return matrix && alpha && offset == pass.uniforms.size();
+}
+
+void Renderer::reduceConstantBlackGroups() {
+  if (offscreenRender_ || width_ <= 2 || height_ <= 2 ||
+      sceneProjection_ != std::array<float, 6>{1, 0, 0, 1, 0, 0}) return;
+  constexpr std::array<double, 20> black{1, 0, 0, -1, 0, 0, 1, 0, -1, 0,
+                                       0, 0, 1, -1, 0, 0, 0, 0, 1, 0};
+  std::vector<RenderCommand> reduced;
+  std::size_t copied = 0;
+  for (std::size_t begin = 0; begin + 2 < frame_.commands.size(); ++begin) {
+    const auto& filter = frame_.commands[begin];
+    if (filter.action != RenderCommand::Action::filterBegin ||
+        filter.filterParameters[2] != 1 || !filter.customFilterPlan ||
+        filter.blendMode != BlendMode::normal ||
+        !matchesColorMatrixPlan(*filter.customFilterPlan, black)) continue;
+    const auto& area = filter.customFilterPlan->frame;
+    const float right = area[0] + area[2], bottom = area[1] + area[3];
+    if (area[0] > 0 || area[1] > 0 || right < width_ || bottom < height_ ||
+        !std::all_of(area.begin(), area.end(), [](float value) {
+          return std::isfinite(value) && value == std::floor(value) &&
+            value >= std::numeric_limits<int>::min() / 4 &&
+            double(value) <= std::numeric_limits<int>::max() / 4;
+        })) continue;
+    const auto& backing = frame_.commands[begin + 1];
+    if (backing.action != RenderCommand::Action::draw ||
+        backing.primitive != RenderCommand::Primitive::screenFill ||
+        backing.color != std::array<float, 4>{0, 0, 0, 1} || backing.clipped ||
+        backing.blendMode != BlendMode::normal || backing.maskImage ||
+        backing.appliesColorMatrix || backing.blur != 0) continue;
+    std::size_t end = begin + 2;
+    for (; end < frame_.commands.size(); ++end) {
+      const auto& draw = frame_.commands[end];
+      if (draw.action == RenderCommand::Action::filterEnd) break;
+      if (draw.action != RenderCommand::Action::draw ||
+          draw.blendMode != BlendMode::normal || draw.maskImage ||
+          draw.appliesColorMatrix || draw.blur != 0 ||
+          !std::isfinite(draw.color[3]) || draw.color[3] < 0 || draw.color[3] > 1 ||
+          (draw.primitive != RenderCommand::Primitive::sprite &&
+           draw.primitive != RenderCommand::Primitive::tilingSprite &&
+           draw.primitive != RenderCommand::Primitive::tileLayer &&
+           draw.primitive != RenderCommand::Primitive::screenFill)) break;
+    }
+    if (end >= frame_.commands.size() ||
+        frame_.commands[end].action != RenderCommand::Action::filterEnd) continue;
+    std::vector<std::pair<std::size_t, std::array<int, 4>>> fringes;
+    double sourcePixels = 0, borderPixels = 0;
+    // Keep a pixel inside the backing too: linear filter sampling can straddle its edge.
+    const std::array<std::array<int, 4>, 4> borders{{
+      {static_cast<int>(area[0]), static_cast<int>(area[1]), static_cast<int>(right), 1},
+      {static_cast<int>(area[0]), height_ - 1, static_cast<int>(right), static_cast<int>(bottom)},
+      {static_cast<int>(area[0]), 1, 1, height_ - 1},
+      {width_ - 1, 1, static_cast<int>(right), height_ - 1}
+    }};
+    for (std::size_t index = begin + 2; index < end; ++index) {
+      const auto& draw = frame_.commands[index];
+      std::array<float, 4> bounds{area[0], area[1], right, bottom};
+      if (!draw.tileLayer) {
+        bounds = {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(),
+                  -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()};
+        for (std::size_t corner = 0; corner < 4; ++corner) {
+          const float x = corner == 1 || corner == 2 ? draw.destination[0] : 0;
+          const float y = corner >= 2 ? draw.destination[1] : 0;
+          float px = draw.spriteWorldVertices ? draw.spriteVertices[corner][0] :
+            draw.transform[0] * x + draw.transform[2] * y + draw.transform[4];
+          float py = draw.spriteWorldVertices ? draw.spriteVertices[corner][1] :
+            draw.transform[1] * x + draw.transform[3] * y + draw.transform[5];
+          if (draw.roundPixels) { px = std::floor(px); py = std::floor(py); }
+          bounds[0] = std::min(bounds[0], px); bounds[1] = std::min(bounds[1], py);
+          bounds[2] = std::max(bounds[2], px); bounds[3] = std::max(bounds[3], py);
+        }
+      }
+      const auto pixelsIn = [&](const auto& box) {
+        double left = std::max(double(bounds[0]), double(box[0]));
+        double top = std::max(double(bounds[1]), double(box[1]));
+        double right = std::min(double(bounds[2]), double(box[2]));
+        double bottom = std::min(double(bounds[3]), double(box[3]));
+        if (draw.clipped) {
+          left = std::max(left, double(draw.clip[0])); top = std::max(top, double(draw.clip[1]));
+          right = std::min(right, double(draw.clip[2])); bottom = std::min(bottom, double(draw.clip[3]));
+        }
+        return std::max(0.0, right - left) * std::max(0.0, bottom - top);
+      };
+      sourcePixels += pixelsIn(std::array<float, 4>{area[0], area[1], right, bottom});
+      for (auto border : borders) {
+        if (draw.clipped) {
+          border[0] = std::max(border[0], draw.clip[0]);
+          border[1] = std::max(border[1], draw.clip[1]);
+          border[2] = std::min(border[2], draw.clip[2]);
+          border[3] = std::min(border[3], draw.clip[3]);
+        }
+        if (border[0] >= border[2] || border[1] >= border[3]) continue;
+        if (bounds[0] >= border[2] || bounds[1] >= border[3] ||
+            bounds[2] <= border[0] || bounds[3] <= border[1]) continue;
+        borderPixels += pixelsIn(border);
+        fringes.emplace_back(index, border);
+      }
+    }
+    const std::size_t sourceDraws = end - begin - 2;
+    if (diagnostics_) {
+      stats_.constantBlackSourceDraws += sourceDraws;
+      stats_.constantBlackBorderDraws += fringes.size();
+    }
+    // Extra submissions need substantial pixel savings; keep small fringe-only draws intact.
+    constexpr double pixelsPerExtraDraw = 4096;
+    if (fringes.size() >= sourceDraws && sourcePixels - borderPixels <=
+        (fringes.size() - sourceDraws) * pixelsPerExtraDraw) {
+      if (diagnostics_) ++stats_.constantBlackGroupsSkipped;
+      continue;
+    }
+    reduced.insert(reduced.end(), frame_.commands.begin() + copied,
+                   frame_.commands.begin() + begin + 2);
+    for (const auto& [index, border] : fringes) {
+      auto fringe = frame_.commands[index];
+      fringe.clipped = true; fringe.clip = border;
+      reduced.push_back(std::move(fringe));
+    }
+    copied = end;
+    begin = end;
+    if (diagnostics_) ++stats_.constantBlackGroups;
+  }
+  if (!copied) return;
+  reduced.insert(reduced.end(), frame_.commands.begin() + copied, frame_.commands.end());
+  // Transfer queued ownership before dropping or duplicating source commands.
+  for (const auto& command : reduced) {
+    if (command.image) images_.beginUse(command.image);
+    if (command.maskImage) images_.beginUse(command.maskImage);
+    if (command.tileLayer) ++tileLayers_.at(command.tileLayer).queuedReferences;
+  }
+  discardCommandsFrom(0);
+  frame_.commands.swap(reduced);
 }
 
 // Cache only isolated, sampler-free chains fed by tracked image draws. The

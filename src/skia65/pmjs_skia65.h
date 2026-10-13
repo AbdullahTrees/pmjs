@@ -23,6 +23,8 @@ typedef struct {
   int italic;
   int hinting; /* SkPaint: 0=none, 1=slight, 2=normal, 3=full */
   int auto_hint;
+  int transformed;
+  float transform[6];
   int accelerated_blend; /* Rounded source-over for accelerated Canvas text. */
 } pmjs_skia65_style;
 
@@ -55,6 +57,15 @@ PMJS_SKIA65_API int pmjs_skia65_image_rgba_strided(uint8_t* pixels, int width, i
   size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing);
 PMJS_SKIA65_API int pmjs_skia65_circle_coverage(float x, float y, float radius,
   const float transform[6], int left, int top, int width, int height, uint8_t* coverage, const float* clips, size_t clip_count);
+/* Path points are in destination space; stroke geometry uses the supplied transform. */
+PMJS_SKIA65_API int pmjs_skia65_path_coverage(const float* points,
+  const uint32_t* sizes, const uint8_t* closed, size_t count,
+  const float* commands, size_t command_count, const float* dash, size_t dash_count, float dash_offset,
+  const float transform[6],
+  float stroke, int cap, int join, float miter_limit, int antialias, int even_odd,
+  int left, int top, int width, int height, uint8_t* coverage);
+PMJS_SKIA65_API int pmjs_skia65_shadow_bgra(const uint8_t* source, int source_width, int source_height,
+  float x, float y, float blur, uint32_t color, int geometry_mask, uint8_t* pixels, int width, int height);
 /* RGBA8: fill coverage, first stroke, packed two-bit span rules, second stroke. */
 PMJS_SKIA65_API int pmjs_skia65_triangle_coverage(const float points[6],
   float stroke_width, float miter_limit, float stroke_alpha,

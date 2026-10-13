@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -13,6 +14,8 @@ struct CanvasTextStyle {
   int join = 0;
   int cap = 0;
   float miterLimit = 10;
+  bool transformed = false;
+  std::array<float, 6> transform = {1, 0, 0, 1, 0, 0};
 };
 struct CanvasTextMetrics;
 struct TextBackendStats {

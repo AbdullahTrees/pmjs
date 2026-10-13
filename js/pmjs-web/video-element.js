@@ -109,6 +109,7 @@ VideoElement.prototype._releaseMedia = function() {
 VideoElement.prototype._pmjsNativeTextureSource = function() {
   if (this._media && typeof NativeHost.media.videoCanvasImage === 'function') {
     var handle = NativeHost.media.videoCanvasImage(this._media.handle);
+    if (!handle) return null;
     if (!this._nativeImage || this._nativeImage.handle !== handle) {
       this._nativeImage = { handle: handle, width: this.videoWidth, height: this.videoHeight };
     }

@@ -12,15 +12,19 @@ const optimizationsSource = fs.readFileSync(
 
 function loadRegistry({ config, env = {} } = {}) {
   const logs = [];
+  const warnings = [];
   const context = {
-    console: { log(message) { logs.push(String(message)); } },
+    console: {
+      log(message) { logs.push(String(message)); },
+      warn(message) { warnings.push(String(message)); },
+    },
     PMJS_GAME_CONFIG: config,
     NativeHost: { runtime: { env(name) { return env[name]; } } },
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-core/config.js'), 'utf8'), context);
   vm.runInContext(optimizationsSource, context, { filename: 'optimizations.js' });
-  return { context, logs, PMJS: context.PMJS };
+  return { context, logs, warnings, PMJS: context.PMJS };
 }
 
 // Owner modules register their own IDs; core never catalogs game plugins.
@@ -203,7 +207,7 @@ test('diagnostics stay silent by default and dump on finalize', () => {
 });
 
 test('owners can refuse an unrecognized shape with a reason', () => {
-  const { PMJS } = loadRegistry({ config: {}, env: {} });
+  const { PMJS, warnings } = loadRegistry({ config: {}, env: {} });
   registerOwnerIds(PMJS, sceneIds);
   assert.equal(PMJS.optimizations.refuse('scene.graphics-cache', 'unknown setter shape'), 'refusal');
   assert.equal(PMJS.optimizations.isEnabled('scene.graphics-cache'), false);
@@ -214,6 +218,11 @@ test('owners can refuse an unrecognized shape with a reason', () => {
   assert.equal(dump.find(entry => entry.id === 'scene.graphics-cache').refusalReason,
     'unknown setter shape');
   assert.equal(dump.find(entry => entry.id === 'scene.tiling-texture-cache').refusalReason, null);
+  PMJS.optimizations.refuse('scene.graphics-cache', 'another shape');
+  PMJS.optimizations.finalize();
+  assert.deepEqual(warnings, [
+    '[pmjs-opt] scene.graphics-cache refused: unknown setter shape; fallback: test fallback',
+  ]);
 });
 
 test('boot diagnostics report refusal and finalization freezes refusal', () => {
@@ -230,7 +239,7 @@ test('boot diagnostics report refusal and finalization freezes refusal', () => {
 });
 
 test('refusal keeps an earlier disable cause and validates input', () => {
-  const { PMJS } = loadRegistry({
+  const { PMJS, warnings } = loadRegistry({
     config: { disableOptimizations: ['scene.graphics-cache'] }, env: {},
   });
   registerOwnerIds(PMJS, sceneIds);
@@ -240,4 +249,5 @@ test('refusal keeps an earlier disable cause and validates input', () => {
     /nonempty string reason/);
   assert.throws(() => PMJS.optimizations.refuse('no.such.id', 'reason'),
     /Unknown PMJS optimization/);
+  assert.deepEqual(warnings, []);
 });

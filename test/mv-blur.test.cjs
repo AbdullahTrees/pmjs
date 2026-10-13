@@ -27,7 +27,7 @@ test('native MV blur preserves Canvas state and invalidates bitmap content witho
   assert.equal(bitmap.stockCalls, 0);
   assert.equal(bitmap.dirtyCalls, 1);
   assert.ok(bitmap._canvas.__pmjsContentRevision > revision);
-  assert.equal(bitmap._context.fillStyle, 'red');
+  assert.equal(bitmap._context.fillStyle, '#ff0000');
   assert.equal(bitmap._context.globalAlpha, 1);
   assert.equal(bitmap._context.globalCompositeOperation, 'source-over');
   assert.equal(bitmap._context._stateStack.length, 1);

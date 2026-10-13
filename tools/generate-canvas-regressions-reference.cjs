@@ -23,6 +23,7 @@ const settings = {
 };
 const scenarioFile = path.resolve(__dirname, '../test/helpers/canvas-regression-scenario.cjs');
 const fontFile = path.resolve(__dirname, '../test/assets/testfont.ttf');
+const shapingFontFile = path.resolve(__dirname, '../test/assets/text-shaping.ttf');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 function validateFixture(fixture) {
@@ -32,6 +33,7 @@ function validateFixture(fixture) {
   assert.equal(fixture.scenarioSha256, hash(scenarioFile), 'Canvas reference scenario/readback changed');
   assert.equal(fixture.readbackSha256, hash(scenarioFile), 'Canvas reference readback changed');
   assert.equal(fixture.fontSha256, hash(fontFile), 'Canvas reference font changed');
+  assert.equal(fixture.shapingFontSha256, hash(shapingFontFile), 'Canvas reference shaping font changed');
   assert.match(fixture.driverSha256, /^[a-f0-9]{64}$/, 'Canvas reference driver identity missing');
   assert.equal(fixture.channelTolerance, 2, 'Canvas reference tolerance changed');
 }
@@ -46,6 +48,7 @@ async function generate(executable, driverFile, output) {
   const { launchMvReference } = require(driverFile);
   process.env.PMJS_MV_REFERENCE_EXECUTABLE = executable;
   const font = fs.readFileSync(fontFile).toString('base64');
+  const shapingFont = fs.readFileSync(shapingFontFile).toString('base64');
   let frames;
   for (let replay = 0; replay < settings.freshProcessReplays; replay++) {
     const app = await launchMvReference({ width: settings.width, height: settings.height,
@@ -57,12 +60,13 @@ async function generate(executable, driverFile, output) {
       });
       assert.deepEqual(versions, { nwVersion: reference.nwVersion,
         chromiumVersion: reference.chromiumVersion, nodeVersion: reference.nodeVersion });
-      await app.page.evaluate(function(font) {
+      await app.page.evaluate(function(fonts) {
         const style = document.createElement('style');
-        style.textContent = '@font-face { font-family: GameFont; src: url(data:font/ttf;base64,' + font + '); }';
+        style.textContent = '@font-face { font-family: GameFont; src: url(data:font/ttf;base64,' + fonts[0] + '); }' +
+          '@font-face { font-family: ShapingFont; src: url(data:font/ttf;base64,' + fonts[1] + '); }';
         document.head.appendChild(style);
-        return document.fonts.load('7px GameFont');
-      }, font);
+        return Promise.all([document.fonts.load('7px GameFont'), document.fonts.load('100px ShapingFont')]);
+      }, [font, shapingFont]);
       await app.page.addScriptTag({ content: 'window.canvasRegressionFixtures = ' + canvasRegressionFixtures.toString() });
       for (let capture = 0; capture < settings.frozenCaptures; capture++) {
         const actual = await app.page.evaluate(function() { return window.canvasRegressionFixtures(); });
@@ -73,7 +77,8 @@ async function generate(executable, driverFile, output) {
   }
   assert.equal(hash(driverFile), driverSha256, 'Canvas reference driver changed during capture');
   const fixture = { reference, settings, generatorSha256: hash(__filename),
-    scenarioSha256: hash(scenarioFile), readbackSha256: hash(scenarioFile), fontSha256: hash(fontFile), driverSha256,
+    scenarioSha256: hash(scenarioFile), readbackSha256: hash(scenarioFile), fontSha256: hash(fontFile),
+    shapingFontSha256: hash(shapingFontFile), driverSha256,
     channelTolerance: 2, frames };
   validateFixture(fixture);
   fs.writeFileSync(output, zlib.gzipSync(JSON.stringify(fixture) + '\n'));

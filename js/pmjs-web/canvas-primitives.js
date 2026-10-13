@@ -62,6 +62,7 @@
         context.globalAlpha = operation.alpha;
         context.globalCompositeOperation = operation.composite;
         context._clipPaths = [];
+        context.shadowColor = 'transparent';
         context.setTransform.apply(context, operation.transform);
         originalFillRect.apply(context, operation.arguments);
         context.restore();
@@ -85,6 +86,7 @@
         style.nativeConcentric && style.stops.length > 0 && style.stops.length <= 3;
       var supportedSolid = typeof style === 'string' || typeof style === 'number';
       if (!identity || this._clipPaths && this._clipPaths.length ||
+          (colorToRgba(this.shadowColor) & 255) && (this.shadowBlur || this.shadowOffsetX || this.shadowOffsetY) ||
           blendMode < 0 || (!supportedGradient && !supportedSolid)) {
         replayRecordedCanvasOperations();
         return originalFillRect.apply(this, arguments);
@@ -112,7 +114,7 @@
         return;
       }
       if (supportedGradient) {
-        appendLightRecord(records, 1, bounds, [style.x0, style.y0],
+        appendLightRecord(records, 1, bounds, [style.x0 + transform[4], style.y0 + transform[5]],
           [style.r0, style.r1], style.stops, this.globalAlpha, blendMode);
       } else {
         appendLightRecord(records, 0, bounds, [0, 0], [0, 0],

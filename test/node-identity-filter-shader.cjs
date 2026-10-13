@@ -12,6 +12,11 @@ const identity = [1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,1,0];
 const candidate = native.render.createFilterProgram(shaders.fragment, shaders.vertex);
 // A semantically identical, unrecognized program keeps every reference operation.
 const reference = native.render.createFilterProgram(shaders.fragment + '\n// reference\n', shaders.vertex);
+const pot=n=>2**Math.ceil(Math.log2(n));
+const neighbor = native.render.createFilterProgram(
+  'varying vec2 vTextureCoord; uniform sampler2D uSampler; void main(){'+
+  'gl_FragColor=texture2D(uSampler,vTextureCoord+vec2('+3/pot(width+8)+','+3/pot(height+8)+'));}',
+  shaders.vertex);
 const canvases = [];
 let seed = 0x51201234;
 function random() {seed = (Math.imul(seed,1664525)+1013904223)>>>0; return seed>>>24;}
@@ -36,7 +41,9 @@ function sprite(canvas,parent=noParent) {
   entry.values.set([0,0,width,height,width,height],9); return entry;
 }
 function render(program,options={}) {
-  const matrix=identity.slice(); matrix[4]=options.offset || 0;
+  const matrix=identity.slice();
+  if(options.black) matrix[3]=matrix[8]=matrix[13]=-1;
+  matrix[4]=options.offset || 0;
   const uniforms=program.uniforms.flatMap(u=>u.name==='m'?matrix:[options.alpha ?? 1]);
   const pass={program:program.handle,input:0,output:1,clear:!!options.clear,
     blend:options.passBlend || 0,uniforms,samplers:[],transform:options.passTransform || [1,0,0,1,0,0]};
@@ -45,36 +52,55 @@ function render(program,options={}) {
     passes:options.multiple?[{...pass,output:2},{...pass,input:2}]:[pass]});
   const entries=[sprite(background)];
   let parent=1;
-  if(options.nested) {entries.push(record(6,noParent,plan.handle,31)); parent=2;}
+  if(options.nested) {
+    const outer=options.neighbor?native.render.createFilterPlan({
+      frame:[-4,-4,width+8,height+8],resolutions:[1,1],passes:[{
+        program:neighbor.handle,input:0,output:1,clear:false,blend:0,uniforms:[],samplers:[]
+      }]}):plan;
+    entries.push(record(6,noParent,outer.handle,31)); parent=2;
+  }
   const begin=record(6,options.nested?1:noParent,plan.handle,31,options.clip?1:0);
   if(options.clip) begin.values.set(options.clip,17);
   begin.values[34]=options.groupBlend || 0;
+  begin.values[9]=options.black && options.enabled !== false ? 1 : 0;
   entries.push(begin);
   if(!options.noFill) {
-    const fill=record(3,parent,0,0,options.fillClip?1:0); fill.metadata[3]=0x131a27;
+    const fill=record(3,parent,0,0,options.fillClip?1:0); fill.metadata[3]=options.black?0:0x131a27;
     fill.values[6]=options.fillAlpha ?? 1;
     if(options.fillClip) fill.values.set(options.fillClip,17);
     entries.push(fill);
   }
-  const a=sprite(first,parent), b=sprite(second,parent);
+  const queuedImage=options.queuedImageRelease?native.images.loadBytes(native.canvas.encodePng(first.handle)):null;
+  const a=sprite(queuedImage||first,parent), b=sprite(second,parent);
   if(options.fractional) a.values[4]=0.5;
   if(options.scaled) a.values[0]=2;
   if(options.rotated) a.values.set([0,1,-1,0],0);
+  if(options.fringe) a.values.set([2,0,0,2,-4,-4],0);
   if(options.childClip) {a.metadata[5]|=1;a.values.set([11,13,211,49],17);}
   if(options.mask) {a.metadata[5]|=4;a.metadata[6]=second.handle;a.values.set([1,0,0,1,0,0],22);}
   if(options.childBlend) a.metadata[4]=options.childBlend;
   if(options.tiling) {a.metadata[0]=2;a.values.set([options.origin ?? 0.5,0.5],15);}
   if(options.linear) a.metadata[5]&=~8;
+  if(options.small) { a.values.set([0,0,2,2,2,2],9); b.values.set([0,0,2,2,2,2],9); }
+  let queuedLayer=null;
   if(options.tile) {
-    const tile=record(4,parent,layers[options.fractionalTile?1:0],0,8);
+    if(options.queuedLayerRelease) queuedLayer=native.render.createTileLayer(
+      new Float32Array([0,0,-4,-4,width,height,0,0,0]),[first.handle]);
+    const tile=record(4,parent,queuedLayer||layers[options.fractionalTile?1:0],0,8);
     tile.values.set([options.animation || 0,0],15); entries.push(tile);
   }
-  entries.push(a,b,record(7,parent));
+  for(let index=0;index<(options.count ?? 2);index++) entries.push(index%2?b:a);
+  if(options.overlayFill) {
+    const fill=record(3,parent); fill.metadata[3]=0xa19385; fill.values[6]=0.7; entries.push(fill);
+  }
+  entries.push(record(7,parent));
   if(options.nested) entries.push(record(7,1));
   const before=native.render.stats();
   native.beginFrame();
   native.scene.submit(schema.version,new Uint32Array(entries.flatMap(e=>e.metadata)),
     new Float32Array(entries.flatMap(e=>Array.from(e.values))),entries.length);
+  if(queuedImage) native.images.release(queuedImage.handle);
+  if(queuedLayer) assert.equal(native.render.releaseTileLayer(queuedLayer),true);
   let pixels;
   if(options.offscreen) {
     const target=native.canvas.create(width,height);
@@ -83,8 +109,17 @@ function render(program,options={}) {
     native.canvas.release(target.handle);
   } else {native.renderScene();pixels=Buffer.from(native.canvas.captureSceneRawPremultiplied());}
   const after=native.render.stats();
+  if(queuedImage) assert.ok(!native.images.memory(100).largest.some(item=>item.handle===queuedImage.handle),
+    'queued image ownership ends after rendering');
+  if(queuedLayer) assert.equal(native.render.releaseTileLayer(queuedLayer),false,
+    'queued tile ownership ends after rendering');
   return {pixels,specialized:after.identityFilterShaderDrawCalls-before.identityFilterShaderDrawCalls,
-    filters:after.filterDrawCalls-before.filterDrawCalls};
+    filters:after.filterDrawCalls-before.filterDrawCalls,
+    blackGroups:after.constantBlackGroups-before.constantBlackGroups,
+    blackSkipped:after.constantBlackGroupsSkipped-before.constantBlackGroupsSkipped,
+    blackSourceDraws:after.constantBlackSourceDraws-before.constantBlackSourceDraws,
+    blackBorderDraws:after.constantBlackBorderDraws-before.constantBlackBorderDraws,
+    spriteDraws:after.spriteDrawCalls-before.spriteDrawCalls};
 }
 let comparisons=0;
 function compare(name,options) {
@@ -126,7 +161,65 @@ try {
   const crlf=native.render.createFilterProgram(shaders.fragment.replaceAll('\n','\r\n'),shaders.vertex.replaceAll('\n','\r\n'));
   assert.ok(render(crlf).pixels.equals(render(reference).pixels));
   assert.equal(render(crlf).specialized,1);
-  console.log(JSON.stringify({comparisons,modifiedVertexFallback:true,crlfExact:true}));
+  let blackComparisons=0;
+  function compareBlack(name,options={},eligible=true) {
+    const settings={...options,black:true};
+    const control=render(candidate,{...settings,enabled:false});
+    const optimized=render(candidate,settings);
+    if(!control.pixels.equals(optimized.pixels)) {
+      let count=0; const first=[];
+      for(let at=0;at<control.pixels.length;at+=4) {
+        if(control.pixels.subarray(at,at+4).equals(optimized.pixels.subarray(at,at+4))) continue;
+        count++;
+        if(first.length<5) first.push({x:at/4%width,y:Math.floor(at/4/width),
+          control:Array.from(control.pixels.subarray(at,at+4)),candidate:Array.from(optimized.pixels.subarray(at,at+4))});
+      }
+      console.error(JSON.stringify({name,count,first}));
+    }
+    assert.ok(control.pixels.equals(optimized.pixels),name+' black complete RGBA');
+    assert.equal(control.blackGroups,0,name+' disabled path');
+    assert.equal(optimized.blackGroups+optimized.blackSkipped,eligible?1:0,name+' black eligibility');
+    assert.equal(optimized.filters,control.filters,name+' original filter passes');
+    blackComparisons++;
+  }
+  for(const [name,options] of [
+    ['padded',{}],['viewport frame',{frame:[0,0,width,height]}],
+    ['tiles',{tile:true}],['fractional tiles',{tile:true,fractionalTile:true}],
+    ['animated tiles',{tile:true,animation:1}],['fractional sprite',{fractional:true}],
+    ['rotated sprite',{rotated:true}],['scaled sprite',{scaled:true}],
+    ['tiling',{tiling:true}],['linear',{linear:true}],['child clip',{childClip:true}],
+    ['nested',{nested:true}],
+    ['source fringe',{fringe:true}],['queued image',{queuedImageRelease:true}],
+    ['queued image fringe',{queuedImageRelease:true,fringe:true}],
+    ['queued tile',{tile:true,queuedLayerRelease:true}],
+    ['neighbor samples',{nested:true,neighbor:true,fringe:true}],
+    ['neighbor with overlay',{nested:true,neighbor:true,fringe:true,overlayFill:true}]
+  ]) compareBlack(name,options);
+  for(const [name,options] of [
+    ['no backing',{noFill:true}],['partial backing',{fillAlpha:254/255}],
+    ['transparent backing',{fillAlpha:0}],['backing clip',{fillClip:[0,0,width-1,height]}],
+    ['output clip',{clip:[8,8,width-8,height-8]}],
+    ['partial tone',{alpha:0.9999999}],['different matrix',{offset:0.1}],
+    ['resolution',{resolution:0.5}],['fractional filter frame',{frame:[-3.5,-3.5,width+7,height+7]}],
+    ['cropped filter frame',{frame:[8,8,width-16,height-16]}],['masked child',{mask:true}],
+    ['child blend',{childBlend:1}],['group blend',{groupBlend:1}],['pass clear',{clear:true}],
+    ['pass blend',{passBlend:1}],['multiple passes',{multiple:true}],
+    ['pass transform',{passTransform:[1,0,0,1,1,0]}],['offscreen',{offscreen:true}]
+  ]) compareBlack(name,options,false);
+  for(const fillAlpha of [1,254/255,0,1])
+    compareBlack('backing recovery '+fillAlpha,{fillAlpha},fillAlpha===1);
+  for(const count of [1,2,4,16,64]) {
+    compareBlack('full-screen cost gate '+count,{count,frame:[0,0,width,height]});
+    compareBlack('tiny corner cost gate '+count,{count,small:true,frame:[0,0,width,height]});
+    const kept=render(candidate,{black:true,count,small:true,frame:[0,0,width,height]});
+    assert.equal(kept.blackSkipped,1,'expensive border rewrite skipped');
+    assert.equal(kept.blackSourceDraws,count);
+    assert.equal(kept.blackBorderDraws,count*2);
+    assert.equal(kept.spriteDraws,count+1,'tiny draws and background keep original submissions');
+  }
+  assert.equal(render(reference,{black:true}).blackGroups,0,'unknown fragment fallback');
+  assert.equal(render(changedVertex,{black:true}).blackGroups,0,'unknown vertex fallback');
+  console.log(JSON.stringify({comparisons,blackComparisons,modifiedVertexFallback:true,crlfExact:true}));
 } finally {
   for(const layer of layers) native.render.releaseTileLayer(layer);
   for(const canvas of canvases) native.canvas.release(canvas.handle);

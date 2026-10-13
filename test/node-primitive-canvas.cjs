@@ -65,6 +65,16 @@ assert.deepEqual(pixels(canvas), pixels(ordinary), 'Text after publication prese
 recorder.record(() => { fill('#000000'); drawing.fillStyle = '#ffffff'; drawing.fillText('AV', 3.75, 34.6); });
 assert.deepEqual(pixels(canvas), pixels(ordinary), 'Non-recorded mutations during a callback preserve operation order');
 
+// Enabling a shadow must not apply it retroactively to published operations.
+recorder.record(() => fill('#ff0000'));
+drawing.shadowColor = '#00ff00'; drawing.shadowOffsetX = 20;
+recorder.record(() => { drawing.fillStyle = '#0000ff'; drawing.fillRect(0, 0, 4, 4); });
+assert.equal(canvas._nativeImage, undefined, 'Shadowed updates use the ordinary Canvas owner');
+assert.deepEqual(read(30, 20), [255, 0, 0, 255]);
+assert.deepEqual(read(21, 1), [0, 255, 0, 255]);
+assert.deepEqual(read(1, 1), [0, 0, 255, 255]);
+drawing.shadowColor = 'transparent'; drawing.shadowOffsetX = 0;
+
 recorder.record(() => fill('#00ff00'));
 const retained = create(); retained.getContext('2d').drawImage(canvas, 0, 0);
 drawing.clearRect(0, 0, 64, 48); recorder.record(() => fill('#0000ff'));

@@ -26,6 +26,15 @@ if (!rendered || !rendered.handle || rendered.width !== 16 ||
   throw new Error('renderToImage did not return a native image');
 }
 
+// CPU Canvas painting reads GPU surfaces on demand, including alpha and orientation.
+for (const immediate of [false, true]) {
+  const canvas = native.canvas.create(16, 16);
+  if (immediate) native.canvas.readPixels(canvas.handle, 0, 0, 1, 1);
+  native.canvas.drawImage(canvas.handle, rendered.handle, 0, 0, 16, 16, 0, 0, 16, 16, 1, false);
+  assert.deepEqual(Array.from(native.canvas.readPixels(canvas.handle, 8, 2, 1, 1)), [255, 0, 0, 128]);
+  assert.deepEqual(Array.from(native.canvas.readPixels(canvas.handle, 8, 13, 1, 1)), [0, 0, 255, 255]);
+  native.canvas.release(canvas.handle);
+}
 // Offscreen generation must not replace the last valid presentation frame.
 native.renderFrame();
 const retainedFrame = native.canvas.captureScene();
@@ -65,6 +74,16 @@ native.beginFrame();
 native.render.setRenderTargetSize(32, 8);
 native.render.quad(0, 0, 32, 8, 1, 1, 1, 0.5);
 const premultiplied = native.render.renderToImage(32, 8, { alphaMode: 'premultiplied' });
+for (const affine of [false, true]) {
+  const canvas = native.canvas.create(32, 8);
+  if (affine) native.canvas.drawAffineImage(canvas.handle, premultiplied.handle, {
+    geometry: [0, 0, 32, 8, 0, 0, 32, 8], transform: [-1, 0, 0, 1, 32, 0],
+    globalAlpha: 1, smoothing: false, composite: 'source-over', clips: []
+  });
+  else native.canvas.drawImage(canvas.handle, premultiplied.handle, 0, 0, 32, 8, 0, 0, 32, 8, 1, false);
+  assert.deepEqual(Array.from(native.canvas.readPixels(canvas.handle, 8, 2, 1, 1)), [255, 255, 255, 128]);
+  native.canvas.release(canvas.handle);
+}
 native.renderFrame();
 const afterResize = native.canvas.captureScene();
 assert.equal(native.canvas.pixel(afterResize.handle, 8, 2), topPixel,
@@ -109,6 +128,18 @@ const premultipliedPixel = native.canvas.captureSceneRawPremultiplied().slice((8
 assert.ok(premultipliedPixel.every(value => Math.abs(value - 128) <= 1),
   `GPU image metadata multiplied alpha twice: ${premultipliedPixel}`);
 native.images.release(premultiplied.handle);
+
+// Queued CPU draws observe a GPU source at submission, before its next update.
+const mutableSurface = native.render.createPrimitiveSurface(4, 4);
+native.render.renderPrimitiveSurface(mutableSurface.handle, [1, 0, 0, 1], []);
+const queuedSurface = native.canvas.create(4, 4);
+native.canvas.drawImage(queuedSurface.handle, mutableSurface.image.handle,
+  0, 0, 4, 4, 0, 0, 4, 4, 1, false);
+native.render.renderPrimitiveSurface(mutableSurface.handle, [0, 0, 1, 1], []);
+native.render.releasePrimitiveSurface(mutableSurface.handle);
+assert.deepEqual(Array.from(native.canvas.readPixels(queuedSurface.handle, 2, 2, 1, 1)),
+  [255, 0, 0, 255], 'GPU updates and source release preserve queued Canvas pixels');
+native.canvas.release(queuedSurface.handle);
 
 // A tall retained atlas must preserve one-pixel rows through GPU normalization.
 // Medium-precision UVs round adjacent rows together above ~1024 texels.

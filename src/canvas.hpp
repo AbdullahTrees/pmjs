@@ -84,14 +84,38 @@ struct CanvasPaint {
   std::span<const std::uint8_t> pixels;
   int width = 0, height = 0;
   std::string repeat;
+  bool smoothing = false;
   std::array<double, 6> transform = {1, 0, 0, 1, 0, 0};
 };
-struct CanvasCirclePaint {
-  double x = 0, y = 0, radius = 0, alpha = 1;
-  std::array<float, 6> transform = {1, 0, 0, 1, 0, 0};
+struct CanvasPaintState {
+  double alpha = 1;
   CanvasPaint paint;
   CanvasComposite composite = CanvasComposite::sourceOver;
   std::vector<CanvasClip> clips;
+};
+struct CanvasCirclePaint : CanvasPaintState {
+  double x = 0, y = 0, radius = 0;
+  std::array<float, 6> transform = {1, 0, 0, 1, 0, 0};
+};
+struct CanvasPathPaint : CanvasPaintState {
+  std::vector<CanvasPath> paths;
+  std::vector<uint8_t> closed;
+  std::vector<float> commands, dash;
+  float dashOffset = 0;
+  std::array<float, 6> transform = {1, 0, 0, 1, 0, 0};
+  double stroke = 0, miterLimit = 10;
+  int cap = 0, join = 0;
+  bool clear = false, evenOdd = false;
+};
+
+struct CanvasAffineImage {
+  double alpha = 1;
+  CanvasComposite composite = CanvasComposite::sourceOver;
+  std::vector<CanvasClip> clips;
+  std::array<double, 8> geometry{};
+  std::array<double, 6> transform = {1, 0, 0, 1, 0, 0};
+  bool smoothing = true;
+  std::optional<CanvasPaint> paint;
 };
 
 class CanvasStore {
@@ -102,7 +126,7 @@ class CanvasStore {
   CanvasStore(const CanvasStore&) = delete;
   CanvasStore& operator=(const CanvasStore&) = delete;
 
-  std::optional<CanvasInfo> create(int width, int height);
+  std::optional<CanvasInfo> create(int width, int height, bool opaque = false);
   std::optional<CanvasInfo> createPixels(int width, int height,
                                        std::vector<std::uint8_t> pixels, PixelEncoding encoding);
   bool fillRect(CanvasHandle handle, int x, int y, int width, int height,
@@ -111,6 +135,10 @@ class CanvasStore {
     std::span<const std::uint8_t> pixels, std::span<const std::uint8_t> clip,
     CanvasComposite operation, double alpha);
   bool paintCircle(CanvasHandle handle, const CanvasCirclePaint& request);
+  bool paintShadow(CanvasHandle handle, CanvasHandle source, double x, double y,
+    double blur, uint32_t color, const CanvasPaintState& state, bool geometryMask = false);
+  bool paintPath(CanvasHandle handle, const CanvasPathPaint& request);
+  bool drawAffineImage(CanvasHandle destination, uint32_t source, const CanvasAffineImage& request);
   bool paintRect(CanvasHandle handle, const std::array<float, 4>& rect, uint32_t color, float stroke,
     const std::array<float, 4>& gradient, const std::vector<float>& offsets, const std::vector<uint32_t>& colors);
   bool fillRadialGradient(CanvasHandle handle, int x, int y, int width, int height,
@@ -147,10 +175,14 @@ class CanvasStore {
   std::optional<ImagePixels> readPixels(CanvasHandle handle, int x, int y,
                                         int width, int height, PixelEncoding encoding = PixelEncoding::StraightRGBA8);
   std::optional<std::vector<std::uint8_t>> encodePng(CanvasHandle handle);
-  std::optional<std::vector<std::uint8_t>> encodeWebP(CanvasHandle handle);
+  std::optional<std::vector<std::uint8_t>> encodeWebP(CanvasHandle handle, std::optional<double> quality = {});
+  std::optional<std::vector<std::uint8_t>> encodeJpeg(CanvasHandle handle, double quality = 0.92);
   bool writePixels(CanvasHandle handle, int x, int y, int width, int height,
                    const std::vector<std::uint8_t>& pixels, PixelEncoding encoding = PixelEncoding::StraightRGBA8);
   bool replacePixels(CanvasHandle handle, std::vector<std::uint8_t> pixels, PixelEncoding encoding);
+  // Replace pixels with a nearest-neighbor orthogonal resample and transparent padding.
+  bool copyTransformedPixels(CanvasHandle destination, CanvasHandle source,
+    int x, int y, int width, int height, int orientation);
   bool blur(CanvasHandle handle);
   // Two additive 3x3 passes over opaque black, using Skia65 byte scaling.
   // Returns false without painting when raw RGB exceeds alpha.
@@ -201,6 +233,7 @@ class CanvasStore {
   struct DrawImageCmd {
     ImageHandle source;
     std::shared_ptr<Content> canvas;
+    std::shared_ptr<ImagePixelSnapshot> snapshot;
     float sourceX;
     float sourceY;
     float sourceWidth;
@@ -250,6 +283,7 @@ class CanvasStore {
     // Conservative hint: raw premultiplied input can violate RGB <= alpha.
     bool mayHaveOverAlpha = false;
     std::vector<CanvasCommand> commands;
+    bool opaque = false;
     std::size_t queuedCommandBytes = 0;
     int dirtyX0 = 0;
     int dirtyY0 = 0;

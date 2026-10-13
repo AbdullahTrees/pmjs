@@ -15,6 +15,9 @@
 #include "SkBitmap.h"
 #include "SkGradientShader.h"
 #include "SkPath.h"
+#include "SkDashPathEffect.h"
+#include "SkDropShadowImageFilter.h"
+#include "SkBlurMask.h"
 #include "SkSurface.h"
 #include "SkTextBlob.h"
 #include "SkTypeface.h"
@@ -152,7 +155,8 @@ bool valid(pmjs_skia65_font* font, const char* text, size_t bytes, const pmjs_sk
     std::isfinite(style->stroke_width) && style->stroke_width >= 0 &&
     std::isfinite(style->miter_limit) && style->miter_limit > 0 &&
     style->join >= 0 && style->join <= 2 && style->cap >= 0 && style->cap <= 2 &&
-    style->hinting >= 0 && style->hinting <= 3;
+    style->hinting >= 0 && style->hinting <= 3 &&
+    (!style->transformed || std::all_of(style->transform, style->transform + 6, [](float v) { return std::isfinite(v); }));
 }
 
 Run layout(pmjs_skia65_font* font, const std::string& text, const pmjs_skia65_style& requested) {
@@ -281,6 +285,11 @@ void boundsOf(const Run& run, const pmjs_skia65_style* style, float x, float bas
   SkRect storage;
   auto ink = paint.computeFastBounds(run.blob->bounds(), &storage);
   ink.offset(x, baseline);
+  if (style->transformed) {
+    const auto* t = style->transform;
+    SkMatrix matrix; matrix.setAll(t[0], t[2], t[4], t[1], t[3], t[5], 0, 0, 1);
+    matrix.mapRect(&ink);
+  }
   ink.offset(-originX, -originY);
   // Include antialias coverage and hinted bitmap bounds at fractional origins.
   ink.outset(2, 2);
@@ -381,7 +390,7 @@ int pmjs_skia65_image_rgba_strided(uint8_t* pixels, int width, int height, size_
 int pmjs_skia65_image_bgra(uint8_t* pixels, int width, int height, int left, int top,
     const uint8_t* source, int source_width, int source_height,
     const float src[4], const float dst[4], float alpha, int smoothing) {
-  return pmjs_skia65_image_rgba_strided(pixels, width, height, static_cast<size_t>(width) * 4,
+  return pmjs_skia65_image_bgra_strided(pixels, width, height, static_cast<size_t>(width) * 4,
     left, top, source, source_width, source_height, static_cast<size_t>(source_width) * 4,
     src, dst, alpha, smoothing);
 }
@@ -409,6 +418,123 @@ int pmjs_skia65_circle_coverage(float x, float y, float radius,
   surface->getCanvas()->concat(matrix);
   surface->getCanvas()->drawPath(path, paint);
   for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) coverage[i] = pixels[i * 4 + 3];
+  return 1;
+} catch (...) { return 0; }
+
+int pmjs_skia65_path_coverage(const float* points,
+    const uint32_t* sizes, const uint8_t* closed, size_t count,
+    const float* commands, size_t command_count, const float* dash, size_t dash_count, float dash_offset,
+    const float transform[6],
+    float stroke, int cap, int join, float miter_limit, int antialias, int even_odd,
+    int left, int top, int width, int height, uint8_t* coverage) try {
+  if (!points || !sizes || !closed || !transform || !coverage || width <= 0 || height <= 0) return 0;
+  SkPath path;
+  if (even_odd) path.setFillType(SkPath::kEvenOdd_FillType);
+  size_t offset = 0;
+  if (command_count) {
+    while (offset < command_count) {
+      const float verb = commands[offset++];
+      const size_t size = verb == 0 || verb == 1 ? 2 : verb == 2 ? 4 : verb == 3 ? 6 : verb == 4 ? 0 : verb == 5 ? 11 : SIZE_MAX;
+      if (size > command_count - offset) return 0;
+      const float* p = commands + offset;
+      if (verb == 0) path.moveTo(p[0], p[1]);
+      else if (verb == 1) path.lineTo(p[0], p[1]);
+      else if (verb == 2) path.quadTo(p[0], p[1], p[2], p[3]);
+      else if (verb == 3) path.cubicTo(p[0], p[1], p[2], p[3], p[4], p[5]);
+      else if (verb == 5) {
+        SkPath arc;
+        const auto oval = SkRect::MakeLTRB(p[0] - p[2], p[1] - p[2], p[0] + p[2], p[1] + p[2]);
+        const float start = p[3] * 180 / SK_ScalarPI, sweep = p[4] * 180 / SK_ScalarPI;
+        if (std::abs(sweep) >= 360) {
+          arc.arcTo(oval, start, sweep / 2, true); arc.arcTo(oval, start + sweep / 2, sweep / 2, false);
+        } else arc.arcTo(oval, start, sweep, true);
+        SkMatrix arcTransform;
+        arcTransform.setAll(p[5], p[7], p[9], p[6], p[8], p[10], 0, 0, 1);
+        path.addPath(arc, arcTransform, SkPath::kExtend_AddPathMode);
+      }
+      else path.close();
+      offset += size;
+    }
+  } else for (size_t i = 0; i < count; ++i) {
+    if (!sizes[i]) continue;
+    path.moveTo(points[offset], points[offset + 1]); offset += 2;
+    for (uint32_t j = 1; j < sizes[i]; ++j) {
+      path.lineTo(points[offset], points[offset + 1]); offset += 2;
+    }
+    if (closed[i]) path.close();
+  }
+  SkMatrix matrix;
+  matrix.setAll(transform[0], transform[2], transform[4],
+    transform[1], transform[3], transform[5], 0, 0, 1);
+  SkPaint paint;
+  paint.setColor(SK_ColorWHITE);
+  paint.setAntiAlias(antialias != 0);
+  if (stroke > 0) {
+    SkMatrix inverse;
+    if (!matrix.invert(&inverse)) return 0;
+    path.transform(inverse);
+    paint.setStyle(SkPaint::kStroke_Style);
+    paint.setStrokeWidth(stroke);
+    paint.setStrokeCap(static_cast<SkPaint::Cap>(cap));
+    paint.setStrokeJoin(static_cast<SkPaint::Join>(join));
+    paint.setStrokeMiter(miter_limit);
+    if (dash_count) paint.setPathEffect(SkDashPathEffect::Make(dash, static_cast<int>(dash_count), dash_offset));
+  }
+  // Stroke coverage depends on the raster format; retain the color raster for strokes.
+  std::vector<uint8_t> pixels;
+  sk_sp<SkSurface> surface;
+  if (stroke > 0) {
+    pixels.resize(static_cast<size_t>(width) * height * 4, 0);
+    surface = SkSurface::MakeRasterDirect(SkImageInfo::MakeN32Premul(width, height), pixels.data(), width * 4);
+  } else {
+    std::fill_n(coverage, static_cast<size_t>(width) * height, 0);
+    surface = SkSurface::MakeRasterDirect(SkImageInfo::MakeA8(width, height), coverage, width);
+  }
+  if (!surface) return 0;
+  surface->getCanvas()->translate(-left, -top);
+  if (stroke > 0) surface->getCanvas()->concat(matrix);
+  surface->getCanvas()->drawPath(path, paint);
+  if (stroke > 0) for (size_t i = 0; i < static_cast<size_t>(width) * height; ++i) coverage[i] = pixels[i * 4 + 3];
+  return 1;
+} catch (...) { return 0; }
+
+int pmjs_skia65_shadow_bgra(const uint8_t* source, int source_width, int source_height,
+    float x, float y, float blur, uint32_t color, int geometry_mask, uint8_t* pixels, int width, int height) try {
+  if (!source || !pixels || source_width <= 0 || source_height <= 0 || width <= 0 || height <= 0) return 0;
+  const float sigma = std::min(blur ? 0.288675f * blur + 0.5f : 0, geometry_mask ? 136.0f : 532.0f);
+  if (geometry_mask) {
+    std::vector<uint8_t> alpha(static_cast<size_t>(source_width) * source_height);
+    for (size_t i = 0; i < alpha.size(); ++i) alpha[i] = source[i * 4 + 3];
+    SkMask mask, blurred;
+    mask.fImage = alpha.data(); mask.fBounds = SkIRect::MakeWH(source_width, source_height);
+    mask.fRowBytes = source_width; mask.fFormat = SkMask::kA8_Format;
+    if (blur && !SkBlurMask::BoxBlur(&blurred, mask, sigma, kNormal_SkBlurStyle, kHigh_SkBlurQuality)) return 0;
+    const SkMask& coverage = blur ? blurred : mask;
+    for (int row = 0; row < height; ++row) for (int column = 0; column < width; ++column) {
+      const float px = column - x, py = row - y;
+      const int sx = std::floor(px), sy = std::floor(py);
+      const float fx = px - sx, fy = py - sy;
+      const auto sample = [&](int cx, int cy) { return coverage.fBounds.contains(cx, cy) ? *coverage.getAddr8(cx, cy) : 0; };
+      const unsigned amount = std::round((sample(sx, sy) * (1 - fx) + sample(sx + 1, sy) * fx) * (1 - fy) +
+        (sample(sx, sy + 1) * (1 - fx) + sample(sx + 1, sy + 1) * fx) * fy);
+      const unsigned a = color & 255;
+      auto* p = pixels + (static_cast<size_t>(row) * width + column) * 4;
+      p[0] = (((color >> 8) & 255) * (a + 1) >> 8) * (amount + 1) >> 8;
+      p[1] = (((color >> 16) & 255) * (a + 1) >> 8) * (amount + 1) >> 8;
+      p[2] = ((color >> 24) * (a + 1) >> 8) * (amount + 1) >> 8;
+      p[3] = a * (amount + 1) >> 8;
+    }
+    if (blur) SkMask::FreeImage(blurred.fImage);
+    return 1;
+  }
+  auto image = SkImage::MakeRasterCopy(SkPixmap(SkImageInfo::MakeN32Premul(source_width, source_height), source, source_width * 4));
+  auto surface = SkSurface::MakeRasterDirect(SkImageInfo::MakeN32Premul(width, height), pixels, width * 4);
+  if (!image || !surface) return 0;
+  SkPaint paint;
+  const auto rgba = SkColorSetARGB(color & 255, color >> 24, (color >> 16) & 255, (color >> 8) & 255);
+  paint.setImageFilter(SkDropShadowImageFilter::Make(0, 0, sigma, sigma, rgba,
+    SkDropShadowImageFilter::kDrawShadowOnly_ShadowMode, nullptr));
+  surface->getCanvas()->drawImage(image, x, y, &paint);
   return 1;
 } catch (...) { return 0; }
 
@@ -597,6 +723,11 @@ static int draw(pmjs_skia65_font* font, const char* utf8, size_t utf8Bytes,
   // Translate the canvas by an integer instead of rounding the caller's glyph
   // coordinates. This retains the original float addition/subpixel phase.
   surface->getCanvas()->translate(-originX - left, -originY - top);
+  if (style->transformed) {
+    const auto* t = style->transform;
+    SkMatrix matrix; matrix.setAll(t[0], t[2], t[4], t[1], t[3], t[5], 0, 0, 1);
+    surface->getCanvas()->concat(matrix);
+  }
   if (run.blob) surface->getCanvas()->drawTextBlob(run.blob, x, baseline, paint);
   if (!bgra || style->accelerated_blend) for (int row = 0; row < croppedHeight; ++row) for (int column = 0; column < croppedWidth; ++column) {
     const auto* input = scratch.data() + (static_cast<size_t>(row) * croppedWidth + column) * 4;

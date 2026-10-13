@@ -33,6 +33,10 @@ try {
   assert.deepStrictEqual(webpDimensions(encoded), { width: 64, height: 48 });
   const again = Buffer.from(native.canvas.encodeWebP(canvas.handle));
   assert.deepStrictEqual(again, encoded, 'Lossless encoding is deterministic');
+  assert.deepStrictEqual(Buffer.from(native.canvas.encodeWebP(canvas.handle, 1)), encoded,
+    'quality one selects the native lossless encoding');
+  for (const quality of [NaN, Infinity, -1, 2])
+    assert.throws(() => native.canvas.encodeWebP(canvas.handle, quality), /invalid canvas/);
   const png = Buffer.from(native.canvas.encodePng(canvas.handle));
   assert.deepStrictEqual(png.subarray(0, 8),
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), 'PNG path unchanged');

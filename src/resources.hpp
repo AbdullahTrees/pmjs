@@ -33,6 +33,14 @@ struct ImagePixels {
   std::vector<std::uint8_t> rgba;
 };
 
+// A deferred reader keeps its crop alive at the revision it observed. Pixel
+// storage is captured only if the image changes before the reader executes.
+struct ImagePixelSnapshot {
+  int x = 0, y = 0, width = 0, height = 0;
+  bool premultiplied = false;
+  std::optional<ImagePixels> pixels;
+};
+
 struct PreparedImageCell {
   std::array<int, 4> rect{}, crop{}, atlas{};
   std::array<std::uint8_t, 4> fill{};
@@ -165,6 +173,7 @@ class ImageStore {
   std::optional<ImageInfo> installPreparedLoad(const ImageFileSource& source,
       std::shared_ptr<PreparedLoad> load, bool retainCpuPixels);
   std::optional<ImageInfo> inspect(ImageHandle handle) const;
+  std::optional<bool> isOpaque(ImageHandle handle);
   bool hasCpuPixels(ImageHandle handle) const;
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
@@ -191,6 +200,9 @@ class ImageStore {
   bool updateRgba(ImageHandle handle, const void* pixels);
   bool updateRgbaRegion(ImageHandle handle, int x, int y, int width, int height,
                         const void* pixels, int sourceRowPixels);
+  std::shared_ptr<ImagePixelSnapshot> deferPixelRead(ImageHandle handle,
+      int x, int y, int width, int height);
+  bool preservePixelReads(ImageHandle handle);
   bool retainCpuPixels(ImageHandle handle);
   bool retain(ImageHandle handle);
   bool release(ImageHandle handle);
@@ -236,6 +248,7 @@ class ImageStore {
   std::vector<ImageMemoryEntry> memoryEntries() const;
 
  private:
+  std::unordered_map<ImageHandle, std::vector<std::weak_ptr<ImagePixelSnapshot>>> pixelReads_;
   struct PreparedBacking;
   struct TilePrototype;
   struct TileCatalog;
@@ -245,6 +258,8 @@ class ImageStore {
   struct Slot {
     std::uint16_t generation = 1;
     std::uint64_t contentRevision = 0;
+    std::uint64_t opacityRevision = 0;
+    bool opaque = false;
     std::uint32_t texture = 0;
     std::shared_ptr<PreparedBacking> prepared;
     std::shared_ptr<TileBacking> tiles;
@@ -269,6 +284,7 @@ class ImageStore {
     bool retainCpuPixels = false;
     std::string cacheKey;
     std::filesystem::path sourcePath;
+    std::string lastPreparedFallbackReason;
     mutable std::optional<ImagePixels> cachedPixels;
     bool live = false;
   };

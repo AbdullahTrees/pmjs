@@ -156,7 +156,7 @@ assert.equal(stats.freetypeRenderUs, renderUsBeforeRepeat, 'No FreeType render o
 native.canvas.release(c2.handle);
 
 // 8. Negative cache resilience: failed size strike does not poison face
-assert.throws(() => native.canvas.measureText(font, 'A', 300), /text measurement failed/, 'Invalid pixel size (>256) must throw');
+assert.throws(() => native.canvas.measureText(font, 'A', Infinity), /text measurement failed/, 'Nonfinite pixel size must throw');
 assert.ok(typeof native.canvas.measureText(font, 'A', 20) === 'number', 'Valid pixel size for same font must still succeed');
 
 // 9. In-process cache limit reconfiguration and eviction safety
@@ -185,4 +185,9 @@ assert.equal(restoredStats.maxGlyphBytes, 8 * 1024 * 1024);
 assert.equal(restoredStats.maxGlyphEntries, 4096);
 
 native.canvas.release(canvas.handle);
+assert.ok(native.canvas.measureText(font, 'W', 300) > 0);
+const large = native.canvas.create(96, 96);
+native.canvas.drawText(large.handle, font, 'W', -50, 180, 300, 0xffffffff, 40);
+assert.ok(native.canvas.readPixels(large.handle, 0, 0, 96, 96).some((value, i) => i % 4 === 3 && value));
+native.canvas.release(large.handle);
 console.log('[pmjs-node-glyph-cache] all assertions passed successfully');

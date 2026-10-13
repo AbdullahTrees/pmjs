@@ -133,7 +133,7 @@ test('image draws ignore non-finite arguments across overloads and transforms', 
   const drawing = canvas.getContext('2d');
   const image = new context.Image();
   image._nativeImage = { handle: 99 };
-  image.width = image.height = 512;
+  image.width = image.height = image.naturalWidth = image.naturalHeight = 512;
   const overloads = [[2, 2], [2, 2, 32, 32], [160, 160, 32, 32, 2, 2, 32, 32]];
   for (const reflected of [false, true]) {
     drawing.setTransform(reflected ? -1 : 1, 0, 0, 1, 0, 0);
@@ -159,7 +159,7 @@ test('image draw arguments convert once using ToNumber semantics', () => {
   const drawing = new context.CanvasElement().getContext('2d');
   const image = new context.Image();
   image._nativeImage = { handle: 99 };
-  image.width = image.height = 32;
+  image.width = image.height = image.naturalWidth = image.naturalHeight = 32;
   drawing.drawImage(image, '2', '3');
   assert.deepEqual(context.calls.drawImage[0].slice(6, 10), [2, 3, 32, 32]);
   assert.throws(() => drawing.drawImage(image, 1n, 2), { name: 'TypeError' });

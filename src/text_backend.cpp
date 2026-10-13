@@ -64,8 +64,13 @@ TextBackend::~TextBackend() = default;
 #ifdef PMJS_HAS_SKIA65
 namespace {
 pmjs_skia65_style settings(float size, uint32_t color, float stroke, const CanvasTextStyle& options) {
-  return {size, stroke, options.miterLimit, color, stroke > 0, options.join, options.cap,
-    options.bold, options.italic, 1, 0, 0};
+  pmjs_skia65_style style{};
+  style.size = size; style.stroke_width = stroke; style.miter_limit = options.miterLimit;
+  style.rgba = color; style.stroke = stroke > 0; style.join = options.join; style.cap = options.cap;
+  style.bold = options.bold; style.italic = options.italic; style.hinting = 1;
+  style.transformed = options.transformed;
+  std::copy(options.transform.begin(), options.transform.end(), style.transform);
+  return style;
 }
 }
 #endif

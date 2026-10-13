@@ -204,18 +204,25 @@ if (typeof _Bitmap_blt === 'function') {
       var context = this._context;
       if (this._drawTextOutline !== originalOutline ||
           this._drawTextBody !== originalBody || this._makeFontNameText !== stockFontName ||
-          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(lineHeight) || maxWidth ||
-          (align && align !== 'left') || text === undefined ||
-          !PMJS.web.canvas.supportsNativeText(context)) {
+          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(lineHeight) ||
+          !Number.isFinite(this.fontSize) || this.fontSize <= 0 ||
+          (maxWidth && !Number.isFinite(maxWidth)) ||
+          (align && align !== 'left' && align !== 'center' && align !== 'right') ||
+          (!align && context.textAlign && context.textAlign !== 'left' && context.textAlign !== 'start') ||
+          text === undefined || !PMJS.web.canvas.supportsNativeText(context, maxWidth, align,
+            { outlineColor: this.outlineColor, color: this.textColor })) {
         return originalDrawText.apply(this, arguments);
       }
 
       text = String(text);
       var descriptor = this._makeFontNameText();
       var baseline = y + lineHeight - (lineHeight - this.fontSize * 0.7) / 2;
+      var width = maxWidth || 0xffffffff;
+      if (align === 'center') x += width / 2;
+      else if (align === 'right') x += width;
       PMJS.web.canvas.drawNativeText(context, text, x, baseline, {
         font: descriptor, outlineColor: this.outlineColor,
-        outlineWidth: this.outlineWidth, color: this.textColor
+        outlineWidth: this.outlineWidth, color: this.textColor, maxWidth: width, align: align
       });
       pmjsBitmapCanvasChanged(this);
       this._setDirty();

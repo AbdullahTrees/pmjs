@@ -253,6 +253,10 @@ for (const item of rawModules) {
 }
 
 const bundleItems = [];
+const runtimeEngine = detectedRuntime?.engine || (rawModules.some(item => item.module.startsWith('js/pmjs-mz/')) ? 'mz' :
+  rawModules.some(item => item.module.startsWith('js/pmjs-mv/')) ? 'mv' : null);
+if (runtimeEngine) bundleItems.push({ label: 'runtime-engine', inlineSource:
+  `globalThis.PMJS_RUNTIME_ENGINE = ${JSON.stringify(runtimeEngine)};\n` });
 
 if (detectedRuntime) {
   bundleItems.push({ label: 'detected-game', inlineSource:

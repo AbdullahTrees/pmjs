@@ -208,6 +208,10 @@ struct RendererStats {
   std::uint64_t spriteDrawCalls = 0;
   std::uint64_t tilingSpriteDrawCalls = 0;
   std::uint64_t screenFillDrawCalls = 0;
+  std::uint64_t constantBlackGroups = 0;
+  std::uint64_t constantBlackGroupsSkipped = 0;
+  std::uint64_t constantBlackSourceDraws = 0;
+  std::uint64_t constantBlackBorderDraws = 0;
   std::uint64_t meshDrawCalls = 0;
 };
 
@@ -511,6 +515,9 @@ class Renderer {
   std::uint32_t nextFilterPlan_ = 0x80000000U;
   static void applyBlendMode(BlendMode mode);
   bool isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const;
+  bool matchesColorMatrixPlan(const CustomFilterPlan& plan,
+                             const std::array<double, 20>& matrix) const;
+  void reduceConstantBlackGroups();
   void drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTarget& source,
                             const RenderTarget& output, const RenderCommand& command,
                             float sourceResolution, float outputResolution, bool outputYDown,

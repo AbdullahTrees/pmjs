@@ -62,6 +62,7 @@ enum class FilterKind : std::uint32_t {
   blurY = 28,
   fxaa = 29,
   mzColor = 30,
+  // Parameters: padding, intermediate-cache permission, constant-black reduction permission.
   custom = 31,
 };
 

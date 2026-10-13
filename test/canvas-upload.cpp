@@ -10,6 +10,7 @@ std::vector<uint8_t> texture;
 int textureWidth, textureHeight, rowLength, fullUploads, regionUploads;
 GLenum pendingError = GL_NO_ERROR;
 bool failUpload = false;
+bool failRead = false;
 }
 // Capture the actual GLES transfer boundary without a window or driver.
 extern "C" {
@@ -42,13 +43,17 @@ void glTexSubImage2D(GLenum, GLint, GLint x, GLint y, GLsizei width, GLsizei hei
 }
 void glGenerateMipmap(GLenum) {}
 void glGetIntegerv(GLenum, GLint* value) { *value=0; }
-void glGenFramebuffers(GLsizei, GLuint*) { assert(false); }
-void glBindFramebuffer(GLenum, GLuint) { assert(false); }
-void glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint) { assert(false); }
-GLenum glCheckFramebufferStatus(GLenum) { assert(false); return 0; }
-void glBindBuffer(GLenum, GLuint) { assert(false); }
-void glReadPixels(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*) { assert(false); }
-void glDeleteFramebuffers(GLsizei, const GLuint*) { assert(false); }
+void glGenFramebuffers(GLsizei count, GLuint* names) { for (int i=0;i<count;i++) names[i]=i+1; }
+void glBindFramebuffer(GLenum, GLuint) {}
+void glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint) {}
+GLenum glCheckFramebufferStatus(GLenum) { return GL_FRAMEBUFFER_COMPLETE; }
+void glBindBuffer(GLenum, GLuint) {}
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
+  assert(x==0 && y==0 && width==textureWidth && height==textureHeight && format==GL_RGBA && type==GL_UNSIGNED_BYTE);
+  if (failRead) { pendingError=GL_INVALID_OPERATION; return; }
+  std::copy(texture.begin(),texture.end(),static_cast<uint8_t*>(pixels));
+}
+void glDeleteFramebuffers(GLsizei, const GLuint*) {}
 }
 int main() {
   pmjs::ImageStore images;
@@ -118,5 +123,30 @@ int main() {
     assert(!images.lookup(gpu->handle)->knownAllZero);
     assert(images.release(gpu->handle));
   }
+  for (const bool gpu : {false,true}) for (const bool immediate : {false,true}) for (const bool region : {false,true}) {
+    const std::vector<uint8_t> blue={0,0,255,128};
+    const std::vector<uint8_t> original={128,0,0,128};
+    const auto source=images.createRgba(1,1,gpu?nullptr:original.data(),true); assert(source);
+    if(gpu) assert(images.updateRgba(source->handle,original.data()));
+    const auto destination=canvases.create(1,1); assert(destination);
+    if(immediate) assert(canvases.readPixels(destination->handle,0,0,1,1));
+    assert(canvases.drawImage(destination->handle,source->handle,0,0,1,1,0,0,1,1,1,false));
+    assert(region ? images.updateRgbaRegion(source->handle,0,0,1,1,blue.data(),1) : images.updateRgba(source->handle,blue.data()));
+    assert(images.release(source->handle));
+    const auto captured=canvases.readPixels(destination->handle,0,0,1,1); assert(captured);
+    assert((captured->rgba==std::vector<uint8_t>{255,0,0,128}));
+    assert(canvases.release(destination->handle));
+  }
+  const auto unreadable=images.createRenderTarget(1,1,true); assert(unreadable);
+  failRead=true;
+  assert(!images.readPixelsRegion(unreadable->handle,0,0,1,1));
+  const auto retry=canvases.create(1,1); assert(retry);
+  assert(canvases.drawImage(retry->handle,unreadable->handle,0,0,1,1,0,0,1,1,1,false));
+  const std::vector<uint8_t> opaqueRed={255,0,0,255};
+  assert(!images.updateRgba(unreadable->handle,opaqueRed.data()));
+  failRead=false;
+  assert(images.updateRgba(unreadable->handle,opaqueRed.data()));
+  assert((canvases.readPixels(retry->handle,0,0,1,1)->rgba==std::vector<uint8_t>(4,0)));
+  assert(canvases.release(retry->handle)); assert(images.release(unreadable->handle));
   std::cout << "[canvas-upload] exact RGBA premultiplied transfers, region bounds and failed-upload retry agree\n";
 }

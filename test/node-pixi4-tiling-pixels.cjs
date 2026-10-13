@@ -313,6 +313,115 @@ try {
   native.beginFrame();
   assert.throws(() => sandbox.submitNativeScene(invalidTilingStage), /scene packet|scene submission/);
   sandbox.NativeHost.scene.submit = submit;
+  const { makeTilingPreparationHarness } = require('./helpers/tiling-preparation-harness.cjs');
+  const liveBeforePreparation = native.canvas.memory().liveCount;
+  const preparation = [false, true].map(enabled => makeTilingPreparationHarness(native, enabled));
+  const source = new preparation[0].sandbox.CanvasElement();
+  source.width = 19; source.height = 13;
+  const sourcePixels = new Uint8Array(19 * 13 * 4);
+  for (let i = 0; i < sourcePixels.length; i++) sourcePixels[i] = (i * 31) % 256;
+  for (let i = 3; i < sourcePixels.length; i += 4) {
+    const pixel = i >>> 2;
+    sourcePixels[i] = pixel % 17 === 0 ? 0 : pixel * 13 % 256;
+  }
+  native.canvas.writePixels(source._ensureNativeCanvas().handle, 0, 0, 19, 13, sourcePixels);
+  source._pmjsContentChanged();
+  const preparedTextures = preparation.map(fixture => {
+    const texture = fixture.makeTexture(19, 13);
+    texture.baseTexture.source = source;
+    return texture;
+  });
+  function preparePair(label) {
+    return preparation.map((fixture, index) => {
+      fixture.transfers.readBytes = fixture.transfers.writeBytes = 0;
+      const image = fixture.sandbox.ensureNativeTilingTexture(preparedTextures[index], false);
+      const canvas = preparedTextures[index].__pmjsTilingCanvas;
+      return { image, pixels: Buffer.from(native.canvas.readPremultipliedPixels(image.handle,
+        0, 0, canvas.width, canvas.height)), label };
+    });
+  }
+  try {
+    let checked = 0;
+    for (const resolution of [0.75, 1, 2]) for (let orientation = 0; orientation < 8; orientation++) {
+      for (const trim of [null, { x: 1.25, y: 2.5, width: 6.5, height: 8.25 },
+          { x: -1.5, y: -0.25, width: 14.75, height: 12.25 }]) {
+        for (const texture of preparedTextures) {
+          texture.baseTexture.resolution = resolution;
+          texture._frame = texture.frame = { x: 2.5, y: 1.25, width: 8.5, height: 6.25 };
+          texture.orig = { width: 11.5, height: 10.25 };
+          texture.trim = trim; texture.rotate = orientation * 2;
+          texture._updateID = (texture._updateID || 0) + 1;
+        }
+        const label = `orientation=${orientation}, resolution=${resolution}, trim=${JSON.stringify(trim)}`;
+        const pair = preparePair(label);
+        assert.deepEqual(pair[1].pixels, pair[0].pixels, label);
+        assert.equal(preparation[1].transfers.readBytes, 0, 'native preparation never reads pixels into JavaScript');
+        assert.equal(preparation[1].transfers.writeBytes, 0, 'native preparation never submits JavaScript pixels');
+        const warm = preparePair(label);
+        for (let index = 0; index < warm.length; index++) {
+          assert.equal(warm[index].image.handle, pair[index].image.handle, 'cache hit retains its Canvas');
+          assert.equal(preparation[index].transfers.readBytes + preparation[index].transfers.writeBytes, 0);
+        }
+        checked++;
+      }
+    }
+    for (const x of [Infinity, -Infinity, 4294967296, -4294967296]) {
+      for (const texture of preparedTextures) {
+        texture.trim = { x, y: 0, width: 6, height: 8 };
+        texture._updateID++;
+      }
+      const pair = preparePair(`offscreen trim x=${x}`);
+      assert.deepEqual(pair[1].pixels, pair[0].pixels);
+      assert.equal(pair[1].pixels.some(value => value), false, 'out-of-domain offsets do not wrap into the Canvas');
+      checked++;
+    }
+    for (const texture of preparedTextures) {
+      texture.trim = { x: -1.5, y: -0.25, width: 14.75, height: 12.25 };
+      texture._updateID++;
+    }
+    const preceding = preparePair('before mutation');
+    const retained = new preparation[1].sandbox.CanvasElement();
+    retained.width = preparedTextures[1].__pmjsTilingCanvas.width;
+    retained.height = preparedTextures[1].__pmjsTilingCanvas.height;
+    retained.getContext('2d').drawImage(preparedTextures[1].__pmjsTilingCanvas, 0, 0);
+    try {
+      sourcePixels.fill(255);
+      native.canvas.writePixels(source._nativeCanvas.handle, 0, 0, 19, 13, sourcePixels);
+      source._pmjsContentChanged();
+      const changed = preparePair('mutated source');
+      assert.deepEqual(changed[1].pixels, changed[0].pixels, 'mutable source invalidation preserves parity');
+      assert.notDeepEqual(changed[1].pixels, preceding[1].pixels);
+      assert.deepEqual(Buffer.from(native.canvas.readPremultipliedPixels(retained._ensureNativeCanvas().handle,
+        0, 0, retained.width, retained.height)), preceding[1].pixels,
+      'queued draws retain a prepared texture across replacement');
+      source._releaseNativeCanvas();
+      const surviving = preparedTextures[1].__pmjsTilingCanvas;
+      assert.deepEqual(Buffer.from(native.canvas.readPremultipliedPixels(surviving._nativeCanvas.handle,
+        0, 0, surviving.width, surviving.height)), changed[1].pixels,
+      'prepared textures survive release of the source Canvas owner');
+    } finally { retained._releaseNativeCanvas(); }
+    const copied = native.canvas.create(3, 2);
+    try {
+      const values = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255,
+        255, 255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255]);
+      native.canvas.writePixels(copied.handle, 0, 0, 3, 2, values);
+      assert.throws(() => native.canvas.copyTransformedPixels(copied.handle, copied.handle, 0, 0, 3, 2, 8), RangeError);
+      assert.deepEqual(Buffer.from(native.canvas.readPixels(copied.handle, 0, 0, 3, 2)), Buffer.from(values),
+        'invalid requests preserve pixels');
+      native.canvas.copyTransformedPixels(copied.handle, copied.handle, 0, 0, 3, 2, 2);
+      const reversed = Buffer.concat([5, 4, 3, 2, 1, 0].map(index => Buffer.from(values.subarray(index * 4, index * 4 + 4))));
+      assert.deepEqual(Buffer.from(native.canvas.readPixels(copied.handle, 0, 0, 3, 2)), reversed,
+        'self copies snapshot their source before writing');
+      native.canvas.copyTransformedPixels(copied.handle, copied.handle, -2147483648, 0, 3, 2, 0);
+      assert.equal(native.canvas.readPixels(copied.handle, 0, 0, 3, 2).some(value => value), false,
+        'offscreen copies replace the destination with transparent padding');
+    } finally { native.canvas.release(copied.handle); }
+    console.log(`native tiling preparation matches JavaScript exactly in ${checked} cases; cache and snapshot ownership pass`);
+  } finally {
+    source._releaseNativeCanvas();
+    for (const texture of preparedTextures) texture.__pmjsTilingCanvas._releaseNativeCanvas();
+  }
+  assert.equal(native.canvas.memory().liveCount, liveBeforePreparation);
   console.log('anchored and zero-scale tiling, retained textures, children and repeat boundaries match exactly');
 } finally {
   for (const image of images) native.images.release(image.handle);

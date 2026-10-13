@@ -540,9 +540,19 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
 }
 
 
+napi_value isOpaqueImage(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  const auto opaque = host(env).images.isOpaque(asUint32(env, args.at(0)));
+  if (!opaque) throw std::runtime_error("cannot inspect image opacity");
+  return boolean(env, *opaque);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 void registerResourceBindings(napi_env env, napi_value exports) {
   napi_value images = moduleObject(env);
   method(env, images, "load", loadImage);
+  method(env, images, "isOpaque", isOpaqueImage);
   method(env, images, "loadAsync", loadImageAsync);
   method(env, images, "acquireCached", acquireCachedImage);
   method(env, images, "loadBytes", loadImageBytes);

@@ -10,6 +10,8 @@
 #include FT_FREETYPE_H
 #include <png.h>
 #include <webp/encode.h>
+#include <jpeglib.h>
+#include <csetjmp>
 
 #include <algorithm>
 #include <chrono>
@@ -153,14 +155,19 @@ struct GlyphMask {
   }
 };
 
-static GlyphMask createStrokeMask(const GlyphMask& base, int strokeWidth) {
+static std::optional<GlyphMask> createStrokeMask(const GlyphMask& base, int strokeWidth) {
   GlyphMask stroked;
-  const int radius = (strokeWidth + 1) / 2;
+  const int radius = strokeWidth / 2 + strokeWidth % 2;
   if (base.width <= 0 || base.height <= 0 || base.coverage.empty() || radius <= 0) {
     return base;
   }
-  stroked.width = base.width + 2 * radius;
-  stroked.height = base.height + 2 * radius;
+  const auto width = int64_t(base.width) + 2LL * radius;
+  const auto height = int64_t(base.height) + 2LL * radius;
+  if (width > 8192 || height > 8192) return std::nullopt;
+  const auto extent = checkedImageExtent(static_cast<int>(width), static_cast<int>(height));
+  if (!extent) return std::nullopt;
+  stroked.width = extent->width;
+  stroked.height = extent->height;
   stroked.bitmapLeft = base.bitmapLeft - radius;
   stroked.bitmapTop = base.bitmapTop + radius;
   stroked.coverage.assign(static_cast<std::size_t>(stroked.width) * stroked.height, 0);
@@ -355,7 +362,7 @@ struct CanvasStore::FontState {
   }
 
   FontStrike* getStrike(const std::filesystem::path& path, int pixelSize) {
-    if (!library || pixelSize <= 0 || pixelSize > 256) return nullptr;
+    if (!library || pixelSize <= 0) return nullptr;
     const std::string pathStr = path.string();
     if (failedFaces.count(pathStr)) return nullptr;
 
@@ -449,7 +456,7 @@ struct CanvasStore::FontState {
   std::optional<GlyphRenderItem> getOrLoadMask(FontStrike* strike,
                                                FT_UInt glyphIndex,
                                                int strokeWidth) {
-    if (strokeWidth < 0 || strokeWidth > 32 || !strike || !strike->face) {
+    if (strokeWidth < 0 || !strike || !strike->face) {
       return std::nullopt;
     }
     const GlyphKey key{strike->id, glyphIndex};
@@ -517,14 +524,15 @@ struct CanvasStore::FontState {
           t0 = std::chrono::steady_clock::now();
         }
 
-        GlyphMask stroked = createStrokeMask(cached.fillMask, strokeWidth);
+        auto stroked = createStrokeMask(cached.fillMask, strokeWidth);
+        if (!stroked) return std::nullopt;
 
         if (telemetryEnabled) {
           const auto t1 = std::chrono::steady_clock::now();
           stats.strokeBuildUs += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
         }
 
-        cached.strokeMasks.push_back(StrokeMaskEntry{strokeWidth, std::move(stroked)});
+        cached.strokeMasks.push_back(StrokeMaskEntry{strokeWidth, std::move(*stroked)});
         resultMask = &cached.strokeMasks.back().mask;
       }
     }
@@ -793,7 +801,7 @@ void CanvasStore::clearRectNow(Content& surface, int x, int y, int width, int he
 }
 
 bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& command) {
-  auto [source, canvas, sourceX, sourceY, sourceWidth, sourceHeight,
+  auto [source, canvas, snapshot, sourceX, sourceY, sourceWidth, sourceHeight,
                destinationX, destinationY, destinationWidth, destinationHeight, alpha, smoothing] = command;
   if (alpha == 0) return true;
   struct SourcePixels {
@@ -804,7 +812,12 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
     bool mayHaveOverAlpha;
   } sourcePixels{};
   std::optional<ImagePixels> regionPixels;
-  if (canvas) {
+  if (snapshot && snapshot->pixels) {
+    const auto& pixels = *snapshot->pixels;
+    sourceX -= snapshot->x; sourceY -= snapshot->y;
+    sourcePixels = {pixels.width, pixels.height, pixels.rgba.data(),
+      snapshot->premultiplied ? PixelEncoding::PremultipliedRGBA8 : PixelEncoding::StraightRGBA8, false};
+  } else if (canvas) {
     if (!realizeContent(*canvas)) return false;
     sourcePixels = {canvas->width, canvas->height, canvas->pixels.data(), PixelEncoding::PremultipliedBGRA8, canvas->mayHaveOverAlpha};
   } else {
@@ -821,7 +834,9 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
       if (!regionPixels) return false;
       sourceX -= rx; sourceY -= ry; decoded = &*regionPixels;
     }
-    sourcePixels = {decoded->width, decoded->height, decoded->rgba.data(), PixelEncoding::StraightRGBA8, false};
+    const auto logical = images_.inspect(source);
+    sourcePixels = {decoded->width, decoded->height, decoded->rgba.data(),
+      logical && logical->premultiplied ? PixelEncoding::PremultipliedRGBA8 : PixelEncoding::StraightRGBA8, false};
   }
   if (sourceX >= sourcePixels.width || sourceY >= sourcePixels.height) return true;
   const std::array<float, 8> geometry = {sourceX, sourceY, sourceWidth, sourceHeight,
@@ -928,8 +943,10 @@ bool CanvasStore::drawTextNow(Content& surface, const std::vector<std::filesyste
   // The legacy web facade rounded font sizes/positions/widths before this
   // integer backend. MV's shortcut also rounded its outline before the helper
   // floored it. Preserve those effective contracts explicitly at this boundary.
-  const int legacySize = static_cast<int>(std::floor(pixelSize + 0.5f));
-  const int legacyStroke = static_cast<int>(std::floor(strokeWidth + 0.5f));
+  if (double(pixelSize) + 0.5 >= std::numeric_limits<int>::max() ||
+      double(strokeWidth) + 0.5 >= std::numeric_limits<int>::max()) return false;
+  const int legacySize = static_cast<int>(std::floor(double(pixelSize) + 0.5));
+  const int legacyStroke = static_cast<int>(std::floor(double(strokeWidth) + 0.5));
   const int legacyX = static_cast<int>(std::clamp(std::floor(x + 0.5f), -1000000000.0f, 1000000000.0f));
   const int legacyY = static_cast<int>(std::clamp(std::floor(y + 0.5f), -1000000000.0f, 1000000000.0f));
   auto layout = fonts_->layoutText(fontPaths, text, legacySize);
@@ -1043,11 +1060,13 @@ bool CanvasStore::realizeContent(Content& surface) {
   Content prepared(*this);
   prepared.width = surface.width;
   prepared.height = surface.height;
+  prepared.opaque = surface.opaque;
   prepared.state = ContentState::Realizing;
   surface.state = ContentState::Realizing;
   try {
     prepared.pixels.assign(static_cast<std::size_t>(surface.width) *
                              static_cast<std::size_t>(surface.height) * 4U, 0);
+    if (prepared.opaque) for (size_t i = 3; i < prepared.pixels.size(); i += 4) prepared.pixels[i] = 255;
     for (const auto& cmd : surface.commands) {
       const bool ok = std::visit([this, &prepared](const auto& c) -> bool {
         using T = std::decay_t<decltype(c)>;
@@ -1131,7 +1150,8 @@ std::optional<std::vector<std::uint8_t>> CanvasStore::encodePng(
 }
 
 std::optional<std::vector<std::uint8_t>> CanvasStore::encodeWebP(
-    CanvasHandle handle) {
+    CanvasHandle handle, std::optional<double> quality) {
+  if (quality && (!std::isfinite(*quality) || *quality < 0 || *quality > 1)) return std::nullopt;
   auto* surface = lookupContent(handle);
   if (!surface) return std::nullopt;
   if (surface->state == ContentState::Deferred && !realizeContent(*surface)) {
@@ -1140,12 +1160,55 @@ std::optional<std::vector<std::uint8_t>> CanvasStore::encodeWebP(
   const auto straight = readPixels(handle, 0, 0, surface->width, surface->height);
   if (!straight) return std::nullopt;
   std::uint8_t* output = nullptr;
-  const std::size_t size = WebPEncodeLosslessRGBA(
-      straight->rgba.data(), surface->width, surface->height,
-      surface->width * 4, &output);
+  const std::size_t size = quality && *quality != 1 ? WebPEncodeRGBA(straight->rgba.data(), surface->width,
+      surface->height, surface->width * 4, *quality * 100, &output) :
+    WebPEncodeLosslessRGBA(straight->rgba.data(), surface->width, surface->height, surface->width * 4, &output);
   if (size == 0 || !output) return std::nullopt;
   std::vector<std::uint8_t> encoded(output, output + size);
   WebPFree(output);
+  return encoded;
+}
+
+std::optional<std::vector<std::uint8_t>> CanvasStore::encodeJpeg(CanvasHandle handle, double quality) {
+  auto* surface = lookupContent(handle);
+  if (!surface || !std::isfinite(quality) || quality < 0 || quality > 1) return std::nullopt;
+  const auto pixels = readPixels(handle, 0, 0, surface->width, surface->height, PixelEncoding::PremultipliedRGBA8);
+  if (!pixels) return std::nullopt;
+  std::vector<uint8_t> rgb(size_t(surface->width) * surface->height * 3);
+  for (size_t i = 0; i < rgb.size() / 3; ++i) std::copy_n(pixels->rgba.data() + i * 4, 3, rgb.data() + i * 3);
+  struct Error {
+    jpeg_error_mgr base;
+    std::jmp_buf jump;
+  } error{};
+  jpeg_compress_struct encoder{};
+  encoder.err = jpeg_std_error(&error.base);
+  error.base.error_exit = [](j_common_ptr state) {
+    auto* failure = reinterpret_cast<Error*>(state->err);
+    std::longjmp(failure->jump, 1);
+  };
+  unsigned char* output = nullptr;
+  unsigned long size = 0;
+  if (setjmp(error.jump)) {
+    jpeg_destroy_compress(&encoder); std::free(output); return std::nullopt;
+  }
+  jpeg_create_compress(&encoder);
+  jpeg_mem_dest(&encoder, &output, &size);
+  encoder.image_width = surface->width; encoder.image_height = surface->height;
+  encoder.input_components = 3; encoder.in_color_space = JCS_RGB;
+  const int compressionQuality = std::round(quality * 100);
+  jpeg_set_defaults(&encoder); jpeg_set_quality(&encoder, compressionQuality, TRUE);
+  if (compressionQuality == 100) for (int component = 0; component < encoder.num_components; ++component) {
+    encoder.comp_info[component].h_samp_factor = 1;
+    encoder.comp_info[component].v_samp_factor = 1;
+  }
+  jpeg_start_compress(&encoder, TRUE);
+  while (encoder.next_scanline < encoder.image_height) {
+    JSAMPROW row = rgb.data() + size_t(encoder.next_scanline) * surface->width * 3;
+    jpeg_write_scanlines(&encoder, &row, 1);
+  }
+  jpeg_finish_compress(&encoder);
+  std::vector<uint8_t> encoded(output, output + size);
+  jpeg_destroy_compress(&encoder); std::free(output);
   return encoded;
 }
 
@@ -1183,6 +1246,7 @@ CanvasStore::Content* CanvasStore::writableContent(CanvasHandle handle) {
     auto copy = std::make_shared<Content>(*this);
     copy->width = old.width;
     copy->height = old.height;
+    copy->opaque = old.opaque;
     copy->state = old.state;
     copy->pixels = old.pixels;
     copy->mayHaveOverAlpha = old.mayHaveOverAlpha;
@@ -1205,7 +1269,7 @@ CanvasStore::Content* CanvasStore::writableContent(CanvasHandle handle) {
   return surface->content.get();
 }
 
-std::optional<CanvasInfo> CanvasStore::create(int width, int height) {
+std::optional<CanvasInfo> CanvasStore::create(int width, int height, bool opaque) {
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
   std::size_t index = 0;
@@ -1216,6 +1280,7 @@ std::optional<CanvasInfo> CanvasStore::create(int width, int height) {
   auto content = std::make_shared<Content>(*this);
   content->width = width;
   content->height = height;
+  content->opaque = opaque;
   surface.content = std::move(content);
   surface.image = 0;
   surface.live = true;
@@ -1320,6 +1385,10 @@ bool CanvasStore::clear(CanvasHandle handle) {
   if (!surface) return false;
   if (surface->state == ContentState::Deferred) {
     discardCommands(*surface);
+    if (surface->opaque) {
+      surface->commands.emplace_back(ClearRectCmd{0, 0, surface->width, surface->height});
+      surface->queuedCommandBytes = sizeof(ClearRectCmd);
+    }
     return true;
   }
   clearNow(*surface);
@@ -1330,7 +1399,7 @@ bool CanvasStore::clearRect(CanvasHandle handle, int x, int y, int width, int he
   auto* surface = writableContent(handle);
   if (!surface) return false;
   if (surface->state == ContentState::Deferred) {
-    if (x <= 0 && y <= 0 && static_cast<int64_t>(x) + width >= surface->width &&
+    if (!surface->opaque && x <= 0 && y <= 0 && static_cast<int64_t>(x) + width >= surface->width &&
         static_cast<int64_t>(y) + height >= surface->height) {
       discardCommands(*surface);
       return true;
@@ -1388,7 +1457,7 @@ bool CanvasStore::drawImage(CanvasHandle destination, std::uint32_t source,
   const std::array<float, 8> geometry = {sourceX, sourceY, sourceWidth, sourceHeight,
     destinationX, destinationY, destinationWidth, destinationHeight};
   if (!std::all_of(geometry.begin(), geometry.end(), [](float value) { return std::isfinite(value); })) return false;
-  DrawImageCmd command{source, {}, sourceX, sourceY, sourceWidth, sourceHeight,
+  DrawImageCmd command{source, {}, {}, sourceX, sourceY, sourceWidth, sourceHeight,
                        destinationX, destinationY, destinationWidth, destinationHeight, alpha, smoothing};
   if ((source & canvasHandleTag) != 0) {
     const auto* sourceSurface = lookup(source);
@@ -1408,6 +1477,16 @@ bool CanvasStore::drawImage(CanvasHandle destination, std::uint32_t source,
         depth > maxCanvasDependencyDepth) {
       if (!realizeContent(*destinationSurface)) return false;
     } else {
+      if (command.source) {
+        const auto sourceInfo = images_.inspect(command.source);
+        const int left = std::clamp(std::floor(double(sourceX) - 1), 0.0, double(sourceInfo->width));
+        const int top = std::clamp(std::floor(double(sourceY) - 1), 0.0, double(sourceInfo->height));
+        const int right = std::clamp(std::ceil(double(sourceX) + sourceWidth + 1), 0.0, double(sourceInfo->width));
+        const int bottom = std::clamp(std::ceil(double(sourceY) + sourceHeight + 1), 0.0, double(sourceInfo->height));
+        if (right <= left || bottom <= top) return true;
+        command.snapshot = images_.deferPixelRead(command.source, left, top, right - left, bottom - top);
+        if (!command.snapshot) return false;
+      }
       destinationSurface->commands.emplace_back(command);
       if (command.source) images_.retain(command.source);
       destinationSurface->queuedCommandBytes += sizeof(DrawImageCmd);
@@ -1466,8 +1545,7 @@ bool CanvasStore::drawText(CanvasHandle handle,
                            std::uint32_t rgba, float strokeWidth, const CanvasTextStyle& style) {
   auto* surface = writableContent(handle);
   if (!surface || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(pixelSize) ||
-      !std::isfinite(strokeWidth) || pixelSize <= 0 || pixelSize > 256 || fontPaths.empty() ||
-      strokeWidth < 0 || strokeWidth > 32) return false;
+      !std::isfinite(strokeWidth) || pixelSize <= 0 || fontPaths.empty() || strokeWidth < 0) return false;
   if (surface->state == ContentState::Deferred) {
     const std::size_t estimatedBytes = sizeof(DrawTextCmd) + text.capacity() +
       fontPaths.capacity() * sizeof(std::filesystem::path);
@@ -1492,8 +1570,9 @@ std::optional<double> CanvasStore::measureText(
     auto metrics = const_cast<TextBackend&>(textBackend_).measure(fontPaths, text, pixelSize, style);
     return metrics ? std::optional<double>(metrics->width) : std::nullopt;
   }
-  if (!std::isfinite(pixelSize) || pixelSize <= 0 || pixelSize > 256) return std::nullopt;
-  auto layout = fonts_->layoutText(fontPaths, text, static_cast<int>(std::floor(pixelSize + 0.5f)));
+  if (!std::isfinite(pixelSize) || pixelSize <= 0 ||
+      double(pixelSize) + 0.5 >= std::numeric_limits<int>::max()) return std::nullopt;
+  auto layout = fonts_->layoutText(fontPaths, text, static_cast<int>(std::floor(double(pixelSize) + 0.5)));
   if (!layout) return std::nullopt;
   return layout->metrics.width;
 }
@@ -1503,8 +1582,9 @@ std::optional<CanvasTextMetrics> CanvasStore::measureTextMetrics(
     float pixelSize, const CanvasTextStyle& style) const {
   if (textBackend_.skia())
     return const_cast<TextBackend&>(textBackend_).measure(fontPaths, text, pixelSize, style);
-  if (!std::isfinite(pixelSize) || pixelSize <= 0 || pixelSize > 256) return std::nullopt;
-  auto layout = fonts_->layoutText(fontPaths, text, static_cast<int>(std::floor(pixelSize + 0.5f)));
+  if (!std::isfinite(pixelSize) || pixelSize <= 0 ||
+      double(pixelSize) + 0.5 >= std::numeric_limits<int>::max()) return std::nullopt;
+  auto layout = fonts_->layoutText(fontPaths, text, static_cast<int>(std::floor(double(pixelSize) + 0.5)));
   if (!layout) return std::nullopt;
   return layout->metrics;
 }
@@ -1661,6 +1741,40 @@ bool CanvasStore::writePixels(CanvasHandle handle, int x, int y, int width,
   return true;
 }
 
+bool CanvasStore::copyTransformedPixels(CanvasHandle destination, CanvasHandle source,
+    int x, int y, int width, int height, int orientation) {
+  const auto from = info(source), to = info(destination);
+  if (!from || !to || width < 0 || height < 0 || orientation < 0 || orientation > 7) return false;
+  const auto extent = checkedImageExtent(to->width, to->height);
+  if (!extent) return false;
+  // Match an image-data copy's straight-alpha byte rounding, including self copies.
+  const auto pixels = readPixels(source, 0, 0, from->width, from->height);
+  if (!pixels) return false;
+  std::vector<uint8_t> output(extent->rgbaBytes, 0);
+  const int64_t left = std::max<int64_t>(0, -int64_t(x));
+  const int64_t top = std::max<int64_t>(0, -int64_t(y));
+  const int64_t right = std::min<int64_t>(width, int64_t(to->width) - x);
+  const int64_t bottom = std::min<int64_t>(height, int64_t(to->height) - y);
+  for (int64_t row = top; row < bottom; ++row) for (int64_t column = left; column < right; ++column) {
+    const double u = (column + 0.5) / width, v = (row + 0.5) / height;
+    double sx = u, sy = v;
+    switch (orientation) {
+      case 1: sx = 1 - v; sy = u; break;
+      case 2: sx = 1 - u; sy = 1 - v; break;
+      case 3: sx = v; sy = 1 - u; break;
+      case 4: sy = 1 - v; break;
+      case 5: sx = v; sy = u; break;
+      case 6: sx = 1 - u; break;
+      case 7: sx = 1 - v; sy = 1 - u; break;
+    }
+    const int sourceX = std::clamp(int(std::floor(sx * from->width)), 0, from->width - 1);
+    const int sourceY = std::clamp(int(std::floor(sy * from->height)), 0, from->height - 1);
+    std::copy_n(pixels->rgba.data() + (size_t(sourceY) * from->width + sourceX) * 4, 4,
+      output.data() + (size_t(y + row) * to->width + size_t(x + column)) * 4);
+  }
+  return writePixels(destination, 0, 0, to->width, to->height, output);
+}
+
 bool CanvasStore::replacePixels(CanvasHandle handle,
                                 std::vector<std::uint8_t> pixels, PixelEncoding encoding) {
   auto* target = lookup(handle);
@@ -1709,8 +1823,8 @@ std::optional<CanvasInfo> CanvasStore::info(CanvasHandle handle) const {
 
 std::optional<ImageHandle> CanvasStore::imageHandle(CanvasHandle handle) const {
   const auto* surface = lookup(handle);
-  return surface && surface->image ? std::optional<ImageHandle>{surface->image}
-                                   : std::nullopt;
+  if (!surface) return std::nullopt;
+  return surface->image ? std::optional<ImageHandle>{surface->image} : std::nullopt;
 }
 
 bool CanvasStore::uploadSurface(Surface& target) {
@@ -1749,13 +1863,25 @@ void CanvasStore::uploadDirty() {
 
 std::size_t CanvasStore::cpuBytes() const {
   std::size_t result = 0;
-  for (const auto* content : contents_) result += content->pixels.size();
+  std::unordered_set<const ImagePixelSnapshot*> snapshots;
+  for (const auto* content : contents_) {
+    result += content->pixels.size();
+    for (const auto& command : content->commands) if (const auto* draw = std::get_if<DrawImageCmd>(&command))
+      if (draw->snapshot && draw->snapshot->pixels && snapshots.insert(draw->snapshot.get()).second)
+        result += draw->snapshot->pixels->rgba.size();
+  }
   return result;
 }
 
 std::size_t CanvasStore::capacityBytes() const {
   std::size_t result = 0;
-  for (const auto* content : contents_) result += content->pixels.capacity();
+  std::unordered_set<const ImagePixelSnapshot*> snapshots;
+  for (const auto* content : contents_) {
+    result += content->pixels.capacity();
+    for (const auto& command : content->commands) if (const auto* draw = std::get_if<DrawImageCmd>(&command))
+      if (draw->snapshot && draw->snapshot->pixels && snapshots.insert(draw->snapshot.get()).second)
+        result += draw->snapshot->pixels->rgba.capacity();
+  }
   return result;
 }
 

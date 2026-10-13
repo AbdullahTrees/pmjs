@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -19,6 +20,7 @@
 
 #include <GLES3/gl3.h>
 #include <jpeglib.h>
+#include <webp/decode.h>
 #include <png.h>
 
 namespace pmjs {
@@ -187,6 +189,15 @@ std::optional<ImagePixels> decodeMemory(const void* data, std::size_t size,
   if (size >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff) {
     return decodeJpegFromMemory(data, size, maxDecodedBytes);
   }
+  if (size >= 12 && std::memcmp(bytes, "RIFF", 4) == 0 && std::memcmp(bytes + 8, "WEBP", 4) == 0) {
+    int width = 0, height = 0;
+    if (!WebPGetInfo(bytes, size, &width, &height)) return std::nullopt;
+    const auto extent = checkedImageExtent(width, height, 8192, maxDecodedBytes);
+    if (!extent) return std::nullopt;
+    ImagePixels pixels{width, height, std::vector<uint8_t>(extent->rgbaBytes)};
+    if (!WebPDecodeRGBAInto(bytes, size, pixels.rgba.data(), pixels.rgba.size(), width * 4)) return std::nullopt;
+    return pixels;
+  }
   if (size >= 6 && std::memcmp(bytes, "8BPS\0\1", 6) == 0) return decodePsdFromMemory(data, size, maxDecodedBytes);
   if (auto recovered = recoverPngBytes({bytes, size}, maxDecodedBytes))
     return decodePngFromMemory(recovered->data(), recovered->size(), maxDecodedBytes);
@@ -222,6 +233,7 @@ std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, int channel
   // The uploaded texture remains this owner's snapshot if its source changes.
   // Texture row zero is the decoded first row; no screen-space flip is needed.
   if (complete) {
+    while (glGetError() != GL_NO_ERROR) {}
     glReadPixels(0, 0, image.width, image.height, GL_RGBA,
                  GL_UNSIGNED_BYTE, pixels.rgba.data());
     // Texture swizzles do not apply to framebuffer reads.
@@ -231,13 +243,14 @@ std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, int channel
       pixels.rgba[i + 3] = static_cast<std::uint8_t>(alpha);
     }
   }
+  const bool readSucceeded = complete && glGetError() == GL_NO_ERROR;
   glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(previousBuffer));
   glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
   glDeleteFramebuffers(1, &framebuffer);
   for (std::size_t index = 0; index < parameters.size(); ++index) {
     glPixelStorei(parameters[index], previousPack[index]);
   }
-  return complete ? std::optional<ImagePixels>(std::move(pixels)) : std::nullopt;
+  return readSucceeded ? std::optional<ImagePixels>(std::move(pixels)) : std::nullopt;
 }
 }
 
@@ -544,6 +557,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   slot.retainCpuPixels = false;
   slot.cacheKey.clear();
   slot.sourcePath.clear();
+  slot.lastPreparedFallbackReason.clear();
   slot.cachedPixels.reset();
   slot.gpuOnly = pixels == nullptr;
   slot.renderTarget = false;
@@ -669,6 +683,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
 bool ImageStore::updateRgba(ImageHandle handle, const void* pixels) {
   const auto info = lookup(handle);
   if (!info || !pixels) return false;
+  if (!preservePixelReads(handle)) return false;
   auto& slot = slots_[(handle & indexMask) - 1U];
   ++slot.contentRevision;
   slot.knownAllZero = false;
@@ -707,6 +722,7 @@ bool ImageStore::updateRgbaRegion(ImageHandle handle, int x, int y, int width,
   if (!info || !pixels || x < 0 || y < 0 || width <= 0 || height <= 0 ||
       x + width > info->width || y + height > info->height ||
       sourceRowPixels < width) return false;
+  if (!preservePixelReads(handle)) return false;
   auto& slot = slots_[(handle & indexMask) - 1U];
   ++slot.contentRevision;
   const bool canProveZero = slot.knownAllZero ||
@@ -737,6 +753,35 @@ bool ImageStore::updateRgbaRegion(ImageHandle handle, int x, int y, int width,
   }
   if (!ok) slot.cachedPixels.reset();
   return ok;
+}
+
+std::shared_ptr<ImagePixelSnapshot> ImageStore::deferPixelRead(ImageHandle handle,
+    int x, int y, int width, int height) {
+  const auto info = inspect(handle);
+  if (!info || x < 0 || y < 0 || width <= 0 || height <= 0 ||
+      int64_t(x) + width > info->width || int64_t(y) + height > info->height) return {};
+  auto snapshot = std::make_shared<ImagePixelSnapshot>();
+  snapshot->x = x; snapshot->y = y;
+  snapshot->width = width; snapshot->height = height;
+  snapshot->premultiplied = info->premultiplied;
+  auto& readers = pixelReads_[handle];
+  std::erase_if(readers, [](const auto& reader) { return reader.expired(); });
+  readers.push_back(snapshot);
+  return snapshot;
+}
+
+bool ImageStore::preservePixelReads(ImageHandle handle) {
+  const auto found = pixelReads_.find(handle);
+  if (found == pixelReads_.end()) return true;
+  for (const auto& reader : found->second) if (auto snapshot = reader.lock()) {
+    if (!snapshot->pixels) {
+      snapshot->pixels = readPixelsRegion(handle, snapshot->x, snapshot->y,
+        snapshot->width, snapshot->height);
+      if (!snapshot->pixels) return false;
+    }
+  }
+  pixelReads_.erase(found);
+  return true;
 }
 
 bool ImageStore::promoteToRgba(Slot& slot, const void* replacement) {
@@ -794,6 +839,31 @@ std::optional<std::uint64_t> ImageStore::contentRevision(ImageHandle handle) con
   // External framebuffer writes have no tracked content revision.
   if (slot.gpuOnly || slot.renderTarget || slot.tiles) return std::nullopt;
   return slot.contentRevision;
+}
+
+std::optional<bool> ImageStore::isOpaque(ImageHandle handle) {
+  const auto revision = contentRevision(handle);
+  if (!revision) return std::nullopt;
+  const auto index = (handle & indexMask) - 1U;
+  // Render targets retain an alpha channel regardless of their current pixels.
+  if (slots_[index].renderTarget) return false;
+  if (slots_[index].opacityRevision == *revision)
+    return slots_[index].opaque;
+  const auto info = inspect(handle);
+  std::optional<ImagePixels> snapshot;
+  const auto* pixels = readPixels(handle);
+  if (!pixels) {
+    snapshot = readPixelsRegion(handle, 0, 0, info->width, info->height);
+    if (snapshot) pixels = &*snapshot;
+  }
+  if (!pixels) return std::nullopt;
+  bool opaque = true;
+  for (size_t i = 3; i < pixels->rgba.size(); i += 4) {
+    if (pixels->rgba[i] != 255) { opaque = false; break; }
+  }
+  slots_[index].opaque = opaque;
+  slots_[index].opacityRevision = *revision;
+  return opaque;
 }
 
 bool ImageStore::isRenderTarget(ImageHandle handle) const {
@@ -920,6 +990,7 @@ bool ImageStore::touch(ImageHandle handle) {
 
 void ImageStore::destroySlot(std::size_t index) {
   auto& slot = slots_[index];
+  pixelReads_.erase(makeHandle(index, slot.generation));
   clearPremultipliedTexture(slot);
   if (!slot.cacheKey.empty()) pathCache_.erase(slot.cacheKey);
   ++textureEpoch_;
@@ -946,6 +1017,7 @@ void ImageStore::destroySlot(std::size_t index) {
   slot.retainCpuPixels = false;
   slot.cacheKey.clear();
   slot.sourcePath.clear();
+  slot.lastPreparedFallbackReason.clear();
   slot.cachedPixels.reset();
   slot.prepared.reset();
   slot.tiles.reset();
@@ -1256,8 +1328,12 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
   const auto& slot = slots_[(handle & indexMask) - 1U];
   if (slot.tiles) return readTileRegion(slot, x, y, width, height);
   if (!slot.prepared) {
-    auto* full = readPixels(handle);
-    if (!full && !slot.gpuOnly) {
+    // Mutable GPU surfaces are read on demand; never retain a stale CPU copy.
+    std::optional<ImagePixels> gpuPixels;
+    if (slot.gpuOnly || slot.renderTarget) gpuPixels = readTexturePixels(*info, slot.channels);
+    auto* full = (slot.gpuOnly || slot.renderTarget) ?
+      (gpuPixels ? &*gpuPixels : nullptr) : readPixels(handle);
+    if (!full && !slot.gpuOnly && !slot.renderTarget) {
       slot.cachedPixels = readTexturePixels(*info, slot.channels);
       full = slot.cachedPixels ? &*slot.cachedPixels : nullptr;
     }
@@ -1427,6 +1503,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   premultiplied = premultiplied || slot.premultiplied;
   if (texture) return true;
   if (!slot.prepared && !slot.tiles) return false;
+  const auto started = std::chrono::steady_clock::now();
   const auto extent = checkedImageExtent(slot.width, slot.height, 8192, 128U * 1024U * 1024U);
   GLint maxTexture = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
   if (!extent || slot.width > maxTexture || slot.height > maxTexture) {
@@ -1475,6 +1552,14 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   const auto bytes = static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
   textureUploadBytes_ += bytes;
   gpuBytes_ += bytes; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
+  const auto elapsedMs = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
+  std::fprintf(stderr,
+      "[pmjs-images] WARNING %s full-image fallback source=\"%s\" last_sampling_reason=%s "
+      "size=%dx%d backing=%s upload_bytes=%zu materialize_ms=%.3f\n",
+      slot.tiles ? "tiled" : "prepared", slot.sourcePath.generic_string().c_str(),
+      slot.lastPreparedFallbackReason.empty() ? "not-recorded" : slot.lastPreparedFallbackReason.c_str(),
+      slot.width, slot.height, premultiplied ? "premultiplied" : "straight", bytes, elapsedMs);
   return true;
 }
 
@@ -1491,6 +1576,7 @@ bool ImageStore::hasUniformPreparedBacking(ImageHandle handle) const {
 }
 
 void ImageStore::notePreparedFallback(ImageHandle handle, const std::string& reason) {
+  if (hasPreparedBacking(handle)) slots_[(handle & indexMask)-1U].lastPreparedFallbackReason = reason;
   if (hasTileBacking(handle)) { if (tileDiagnostics_) ++tileFallbacks_[reason]; }
   else if (hasPreparedBacking(handle)) ++preparedFallbacks_[reason];
 }

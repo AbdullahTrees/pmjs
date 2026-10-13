@@ -388,6 +388,7 @@ void Renderer::renderScene() {
   const bool shouldRenderScene =
       sceneSubmittedThisFrame_ || offscreenRender_ || !hasValidSceneFrame_;
   if (shouldRenderScene) {
+    reduceConstantBlackGroups();
     if (!offscreenRender_) filterIntermediateUsed_ = false;
     // llvmpipe changes interpolation when depth is first attached; keep its scene storage stable.
     if (!offscreenRender_ && (softwareSceneDepth_ || std::any_of(frame_.commands.begin(), frame_.commands.end(), [](const auto& command) {

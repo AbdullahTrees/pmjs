@@ -193,10 +193,16 @@ int main() {
     const std::array<std::uint8_t, 4> opaque = {12, 34, 56, 255};
     const auto opaqueImage = owner.createRgba(1, 1, opaque.data());
     if (!opaqueImage) throw std::runtime_error("opaque image allocation failed");
+    if (owner.isOpaque(opaqueImage->handle) != true || owner.isOpaque(owned->handle) != false)
+      throw std::runtime_error("image opacity inspection lost source alpha");
     const auto opaqueView = owner.lookupPremultiplied(opaqueImage->handle);
     if (!opaqueView || opaqueView->texture != opaqueImage->texture || owner.gpuBytes() != 36) {
       throw std::runtime_error("opaque image unnecessarily duplicated texture storage");
     }
+    const std::array<std::uint8_t, 4> transparent = {12, 34, 56, 0};
+    if (!owner.updateRgba(opaqueImage->handle, transparent.data()) || owner.isOpaque(opaqueImage->handle) != false ||
+        !owner.updateRgbaRegion(opaqueImage->handle, 0, 0, 1, 1, opaque.data(), 1) || owner.isOpaque(opaqueImage->handle) != true)
+      throw std::runtime_error("image opacity cache survived a source mutation");
   }
   if (glIsTexture(ownedTexture) || glIsTexture(ownedView)) {
     throw std::runtime_error("image store teardown leaked rendering textures");

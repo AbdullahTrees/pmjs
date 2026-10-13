@@ -3,25 +3,154 @@ function CanvasContext2D(canvas) {
   resetCanvasContextState(this);
 }
 
+var canvasStateDefaults = {
+  fillStyle: '#000000', strokeStyle: '#000000', globalAlpha: 1,
+  globalCompositeOperation: 'source-over', font: '10px sans-serif',
+  textAlign: 'start', textBaseline: 'alphabetic', lineWidth: 1,
+  lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, imageSmoothingEnabled: true,
+  lineDashOffset: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0
+};
 function resetCanvasContextState(context) {
-  var canvas = context.canvas;
-  context.canvas = canvas;
-  context.fillStyle = '#000000';
-  context.strokeStyle = '#000000';
-  context.globalAlpha = 1;
-  context.globalCompositeOperation = 'source-over';
-  context.font = '10px sans-serif';
-  context.textAlign = 'start';
-  context.textBaseline = 'alphabetic';
-  context.lineWidth = 1;
-  context.imageSmoothingEnabled = true;
+  for (var key in canvasStateDefaults) context[key] = canvasStateDefaults[key];
   context._transform = [1, 0, 0, 1, 0, 0];
   context._stateStack = [];
   context._circlePath = null;
+  context._pendingArc = null;
   context._path = [];
   context._subpath = null;
+  context._currentPathPoint = null;
   context._clipPaths = [];
+  context._lineDash = [];
 }
+function canvasTransformInvertible(context) {
+  var t = context._transform;
+  var determinant = t[0] * t[3] - t[1] * t[2];
+  return Number.isFinite(determinant) && determinant !== 0;
+}
+function canvasIndexSizeError(message) {
+  if (typeof DOMException === 'function') return new DOMException(message, 'IndexSizeError');
+  var error = new Error(message); error.name = 'IndexSizeError'; error.code = 1; return error;
+}
+
+['lineDashOffset', 'shadowBlur', 'shadowOffsetX', 'shadowOffsetY'].forEach(function(name) {
+  Object.defineProperty(CanvasContext2D.prototype, name, {
+    get: function() { return this['_' + name]; },
+    set: function(value) {
+      value = +value;
+      if (Number.isFinite(value) && (name !== 'shadowBlur' || value >= 0)) this['_' + name] = value;
+    }
+  });
+});
+Object.defineProperty(CanvasContext2D.prototype, 'shadowColor', {
+  get: function() { return this._shadowColor; },
+  set: function(value) { var color = canvasSerializedColor(value); if (color !== null) this._shadowColor = color; }
+});
+CanvasContext2D.prototype.setLineDash = function(segments) {
+  if (!segments || typeof segments[Symbol.iterator] !== 'function') throw new TypeError('line dash must be iterable');
+  var dash = Array.from(segments, function(value) { return +value; });
+  if (!dash.every(function(value) { return Number.isFinite(value) && value >= 0; })) return;
+  this._lineDash = dash.length % 2 ? dash.concat(dash) : dash;
+};
+CanvasContext2D.prototype.getLineDash = function() { return this._lineDash.slice(); };
+
+function canvasPathCommands(paths) {
+  if (!paths.some(function(path) { return path.commands; })) return [];
+  var commands = [];
+  paths.forEach(function(path) {
+    if (path.commands) commands = commands.concat(path.commands);
+    else {
+      path.forEach(function(point, index) { commands.push(index ? 1 : 0, point[0], point[1]); });
+      if (path.closed) commands.push(4);
+    }
+  });
+  return commands;
+}
+function canvasPathBounds(path, point) {
+  if (!path.bounds) path.bounds = [point.slice(), point.slice()];
+  for (var axis = 0; axis < 2; axis++) {
+    path.bounds[0][axis] = Math.min(path.bounds[0][axis], point[axis]);
+    path.bounds[1][axis] = Math.max(path.bounds[1][axis], point[axis]);
+  }
+}
+function canvasFlattenCurve(points, path) {
+  var remaining = 8192;
+  function flatten(curve, depth) {
+    var first = curve[0], last = curve[curve.length - 1];
+    var dx = last[0] - first[0], dy = last[1] - first[1], length = Math.hypot(dx, dy);
+    var flat = curve.slice(1, -1).every(function(control) {
+      return length ? Math.abs(dx * (control[1] - first[1]) - dy * (control[0] - first[0])) <= length * 0.01 :
+        Math.hypot(control[0] - first[0], control[1] - first[1]) <= 0.01;
+    });
+    if (flat || depth >= 16 || remaining <= 1) { path.push(last); remaining--; return; }
+    var left = [first], right = [last], row = curve;
+    while (row.length > 1) {
+      row = row.slice(1).map(function(point, index) { return [(row[index][0] + point[0]) / 2, (row[index][1] + point[1]) / 2]; });
+      left.push(row[0]); right.unshift(row[row.length - 1]);
+    }
+    flatten(left, depth + 1); flatten(right, depth + 1);
+  }
+  flatten(points, 0);
+}
+function canvasFlattenPath(path) {
+  if (!path.needsFlatten) return;
+  var points = [], commands = path.commands;
+  for (var i = 0; i < commands.length;) {
+    var verb = commands[i++];
+    if (verb === 4) points.push(points[0].slice());
+    else if (verb === 5) {
+      var x = commands[i++], y = commands[i++], radius = commands[i++];
+      var start = commands[i++], sweep = commands[i++], t = commands.slice(i, i + 6); i += 6;
+      var extent = radius * (Math.hypot(t[0], t[1]) + Math.hypot(t[2], t[3]));
+      var segments = Math.min(8192, Math.max(16, Math.ceil(Math.abs(sweep) * Math.sqrt(extent * 2))));
+      for (var index = 0; index <= segments; index++) {
+        var angle = start + sweep * index / segments;
+        var px = x + Math.cos(angle) * radius, py = y + Math.sin(angle) * radius;
+        var point = [t[0] * px + t[2] * py + t[4], t[1] * px + t[3] * py + t[5]];
+        if (index || !points.length || point[0] !== points[points.length - 1][0] || point[1] !== points[points.length - 1][1]) points.push(point);
+      }
+    } else if (verb === 2 || verb === 3) {
+      var curve = [points[points.length - 1]];
+      for (var end = i + (verb === 3 ? 6 : 4); i < end; i += 2) curve.push([commands[i], commands[i + 1]]);
+      canvasFlattenCurve(curve, points);
+    } else {
+      points.push([commands[i], commands[i + 1]]); i += 2;
+    }
+  }
+  path.length = 0;
+  for (var index = 0; index < points.length; index++) path.push(points[index]);
+  path.needsFlatten = false;
+}
+function canvasCurve(context, values, cubic) {
+  if (values.length < (cubic ? 6 : 4)) throw new TypeError('not enough curve arguments');
+  values = values.map(function(value) { return Math.fround(+value); });
+  if (!values.every(Number.isFinite) || !canvasTransformInvertible(context)) return;
+  materializeCanvasArc(context); context._circlePath = null;
+  if (!context._subpath) context.moveTo(values[0], values[1]);
+  if (context._subpath.closed) {
+    context._subpath = [context._subpath[0].slice()]; context._path.push(context._subpath);
+  }
+  var path = context._subpath;
+  if (!path.commands) {
+    path.commands = [];
+    path.forEach(function(point, index) { path.commands.push(index ? 1 : 0, point[0], point[1]); });
+  }
+  var points = [context._currentPathPoint.slice()], command = [cubic ? 3 : 2];
+  for (var i = 0; i < values.length; i += 2) {
+    var point = transformedPoint(context, values[i], values[i + 1]);
+    points.push(point); command.push(point[0], point[1]);
+  }
+  path.commands.push.apply(path.commands, command);
+  points.forEach(function(point) { canvasPathBounds(path, point); });
+  path.needsFlatten = true;
+  path.push(points[points.length - 1]);
+  context._currentPathPoint = points[points.length - 1].slice();
+}
+CanvasContext2D.prototype.quadraticCurveTo = function(cpx, cpy, x, y) {
+  canvasCurve(this, Array.prototype.slice.call(arguments, 0, 4), false);
+};
+CanvasContext2D.prototype.bezierCurveTo = function(cp1x, cp1y, cp2x, cp2y, x, y) {
+  canvasCurve(this, Array.prototype.slice.call(arguments, 0, 6), true);
+};
 
 function multiplyTransform(left, right) {
   return [left[0] * right[0] + left[2] * right[1],
@@ -34,13 +163,22 @@ function multiplyTransform(left, right) {
 
 function axisAlignedRect(context, x, y, width, height) {
   var t = context._transform;
-  if (Math.abs(t[1]) > 0.000001 || Math.abs(t[2]) > 0.000001) return null;
+  if (t[1] !== 0 || t[2] !== 0) return null;
   var x0 = t[0] * x + t[4];
   var y0 = t[3] * y + t[5];
   var x1 = t[0] * (x + width) + t[4];
   var y1 = t[3] * (y + height) + t[5];
   return { x: Math.min(x0, x1), y: Math.min(y0, y1),
     width: Math.abs(x1 - x0), height: Math.abs(y1 - y0) };
+}
+
+function canvasSourceDimensions(source) {
+  if (source && 'videoWidth' in source) return [Number(source.videoWidth), Number(source.videoHeight)];
+  if (source && 'naturalWidth' in source) return [Number(source.naturalWidth), Number(source.naturalHeight)];
+  return [Number(source.width) || 0, Number(source.height) || 0];
+}
+function canvasReferenceEngine() {
+  return globalThis.PMJS_RUNTIME_ENGINE || (globalThis.PMJS_RUNTIME_GAME && PMJS_RUNTIME_GAME.engine);
 }
 
 function canvasSourcePixels(source, nativeSource, operationId, region) {
@@ -77,6 +215,36 @@ function canvasSourcePixels(source, nativeSource, operationId, region) {
   }
 }
 
+function canvasFontValue(value) {
+  var match = /^\s*((?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|[1-9]00)\s+)*)(\d+(?:\.\d+)?|\.\d+)(px|pt|pc|in|cm|mm|em|rem|%)\s*(?:\/\s*(?:normal|\d+(?:\.\d+)?(?:px|pt|em|%)?)\s+)?(.+?)\s*$/i.exec(value);
+  if (!match || !(Number(match[2]) > 0)) return null;
+  var prefix = match[1].trim().split(/\s+/).filter(Boolean);
+  var style = prefix.filter(function(token) { return /^(italic|oblique)$/i.test(token); });
+  var weight = prefix.filter(function(token) { return /^(bold|bolder|lighter|[1-9]00)$/i.test(token); });
+  if (style.length > 1 || weight.length > 1 || prefix.filter(function(token) { return token === 'small-caps'; }).length > 1) return null;
+  var families = match[4].match(/"[^"\r\n]+"|'[^'\r\n]+'|[^,]+/g);
+  if (!families || families.join(',').replace(/\s+/g, '') !== match[4].replace(/\s+/g, '')) return null;
+  for (var i = 0; i < families.length; i++) {
+    var family = families[i].trim();
+    if (!/^(?:"[^"\r\n]+"|'[^'\r\n]+'|(?:--|-?[_a-zA-Z\u0080-\uffff])[-_a-zA-Z0-9\u0080-\uffff]*(?:\s+(?:--|-?[_a-zA-Z\u0080-\uffff])[-_a-zA-Z0-9\u0080-\uffff]*)*)$/.test(family)) return null;
+    if (/^(inherit|initial|unset|revert|default)$/i.test(family)) return null;
+  }
+  var factors = { px: 1, pt: 4 / 3, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4, em: 16, rem: 16, '%': 0.16 };
+  var size = Number(match[2]) * factors[match[3].toLowerCase()];
+  if (!Number.isFinite(size)) return null;
+  var parts = prefix.filter(function(token) { return token !== 'normal'; });
+  return parts.concat([size + 'px', families.map(function(family) { return family.trim(); }).join(', ')]).join(' ');
+}
+Object.defineProperty(CanvasContext2D.prototype, 'font', {
+  get: function() { return this._font; },
+  set: function(value) { var font = canvasFontValue(String(value)); if (font !== null) this._font = font; }
+});
+
+Object.defineProperty(CanvasContext2D.prototype, 'imageSmoothingEnabled', {
+  get: function() { return this._imageSmoothingEnabled; },
+  set: function(value) { this._imageSmoothingEnabled = !!value; }
+});
+
 Object.defineProperty(CanvasContext2D.prototype, 'globalAlpha', {
   get: function() { return this._globalAlpha; },
   set: function(value) {
@@ -93,6 +261,48 @@ Object.defineProperty(CanvasContext2D.prototype, 'lineWidth', {
   }
 });
 
+[['lineCap', ['butt', 'round', 'square']], ['lineJoin', ['miter', 'round', 'bevel']]].forEach(function(entry) {
+  Object.defineProperty(CanvasContext2D.prototype, entry[0], {
+    get: function() { return this['_' + entry[0]]; },
+    set: function(value) {
+      value = String(value);
+      if (entry[1].indexOf(value) >= 0) this['_' + entry[0]] = value;
+    }
+  });
+});
+Object.defineProperty(CanvasContext2D.prototype, 'miterLimit', {
+  get: function() { return this._miterLimit; },
+  set: function(value) {
+    value = +value;
+    if (Number.isFinite(value) && value > 0) this._miterLimit = value;
+  }
+});
+function canvasPaintEmpty(style) {
+  return !!(style && style._pmjsStyle === 'linear-gradient' && style.x0 === style.x1 && style.y0 === style.y1);
+}
+function canvasImageSmoothing(context, sw, sh, dw, dh) {
+  var t = context._transform;
+  return context.imageSmoothingEnabled ||
+    dw * dw * (t[0] * t[0] + t[1] * t[1]) < sw * sw &&
+    dh * dh * (t[2] * t[2] + t[3] * t[3]) < sh * sh;
+}
+function nativeCanvasPath(context, paths, stroke, clear, rule) {
+  return typeof NativeHost.canvas.paintPath === 'function' &&
+    NativeHost.canvas.paintPath(context.canvas._ensureNativeCanvas().handle, {
+      // Native coverage bounds must include the control hull before subdivision.
+      paths: paths.map(function(path) { return path.bounds ? path.concat(path.bounds) : path; }),
+      closed: paths.map(function(path) { return !!path.closed; }),
+      commands: canvasPathCommands(paths), dash: stroke ? context._lineDash : [],
+      dashOffset: context.lineDashOffset,
+      transform: context._transform, paint: canvasNativePaint(clear ? '#00000000' :
+        stroke ? context.strokeStyle : context.fillStyle, context),
+      globalAlpha: context.globalAlpha, composite: context.globalCompositeOperation,
+      clips: context._clipPaths, stroke: stroke ? context.lineWidth : 0,
+      cap: ['butt', 'round', 'square'].indexOf(context.lineCap),
+      join: ['miter', 'round', 'bevel'].indexOf(context.lineJoin),
+      miterLimit: context.miterLimit, clear: !!clear, rule: rule || 'nonzero'
+    });
+}
 var canvasCompositeOperations = [
   'source-over', 'source-in', 'source-out', 'source-atop', 'destination-over',
   'destination-in', 'destination-out', 'destination-atop', 'lighter', 'copy', 'xor',
@@ -114,26 +324,46 @@ function canvasCompositeRegion(context, left, top, right, bottom) {
   }
   return [left, top, right, bottom];
 }
-function canvasNativePaint(style) {
+function canvasNativePaint(style, context) {
   if (style && style._pmjsStyle === 'pattern') {
     return { kind: 'pattern', width: style.width, height: style.height,
-      repeat: style.repeat, pixels: style.pixels, transform: style.transform };
+      repeat: style.repeat, pixels: style.pixels, smoothing: context ? context.imageSmoothingEnabled : true, transform: context ? multiplyTransform(context._transform, style.transform) : style.transform };
   }
   if (style && (style._pmjsStyle === 'linear-gradient' || style._pmjsStyle === 'radial-gradient')) {
     return { kind: style._pmjsStyle === 'linear-gradient' ? 'linear' : 'radial',
       geometry: [style.x0, style.y0, style.r0 || 0, style.x1, style.y1, style.r1 || 0],
       offsets: style.stops.map(function(stop) { return stop.offset; }),
-      colors: style.stops.map(function(stop) { return colorToRgba(stop.color); }) };
+      colors: style.stops.map(function(stop) { return colorToRgba(stop.color); }),
+      transform: context ? context._transform : [1, 0, 0, 1, 0, 0] };
   }
   return { kind: 'solid', color: colorToRgba(style) };
 }
 
 function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
-    dx, dy, dw, dh, operationId) {
+    dx, dy, dw, dh, operationId, paintStyle, smoothing) {
   if (!sw || !sh || !dw || !dh || source.width <= 0 || source.height <= 0) return;
   var t = context._transform;
   var determinant = t[0] * t[3] - t[1] * t[2];
-  if (Math.abs(determinant) < 0.000001) return;
+  if (!Number.isFinite(determinant) || determinant === 0) return;
+  if (smoothing === undefined) smoothing = context.imageSmoothingEnabled;
+  if (typeof NativeHost.canvas.drawAffineImage === 'function') {
+    var target = context.canvas._ensureNativeCanvas();
+    var descriptor = {
+      geometry: [sx, sy, sw, sh, dx, dy, dw, dh], transform: t,
+      globalAlpha: context.globalAlpha, smoothing: smoothing,
+      composite: context.globalCompositeOperation, clips: context._clipPaths
+    };
+    if (paintStyle) descriptor.paint = canvasNativePaint(paintStyle, { _transform: context._paintTransform || t, imageSmoothingEnabled: context.imageSmoothingEnabled });
+    NativeHost.canvas.drawAffineImage(target.handle, nativeSource.handle, descriptor);
+    if (globalThis.__pmjsTrace && __pmjsTrace.active()) {
+      var resource = __pmjsTrace.revision(target, 'canvas', true);
+      __pmjsTrace.event('canvas', 'canvas.affine-native-complete', {
+        parentOperationId: operationId, destinationId: resource.id,
+        destinationRevision: resource.revision
+      });
+    }
+    return;
+  }
   var corners = [[dx, dy], [dx + dw, dy], [dx + dw, dy + dh], [dx, dy + dh]];
   for (var index = 0; index < corners.length; index++) {
     var point = corners[index], px = point[0], py = point[1];
@@ -148,14 +378,14 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
   left = region[0]; top = region[1]; right = region[2]; bottom = region[3];
   if (right <= left || bottom <= top) return;
   var sourceLeft = Math.max(0, Math.min(source.width - 1,
-    Math.floor(Math.min(sx, sx + sw) - (context.imageSmoothingEnabled ? 0.5 : 0))));
+    Math.floor(Math.min(sx, sx + sw) - (smoothing ? 1 : 0))));
   var sourceTop = Math.max(0, Math.min(source.height - 1,
-    Math.floor(Math.min(sy, sy + sh) - (context.imageSmoothingEnabled ? 0.5 : 0))));
+    Math.floor(Math.min(sy, sy + sh) - (smoothing ? 1 : 0))));
   var sourceRight = Math.max(sourceLeft + 1, Math.min(source.width,
-    context.imageSmoothingEnabled ? Math.ceil(Math.max(sx, sx + sw) + 0.5) :
+    smoothing ? Math.ceil(Math.max(sx, sx + sw) + 1) :
       Math.floor(Math.max(sx, sx + sw)) + 1));
   var sourceBottom = Math.max(sourceTop + 1, Math.min(source.height,
-    context.imageSmoothingEnabled ? Math.ceil(Math.max(sy, sy + sh) + 0.5) :
+    smoothing ? Math.ceil(Math.max(sy, sy + sh) + 1) :
       Math.floor(Math.max(sy, sy + sh)) + 1));
   var sourceWidth = sourceRight - sourceLeft;
   var sourcePixels = canvasSourcePixels(source, nativeSource, operationId, {
@@ -168,6 +398,10 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
   var inverseA = t[3] / determinant, inverseB = -t[1] / determinant;
   var inverseC = -t[2] / determinant, inverseD = t[0] / determinant;
   var alpha = Math.max(0, Math.min(1, Number(context.globalAlpha)));
+  var axis = t[1] === 0 && t[2] === 0;
+  var startX = Math.floor((sx + ((left + 0.5 - t[4]) / t[0] - dx) / dw * sw - 0.5) * 65536);
+  var startY = Math.floor((sy + ((top + 0.5 - t[5]) / t[3] - dy) / dh * sh - 0.5) * 65536);
+  var stepX = Math.trunc(sw / (dw * t[0]) * 65536), stepY = Math.trunc(sh / (dh * t[3]) * 65536);
   for (var y = top; y < bottom; y++) for (var x = left; x < right; x++) {
     var shiftedX = x + 0.5 - t[4], shiftedY = y + 0.5 - t[5];
     var localX = inverseA * shiftedX + inverseC * shiftedY;
@@ -178,12 +412,13 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
     clipMask[index] = 255;
     if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
     var sampleX = sx + u * sw, sampleY = sy + v * sh;
-    if (context.imageSmoothingEnabled) {
-      sampleX = Math.max(0, Math.min(source.width - 1, sampleX - 0.5));
-      sampleY = Math.max(0, Math.min(source.height - 1, sampleY - 0.5));
+    if (smoothing) {
+      sampleX = Math.max(0, Math.min(source.width - 1, axis ? (startX + (x - left) * stepX) / 65536 : sampleX - 0.5));
+      sampleY = Math.max(0, Math.min(source.height - 1, axis ? (startY + (y - top) * stepY) / 65536 : sampleY - 0.5));
       var x0 = Math.floor(sampleX), y0 = Math.floor(sampleY);
       var x1 = Math.min(source.width - 1, x0 + 1), y1 = Math.min(source.height - 1, y0 + 1);
-      var fx = sampleX - x0, fy = sampleY - y0;
+      // The low-quality raster filter uses four fractional bits.
+      var fx = Math.floor((sampleX - x0) * 16 + 0.00001) / 16, fy = Math.floor((sampleY - y0) * 16 + 0.00001) / 16;
       var p00 = ((y0 - sourceTop) * sourceWidth + x0 - sourceLeft) * 4;
       var p10 = ((y0 - sourceTop) * sourceWidth + x1 - sourceLeft) * 4;
       var p01 = ((y1 - sourceTop) * sourceWidth + x0 - sourceLeft) * 4;
@@ -194,10 +429,21 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
           (sourcePixels[p01 + channel] * (1 - fx) + sourcePixels[p11 + channel] * fx) * fy);
       }
     } else {
-      sampleX = Math.max(0, Math.min(source.width - 1, Math.floor(sampleX)));
-      sampleY = Math.max(0, Math.min(source.height - 1, Math.floor(sampleY)));
+      sampleX = Math.max(0, Math.min(source.width - 1,
+        Math.floor(axis ? (startX + (x - left) * stepX + 32768) / 65536 : sampleX)));
+      sampleY = Math.max(0, Math.min(source.height - 1,
+        Math.floor(axis ? (startY + (y - top) * stepY + 32768) / 65536 : sampleY)));
       var sourceOffset = ((sampleY - sourceTop) * sourceWidth + sampleX - sourceLeft) * 4;
       paintPixels.set(sourcePixels.subarray(sourceOffset, sourceOffset + 4), index * 4);
+    }
+  }
+  if (paintStyle) {
+    for (var py = top; py < bottom; py++) for (var px = left; px < right; px++) {
+      var offset = ((py - top) * (right - left) + px - left) * 4;
+      var coverage = paintPixels[offset + 3] / 255;
+      var rgba = canvasStylePremultiplied(paintStyle, px + 0.5, py + 0.5, 1, context._paintTransform || t, context.imageSmoothingEnabled);
+      for (var channel = 0; channel < 4; channel++)
+        paintPixels[offset + channel] = Math.round(((rgba >>> ((3 - channel) * 8)) & 255) * coverage);
     }
   }
   NativeHost.canvas.compositePixels(destination.handle, left, top,
@@ -213,8 +459,30 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
   }
 }
 
+function canvasPolygonCoverage(points, x, y) {
+  var polygon = points;
+  [[0, x, 1], [0, x + 1, -1], [1, y, 1], [1, y + 1, -1]].forEach(function(boundary) {
+    var clipped = [], axis = boundary[0], limit = boundary[1], sign = boundary[2];
+    for (var i = 0; i < polygon.length; i++) {
+      var a = polygon[i], b = polygon[(i + 1) % polygon.length];
+      var insideA = sign * (a[axis] - limit) >= 0, insideB = sign * (b[axis] - limit) >= 0;
+      if (insideA) clipped.push(a);
+      if (insideA !== insideB) {
+        var amount = (limit - a[axis]) / (b[axis] - a[axis]);
+        clipped.push([a[0] + amount * (b[0] - a[0]), a[1] + amount * (b[1] - a[1])]);
+      }
+    }
+    polygon = clipped;
+  });
+  var area = 0;
+  for (var i = 0; i < polygon.length; i++) {
+    var a = polygon[i], b = polygon[(i + 1) % polygon.length]; area += a[0] * b[1] - a[1] * b[0];
+  }
+  return Math.min(1, Math.abs(area) / 2);
+}
+
 function paintAffineRectangle(context, x, y, width, height, rgba, clear) {
-  if (!width || !height) return;
+  if (!width || !height || !canvasTransformInvertible(context)) return;
   var t = context._transform;
   var points = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]];
   for (var index = 0; index < 4; index++) {
@@ -222,6 +490,8 @@ function paintAffineRectangle(context, x, y, width, height, rgba, clear) {
     points[index] = [t[0] * px + t[2] * py + t[4],
       t[1] * px + t[3] * py + t[5]];
   }
+  points.closed = true;
+  if (nativeCanvasPath(context, [points], false, clear)) return;
   var left = Math.max(0, Math.floor(Math.min.apply(null, points.map(function(p) { return p[0]; }))));
   var top = Math.max(0, Math.floor(Math.min.apply(null, points.map(function(p) { return p[1]; }))));
   var right = Math.min(context.canvas.width, Math.ceil(Math.max.apply(null, points.map(function(p) { return p[0]; }))));
@@ -249,12 +519,16 @@ function paintAffineRectangle(context, x, y, width, height, rgba, clear) {
     if (!passesCanvasClip(context, targetX + 0.5, targetY + 0.5) || clear && !inside) continue;
     var index = (targetY - top) * (right - left) + targetX - left;
     clipMask[index] = 255;
-    if (clear || !inside) continue;
+    var coverage = clear ? 0 : canvasPolygonCoverage(points, targetX, targetY);
+    if (clear || !coverage) continue;
     var offset = index * 4;
     var pixelRgba = dynamicStyle ? canvasStylePremultiplied(rgba,
-      targetX + 0.5, targetY + 0.5, context.globalAlpha) : premultiplyCanvasColor(rgba);
-    pixels[offset] = pixelRgba >>> 24; pixels[offset + 1] = pixelRgba >>> 16 & 255;
-    pixels[offset + 2] = pixelRgba >>> 8 & 255; pixels[offset + 3] = pixelRgba & 255;
+      targetX + 0.5, targetY + 0.5, context.globalAlpha, context._transform, context.imageSmoothingEnabled) : premultiplyCanvasColor(rgba);
+    var scale = Math.round(coverage * 255) + 1;
+    pixels[offset] = (pixelRgba >>> 24) * scale >> 8;
+    pixels[offset + 1] = (pixelRgba >>> 16 & 255) * scale >> 8;
+    pixels[offset + 2] = (pixelRgba >>> 8 & 255) * scale >> 8;
+    pixels[offset + 3] = (pixelRgba & 255) * scale >> 8;
   }
   NativeHost.canvas.compositePixels(canvas.handle, left, top,
     right - left, bottom - top, pixels, clipMask, clear ? 'copy' : context.globalCompositeOperation, 1);
@@ -271,8 +545,9 @@ function premultiplyCanvasColor(rgba) {
     (Math.floor(((rgba >>> 16 & 255) * alpha + 127) / 255) << 16) |
     (Math.floor(((rgba >>> 8 & 255) * alpha + 127) / 255) << 8) | alpha) >>> 0;
 }
-function canvasStylePremultiplied(style, x, y, alpha) {
-  var rgba = canvasStyleRgba(style, x, y, alpha);
+function canvasStylePremultiplied(style, x, y, alpha, transform, smoothing) {
+  if (style && style._pmjsStyle === 'pattern') style = Object.assign({}, style, { smoothing: smoothing !== false });
+  var rgba = canvasStyleRgba(style, x, y, alpha, transform);
   if (!style || style._pmjsStyle !== 'pattern') return premultiplyCanvasColor(rgba);
   // Pattern samples already contain premultiplied colors.
   return ((Math.round((rgba >>> 24) * alpha) << 24) |
@@ -280,32 +555,45 @@ function canvasStylePremultiplied(style, x, y, alpha) {
     (Math.round((rgba >>> 8 & 255) * alpha) << 8) | (rgba & 255)) >>> 0;
 }
 
-function canvasStyleRgba(style, x, y, alpha) {
+function canvasStyleRgba(style, x, y, alpha, transform) {
   if (style && style._pmjsStyle === 'pattern') {
     var patternTransform = style.transform || [1, 0, 0, 1, 0, 0];
+    if (transform) patternTransform = multiplyTransform(transform, patternTransform);
     var determinant = patternTransform[0] * patternTransform[3] -
       patternTransform[1] * patternTransform[2];
-    if (Math.abs(determinant) < 0.000001) return 0;
+    if (!Number.isFinite(determinant) || determinant === 0) return 0;
     var shiftedX = x - patternTransform[4], shiftedY = y - patternTransform[5];
-    var sampleX = Math.floor((patternTransform[3] * shiftedX -
-      patternTransform[2] * shiftedY) / determinant);
-    var sampleY = Math.floor((-patternTransform[1] * shiftedX +
-      patternTransform[0] * shiftedY) / determinant);
-    if (style.repeat === 'repeat' || style.repeat === 'repeat-x') {
-      sampleX = ((sampleX % style.width) + style.width) % style.width;
-    } else if (sampleX < 0 || sampleX >= style.width) return 0;
-    if (style.repeat === 'repeat' || style.repeat === 'repeat-y') {
-      sampleY = ((sampleY % style.height) + style.height) % style.height;
-    } else if (sampleY < 0 || sampleY >= style.height) return 0;
-    var pixelOffset = (sampleY * style.width + sampleX) * 4;
-    return ((style.pixels[pixelOffset] << 24) |
-      (style.pixels[pixelOffset + 1] << 16) |
-      (style.pixels[pixelOffset + 2] << 8) |
-      Math.round(style.pixels[pixelOffset + 3] * alpha)) >>> 0;
+    var sampleX = (patternTransform[3] * shiftedX - patternTransform[2] * shiftedY) / determinant;
+    var sampleY = (-patternTransform[1] * shiftedX + patternTransform[0] * shiftedY) / determinant;
+    function sample(px, py) {
+      if (style.repeat === 'repeat' || style.repeat === 'repeat-x') px = ((px % style.width) + style.width) % style.width;
+      else if (px < 0 || px >= style.width) return [0, 0, 0, 0];
+      if (style.repeat === 'repeat' || style.repeat === 'repeat-y') py = ((py % style.height) + style.height) % style.height;
+      else if (py < 0 || py >= style.height) return [0, 0, 0, 0];
+      var offset = (py * style.width + px) * 4;
+      return Array.prototype.slice.call(style.pixels, offset, offset + 4);
+    }
+    var channels;
+    if (style.smoothing === false) channels = sample(Math.floor(sampleX), Math.floor(sampleY));
+    else {
+      var x0 = Math.floor(sampleX - 0.5), y0 = Math.floor(sampleY - 0.5);
+      var fx = Math.floor((sampleX - 0.5 - x0) * 16) / 16, fy = Math.floor((sampleY - 0.5 - y0) * 16) / 16;
+      var a = sample(x0, y0), b = sample(x0 + 1, y0), c = sample(x0, y0 + 1), d = sample(x0 + 1, y0 + 1);
+      channels = a.map(function(value, i) { return Math.floor(
+        (value * (1 - fx) + b[i] * fx) * (1 - fy) + (c[i] * (1 - fx) + d[i] * fx) * fy); });
+    }
+    return ((channels[0] << 24) | (channels[1] << 16) | (channels[2] << 8) | Math.round(channels[3] * alpha)) >>> 0;
   }
   if (!style || (style._pmjsStyle !== 'linear-gradient' &&
       style._pmjsStyle !== 'radial-gradient')) {
     return colorWithGlobalAlpha(style, alpha);
+  }
+  if (transform) {
+    var det = transform[0] * transform[3] - transform[1] * transform[2];
+    if (!Number.isFinite(det) || det === 0) return 0;
+    var localX = x - transform[4], localY = y - transform[5];
+    x = (transform[3] * localX - transform[2] * localY) / det;
+    y = (-transform[1] * localX + transform[0] * localY) / det;
   }
   if (!style.stops.length) return 0;
   var amount;
@@ -333,7 +621,8 @@ function canvasStyleRgba(style, x, y, alpha) {
   } else {
     var dx = style.x1 - style.x0, dy = style.y1 - style.y0;
     var length = dx * dx + dy * dy;
-    amount = length ? ((x - style.x0) * dx + (y - style.y0) * dy) / length : 0;
+    if (!length) return 0;
+    amount = ((x - style.x0) * dx + (y - style.y0) * dy) / length;
   }
   amount = Math.max(0, Math.min(1, amount));
   var lower = style.stops[0], upper = style.stops[style.stops.length - 1];
@@ -343,7 +632,7 @@ function canvasStyleRgba(style, x, y, alpha) {
     }
   }
   var span = upper.offset - lower.offset;
-  var mix = span ? (amount - lower.offset) / span : 0;
+  var mix = span ? Math.max(0, Math.min(1, (amount - lower.offset) / span)) : 0;
   var first = colorToRgba(lower.color), second = colorToRgba(upper.color);
   var channel = function(shift) {
     return Math.round(((first >>> shift) & 255) * (1 - mix) +
@@ -355,10 +644,19 @@ function canvasStyleRgba(style, x, y, alpha) {
 
 function fillAxisAlignedRadialGradient(context, rectangle, style) {
   if (!style || style._pmjsStyle !== 'radial-gradient' ||
-      !style.nativeConcentric || !style.stops.length || context._clipPaths.length ||
+      !style.nativeConcentric || !style.stops.length || style.stops.length > 64 || context._clipPaths.length ||
+      ![rectangle.x, rectangle.y, rectangle.width, rectangle.height].every(Number.isInteger) ||
       (context.globalCompositeOperation !== 'source-over' &&
        context.globalCompositeOperation !== 'lighter') ||
       typeof NativeHost.canvas.fillRadialGradient !== 'function') return false;
+  var transform = context._transform;
+  if (transform[1] !== 0 || transform[2] !== 0 || transform[0] !== transform[3] || transform[0] <= 0) return false;
+  style = Object.assign({}, style, {
+    x0: style.x0 * transform[0] + transform[4], y0: style.y0 * transform[3] + transform[5],
+    x1: style.x1 * transform[0] + transform[4], y1: style.y1 * transform[3] + transform[5],
+    r0: style.r0 * transform[0], r1: style.r1 * transform[0]
+  });
+
   var left = Math.floor(rectangle.x);
   var top = Math.floor(rectangle.y);
   var width = Math.ceil(rectangle.x + rectangle.width) - left;
@@ -374,14 +672,22 @@ function fillAxisAlignedRadialGradient(context, rectangle, style) {
 
 function fillAxisAlignedLinearGradient(context, rectangle, style) {
   if (!style || style._pmjsStyle !== 'linear-gradient' ||
-      !style.stops.length || context._clipPaths.length ||
+      !style.stops.length || (style.x0 === style.x1 && style.y0 === style.y1) || context._clipPaths.length ||
       context.globalCompositeOperation !== 'source-over') return false;
-  if (context.globalCompositeOperation === 'source-over' && NativeHost.canvas.paintRect &&
+  var transform = context._transform;
+  if (transform[1] !== 0 || transform[2] !== 0 || transform[0] !== transform[3] || transform[0] <= 0) return false;
+  style = Object.assign({}, style, {
+    x0: style.x0 * transform[0] + transform[4], y0: style.y0 * transform[3] + transform[5],
+    x1: style.x1 * transform[0] + transform[4], y1: style.y1 * transform[3] + transform[5],
+    r0: style.r0 * transform[0], r1: style.r1 * transform[0]
+  });
+  if (style.stops.length <= 64 && NativeHost.canvas.paintRect &&
       NativeHost.canvas.paintRect(context.canvas._ensureNativeCanvas().handle,
         rectangle.x, rectangle.y, rectangle.width, rectangle.height, colorWithGlobalAlpha('#fff', context.globalAlpha), 0,
         style.x0, style.y0, style.x1, style.y1,
         style.stops.map(function(stop) { return stop.offset; }),
         style.stops.map(function(stop) { return colorToRgba(stop.color); }))) return true;
+  if (![rectangle.x, rectangle.y, rectangle.width, rectangle.height].every(Number.isInteger)) return false;
   var dx = style.x1 - style.x0;
   var dy = style.y1 - style.y0;
   var horizontal = Math.abs(dy) < 0.000001;
@@ -433,21 +739,119 @@ function passesCanvasClip(context, x, y) {
   return true;
 }
 
+function canvasDashedPaths(context, paths) {
+  var dash = context._lineDash, total = dash.reduce(function(sum, value) { return sum + value; }, 0);
+  if (!total) return paths;
+  var t = context._transform, determinant = t[0] * t[3] - t[1] * t[2], result = [];
+  paths.forEach(function(path) {
+    var index = 0, phase = (context.lineDashOffset % total + total) % total;
+    while (phase >= dash[index]) { phase -= dash[index]; index = (index + 1) % dash.length; }
+    var remaining = dash[index] - phase, active = null;
+    var local = path.map(function(point) {
+      var x = point[0] - t[4], y = point[1] - t[5];
+      return [(t[3] * x - t[2] * y) / determinant, (-t[1] * x + t[0] * y) / determinant];
+    });
+    for (var i = 1; i < local.length; i++) {
+      var a = local[i - 1], b = local[i], length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      for (var distance = 0; distance < length;) {
+        if (!remaining) { index = (index + 1) % dash.length; remaining = dash[index]; active = null; continue; }
+        var step = Math.min(remaining, length - distance);
+        if (!(index % 2)) {
+          if (!active) { active = [transformedPoint(context, a[0] + (b[0] - a[0]) * distance / length, a[1] + (b[1] - a[1]) * distance / length)]; result.push(active); }
+          active.push(transformedPoint(context, a[0] + (b[0] - a[0]) * (distance + step) / length, a[1] + (b[1] - a[1]) * (distance + step) / length));
+        }
+        distance += step; remaining -= step;
+      }
+    }
+  });
+  return result;
+}
+function canvasStrokePolygons(context, paths) {
+  paths = canvasDashedPaths(context, paths);
+  // Stored path points are in destination space; stroke outlines belong in current user space.
+  var t = context._transform, determinant = t[0] * t[3] - t[1] * t[2];
+  var radius = context.lineWidth / 2, polygons = [];
+  function circle(point) {
+    var polygon = [], extent = radius * (Math.hypot(t[0], t[1]) + Math.hypot(t[2], t[3]));
+    var count = Math.min(8192, Math.max(16, Math.ceil(Math.PI * 2 * Math.sqrt(extent * 2))));
+    for (var i = 0; i < count; i++) {
+      var angle = i * Math.PI * 2 / count;
+      polygon.push([point[0] + radius * Math.cos(angle), point[1] + radius * Math.sin(angle)]);
+    }
+    polygons.push(polygon);
+  }
+  paths.forEach(function(path) {
+    var local = path.map(function(point) {
+      var x = point[0] - t[4], y = point[1] - t[5];
+      return [(t[3] * x - t[2] * y) / determinant, (-t[1] * x + t[0] * y) / determinant];
+    });
+    var edges = [];
+    for (var i = 1; i < local.length; i++) {
+      var a = local[i - 1], b = local[i], length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (length) edges.push({ a: a, b: b, dx: (b[0] - a[0]) / length, dy: (b[1] - a[1]) / length });
+    }
+    if (!edges.length) {
+      if (!path.closed && context.lineCap === 'round') circle(local[0]);
+      else if (!path.closed && context.lineCap === 'square') {
+        var point = local[0];
+        polygons.push([[point[0] - radius, point[1] - radius], [point[0] + radius, point[1] - radius],
+          [point[0] + radius, point[1] + radius], [point[0] - radius, point[1] + radius]]);
+      }
+      return;
+    }
+    edges.forEach(function(edge, index) {
+      var nx = -edge.dy * radius, ny = edge.dx * radius;
+      var start = !path.closed && context.lineCap === 'square' && index === 0 ? radius : 0;
+      var end = !path.closed && context.lineCap === 'square' && index === edges.length - 1 ? radius : 0;
+      var ax = edge.a[0] - edge.dx * start, ay = edge.a[1] - edge.dy * start;
+      var bx = edge.b[0] + edge.dx * end, by = edge.b[1] + edge.dy * end;
+      polygons.push([[ax + nx, ay + ny], [bx + nx, by + ny], [bx - nx, by - ny], [ax - nx, ay - ny]]);
+      if (index === edges.length - 1 && !path.closed) return;
+      var next = edges[(index + 1) % edges.length], point = edge.b;
+      var cross = edge.dx * next.dy - edge.dy * next.dx;
+      if (context.lineJoin === 'round') { circle(point); return; }
+      if (Math.abs(cross) < 0.000001) return;
+      var side = cross > 0 ? -1 : 1;
+      var first = [point[0] - edge.dy * radius * side, point[1] + edge.dx * radius * side];
+      var second = [point[0] - next.dy * radius * side, point[1] + next.dx * radius * side];
+      var join = [point, first];
+      if (context.lineJoin === 'miter') {
+        var distance = ((second[0] - first[0]) * next.dy - (second[1] - first[1]) * next.dx) / cross;
+        var miter = [first[0] + edge.dx * distance, first[1] + edge.dy * distance];
+        if (Math.hypot(miter[0] - point[0], miter[1] - point[1]) <= radius * context.miterLimit) join.push(miter);
+      }
+      join.push(second); polygons.push(join);
+    });
+    if (!path.closed && context.lineCap === 'round') { circle(edges[0].a); circle(edges[edges.length - 1].b); }
+  });
+  return polygons.map(function(polygon) {
+    return polygon.map(function(point) { return transformedPoint(context, point[0], point[1]); });
+  });
+}
+
 function rasterPath(context, stroke, rule, drawingPaths) {
+  if (!canvasTransformInvertible(context) || !context.canvas.width || !context.canvas.height) return;
+  if (canvasPaintEmpty(stroke ? context.strokeStyle : context.fillStyle)) return;
+  if (stroke || !context._circlePath) materializeCanvasArc(context);
   var paths = (drawingPaths || context._path).filter(function(path) { return path.length > 1; });
-  if (!paths.length) return;
+  if (!paths.length && !context._circlePath) return;
+  if (stroke && nativeCanvasPath(context, paths, true, false)) return;
   var circle = !stroke && context._circlePath;
   if (circle) {
     NativeHost.canvas.paintCircle(context.canvas._ensureNativeCanvas().handle, {
       geometry: [circle.x, circle.y, circle.radius], transform: circle.transform,
-      paint: canvasNativePaint(context.fillStyle),
+      paint: canvasNativePaint(context.fillStyle, context),
       globalAlpha: Math.max(0, Math.min(1, Number(context.globalAlpha))),
       composite: context.globalCompositeOperation, clips: context._clipPaths
     });
     return;
   }
+  if (!stroke && nativeCanvasPath(context, paths, false, false, rule)) return;
+  paths.forEach(canvasFlattenPath);
+  if (stroke) paths = canvasStrokePolygons(context, paths);
+  if (!paths.length) return;
   var all = [].concat.apply([], paths);
-  var radius = stroke ? Math.max(0.5, Number(context.lineWidth) / 2) : 0;
+  var radius = 0;
   var left = Math.max(0, Math.floor(Math.min.apply(null, all.map(function(p) { return p[0]; })) - radius));
   var top = Math.max(0, Math.floor(Math.min.apply(null, all.map(function(p) { return p[1]; })) - radius));
   var right = Math.min(context.canvas.width, Math.ceil(Math.max.apply(null, all.map(function(p) { return p[0]; })) + radius));
@@ -462,18 +866,7 @@ function rasterPath(context, stroke, rule, drawingPaths) {
   for (var y = top; y < bottom; y++) for (var x = left; x < right; x++) {
     var px = x + 0.5, py = y + 0.5, covered = false;
     if (stroke) {
-      for (var pathIndex = 0; pathIndex < paths.length && !covered; pathIndex++) {
-        var path = paths[pathIndex];
-        for (var edge = 1; edge < path.length; edge++) {
-          var a = path[edge - 1], b = path[edge];
-          var vx = b[0] - a[0], vy = b[1] - a[1];
-          var lengthSquared = vx * vx + vy * vy;
-          var amount = lengthSquared ? Math.max(0, Math.min(1,
-            ((px - a[0]) * vx + (py - a[1]) * vy) / lengthSquared)) : 0;
-          var dx = px - (a[0] + amount * vx), dy = py - (a[1] + amount * vy);
-          if (dx * dx + dy * dy <= radius * radius) { covered = true; break; }
-        }
-      }
+      covered = paths.some(function(path) { return pointInCanvasPaths([path], px, py, 'nonzero'); });
     } else {
       covered = pointInCanvasPaths(paths, px, py, rule);
     }
@@ -482,7 +875,7 @@ function rasterPath(context, stroke, rule, drawingPaths) {
     clipMask[index] = 255;
     if (!covered) continue;
     var offset = index * 4;
-    var rgba = canvasStylePremultiplied(style, px, py, context.globalAlpha);
+    var rgba = canvasStylePremultiplied(style, px, py, context.globalAlpha, context._transform, context.imageSmoothingEnabled);
     pixels[offset] = rgba >>> 24; pixels[offset + 1] = rgba >>> 16 & 255;
     pixels[offset + 2] = rgba >>> 8 & 255; pixels[offset + 3] = rgba & 255;
   }
@@ -546,6 +939,7 @@ function parseCanvasColor(color) {
   }
   var functional = /^(rgba?|hsla?|hwb)\((.*)\)$/.exec(text);
   if (!functional) return null;
+  if (functional[1] === 'hwb' && canvasReferenceEngine()) return null;
   var body = functional[2], comma = body.indexOf(',') >= 0;
   if (comma && body.indexOf('/') >= 0) return null;
   var sections = comma ? [body] : body.split('/');
@@ -591,12 +985,28 @@ function colorToRgba(color) {
   var rgba = parseCanvasColor(color);
   return rgba === null ? 0x000000ff : rgba;
 }
+function canvasSerializedColor(value) {
+  var rgba = parseCanvasColor(String(value));
+  if (rgba === null) return null;
+  var alpha = rgba & 255;
+  if (alpha === 255) return '#' + (rgba >>> 8).toString(16).padStart(6, '0');
+  var fraction = alpha ? String(alpha / 255).slice(2) : '0';
+  var zeros = (fraction.match(/^0*/) || [''])[0];
+  var significant = fraction.slice(zeros.length);
+  // Decimal serialization rounds the shortest decimal representation to
+  // fifteen significant digits, without a second binary floating conversion.
+  if (significant.length > 15) significant = String(Number(significant.slice(0, 15)) + (Number(significant[15]) >= 5 ? 1 : 0));
+  var serializedAlpha = alpha ? ('0.' + zeros + significant).replace(/0+$/, '') : '0';
+  return 'rgba(' + [rgba >>> 24, rgba >>> 16 & 255, rgba >>> 8 & 255, serializedAlpha].join(', ') + ')';
+}
 
 ['fillStyle', 'strokeStyle'].forEach(function(property) {
   Object.defineProperty(CanvasContext2D.prototype, property, {
     get: function() { return this['_' + property]; },
     set: function(value) {
-      if (value && typeof value === 'object' && value._pmjsStyle || parseCanvasColor(value) !== null) this['_' + property] = value;
+      if (value && typeof value === 'object' && value._pmjsStyle) { this['_' + property] = value; return; }
+      var color = canvasSerializedColor(value);
+      if (color !== null) this['_' + property] = color;
     }
   });
 });
@@ -698,16 +1108,14 @@ globalThis.__pmjsCanvasReleaseStats = function() {
 
 
 CanvasContext2D.prototype.save = function() {
-  this._stateStack.push({ transform: this._transform.slice(), fillStyle: this.fillStyle,
-    strokeStyle: this.strokeStyle, globalAlpha: this.globalAlpha,
-    globalCompositeOperation: this.globalCompositeOperation, font: this.font,
-    textAlign: this.textAlign, textBaseline: this.textBaseline,
-    lineWidth: this.lineWidth, imageSmoothingEnabled: this.imageSmoothingEnabled,
-    clipPaths: this._clipPaths.map(function(region) {
-      return { rule: region.rule, paths: region.paths.map(function(path) {
-        return path.map(function(point) { return point.slice(); });
-      }) };
-    }) });
+  var state = { transform: this._transform.slice(), clipPaths: this._clipPaths.map(function(region) {
+    return { rule: region.rule, paths: region.paths.map(function(path) {
+      return path.map(function(point) { return point.slice(); });
+    }) };
+  }) };
+  for (var key in canvasStateDefaults) state[key] = this[key];
+  state._lineDash = this._lineDash.slice();
+  this._stateStack.push(state);
 };
 CanvasContext2D.prototype.restore = function() {
   if (!this._stateStack.length) return;
@@ -716,6 +1124,7 @@ CanvasContext2D.prototype.restore = function() {
     key === 'clipPaths' ? '_clipPaths' : key] = state[key];
 };
 CanvasContext2D.prototype.setTransform = function(a, b, c, d, e, f) {
+  if (arguments.length < 6 && canvasReferenceEngine() === 'mv') throw new TypeError('setTransform requires six arguments');
   var transform = arguments.length === 1 && a ?
     [Number(a.a), Number(a.b), Number(a.c), Number(a.d), Number(a.e), Number(a.f)] :
     [Number(a), Number(b), Number(c), Number(d), Number(e), Number(f)];
@@ -735,8 +1144,13 @@ CanvasContext2D.prototype.rotate = function(angle) {
   this.transform(cosine, sine, -sine, cosine, 0, 0);
 };
 CanvasContext2D.prototype.clearRect = function(x, y, width, height) {
+  x = +x; y = +y; width = +width; height = +height;
+  if (![x, y, width, height].every(Number.isFinite) || !canvasTransformInvertible(this) ||
+      !this.canvas.width || !this.canvas.height) return;
+  if (!width || !height) return;
   var rectangle = axisAlignedRect(this, x, y, width, height);
-  if (!rectangle || this._clipPaths.length) {
+  if (!rectangle || this._clipPaths.length ||
+      ![rectangle.x, rectangle.y, rectangle.width, rectangle.height].every(Number.isInteger)) {
     paintAffineRectangle(this, x, y, width, height, 0, true); return;
   }
   x = rectangle.x; y = rectangle.y; width = rectangle.width; height = rectangle.height;
@@ -749,10 +1163,16 @@ CanvasContext2D.prototype.clearRect = function(x, y, width, height) {
   }
 };
 CanvasContext2D.prototype.fillRect = function(x, y, width, height) {
+  if (canvasPaintEmpty(this.fillStyle)) return;
+  x = +x; y = +y; width = +width; height = +height;
+  if (![x, y, width, height].every(Number.isFinite) || !canvasTransformInvertible(this) ||
+      !this.canvas.width || !this.canvas.height) return;
+  if (!width || !height) return;
   var rectangle = axisAlignedRect(this, x, y, width, height);
   if (rectangle && fillAxisAlignedRadialGradient(this, rectangle, this.fillStyle)) return;
   if (rectangle && fillAxisAlignedLinearGradient(this, rectangle, this.fillStyle)) return;
   if (!rectangle || this._clipPaths.length || typeof this.fillStyle === 'object' ||
+      ![rectangle.x, rectangle.y, rectangle.width, rectangle.height].every(Number.isInteger) ||
       this.globalCompositeOperation !== 'source-over') {
     paintAffineRectangle(this, x, y, width, height,
       typeof this.fillStyle === 'object' ? this.fillStyle :
@@ -765,10 +1185,23 @@ CanvasContext2D.prototype.fillRect = function(x, y, width, height) {
     colorWithGlobalAlpha(this.fillStyle, this.globalAlpha));
 };
 CanvasContext2D.prototype.strokeRect = function(x, y, width, height) {
+  if (canvasPaintEmpty(this.strokeStyle)) return;
+  x = +x; y = +y; width = +width; height = +height;
+  if (![x, y, width, height].every(Number.isFinite) || !canvasTransformInvertible(this) ||
+      !this.canvas.width || !this.canvas.height) return;
   var line = Number(this.lineWidth);
   if (!(line > 0) || !Number.isFinite(line)) return;
+  if (!width || !height) {
+    if (!width && !height) return;
+    var segment = [transformedPoint(this, x, y), transformedPoint(this, x + width, y + height)];
+    var drawing = Object.create(this); drawing.lineCap = 'butt';
+    rasterPath(drawing, true, 'nonzero', [segment]);
+    return;
+  }
   var rectangle = axisAlignedRect(this, x, y, width, height);
   if (rectangle && Math.abs(this._transform[0]) === Math.abs(this._transform[3]) &&
+      this.lineJoin === 'miter' && this.miterLimit === 10 &&
+      !this._lineDash.length &&
       !this._clipPaths.length && this.globalCompositeOperation === 'source-over' &&
       typeof this.strokeStyle !== 'object' && NativeHost.canvas.paintRect &&
       NativeHost.canvas.paintRect(this.canvas._ensureNativeCanvas().handle,
@@ -780,12 +1213,13 @@ CanvasContext2D.prototype.strokeRect = function(x, y, width, height) {
     [x, y + height], [x, y]].map(function(point) {
       return transformedPoint(context, point[0], point[1]);
     });
+  outline.closed = true;
   rasterPath(this, true, 'nonzero', [outline]);
 };
 CanvasContext2D.prototype.drawImage = function(source) {
-  if (source && source._pmjsPrimitiveContent) source._pmjsPrimitiveContent.materialize();
   var nativeSource = source && (typeof source._pmjsNativeTextureSource === 'function'
     ? source._pmjsNativeTextureSource() : (source._nativeImage || source._nativeCanvas));
+  if (!nativeSource && source && 'videoWidth' in source) return;
   if (!nativeSource && !(source instanceof NativeImage) &&
       !(source && typeof source._ensureNativeCanvas === 'function')) {
     throw new TypeError('drawImage source has no native resource');
@@ -793,8 +1227,9 @@ CanvasContext2D.prototype.drawImage = function(source) {
 
   var sx = 0;
   var sy = 0;
-  var sw = Number(source.width) || 0;
-  var sh = Number(source.height) || 0;
+  var dimensions = canvasSourceDimensions(source);
+  var sw = dimensions[0];
+  var sh = dimensions[1];
   var dx;
   var dy;
   var dw;
@@ -814,6 +1249,12 @@ CanvasContext2D.prototype.drawImage = function(source) {
       !Number.isFinite(sw) || !Number.isFinite(sh) ||
       !Number.isFinite(dx) || !Number.isFinite(dy) ||
       !Number.isFinite(dw) || !Number.isFinite(dh)) return;
+  if (!sw || !sh || !dw || !dh || !dimensions[0] || !dimensions[1] ||
+      !this.canvas.width || !this.canvas.height || !canvasTransformInvertible(this)) return;
+  if (source._pmjsPrimitiveContent) {
+    source._pmjsPrimitiveContent.materialize();
+    nativeSource = source._nativeImage || source._nativeCanvas;
+  }
   if (!nativeSource && typeof source._ensureNativeCanvas === 'function') {
     nativeSource = source._ensureNativeCanvas();
   }
@@ -838,6 +1279,8 @@ CanvasContext2D.prototype.drawImage = function(source) {
   dh *= (clippedBottom - clippedTop) / sh;
   sx = clippedLeft; sy = clippedTop;
   sw = clippedRight - clippedLeft; sh = clippedBottom - clippedTop;
+  if (!this.canvas.width || !this.canvas.height || !dimensions[0] || !dimensions[1] ||
+      !canvasTransformInvertible(this)) return;
   var trace = globalThis.__pmjsTrace;
   var tracedDestination = trace && trace.active() ?
     this.canvas._ensureNativeCanvas() : null;
@@ -849,12 +1292,14 @@ CanvasContext2D.prototype.drawImage = function(source) {
     destinationWidth: dw, destinationHeight: dh,
     composite: this.globalCompositeOperation
   }) : 0;
+  var smoothing = canvasImageSmoothing(this, sw, sh, dw, dh);
   var transformed = axisAlignedRect(this, dx, dy, dw, dh);
   if (!transformed || this._transform[0] < 0 || this._transform[3] < 0 ||
       this._clipPaths.length ||
       this.globalCompositeOperation !== 'source-over') {
-    drawAffineImage(this, source, nativeSource, sx, sy, sw, sh,
-      dx, dy, dw, dh, operationId);
+    var bitmapSource = { width: dimensions[0], height: dimensions[1], _nativeCanvas: source._nativeCanvas };
+    drawAffineImage(this, bitmapSource, nativeSource, sx, sy, sw, sh,
+      dx, dy, dw, dh, operationId, null, smoothing);
     return;
   }
   dx = transformed.x; dy = transformed.y; dw = transformed.width; dh = transformed.height;
@@ -862,7 +1307,7 @@ CanvasContext2D.prototype.drawImage = function(source) {
   NativeHost.canvas.drawImage(
     destination.handle, nativeSource.handle,
     sx, sy, sw, sh, dx, dy, dw, dh,
-    Math.max(0, Math.min(1, Number(this.globalAlpha))), this.imageSmoothingEnabled !== false);
+    Math.max(0, Math.min(1, Number(this.globalAlpha))), smoothing);
   if (trace && trace.active()) {
     var destinationResource = trace.revision(destination, 'canvas', true);
     trace.event('canvas', 'canvas.drawImage-complete', {
@@ -888,9 +1333,16 @@ function canvasTextPosition(context, text, x, y) {
   if (context.textAlign === 'center') x -= width / 2;
   else if (context.textAlign === 'right' || context.textAlign === 'end') x -= width;
   var baseline = context.textBaseline;
-  if (baseline === 'top' || baseline === 'hanging') y += font.size;
-  else if (baseline === 'middle') y += font.size / 2;
-  else if (baseline === 'bottom' || baseline === 'ideographic') y -= 0;
+  if (baseline !== 'alphabetic' && typeof NativeHost.canvas.measureTextMetrics === 'function') {
+    var metrics = NativeHost.canvas.measureTextMetrics(font.paths, String(text), font.size, nativeTextStyle(context, font));
+    var ascent = Math.round(metrics.fontBoundingBoxAscent), descent = Math.round(metrics.fontBoundingBoxDescent);
+    var tiny = ascent < 3 || ascent + descent < 2;
+    if (tiny) { ascent = metrics.fontBoundingBoxAscent; descent = metrics.fontBoundingBoxDescent; }
+    if (baseline === 'top') y += ascent;
+    else if (baseline === 'hanging') y += tiny ? ascent * 0.8 : Math.floor(ascent * 80 / 100);
+    else if (baseline === 'middle') y += -descent + (tiny ? (ascent + descent) / 2 : Math.floor((ascent + descent) / 2));
+    else if (baseline === 'bottom' || baseline === 'ideographic') y -= descent;
+  }
   return { font: font, width: width, x: x, top: y - font.size };
 }
 
@@ -900,7 +1352,9 @@ function drawCanvasText(context, text, x, y, stroke, maxWidth) {
   var suppliedWidth = maxWidth !== undefined;
   maxWidth = suppliedWidth ? +maxWidth : Infinity;
   if (!Number.isFinite(x) || !Number.isFinite(y) ||
-      (suppliedWidth && !Number.isFinite(maxWidth)) || !(maxWidth > 0)) return;
+      (suppliedWidth && !Number.isFinite(maxWidth)) || !(maxWidth > 0) ||
+      !canvasTransformInvertible(context) || !context.canvas.width || !context.canvas.height) return;
+  if (canvasPaintEmpty(stroke ? context.strokeStyle : context.fillStyle)) return;
   var placement = canvasTextPosition(context, text, x, y);
   var horizontalScale = placement.width > maxWidth ? maxWidth / placement.width : 1;
   if (horizontalScale < 1) {
@@ -912,16 +1366,35 @@ function drawCanvasText(context, text, x, y, stroke, maxWidth) {
   }
   var t = context._transform;
   var style = stroke ? context.strokeStyle : context.fillStyle;
+  var dynamicStyle = style && typeof style === 'object';
   var color = colorWithGlobalAlpha(style, context.globalAlpha);
   var strokeWidth = stroke ? Math.max(0, usesLegacyText() ? Math.round(context.lineWidth) : Number(context.lineWidth)) : 0;
-  if (Math.abs(t[0] - 1) < 0.000001 && Math.abs(t[1]) < 0.000001 &&
-      Math.abs(t[2]) < 0.000001 && Math.abs(t[3] - 1) < 0.000001 &&
-      !context._clipPaths.length && horizontalScale === 1 &&
-      context.globalCompositeOperation === 'source-over') {
+  if (!dynamicStyle && !context._clipPaths.length && context.globalCompositeOperation === 'source-over' &&
+      (!usesLegacyText() || (t[0] === 1 && t[1] === 0 && t[2] === 0 && t[3] === 1 && horizontalScale === 1))) {
+    var options = nativeTextStyle(context, placement.font);
+    var directX = placement.x + t[4], directY = placement.top + placement.font.size + t[5];
+    if (t[0] !== 1 || t[1] !== 0 || t[2] !== 0 || t[3] !== 1 || horizontalScale < 1) {
+      options.transform = multiplyTransform(t, [horizontalScale, 0, 0, 1, placement.x, placement.top + placement.font.size]);
+      directX = directY = 0;
+    }
     NativeHost.canvas.drawText(context.canvas._ensureNativeCanvas().handle,
-      placement.font.paths, text, placement.x + t[4],
-      placement.top + placement.font.size + t[5],
-      placement.font.size, color, strokeWidth, nativeTextStyle(context, placement.font));
+      placement.font.paths, text, directX, directY,
+      placement.font.size, color, strokeWidth, options);
+    return;
+  }
+  if (!usesLegacyText()) {
+    var transform = horizontalScale < 1 ?
+      multiplyTransform(t, [horizontalScale, 0, 0, 1, placement.x, placement.top + placement.font.size]) : t;
+    var textStyle = nativeTextStyle(context, placement.font); textStyle.transform = transform;
+    var mask = NativeHost.canvas.create(context.canvas.width, context.canvas.height);
+    try {
+      NativeHost.canvas.drawText(mask.handle, placement.font.paths, text, horizontalScale < 1 ? 0 : placement.x,
+        horizontalScale < 1 ? 0 : placement.top + placement.font.size, placement.font.size, 0xffffffff, strokeWidth, textStyle);
+      var drawing = Object.create(context); drawing._transform = [1, 0, 0, 1, 0, 0];
+      drawing._paintTransform = transform;
+      drawAffineImage(drawing, mask, mask, 0, 0, mask.width, mask.height,
+        0, 0, mask.width, mask.height, 0, style, false);
+    } finally { releaseNativeResource(mask, 'canvas'); }
     return;
   }
   var padding = strokeWidth + 2;
@@ -931,12 +1404,12 @@ function drawCanvasText(context, text, x, y, stroke, maxWidth) {
   try {
     NativeHost.canvas.drawText(temporary.handle, placement.font.paths, text,
       padding, padding + placement.font.size, placement.font.size,
-      colorToRgba(style), strokeWidth, nativeTextStyle(context, placement.font));
+      dynamicStyle ? 0xffffffff : colorToRgba(style), strokeWidth, nativeTextStyle(context, placement.font));
     var source = { width: temporary.width, height: temporary.height,
       _nativeCanvas: temporary };
     drawAffineImage(context, source, temporary, 0, 0, temporary.width,
       temporary.height, placement.x - padding, placement.top - padding,
-      temporary.width * horizontalScale, temporary.height);
+      temporary.width * horizontalScale, temporary.height, 0, dynamicStyle ? style : null);
   } finally {
     releaseNativeResource(temporary, 'canvas');
   }
@@ -948,57 +1421,112 @@ CanvasContext2D.prototype.strokeText = function(text, x, y, maxWidth) {
   drawCanvasText(this, text, x, y, true, maxWidth);
 };
 CanvasContext2D.prototype.beginPath = function() {
+  this._pendingArc = null;
   this._circlePath = null;
   this._path = []; this._subpath = null; this._currentPathPoint = null;
 };
 CanvasContext2D.prototype.closePath = function() {
-  if (this._subpath && this._subpath.length > 1) this._subpath.push(this._subpath[0].slice());
+  materializeCanvasArc(this);
+  if (this._subpath && this._subpath.length > 1 && !this._subpath.closed) {
+    this._subpath.push(this._subpath[0].slice());
+    this._subpath.closed = true;
+    if (this._subpath.commands) this._subpath.commands.push(4);
+    this._currentPathPoint = this._subpath[0].slice();
+  }
 };
 CanvasContext2D.prototype.moveTo = function(x, y) {
+  x = Math.fround(+x); y = Math.fround(+y);
+  if (![x, y].every(Number.isFinite) || !canvasTransformInvertible(this)) return;
+  materializeCanvasArc(this);
   this._circlePath = null;
-  this._currentPathPoint = [Number(x), Number(y)];
+  this._currentPathPoint = transformedPoint(this, Number(x), Number(y));
   this._subpath = [transformedPoint(this, Number(x), Number(y))];
   this._path.push(this._subpath);
 };
 CanvasContext2D.prototype.lineTo = function(x, y) {
+  x = Math.fround(+x); y = Math.fround(+y);
+  if (![x, y].every(Number.isFinite) || !canvasTransformInvertible(this)) return;
+  materializeCanvasArc(this);
   this._circlePath = null;
   if (!this._subpath) this.moveTo(x, y);
   else {
-    this._currentPathPoint = [Number(x), Number(y)];
+    if (this._subpath.closed) {
+      this._subpath = [this._subpath[0].slice()];
+      this._path.push(this._subpath);
+    }
+    this._currentPathPoint = transformedPoint(this, Number(x), Number(y));
     this._subpath.push(transformedPoint(this, Number(x), Number(y)));
+    if (this._subpath.commands) this._subpath.commands.push(1, this._currentPathPoint[0], this._currentPathPoint[1]);
   }
 };
+function appendCanvasArc(context, arc) {
+  var t = arc.transform;
+  if (context._subpath && context._subpath.closed) {
+    context._subpath = [context._subpath[0].slice()];
+    context._path.push(context._subpath);
+  }
+  function pointAt(angle) {
+    var x = arc.x + Math.cos(angle) * arc.radius, y = arc.y + Math.sin(angle) * arc.radius;
+    return [t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5]];
+  }
+  var startPoint = pointAt(arc.start);
+  if (!context._subpath) { context._subpath = [startPoint]; context._path.push(context._subpath); }
+  var path = context._subpath;
+  if (!path.commands) {
+    path.commands = [];
+    path.forEach(function(point, index) { path.commands.push(index ? 1 : 0, point[0], point[1]); });
+  }
+  path.push(startPoint, pointAt(arc.start + arc.sweep));
+  path.commands.push.apply(path.commands, [5, arc.x, arc.y, arc.radius, arc.start, arc.sweep].concat(t));
+  var cx = t[0] * arc.x + t[2] * arc.y + t[4], cy = t[1] * arc.x + t[3] * arc.y + t[5];
+  var rx = arc.radius * (Math.abs(t[0]) + Math.abs(t[2]));
+  var ry = arc.radius * (Math.abs(t[1]) + Math.abs(t[3]));
+  canvasPathBounds(path, [cx - rx, cy - ry]); canvasPathBounds(path, [cx + rx, cy + ry]);
+  path.needsFlatten = true;
+}
+function materializeCanvasArc(context) {
+  if (!context._pendingArc) return;
+  var arc = context._pendingArc;
+  context._pendingArc = null;
+  appendCanvasArc(context, arc);
+}
 CanvasContext2D.prototype.arc = function(x, y, radius, start, end, anticlockwise) {
-  radius = Number(radius); if (radius < 0) throw new RangeError('negative arc radius');
-  x = Number(x); y = Number(y); start = Number(start); end = Number(end);
+  radius = Math.fround(+radius);
+  x = Math.fround(+x); y = Math.fround(+y); start = Math.fround(+start); end = Math.fround(+end);
   if (![x, y, radius, start, end].every(Number.isFinite)) return;
+  if (radius < 0) throw canvasIndexSizeError('negative arc radius');
+  if (!canvasTransformInvertible(this)) return;
+  materializeCanvasArc(this);
   var difference = end - start, tau = Math.PI * 2;
   var sweep;
   if (!anticlockwise && difference >= tau) sweep = tau;
   else if (anticlockwise && difference <= -tau) sweep = -tau;
   else {
     sweep = (difference % tau + tau) % tau;
-    if (anticlockwise && sweep > 0) sweep -= tau;
+    if (!sweep && difference) sweep = anticlockwise ? -tau : tau;
+    else if (anticlockwise && sweep > 0) sweep -= tau;
   }
-  this._circlePath = !this._path.length && Math.abs(sweep) >= Math.PI * 2 ?
-    { x: Number(x), y: Number(y), radius: radius, transform: this._transform.slice() } : null;
-  var segments = Math.max(8, Math.ceil(Math.abs(sweep) * Math.max(1, radius) * 2));
-  for (var index = 0; index <= segments; index++) {
-    var angle = Number(start) + sweep * index / segments;
-    var point = transformedPoint(this, Number(x) + Math.cos(angle) * radius,
-      Number(y) + Math.sin(angle) * radius);
-    if (!this._subpath) { this._subpath = [point]; this._path.push(this._subpath); }
-    else this._subpath.push(point);
-  }
-  this._currentPathPoint = [Number(x) + Math.cos(Number(start) + sweep) * radius,
-    Number(y) + Math.sin(Number(start) + sweep) * radius];
+  var arc = { x: x, y: y, radius: radius, start: start, sweep: sweep, transform: this._transform.slice() };
+  this._circlePath = !this._path.length && Math.abs(sweep) >= tau ? arc : null;
+  if (this._circlePath) this._pendingArc = arc;
+  else appendCanvasArc(this, arc);
+  this._currentPathPoint = transformedPoint(this, x + Math.cos(start + sweep) * radius,
+    y + Math.sin(start + sweep) * radius);
 };
 CanvasContext2D.prototype.arcTo = function(x1, y1, x2, y2, radius) {
-  x1 = Number(x1); y1 = Number(y1); x2 = Number(x2); y2 = Number(y2);
-  radius = Number(radius);
-  if (radius < 0) throw new RangeError('negative arcTo radius');
+  x1 = Math.fround(+x1); y1 = Math.fround(+y1); x2 = Math.fround(+x2); y2 = Math.fround(+y2);
+  radius = Math.fround(+radius);
+  if (![x1, y1, x2, y2, radius].every(Number.isFinite)) return;
+  if (radius < 0) throw canvasIndexSizeError('negative arcTo radius');
+  if (!canvasTransformInvertible(this)) return;
   if (!this._currentPathPoint) { this.moveTo(x1, y1); return; }
-  var x0 = this._currentPathPoint[0], y0 = this._currentPathPoint[1];
+  var t = this._transform, determinant = t[0] * t[3] - t[1] * t[2];
+  // The raster path reports its last stored vertex after a close verb.
+  var current = this._subpath && this._subpath.closed ?
+    this._subpath[this._subpath.length - 2] : this._currentPathPoint;
+  var px = current[0] - t[4], py = current[1] - t[5];
+  var x0 = (t[3] * px - t[2] * py) / determinant;
+  var y0 = (-t[1] * px + t[0] * py) / determinant;
   var firstX = x0 - x1, firstY = y0 - y1;
   var secondX = x2 - x1, secondY = y2 - y1;
   var firstLength = Math.hypot(firstX, firstY);
@@ -1026,6 +1554,7 @@ CanvasContext2D.prototype.arcTo = function(x1, y1, x2, y2, radius) {
     Math.atan2(tangent2Y - centerY, tangent2X - centerX), cross > 0);
 };
 CanvasContext2D.prototype.ellipse = function(x, y, radiusX, radiusY, rotation, start, end) {
+  materializeCanvasArc(this);
   if (arguments.length < 7) throw new TypeError('ellipse requires seven arguments');
   // The reference canvas path stores float geometry, including its angles.
   x = Math.fround(+x); y = Math.fround(+y);
@@ -1069,7 +1598,8 @@ CanvasContext2D.prototype.ellipse = function(x, y, radiusX, radiusY, rotation, s
     var point = transformedPoint(context, local[0], local[1]);
     if (!context._subpath) { context._subpath = [point]; context._path.push(context._subpath); }
     else context._subpath.push(point);
-    context._currentPathPoint = local;
+    if (context._subpath.commands) context._subpath.commands.push(1, point[0], point[1]);
+    context._currentPathPoint = point.slice();
   }
   append(start);
   if (!sweep || (!radiusX && !radiusY)) return;
@@ -1088,13 +1618,18 @@ CanvasContext2D.prototype.ellipse = function(x, y, radiusX, radiusY, rotation, s
   append(start + sweep);
 };
 CanvasContext2D.prototype.rect = function(x, y, width, height) {
+  x = Math.fround(+x); y = Math.fround(+y); width = Math.fround(+width); height = Math.fround(+height);
+  if (![x, y, width, height].every(Number.isFinite) || !canvasTransformInvertible(this)) return;
   this.moveTo(x, y); this.lineTo(x + width, y); this.lineTo(x + width, y + height);
   this.lineTo(x, y + height); this.closePath();
 };
 CanvasContext2D.prototype.clip = function(rule) {
+  materializeCanvasArc(this);
   rule = rule === undefined ? 'nonzero' : String(rule);
   if (rule !== 'nonzero' && rule !== 'evenodd') throw new TypeError('invalid fill rule');
+  if (!canvasTransformInvertible(this)) return;
   this._clipPaths.push({ rule: rule, paths: this._path.map(function(path) {
+    canvasFlattenPath(path);
     return path.map(function(point) { return point.slice(); });
   }) });
 };
@@ -1105,8 +1640,8 @@ CanvasContext2D.prototype.fill = function(rule) {
 };
 CanvasContext2D.prototype.stroke = function() { rasterPath(this, true, 'nonzero'); };
 CanvasContext2D.prototype.createLinearGradient = function() {
-  var first = transformedPoint(this, Number(arguments[0]), Number(arguments[1]));
-  var second = transformedPoint(this, Number(arguments[2]), Number(arguments[3]));
+  var first = [Number(arguments[0]), Number(arguments[1])];
+  var second = [Number(arguments[2]), Number(arguments[3])];
   return { _pmjsStyle: 'linear-gradient', x0: first[0], y0: first[1],
     x1: second[0], y1: second[1], stops: [], addColorStop: function(offset, color) {
       offset = Number(offset);
@@ -1122,21 +1657,10 @@ CanvasContext2D.prototype.createRadialGradient = function(x0, y0, r0, x1, y1, r1
   if (![x0, y0, r0, x1, y1, r1].every(Number.isFinite)) {
     throw new TypeError('invalid radial gradient');
   }
-  if (r0 < 0 || r1 < 0) throw new RangeError('negative radial gradient radius');
-  var first = transformedPoint(this, x0, y0);
-  var second = transformedPoint(this, x1, y1);
-  var transform = this._transform;
-  var scaleX = Math.hypot(transform[0], transform[1]);
-  var scaleY = Math.hypot(transform[2], transform[3]);
-  var uniformScale = Math.abs(scaleX - scaleY) < 0.000001 &&
-    Math.abs(transform[0] * transform[2] + transform[1] * transform[3]) < 0.000001;
-  var scale = Math.sqrt(Math.abs(transform[0] * transform[3] -
-    transform[1] * transform[2]));
-  return { _pmjsStyle: 'radial-gradient',
-    x0: first[0], y0: first[1], r0: r0 * scale,
-    x1: second[0], y1: second[1], r1: r1 * scale,
-    nativeConcentric: uniformScale && Math.abs(first[0] - second[0]) < 0.000001 &&
-      Math.abs(first[1] - second[1]) < 0.000001 && r1 > r0,
+  if (r0 < 0 || r1 < 0) throw canvasIndexSizeError('negative radial gradient radius');
+  return { _pmjsStyle: 'radial-gradient', x0: x0, y0: y0, r0: r0,
+    x1: x1, y1: y1, r1: r1,
+    nativeConcentric: x0 === x1 && y0 === y1 && r1 > r0,
     stops: [], addColorStop: function(offset, color) {
       offset = Number(offset);
       if (!isFinite(offset) || offset < 0 || offset > 1) throw new RangeError('invalid color stop');
@@ -1147,19 +1671,27 @@ CanvasContext2D.prototype.createRadialGradient = function(x0, y0, r0, x1, y1, r1
 };
 CanvasContext2D.prototype.createPattern = function(source, repetition) {
   if (source && source._pmjsPrimitiveContent) source._pmjsPrimitiveContent.materialize();
+  var dimensions = canvasSourceDimensions(source);
+  if (!dimensions[0] || !dimensions[1]) {
+    if (source && typeof source._ensureNativeCanvas === 'function') {
+      if (typeof DOMException === 'function') throw new DOMException('empty pattern source', 'InvalidStateError');
+      var error = new Error('empty pattern source'); error.name = 'InvalidStateError'; error.code = 11; throw error;
+    }
+    return null;
+  }
   var nativeSource = source && (typeof source._pmjsNativeTextureSource === 'function'
     ? source._pmjsNativeTextureSource() : (source._nativeImage || source._nativeCanvas));
   if (!nativeSource && source && typeof source._ensureNativeCanvas === 'function') {
     nativeSource = source._ensureNativeCanvas();
   }
-  if (!nativeSource || !source.width || !source.height) return null;
+  if (!nativeSource || !dimensions[0] || !dimensions[1]) return null;
   repetition = repetition || 'repeat';
   if (['repeat', 'repeat-x', 'repeat-y', 'no-repeat'].indexOf(repetition) < 0) {
     throw new TypeError('invalid pattern repetition');
   }
-  return { _pmjsStyle: 'pattern', repeat: repetition,
-    width: source.width, height: source.height,
-    pixels: canvasSourcePixels(source, nativeSource), transform: [1, 0, 0, 1, 0, 0],
+  var pattern = { _pmjsStyle: 'pattern', repeat: repetition,
+    width: dimensions[0], height: dimensions[1],
+    pixels: canvasSourcePixels(source, nativeSource, 0, { x: 0, y: 0, width: dimensions[0], height: dimensions[1] }), transform: [1, 0, 0, 1, 0, 0],
     setTransform: function(matrix) {
       matrix = matrix || {};
       var values = [matrix.a === undefined ? 1 : Number(matrix.a), Number(matrix.b) || 0,
@@ -1168,25 +1700,54 @@ CanvasContext2D.prototype.createPattern = function(source, repetition) {
       if (!values.every(Number.isFinite)) throw new TypeError('invalid pattern transform');
       this.transform = values;
     } };
+  if (canvasReferenceEngine() === 'mv') delete pattern.setTransform;
+  return pattern;
 };
 CanvasContext2D.prototype.measureText = function(text) {
   var font = contextFont(this);
   return NativeHost.canvas.measureTextMetrics(font.paths, String(text), font.size, nativeTextStyle(this, font));
 };
+function canvasImageDataInteger(value) {
+  return +value | 0;
+}
+function canvasImageDataSize(width, height) {
+  if (!width || !height) {
+    if (typeof DOMException === 'function') throw new DOMException('zero ImageData dimension', 'IndexSizeError');
+    var error = new Error('zero ImageData dimension'); error.name = 'IndexSizeError'; error.code = 1; throw error;
+  }
+  return [Math.abs(width), Math.abs(height)];
+}
+CanvasContext2D.prototype.createImageData = function(width, height) {
+  if (arguments.length === 1) {
+    if (!(width instanceof ImageData)) throw new TypeError('invalid ImageData');
+    height = width.height; width = width.width;
+  } else {
+    if (arguments.length < 2) throw new TypeError('createImageData requires two dimensions');
+    width = canvasImageDataInteger(width); height = canvasImageDataInteger(height);
+  }
+  var size = canvasImageDataSize(width, height);
+  return new ImageData(size[0], size[1]);
+};
 CanvasContext2D.prototype.getImageData = function(x, y, width, height) {
-  width = Math.floor(width);
-  height = Math.floor(height);
-  if (width <= 0 || height <= 0) throw new RangeError('invalid ImageData dimensions');
+  if (arguments.length < 4) throw new TypeError('getImageData requires four arguments');
+  x = canvasImageDataInteger(x); y = canvasImageDataInteger(y);
+  width = canvasImageDataInteger(width); height = canvasImageDataInteger(height);
+  if (width < 0) x += width;
+  if (height < 0) y += height;
+  var size = canvasImageDataSize(width, height);
+  width = size[0]; height = size[1];
+  if (!this.canvas.width || !this.canvas.height) return new ImageData(width, height);
   var canvas = this.canvas._ensureNativeCanvas();
   return new ImageData(new Uint8ClampedArray(NativeHost.canvas.readPixels(
-    canvas.handle, Math.floor(x), Math.floor(y), width, height)), width, height);
+    canvas.handle, x, y, width, height)), width, height);
 };
 CanvasContext2D.prototype.putImageData = function(imageData, x, y) {
   if (!imageData || !imageData.data) throw new TypeError('invalid ImageData');
-  var sourceX = arguments.length >= 7 ? Math.floor(arguments[3]) : 0;
-  var sourceY = arguments.length >= 7 ? Math.floor(arguments[4]) : 0;
-  var width = arguments.length >= 7 ? Math.floor(arguments[5]) : imageData.width;
-  var height = arguments.length >= 7 ? Math.floor(arguments[6]) : imageData.height;
+  x = canvasImageDataInteger(x); y = canvasImageDataInteger(y);
+  var sourceX = arguments.length >= 7 ? canvasImageDataInteger(arguments[3]) : 0;
+  var sourceY = arguments.length >= 7 ? canvasImageDataInteger(arguments[4]) : 0;
+  var width = arguments.length >= 7 ? canvasImageDataInteger(arguments[5]) : imageData.width;
+  var height = arguments.length >= 7 ? canvasImageDataInteger(arguments[6]) : imageData.height;
   if (width < 0) { sourceX += width; width = -width; }
   if (height < 0) { sourceY += height; height = -height; }
   var right = Math.min(imageData.width, sourceX + width);
@@ -1195,7 +1756,7 @@ CanvasContext2D.prototype.putImageData = function(imageData, x, y) {
   sourceY = Math.max(0, sourceY);
   width = right - sourceX;
   height = bottom - sourceY;
-  if (width <= 0 || height <= 0) return;
+  if (width <= 0 || height <= 0 || !this.canvas.width || !this.canvas.height) return;
   var pixels = imageData.data;
   if (sourceX !== 0 || sourceY !== 0 || width !== imageData.width ||
       height !== imageData.height) {
@@ -1206,9 +1767,153 @@ CanvasContext2D.prototype.putImageData = function(imageData, x, y) {
     }
   }
   var canvas = this.canvas._ensureNativeCanvas();
-  NativeHost.canvas.writePixels(canvas.handle, Math.floor(x) + sourceX,
-    Math.floor(y) + sourceY, width, height, pixels);
+  NativeHost.canvas.writePixels(canvas.handle, x + sourceX,
+    y + sourceY, width, height, pixels);
 };
+
+function canvasShadowSourceBounds(context, args, method) {
+  var points = [], rectangle;
+  if (method === 'fillRect' || method === 'strokeRect') rectangle = Array.prototype.slice.call(args, 0, 4);
+  else if (method === 'drawImage' && (args.length === 5 || args.length === 9))
+    rectangle = Array.prototype.slice.call(args, args.length - 4);
+  else if (method === 'fill' || method === 'stroke') {
+    context._path.forEach(function(path) {
+      path.forEach(function(point) { points.push(point); });
+      if (path.bounds) path.bounds.forEach(function(point) { points.push(point); });
+    });
+    var arc = context._pendingArc;
+    if (arc) {
+      var t = arc.transform, cx = t[0] * arc.x + t[2] * arc.y + t[4], cy = t[1] * arc.x + t[3] * arc.y + t[5];
+      var rx = arc.radius * (Math.abs(t[0]) + Math.abs(t[2])), ry = arc.radius * (Math.abs(t[1]) + Math.abs(t[3]));
+      points.push([cx - rx, cy - ry], [cx + rx, cy + ry]);
+    }
+  } else return null;
+  if (rectangle) {
+    if (rectangle.length !== 4 || !rectangle.every(Number.isFinite)) return null;
+    for (var corner = 0; corner < 4; corner++) points.push(transformedPoint(context,
+      rectangle[0] + (corner & 1 ? rectangle[2] : 0), rectangle[1] + (corner & 2 ? rectangle[3] : 0)));
+  }
+  if (!points.length) return null;
+  var bounds = [Infinity, Infinity, -Infinity, -Infinity];
+  points.forEach(function(point) {
+    bounds[0] = Math.min(bounds[0], point[0]); bounds[1] = Math.min(bounds[1], point[1]);
+    bounds[2] = Math.max(bounds[2], point[0]); bounds[3] = Math.max(bounds[3], point[1]);
+  });
+  var padding = 2;
+  if (/^stroke/.test(method)) {
+    var transform = context._transform;
+    padding += context.lineWidth * Math.max(1, context.lineJoin === 'miter' ? context.miterLimit : 1) *
+      (Math.hypot(transform[0], transform[1]) + Math.hypot(transform[2], transform[3])) / 2;
+  }
+  return [Math.floor(bounds[0] - padding), Math.floor(bounds[1] - padding),
+    Math.ceil(bounds[2] + padding), Math.ceil(bounds[3] + padding)];
+}
+
+function drawCanvasShadow(context, draw, args, method) {
+  if (!context.canvas.width || !context.canvas.height || !canvasTransformInvertible(context)) return;
+  var geometryMask = method !== 'drawImage';
+  var source = args[0];
+  var opaqueImage = !geometryMask && source && (source._context2d && source._context2d._alpha === false ||
+    source._nativeImage && NativeHost.images.isOpaque(source._nativeImage.handle));
+  // Capture only geometry that can contribute to the destination after shifting and blurring.
+  // The mask and image blur implementations clamp sigma to different finite limits.
+  var sigma = context.shadowBlur ? 0.288675 * context.shadowBlur + 0.5 : 0;
+  var margin = Math.ceil(Math.min(sigma, geometryMask || opaqueImage ? 136 : 532) * 3) + 2;
+  // Geometry loopers translate before rasterization; image filters translate the captured pixels.
+  var geometryOffsetX = geometryMask || opaqueImage ? context.shadowOffsetX : 0;
+  var geometryOffsetY = geometryMask || opaqueImage ? context.shadowOffsetY : 0;
+  var filterOffsetX = context.shadowOffsetX - geometryOffsetX;
+  var filterOffsetY = context.shadowOffsetY - geometryOffsetY;
+  var originX = Math.floor(-filterOffsetX) - margin;
+  var originY = Math.floor(-filterOffsetY) - margin;
+  var right = Math.ceil(context.canvas.width - filterOffsetX) + margin;
+  var bottom = Math.ceil(context.canvas.height - filterOffsetY) + margin;
+  var bounds = canvasShadowSourceBounds(context, args, method);
+  if (bounds && bounds.every(Number.isFinite)) {
+    if (opaqueImage && (bounds[2] - 2 <= 0 || bounds[3] - 2 <= 0 ||
+        bounds[0] + 2 >= context.canvas.width || bounds[1] + 2 >= context.canvas.height)) return;
+    originX = Math.max(originX, Math.floor(bounds[0] + geometryOffsetX));
+    originY = Math.max(originY, Math.floor(bounds[1] + geometryOffsetY));
+    right = Math.min(right, Math.ceil(bounds[2] + geometryOffsetX));
+    bottom = Math.min(bottom, Math.ceil(bounds[3] + geometryOffsetY));
+  }
+  if (right <= originX || bottom <= originY) {
+    if (['source-in', 'source-out', 'destination-in', 'destination-atop'].indexOf(context.globalCompositeOperation) < 0) return;
+    // An empty shadow still participates in full-canvas compositing.
+    right = originX + 1; bottom = originY + 1;
+  }
+  var shiftX = geometryOffsetX - originX, shiftY = geometryOffsetY - originY;
+  var mask = new CanvasElement();
+  mask.width = right - originX; mask.height = bottom - originY;
+  var drawing = Object.create(context); drawing.canvas = mask;
+  drawing._transform = multiplyTransform([1, 0, 0, 1, shiftX, shiftY], context._transform);
+  drawing._clipPaths = []; drawing.globalAlpha = 1;
+  drawing.globalCompositeOperation = 'source-over'; drawing.shadowColor = 'transparent';
+  // Image filters blur premultiplied alpha; geometry shadows blur coverage.
+  if (!geometryMask && !opaqueImage) drawing.globalAlpha = context.globalAlpha;
+  var shadowStyle = /^stroke/.test(method) ? context.strokeStyle : context.fillStyle;
+  if (geometryMask && canvasPaintEmpty(shadowStyle)) return;
+  var shadowPaint = geometryMask ? canvasNativePaint(shadowStyle, drawing) : null;
+  if (geometryMask) drawing.fillStyle = drawing.strokeStyle = 'white';
+  drawing._path = context._path.map(function(path) {
+    var shifted = path.map(function(point) { return [point[0] + shiftX, point[1] + shiftY]; });
+    shifted.closed = path.closed;
+    shifted.needsFlatten = path.needsFlatten;
+    if (path.bounds) shifted.bounds = path.bounds.map(function(point) { return [point[0] + shiftX, point[1] + shiftY]; });
+    if (path.commands) {
+      shifted.commands = path.commands.slice();
+      for (var i = 0; i < shifted.commands.length;) {
+        var verb = shifted.commands[i++], count = verb === 5 ? 11 : verb === 4 ? 0 : verb === 3 ? 6 : verb === 2 ? 4 : 2;
+        if (verb === 5) { shifted.commands[i + 9] += shiftX; shifted.commands[i + 10] += shiftY; i += count; }
+        else for (var end = i + count; i < end; i += 2) {
+          shifted.commands[i] += shiftX; shifted.commands[i + 1] += shiftY;
+        }
+      }
+    }
+    return shifted;
+  });
+  drawing._subpath = null;
+  ['_circlePath', '_pendingArc'].forEach(function(key) {
+    if (context[key]) {
+      drawing[key] = Object.assign({}, context[key]);
+      drawing[key].transform = multiplyTransform([1, 0, 0, 1, shiftX, shiftY], context[key].transform);
+    }
+  });
+  try {
+    draw.apply(drawing, args);
+    if (!mask._nativeCanvas) return;
+    var shadow = {
+      x: filterOffsetX + originX, y: filterOffsetY + originY,
+      blur: context.shadowBlur, color: colorToRgba(context.shadowColor),
+      globalAlpha: geometryMask || opaqueImage ? context.globalAlpha : 1,
+      composite: context.globalCompositeOperation, clips: context._clipPaths
+    };
+    if (geometryMask) shadow.paint = shadowPaint;
+    var operation = context.globalCompositeOperation;
+    if (opaqueImage) shadow.paint = {kind: 'solid', color: 0xffffffff};
+    var grouped = !geometryMask && operation !== 'source-over' && operation !== 'copy' &&
+      operation !== 'source-in' && operation !== 'source-out' &&
+      operation !== 'destination-in' && operation !== 'destination-atop' && !opaqueImage;
+    if (grouped) {
+      // Translucent image shadows merge with the foreground before blending.
+      // Opaque images and full-canvas composite modes use separate passes.
+      var group = new CanvasElement();
+      group.width = context.canvas.width; group.height = context.canvas.height;
+      try {
+        shadow.composite = 'source-over'; shadow.clips = [];
+        NativeHost.canvas.paintShadow(group._ensureNativeCanvas().handle, mask._nativeCanvas.handle, shadow);
+        var foreground = Object.create(context); foreground.canvas = group;
+        foreground._clipPaths = []; foreground.globalCompositeOperation = 'source-over';
+        draw.apply(foreground, args);
+        var composition = Object.create(context); composition._transform = [1, 0, 0, 1, 0, 0];
+        composition.globalAlpha = 1; composition.imageSmoothingEnabled = false;
+        draw.call(composition, group, 0, 0);
+        return true;
+      } finally { group._releaseNativeCanvas(); }
+    }
+    NativeHost.canvas.paintShadow(context.canvas._ensureNativeCanvas().handle, mask._nativeCanvas.handle, shadow);
+  } finally { mask._releaseNativeCanvas(); }
+}
 
 [
   'clearRect', 'fillRect', 'strokeRect', 'drawImage', 'fillText', 'strokeText',
@@ -1217,6 +1922,9 @@ CanvasContext2D.prototype.putImageData = function(imageData, x, y) {
   var mutate = CanvasContext2D.prototype[method];
   CanvasContext2D.prototype[method] = function() {
     try {
+      if (method !== 'clearRect' && method !== 'putImageData' && (colorToRgba(this.shadowColor) & 255) &&
+          this.globalCompositeOperation !== 'copy' && (this.shadowBlur || this.shadowOffsetX || this.shadowOffsetY) &&
+          drawCanvasShadow(this, mutate, arguments, method)) return;
       return mutate.apply(this, arguments);
     } finally {
       if (this.canvas && typeof this.canvas._pmjsContentChanged === 'function') {
@@ -1237,10 +1945,14 @@ function canvasIsUntransformedSourceOver(context) {
     transform[0] === 1 && transform[1] === 0 && transform[2] === 0 &&
     transform[3] === 1 && transform[4] === 0 && transform[5] === 0 &&
     !(context._clipPaths && context._clipPaths.length) &&
+    !((colorToRgba(context.shadowColor) & 255) && (context.shadowBlur || context.shadowOffsetX || context.shadowOffsetY)) &&
     context.globalCompositeOperation === 'source-over');
 }
 
 var mvBlurCanvasMethods = ['drawImage', 'fillRect', 'save', 'restore'].map(function(name) {
+  return { name: name, method: CanvasContext2D.prototype[name] };
+});
+var nativeTextCanvasMethods = ['fillText', 'strokeText', 'save', 'restore'].map(function(name) {
   return { name: name, method: CanvasContext2D.prototype[name] };
 });
 
@@ -1257,6 +1969,7 @@ Object.assign(PMJS.web.canvas, {
     return NativeHost.canvas.blurMv(context.canvas._ensureNativeCanvas().handle);
   },
   readPixel: function(canvas, context, x, y) {
+    if (canvas && (!canvas.width || !canvas.height)) return [0, 0, 0, 0];
     if (canvas && canvas._nativeCanvas) {
       var rgba = NativeHost.canvas.pixel(canvas._ensureNativeCanvas().handle, x, y);
       return [(rgba >>> 24) & 255, (rgba >>> 16) & 255,
@@ -1267,7 +1980,17 @@ Object.assign(PMJS.web.canvas, {
     }
     return null;
   },
-  supportsNativeText: canvasIsUntransformedSourceOver,
+  supportsNativeText: function(context, maxWidth, align, style) {
+    return canvasIsUntransformedSourceOver(context) &&
+      (!(context instanceof CanvasContext2D) || nativeTextCanvasMethods.every(function(entry) {
+        return context[entry.name] === entry.method;
+      })) &&
+      (!style || [style.outlineColor, style.color].every(function(color) {
+        return typeof color === 'string' && parseCanvasColor(color) !== null;
+      })) &&
+      (!(maxWidth || (align && align !== 'left')) ||
+        (!usesLegacyText() && typeof NativeHost.canvas.drawOutlinedText === 'function'));
+  },
   drawNativeText: function(context, text, x, baseline, style) {
     var font = contextFont(style.font);
     var canvas = context.canvas._ensureNativeCanvas();
@@ -1275,6 +1998,14 @@ Object.assign(PMJS.web.canvas, {
     options.lineJoin = 'round'; // MV Bitmap._drawTextOutline sets this before stroking.
     var outlineWidth = +style.outlineWidth;
     if (!Number.isFinite(outlineWidth) || !(outlineWidth > 0)) outlineWidth = context.lineWidth;
+    if (!usesLegacyText() && typeof NativeHost.canvas.drawOutlinedText === 'function') {
+      var maxWidth = style.maxWidth || 0xffffffff;
+      if (!(maxWidth > 0)) return;
+      NativeHost.canvas.drawOutlinedText(canvas.handle, font.paths, text, x, baseline,
+        font.size, colorWithGlobalAlpha(style.outlineColor, 1), outlineWidth,
+        colorWithGlobalAlpha(style.color, context.globalAlpha), maxWidth, style.align || 'left', options);
+      return;
+    }
     NativeHost.canvas.drawText(canvas.handle, font.paths, text,
       x, baseline, font.size, colorWithGlobalAlpha(style.outlineColor, 1),
       outlineWidth, options);
