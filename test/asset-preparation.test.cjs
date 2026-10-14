@@ -317,14 +317,108 @@ test('unsupported images reuse a negative entry; transient failures retry next l
 test('portable negative image decisions skip processing without reading pages', async () => {
   const f = fixture();
   const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
-  const result = await prepareAssets({ ...f, portableAssetRoot: f.root,
+  const options = { ...f, portableAssetRoot: f.root,
     portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
-      encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } });
+      encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
+  const result = await prepareAssets(options);
   assert.equal(result.fallback, 1);
   assert.equal(result.indexedNegative, 1);
   assert.equal(result.unindexedProcessed, 0);
+  assert.equal(result.generated, 0);
+  assert.deepEqual(manifests(f), []);
   assert.equal(f.jobs, 0);
   assert.deepEqual(f.warnings, []);
+  fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
+  const changed = await prepareAssets(options);
+  assert.equal(changed.indexedNegative, 0);
+  assert.equal(changed.generated, 1);
+  assert.equal(f.jobs, 1);
+});
+
+test('indexed negative images publish a warm catalog without cache entries', async () => {
+  const f = fixture();
+  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  const options = { ...f, portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
+    encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
+  const cold = await prepareAssets(options);
+  assert.equal(cold.generated, 0);
+  assert.equal(cold.installed, 0);
+  assert.deepEqual(manifests(f), []);
+  const warm = await prepareAssets(options);
+  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.hits, 1);
+  assert.equal(warm.negativeHits, 1);
+  assert.equal(f.jobs, 0);
+  warm.releaseCacheLease(); cold.releaseCacheLease();
+});
+
+test('mixed indexed and ordinary negatives publish warm catalog with hit count matching actual cache decisions', async () => {
+  const f = fixture();
+  const sourceB = 'img/pictures/b.png';
+  fs.writeFileSync(path.join(f.gameRoot, sourceB), PNG);
+  const sourceHashA = crypto.createHash('sha256').update(PNG).digest('hex');
+
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  f.native.assets.processImage = async () => null;
+
+  const options = { ...f, portableIndex: { images: [{ source: f.source, sourceHash: sourceHashA, recipe: null,
+    encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
+  const cold = await prepareAssets(options);
+  assert.equal(cold.fallback, 2);
+  assert.equal(cold.indexedNegative, 1);
+  assert.equal(cold.generated, 1);
+  assert.equal(cold.installed, 0);
+
+  const warm = await prepareAssets(options);
+  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.hits, 2);
+  assert.equal(warm.negativeHits, 2);
+  assert.equal(warm.installed, 0);
+  assert.equal(f.jobs, 0);
+  warm.releaseCacheLease(); cold.releaseCacheLease();
+});
+
+test('progress callback throws during indexed-negative handling without duplicate completion or fallback', async () => {
+  const f = fixture();
+  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
+  let thrown = false;
+  const options = { ...f,
+    portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
+      encryptionSettingsSha256: null, descriptor: null, outputs: [] }] },
+    onProgress(value) {
+      if (value.phase === 'validate' && value.source === f.source && value.completed === 1 && !thrown) {
+        thrown = true;
+        throw new Error('progress failed');
+      }
+    }
+  };
+  const result = await prepareAssets(options);
+  assert.equal(result.completed, 1);
+  assert.equal(result.fallback, 1);
+  assert.ok(!f.warnings.some(w => w.includes('asset preparation fallback')));
+  assert.ok(f.warnings.some(w => w.includes('asset preparation unavailable: progress failed')));
+});
+
+test('previously prepared positive entry followed by matching indexed negative transitions to ordinary loading and cleans up cache', async () => {
+  const f = fixture();
+  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
+  const cold = await prepareAssets(f);
+  assert.equal(cold.generated, 1);
+  assert.equal(cold.installed, 1);
+  assert.equal(manifests(f).length, 1);
+
+  const options = { ...f, portableAssetRoot: f.root,
+    portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
+      encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
+  const transition = await prepareAssets(options);
+  assert.equal(transition.fallback, 1);
+  assert.equal(transition.indexedNegative, 1);
+  assert.equal(transition.installed, 0);
+  assert.equal(transition.generated, 0);
+  assert.deepEqual(manifests(f), []);
 });
 
 test('concurrent preparers serialize and reuse completed output', async () => {
@@ -609,6 +703,28 @@ function encryptedFixture(engine = 'MZ') {
   };
   return { ...f, encrypt, audio, encryptedImage, encryptedAudio, systemFile, get jobs() { return f.jobs; }, get installs() { return f.installs; } };
 }
+
+test('encrypted character index decisions use the recipe found after decryption', async () => {
+  const f = encryptedFixture('MV');
+  const source = 'img/characters/$indexed.rpgmvp';
+  const logicalSource = 'img/characters/$indexed.png';
+  fs.mkdirSync(path.join(f.gameRoot, 'img/characters'), { recursive: true });
+  fs.renameSync(path.join(f.gameRoot, f.encryptedImage), path.join(f.gameRoot, source));
+  const png = Buffer.from(PNG);
+  png.writeUInt32BE(3, 16); png.writeUInt32BE(4, 20);
+  const encrypted = f.encrypt(png);
+  fs.writeFileSync(path.join(f.gameRoot, source), encrypted);
+  const sourceHash = crypto.createHash('sha256').update(encrypted).digest('hex');
+  const settingsHash = crypto.createHash('sha256').update(fs.readFileSync(f.systemFile)).digest('hex');
+  let calls = 0;
+  f.native.assets.processImage = async () => { ++calls; return null; };
+  const result = await prepareAssets({ ...f, portableIndex: { images: [{ source, sourceHash,
+    recipe: { source: logicalSource, sourceHash, grid: [3, 4] },
+    encryptionSettingsSha256: settingsHash, descriptor: null, outputs: [] }] } });
+  assert.equal(result.indexedNegative, 1);
+  assert.equal(result.decrypted, 2);
+  assert.equal(calls, 0);
+});
 
 for (const engine of ['MV', 'MZ']) {
   test(engine + ': unchanged hard-linked encryption inputs refresh identities while changed settings refuse installation', async () => {

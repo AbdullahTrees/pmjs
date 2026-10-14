@@ -250,6 +250,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
   let catalogNegativeHits = 0;
+  let indexedNegativeSkips = 0;
   let terminalPhase = 'complete';
   const report = (phase, source = '', terminal = false) => onProgress({
     phase, source, terminal, completed: result.completed, total: result.total,
@@ -358,105 +359,117 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
         const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
-        const directory = path.join(cacheRoot, 'entries', key);
-        let manifest = await cachedEntry(directory, key, sourceHash, files);
-        if (manifest && encrypted && manifest.decrypted !== 'source' + extension) manifest = null;
-        if (manifest) {
-          result.hits += 1;
-          if (!manifest.descriptor && !manifest.decrypted) result.negativeHits += 1;
+        const findIndexed = () => portableIndex?.images?.find(record => record.source === source &&
+          record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
+          record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
+          (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||
+            record.descriptor && validDescriptor(record.descriptor)));
+        let indexed = encrypted ? null : findIndexed();
+        // A matching negative decision needs no prepared backing or cache entry.
+        // The ordinary loader will read the original source if it is requested.
+        const indexedNegativeSkip = !offline && !encrypted && extension === '.png' && indexed?.descriptor === null;
+        if (indexedNegativeSkip) {
+          ++result.indexedNegative;
+          ++result.fallback;
+          ++catalogNegativeHits;
+          ++indexedNegativeSkips;
         } else {
-          sourcePhase = 'prepare';
-          report('prepare', source);
-          if (cancelled()) break;
-          stage = await fsp.mkdtemp(path.join(cacheRoot, 'entries', '.stage-'));
-          const decrypted = encrypted ? 'source' + extension : undefined;
-          let input = file;
-          if (decrypted) {
-            input = path.join(stage, decrypted);
-            await decryptFile(file, input, settings.key, extension);
-            if (!recipe) recipe = await automaticRecipe(input, logicalSource, sourceHash);
-          }
-          if (cancelled()) break;
-          const indexed = portableIndex?.images?.find(record => record.source === source &&
-            record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
-            record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
-            (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||
-              record.descriptor && validDescriptor(record.descriptor)));
-          let descriptor = null, copied = false;
-          const indexedFallback = indexed?.descriptor === null;
-          if (indexedFallback) ++result.indexedNegative;
-          if (indexed?.descriptor && portableAssetRoot && Array.isArray(indexed.outputs) &&
-              indexed.outputs.length === indexed.descriptor.pages.length) {
-            const pages = indexed.descriptor.pages;
-            try {
-              for (let i = 0; i < pages.length; ++i) {
-                const item = indexed.outputs[i];
-                if (!item || typeof item.path !== 'string' || !/^assets\/images\/[a-f0-9]{64}\/page-\d+\.png$/.test(item.path) ||
-                    path.basename(item.path) !== pages[i].path || !HASH.test(item.hash)) throw new Error('invalid indexed page');
-                const candidate = path.join(portableAssetRoot, item.path);
-                if (await hashFile(candidate) !== item.hash) throw new Error('indexed page checksum differs');
-                const header = Buffer.alloc(24);
-                const handle = await fsp.open(candidate, 'r');
-                try {
-                  if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24 ||
-                      !header.subarray(0, 8).equals(PNG) ||
-                      header.readUInt32BE(16) !== pages[i].width ||
-                      header.readUInt32BE(20) !== pages[i].height)
-                    throw new Error('indexed page header differs');
-                } finally { await handle.close(); }
-                await fsp.copyFile(candidate, path.join(stage, pages[i].path));
-                if (await hashFile(path.join(stage, pages[i].path)) !== item.hash)
-                  throw new Error('indexed page changed while copying');
-              }
-              descriptor = indexed.descriptor;
-              copied = true;
-              if (pages.length) ++result.indexedPageCopies;
-              else ++result.indexedZeroPage;
-            } catch (_) {
-              for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
+          const directory = path.join(cacheRoot, 'entries', key);
+          let manifest = await cachedEntry(directory, key, sourceHash, files);
+          if (manifest && encrypted && manifest.decrypted !== 'source' + extension) manifest = null;
+          if (manifest) {
+            result.hits += 1;
+            if (!manifest.descriptor && !manifest.decrypted) result.negativeHits += 1;
+          } else {
+            sourcePhase = 'prepare';
+            report('prepare', source);
+            if (cancelled()) break;
+            stage = await fsp.mkdtemp(path.join(cacheRoot, 'entries', '.stage-'));
+            const decrypted = encrypted ? 'source' + extension : undefined;
+            let input = file;
+            if (decrypted) {
+              input = path.join(stage, decrypted);
+              await decryptFile(file, input, settings.key, extension);
+              if (!recipe) recipe = await automaticRecipe(input, logicalSource, sourceHash);
+              indexed = findIndexed();
             }
+            if (cancelled()) break;
+            let descriptor = null, copied = false;
+            const indexedFallback = indexed?.descriptor === null;
+            if (indexedFallback) ++result.indexedNegative;
+            if (indexed?.descriptor && portableAssetRoot && Array.isArray(indexed.outputs) &&
+                indexed.outputs.length === indexed.descriptor.pages.length) {
+              const pages = indexed.descriptor.pages;
+              try {
+                for (let i = 0; i < pages.length; ++i) {
+                  const item = indexed.outputs[i];
+                  if (!item || typeof item.path !== 'string' || !/^assets\/images\/[a-f0-9]{64}\/page-\d+\.png$/.test(item.path) ||
+                      path.basename(item.path) !== pages[i].path || !HASH.test(item.hash)) throw new Error('invalid indexed page');
+                  const candidate = path.join(portableAssetRoot, item.path);
+                  if (await hashFile(candidate) !== item.hash) throw new Error('indexed page checksum differs');
+                  const header = Buffer.alloc(24);
+                  const handle = await fsp.open(candidate, 'r');
+                  try {
+                    if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24 ||
+                        !header.subarray(0, 8).equals(PNG) ||
+                        header.readUInt32BE(16) !== pages[i].width ||
+                        header.readUInt32BE(20) !== pages[i].height)
+                      throw new Error('indexed page header differs');
+                  } finally { await handle.close(); }
+                  await fsp.copyFile(candidate, path.join(stage, pages[i].path));
+                  if (await hashFile(path.join(stage, pages[i].path)) !== item.hash)
+                    throw new Error('indexed page changed while copying');
+                }
+                descriptor = indexed.descriptor;
+                copied = true;
+                if (pages.length) ++result.indexedPageCopies;
+                else ++result.indexedZeroPage;
+              } catch (_) {
+                for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
+              }
+            }
+            if (!copied && !indexedFallback && extension === '.png') {
+              if (indexed) ++result.indexedLayoutAttempts;
+              else ++result.unindexedProcessed;
+              descriptor = await native.assets.processImage(source, stage, recipe || null,
+                input, ...(indexed ? [indexed.descriptor] : []));
+            }
+            if (cancelled()) break;
+            if (descriptor !== null && !validDescriptor(descriptor)) throw new Error('processor returned invalid logical image descriptor');
+            if (await hashFile(file) !== sourceHash) throw new Error('source changed during image preparation');
+            const outputs = {};
+            if (decrypted) outputs[decrypted] = await hashFile(input);
+            for (const page of descriptor ? descriptor.pages : []) outputs[page.path] = await hashFile(path.join(stage, page.path));
+            manifest = { version: CACHE_VERSION, key, source, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
+              ...(decrypted ? { decrypted } : {}) };
+            // Cache entries are disposable and hash-validated; locks, leases and indexes still flush.
+            await writeJson(path.join(stage, 'manifest.json'), manifest, false);
+            if (!await cachedEntry(stage, key, sourceHash, files)) throw new Error('prepared output validation failed');
+            await fsp.rm(directory, { recursive: true, force: true });
+            await fsp.rename(stage, directory);
+            stage = null;
+            for (const output of Object.keys(outputs)) await files.hash(path.join(directory, output));
+            if (!await cachedEntry(directory, key, sourceHash, files)) throw new Error('published output validation failed');
+            result.generated += 1;
           }
-          if (!copied && !indexedFallback && extension === '.png') {
-            if (indexed) ++result.indexedLayoutAttempts;
-            else ++result.unindexedProcessed;
-            descriptor = await native.assets.processImage(source, stage, recipe || null,
-              input, ...(indexed ? [indexed.descriptor] : []));
+          sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
+          if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
+            encryptionSettingsSha256: encrypted ? settings.hash : null,
+            descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
+              .filter(([name]) => name !== manifest.decrypted)) });
+          if (encrypted) settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
+          keys.push(key);
+          if (manifest.decrypted) {
+            result.decryptedEntries.push({ source, logicalSource, file: path.join(directory, manifest.decrypted),
+              sourceIdentity, sourceHash, settingsIdentity: settings.sourceIdentity });
+            result.cacheBytes += (await fsp.stat(path.join(directory, manifest.decrypted))).size;
           }
-          if (cancelled()) break;
-          if (descriptor !== null && !validDescriptor(descriptor)) throw new Error('processor returned invalid logical image descriptor');
-          if (await hashFile(file) !== sourceHash) throw new Error('source changed during image preparation');
-          const outputs = {};
-          if (decrypted) outputs[decrypted] = await hashFile(input);
-          for (const page of descriptor ? descriptor.pages : []) outputs[page.path] = await hashFile(path.join(stage, page.path));
-          manifest = { version: CACHE_VERSION, key, source, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
-            ...(decrypted ? { decrypted } : {}) };
-          // Cache entries are disposable and hash-validated; locks, leases and indexes still flush.
-          await writeJson(path.join(stage, 'manifest.json'), manifest, false);
-          if (!await cachedEntry(stage, key, sourceHash, files)) throw new Error('prepared output validation failed');
-          await fsp.rm(directory, { recursive: true, force: true });
-          await fsp.rename(stage, directory);
-          stage = null;
-          for (const output of Object.keys(outputs)) await files.hash(path.join(directory, output));
-          if (!await cachedEntry(directory, key, sourceHash, files)) throw new Error('published output validation failed');
-          result.generated += 1;
+          if (manifest.descriptor) {
+            for (const page of manifest.descriptor.pages) result.cacheBytes += (await fsp.stat(path.join(directory, page.path))).size;
+            result.entries.push({ source: logicalSource, directory, descriptor: manifest.descriptor, sourceHash, sourceIdentity,
+              ...(encrypted ? { decryptedFile: path.join(directory, manifest.decrypted) } : {}) });
+          } else if (!manifest.decrypted) { result.fallback += 1; ++catalogNegativeHits; }
         }
-        sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
-        if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
-          encryptionSettingsSha256: encrypted ? settings.hash : null,
-          descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
-            .filter(([name]) => name !== manifest.decrypted)) });
-        if (encrypted) settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
-        keys.push(key);
-        if (manifest.decrypted) {
-          result.decryptedEntries.push({ source, logicalSource, file: path.join(directory, manifest.decrypted),
-            sourceIdentity, sourceHash, settingsIdentity: settings.sourceIdentity });
-          result.cacheBytes += (await fsp.stat(path.join(directory, manifest.decrypted))).size;
-        }
-        if (manifest.descriptor) {
-          for (const page of manifest.descriptor.pages) result.cacheBytes += (await fsp.stat(path.join(directory, page.path))).size;
-          result.entries.push({ source: logicalSource, directory, descriptor: manifest.descriptor, sourceHash, sourceIdentity,
-            ...(encrypted ? { decryptedFile: path.join(directory, manifest.decrypted) } : {}) });
-        } else if (!manifest.decrypted) { result.fallback += 1; ++catalogNegativeHits; }
       } catch (error) {
         result.fallback += 1;
         logger.warn(`[pmjs] asset preparation fallback ${source}: ${error.message}`);
@@ -509,7 +522,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       }
       if (catalogCapable && result.installed === result.entries.length && result.decrypted === result.decryptedEntries.length) {
         const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
-        summary.hits = keys.length;
+        summary.hits = keys.length + indexedNegativeSkips;
         summary.negativeHits = catalogNegativeHits;
         await publishCatalog(catalogFile, binding, cacheRoot, { keys, entries: result.entries,
           decryptedEntries: result.decryptedEntries, summary });
