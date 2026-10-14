@@ -194,6 +194,8 @@ class ImageStore {
                                              bool premultiplied = false);
   bool isRenderTarget(ImageHandle handle) const;
   std::optional<std::uint64_t> contentRevision(ImageHandle handle) const;
+  // Source-space coverage with a periodic one-texel filtering halo. No readback.
+  const std::vector<std::array<int, 4>>* sparseRegions(ImageHandle handle) const;
   std::uint64_t textureEpoch() const { return textureEpoch_; }
   bool ensureMipmaps(ImageHandle handle, bool premultiplied);
   const ImagePixels* readPixels(ImageHandle handle) const;
@@ -240,6 +242,7 @@ class ImageStore {
   std::uint64_t preparedHits() const { return preparedHits_; }
   std::uint64_t preparedRegions() const { return preparedRegions_; }
   std::uint64_t preparedMaterializations() const { return preparedMaterializations_; }
+  std::uint64_t preparedPageDecodes() const { return preparedPageDecodes_->load(std::memory_order_relaxed); }
   std::uint64_t preparedRegionReads() const { return preparedRegionReads_; }
   const std::unordered_map<std::string, std::uint64_t>& preparedFallbacks() const { return preparedFallbacks_; }
   void notePreparedFallback(ImageHandle handle, const std::string& reason);
@@ -286,6 +289,8 @@ class ImageStore {
     std::filesystem::path sourcePath;
     std::string lastPreparedFallbackReason;
     mutable std::optional<ImagePixels> cachedPixels;
+    std::optional<std::vector<std::array<int, 4>>> sparseRegions;
+    std::uint64_t sparseRevision = 0;
     bool live = false;
   };
 
@@ -301,6 +306,7 @@ class ImageStore {
   std::optional<ImageInfo> insertTileView(std::shared_ptr<TileBacking> backing,
       int width, int height, const std::string& cacheKey);
   bool tileDiagnostics_ = false;
+  bool sparseTiling_ = false;
   std::shared_ptr<std::atomic<std::size_t>> tileMetadataBytes_ =
       std::make_shared<std::atomic<std::size_t>>(0);
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
@@ -311,6 +317,7 @@ class ImageStore {
   std::uint64_t tilePageDecodes_ = 0, tilePageUploads_ = 0;
   std::unordered_map<std::string, std::uint64_t> tileFallbacks_, tileRegionSets_;
   void clearPrepared(Slot& slot);
+  void trimPreparedPages();
   bool materialize(Slot& slot, bool premultiplied);
   static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page);
   static std::optional<ImagePixels> readPreparedRegion(PreparedBacking& backing,
@@ -343,6 +350,8 @@ class ImageStore {
   std::uint64_t textureRegionUpdates_ = 0;
   std::uint64_t textureUploadBytes_ = 0;
   std::uint64_t preparedHits_ = 0, preparedRegions_ = 0, preparedMaterializations_ = 0;
+  std::shared_ptr<std::atomic<std::uint64_t>> preparedPageDecodes_ =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
   mutable std::uint64_t preparedRegionReads_ = 0;
   std::unordered_map<std::string, std::uint64_t> preparedFallbacks_;
   ImageHandle fallbackHandle_ = 0;

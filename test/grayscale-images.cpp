@@ -224,11 +224,14 @@ int main() {
     descriptor.cells.push_back({{0, 0, 8, 8}, {1, 1, 6, 6}, {1, 1, 6, 6}, {}, 0});
     descriptor.cells.push_back({{8, 0, 8, 8}, {1, 1, 6, 6}, {9, 1, 6, 6}, {}, 0});
     require(images.installPrepared(root / "source.png", root, descriptor), "prepared grayscale install failed");
+    const auto pageDecodes = images.preparedPageDecodes();
     const auto logical = images.loadPng(root / "source.png");
     const auto region = images.resolveSpriteRegion(logical->handle, 0, 0, 8, 8, false);
     require(region && images.gpuBytes() == 256, "prepared grayscale page not compressed");
     require(images.resolveSpriteRegion(logical->handle, 8, 0, 8, 8, true) && images.gpuBytes() == 512,
       "prepared premultiplied page accounting wrong");
+    require(images.preparedPageDecodes() - pageDecodes == 1,
+      "straight and premultiplied uploads repeated the validation decode");
     auto pageControl = images.createRgba(16, 8, page.rgba.data());
     for (int variant : {0, 1, 3, 5}) {
       require(render(renderer, logical->handle, 8, 8, variant) ==

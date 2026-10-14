@@ -88,19 +88,23 @@ int main() {
     require(!images.installPrepared(root/"source.png",root,descriptor,"changed-identity"),"changed source identity accepted");
     auto image=images.loadPng(root/"source.png");
     require(image&&image->width==8&&image->height==4&&image->texture==0,"logical image allocated full GPU backing");
-    require(images.cpuBytes()==0,"image load retained every compact page eagerly");
+    require(images.cpuBytes()==atlas.size()&&images.preparedPageDecodes()==1,
+            "validation did not retain one accounted page decode");
     const auto* pixels=images.readPixels(image->handle);
     require(pixels&&pixels->rgba==original,"logical reconstruction lost exact RGBA or hidden RGB");
     auto region=images.resolveSpriteRegion(image->handle,4,0,4,4,false);
     require(region&&region->source==std::array<float,4>{5,1,2,2}&&region->atlas==std::array<float,4>{5,1,2,2},"cell remapping failed");
     require(images.inspect(image->handle)->texture==0,"ordinary region forced full backing");
+    require(images.preparedPageDecodes()==1,"first reconstruction or atlas upload decoded the validated page again");
     for(int tick=0;tick<61;++tick) images.update();
     require(images.cpuBytes()==0,"on-demand compact CPU pages escaped expiry");
     require(images.resolveSpriteRegion(image->handle,4,0,4,4,false).has_value()&&images.cpuBytes()==0,
             "resident GPU page needlessly decoded CPU pixels after expiry");
+    require(images.preparedPageDecodes()==1,"resident GPU page decoded again after CPU expiry");
     require(!images.resolveSpriteRegion(image->handle,3,0,2,4,false),"cross-cell crop escaped fallback");
     auto full=images.lookup(image->handle);
     require(full&&readGpu(*full)==original,"full fallback changed original pixels");
+    require(images.preparedPageDecodes()==2,"expired page was not decoded once for full fallback");
     auto premultiplied=images.lookupPremultiplied(image->handle);
     auto expected=original;
     for(std::size_t i=0;i<expected.size();i+=4) for(int c=0;c<3;++c)
@@ -145,7 +149,7 @@ int main() {
       const auto identity=pmjs::ImageStore::openFile(source);
       require(images.installPrepared(source,root,descriptor,identity->key()),"lazy preparation failed");
       const auto image=images.loadPng(source);
-      require(image&&image->texture==0&&images.cpuBytes()==0,"lazy image materialized before drawing");
+      require(image&&image->texture==0,"lazy image materialized before drawing");
       return image->handle;
     };
     {
@@ -155,13 +159,17 @@ int main() {
       require(images.pin(pinned)&&images.beginUse(inFlight),"lazy owner capture failed");
       images.release(pinned); images.release(inFlight);
       for(int i=3;i<67;++i) images.release(acquire(images,i));
-      require(images.warmCount()==64&&images.warmBytes()==0&&images.warmFileCount()==64,
-              "zero-byte lazy file accounting failed");
+      require(images.warmCount()==64&&images.warmBytes()==64*6*6*4&&images.warmFileCount()==64,
+              "validated lazy page or file accounting failed");
       images.update();
       require(images.warmCount()==0&&images.warmFileCount()==0&&files()==before+3,
               "zero-budget lazy cache retained descriptors");
       require(images.inspect(pinned)&&images.inspect(inFlight)&&images.inspect(live),
               "cache eviction released a live owner");
+      const auto decodes=images.preparedPageDecodes();
+      require(images.retainCpuPixels(live)&&images.cpuBytes()==2*6*6*4+4*4*4&&
+              images.preparedPageDecodes()==decodes,
+              "synchronous CPU retention repeated the decode or kept duplicate pages");
       std::filesystem::remove(root/"lazy-page.png");
       require(images.readPixelsRegion(live,0,0,4,4)->rgba==std::vector<std::uint8_t>(64,255),
               "live captured page lost after deletion");
@@ -280,7 +288,14 @@ int main() {
     }
     require(images.installPrepared(root/"many-pages.png",root,descriptor),"many-page install failed");
     const auto image=images.loadPng(root/"many-pages.png");
-    require(image&&image->texture==0&&images.cpuBytes()==0,"many-page catalogue retained decoded pages");
+    require(image&&image->texture==0&&images.cpuBytes()>0&&images.cpuBytes()<=32U*1024U*1024U&&
+            images.preparedPageDecodes()==columns*rows,"many-page validation escaped the decode cache budget");
+    std::filesystem::create_hard_link(root/"many-pages.png",root/"many-pages-second.png");
+    require(images.installPrepared(root/"many-pages-second.png",root,descriptor),"second many-page install failed");
+    const auto second=images.loadPng(root/"many-pages-second.png");
+    require(second&&second->handle!=image->handle&&images.cpuBytes()<=32U*1024U*1024U,
+            "loading multiple prepared images accumulated unbounded validation pixels");
+    images.release(second->handle);images.setWarmBudgetBytes(0);images.update();
     const auto full=images.lookup(image->handle);
     require(full&&images.preparedMaterializations()==1,"many-page oversized strip fallback failed");
     require(images.cpuBytes()<=32U*1024U*1024U,"strip fallback retained more than bounded page cache");

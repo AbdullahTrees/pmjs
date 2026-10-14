@@ -1,10 +1,12 @@
 #include "platform.hpp"
 #include "resources.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <unistd.h>
 
@@ -13,6 +15,93 @@
 
 int main() {
   pmjs::Platform platform(16, 16, "Image capability test");
+  {
+    const char* sparseEnvironment = std::getenv("PMJS_SPARSE_TILING");
+    const std::optional<std::string> previousSparse = sparseEnvironment ?
+        std::optional<std::string>(sparseEnvironment) : std::nullopt;
+    constexpr int width = 193, height = 159;
+    std::vector<std::uint8_t> rgba(width * height * 4);
+    const std::array<std::array<int, 2>, 2> visible = {{{32, 64}, {width - 1, height - 1}}};
+    for (const auto& point : visible) rgba[(point[1] * width + point[0]) * 4 + 3] = 39;
+    setenv("PMJS_SPARSE_TILING", "0", 1);
+    {
+      pmjs::ImageStore disabled;
+      const auto image = disabled.createRgba(width, height, rgba.data());
+      if (!image || disabled.sparseRegions(image->handle) || disabled.cpuBytes())
+        throw std::runtime_error("disabled sparse image analysis retained metadata");
+    }
+    setenv("PMJS_SPARSE_TILING", "1", 1);
+    pmjs::ImageStore sparse;
+    const auto image = sparse.createRgba(width, height, rgba.data());
+    if (!image) throw std::runtime_error("sparse image allocation failed");
+    const auto* regions = sparse.sparseRegions(image->handle);
+    if (!regions || regions->empty() || regions->size() > 64)
+      throw std::runtime_error("sparse image coverage was unavailable");
+    std::vector<bool> covered(width * height);
+    for (const auto& rect : *regions) {
+      if (rect[0] < 0 || rect[1] < 0 || rect[2] <= 0 || rect[3] <= 0 ||
+          rect[0] + rect[2] > width || rect[1] + rect[3] > height)
+        throw std::runtime_error("sparse coverage escaped source dimensions");
+      for (int y = rect[1]; y < rect[1] + rect[3]; ++y) {
+        for (int x = rect[0]; x < rect[0] + rect[2]; ++x) {
+          if (covered[y * width + x]) throw std::runtime_error("sparse image regions overlap");
+          covered[y * width + x] = true;
+        }
+      }
+    }
+    for (const auto& point : visible) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+          const int x = (point[0] + dx + width) % width;
+          const int y = (point[1] + dy + height) % height;
+          if (!covered[y * width + x]) throw std::runtime_error("sparse periodic filtering halo was lost");
+        }
+      }
+    }
+    const auto metadataBytes = regions->capacity() * sizeof(std::array<int, 4>);
+    if (sparse.cpuBytes() != metadataBytes || sparse.memoryEntries()[0].cpuBytes != metadataBytes)
+      throw std::runtime_error("sparse image metadata was missing from resource accounting");
+    for (int frame = 0; frame < 65; ++frame) sparse.update();
+    if (!sparse.sparseRegions(image->handle) || sparse.cpuBytes() != metadataBytes)
+      throw std::runtime_error("CPU pixel eviction discarded sparse image metadata");
+    const auto revision = sparse.contentRevision(image->handle);
+    const std::array<std::uint8_t, 4> replacement = {0, 0, 0, 255};
+    if (!sparse.updateRgbaRegion(image->handle, 100, 100, 1, 1, replacement.data(), 1) ||
+        sparse.sparseRegions(image->handle) || sparse.cpuBytes() ||
+        sparse.contentRevision(image->handle) == revision)
+      throw std::runtime_error("region mutation retained stale sparse image coverage");
+    sparse.release(image->handle);
+    if (sparse.sparseRegions(image->handle) || sparse.cpuBytes())
+      throw std::runtime_error("released image retained sparse metadata");
+
+    std::fill(rgba.begin(), rgba.end(), 255);
+    const auto dense = sparse.createRgba(width, height, rgba.data());
+    if (!dense || dense->handle == image->handle || sparse.sparseRegions(dense->handle))
+      throw std::runtime_error("slot reuse or dense coverage admitted stale sparse regions");
+    sparse.release(dense->handle);
+    std::fill(rgba.begin(), rgba.end(), 0);
+    for (std::size_t i = 0; i < rgba.size(); i += 4) rgba[i] = 255;
+    const auto additive = sparse.createRgba(width, height, rgba.data(), true);
+    const auto transparent = sparse.createRgba(width, height, rgba.data());
+    if (!additive || sparse.sparseRegions(additive->handle) || !transparent ||
+        !sparse.sparseRegions(transparent->handle) || !sparse.sparseRegions(transparent->handle)->empty())
+      throw std::runtime_error("sparse coverage confused straight alpha and additive color");
+    if (!sparse.updateRgba(transparent->handle, rgba.data()) || sparse.sparseRegions(transparent->handle))
+      throw std::runtime_error("full mutation retained stale sparse image coverage");
+    const auto target = sparse.createRenderTarget(width, height);
+    const auto gpuOnly = sparse.createRgba(width, height, nullptr);
+    if (!target || !gpuOnly || sparse.sparseRegions(target->handle) || sparse.sparseRegions(gpuOnly->handle))
+      throw std::runtime_error("untracked GPU writes acquired sparse image coverage");
+
+    std::vector<std::uint8_t> fragmented(1024 * 1024 * 4);
+    for (int y = 16; y < 1024; y += 96)
+      for (int x = 16; x < 1024; x += 96) fragmented[(y * 1024 + x) * 4 + 3] = 255;
+    const auto complex = sparse.createRgba(1024, 1024, fragmented.data());
+    if (!complex || sparse.sparseRegions(complex->handle))
+      throw std::runtime_error("fragmented coverage exceeded its rectangle budget");
+    if (previousSparse) setenv("PMJS_SPARSE_TILING", previousSparse->c_str(), 1);
+    else unsetenv("PMJS_SPARSE_TILING");
+  }
   {
     pmjs::ImageStore emptyImages;
     char emptyPath[] = "/tmp/pmjs-empty-image-XXXXXX";

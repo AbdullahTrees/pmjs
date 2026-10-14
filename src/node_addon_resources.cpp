@@ -485,6 +485,7 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
   napi_set_named_property(env, result, "preparedHits", number(env, images.preparedHits()));
   napi_set_named_property(env, result, "preparedRegions", number(env, images.preparedRegions()));
   napi_set_named_property(env, result, "preparedMaterializations", number(env, images.preparedMaterializations()));
+  napi_set_named_property(env, result, "preparedPageDecodes", number(env, images.preparedPageDecodes()));
   napi_set_named_property(env, result, "preparedRegionReads", number(env, images.preparedRegionReads()));
   napi_value preparedFallbacks;
   check(env, napi_create_object(env, &preparedFallbacks), "cannot create prepared fallback counts");

@@ -207,6 +207,10 @@ struct RendererStats {
   std::uint64_t presentationLetterboxedFrames = 0;
   std::uint64_t spriteDrawCalls = 0;
   std::uint64_t tilingSpriteDrawCalls = 0;
+  std::uint64_t sparseTilingCommands = 0;
+  std::uint64_t sparseTilingDrawCalls = 0;
+  std::uint64_t sparseTilingFullPixels = 0;
+  std::uint64_t sparseTilingPixels = 0;
   std::uint64_t screenFillDrawCalls = 0;
   std::uint64_t constantBlackGroups = 0;
   std::uint64_t constantBlackGroupsSkipped = 0;
@@ -543,6 +547,7 @@ class Renderer {
   RendererStats stats_;
   PresentationTimings presentationTimings_;
   bool diagnostics_ = false;
+  bool sparseTiling_ = false;
   std::vector<FilterContentBounds> filterBounds_;
   bool filterBoundsEnabled_ = true;
   std::uint32_t program_ = 0;

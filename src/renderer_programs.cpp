@@ -95,6 +95,10 @@ Renderer::Renderer(int width, int height, ImageStore& images)
   nearestTileShader_ = !(nearestTile && std::string(nearestTile) == "0");
   const char* diagnostics = std::getenv("PMJS_GRAPHICS_DIAGNOSTICS");
   diagnostics_ = diagnostics && std::string(diagnostics) == "1";
+  const char* sparseTiling = std::getenv("PMJS_SPARSE_TILING");
+  if (sparseTiling && std::string(sparseTiling) != "0" && std::string(sparseTiling) != "1")
+    throw std::runtime_error("PMJS_SPARSE_TILING must be 0 or 1");
+  sparseTiling_ = sparseTiling && std::string(sparseTiling) == "1";
   const char* filterBounds = std::getenv("PMJS_FILTER_BOUNDS");
   filterBoundsEnabled_ = !(filterBounds && std::string(filterBounds) == "0");
   presentation_.scaleMode = presentScaleModeFromEnvironment();

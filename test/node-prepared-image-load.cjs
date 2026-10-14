@@ -116,10 +116,14 @@ async function main() {
   assert.equal(left.handle, right.handle);
   assert.notEqual(left, right);
   assert.equal(entry(left).references, 2);
-  assert.equal(entry(left).cpuBytes, 0, 'validation retained decoded pages');
+  assert.equal(entry(left).cpuBytes, 6 * 6 * 4, 'validation lost its reusable decoded page');
   assert.equal(entry(left).gpuBytes, 0, 'validation allocated GPU backing');
+  assert.equal(native.images.memory().preparedPageDecodes - before.preparedPageDecodes, 1,
+    'coalesced validation decoded a page more than once');
   native.images.release(left.handle);
   assertPixels(right, lazy.pixels);
+  assert.equal(native.images.memory().preparedPageDecodes - before.preparedPageDecodes, 1,
+    'first Canvas read decoded the validated page again');
   assert.equal(entry(right).references, 1);
   native.images.release(right.handle);
   const replacement = await native.images.loadAsync(lazy.source);
@@ -129,6 +133,7 @@ async function main() {
   for (const lateRequest of [false, true]) {
     const retained = retainedFixtures[Number(lateRequest)];
     install(retained);
+    const decodes = native.images.memory().preparedPageDecodes;
     let owner, cpuOwner;
     await withBlockedWorker(async () => {
       owner = native.images.loadAsync(retained.source, !lateRequest);
@@ -141,6 +146,8 @@ async function main() {
     assert.equal(a.handle, b.handle);
     assert.equal(entry(a).cpuBytes, retained.pixels.length);
     assert.equal(entry(a).gpuBytes, 0);
+    assert.equal(native.images.memory().preparedPageDecodes - decodes, 1,
+      'explicit CPU reconstruction repeated the validation decode');
     for (let frame = 0; frame < 61; ++frame) native.beginFrame();
     assert.equal(entry(a).cpuBytes, retained.pixels.length, 'explicit CPU retention expired');
     assertPixels(a, retained.pixels);
@@ -149,14 +156,14 @@ async function main() {
 
   install(cached);
   const original = await native.images.loadAsync(cached.source);
-  assert.equal(entry(original).cpuBytes, 0);
+  assert.equal(entry(original).cpuBytes, 6 * 6 * 4);
   native.assets.installPrepared([]);
   fs.rmSync(cached.directory, { recursive: true });
   let cpuRequest;
   await withBlockedWorker(async () => {
     cpuRequest = native.images.loadAsync(cached.source, true);
     await remainsPending(cpuRequest);
-    assert.equal(entry(original).cpuBytes, 0);
+    assert.equal(entry(original).cpuBytes, 6 * 6 * 4);
   });
   const cpu = await cpuRequest;
   assert.equal(cpu.handle, original.handle);
