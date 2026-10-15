@@ -1,5 +1,6 @@
 #include "node_addon_internal.hpp"
 #include <cmath>
+#include <span>
 
 namespace pmjs::addon {
 namespace {
@@ -137,23 +138,41 @@ void executeImageMemoryLoad(napi_env, void* opaque) noexcept {
   }
 }
 
-void completeImageMemoryLoad(napi_env env, napi_status status, void* opaque) {
-  std::unique_ptr<AsyncImageMemoryLoad> load(static_cast<AsyncImageMemoryLoad*>(opaque));
-  napi_value result;
-  if (status == napi_ok && load->pixels) {
-    auto installed = state->images.installDecodedMemory(
-      std::move(*load->pixels), load->retainCpuPixels);
-    if (installed) {
-      napi_resolve_deferred(env, load->deferred,
-        imageInfo(env, installed->handle, installed->width, installed->height));
-      napi_delete_async_work(env, load->work);
-      return;
-    }
+void rejectImageLoads(napi_env env, std::span<const napi_deferred> deferreds,
+                      const char* message) noexcept {
+  napi_value error = nullptr;
+  bool pending = false;
+  napi_is_exception_pending(env, &pending);
+  if (pending) napi_get_and_clear_last_exception(env, &error);
+  if (!error) {
+    napi_value text;
+    if (napi_create_string_utf8(env, message, NAPI_AUTO_LENGTH, &text) == napi_ok)
+      napi_create_error(env, nullptr, text, &error);
   }
-  napi_value message;
-  napi_create_string_utf8(env, "cannot decode image bytes", NAPI_AUTO_LENGTH, &message);
-  napi_create_error(env, nullptr, message, &result);
-  napi_reject_deferred(env, load->deferred, result);
+  if (!error) napi_get_undefined(env, &error);
+  for (const auto deferred : deferreds) napi_reject_deferred(env, deferred, error);
+}
+
+void completeImageMemoryLoad(napi_env env, napi_status status, void* opaque) noexcept {
+  std::unique_ptr<AsyncImageMemoryLoad> load(static_cast<AsyncImageMemoryLoad*>(opaque));
+  const auto owner = state;
+  pmjs::ImageHandle installedHandle = 0;
+  try {
+    if (status != napi_ok || !load->pixels || !owner)
+      throw std::runtime_error("cannot decode image bytes");
+    auto installed = owner->images.installDecodedMemory(
+      std::move(*load->pixels), load->retainCpuPixels);
+    if (!installed) throw std::runtime_error("cannot install image bytes");
+    installedHandle = installed->handle;
+    const auto result = imageInfo(env, installed->handle, installed->width, installed->height);
+    check(env, napi_resolve_deferred(env, load->deferred, result), "cannot resolve image bytes");
+    installedHandle = 0;
+  } catch (const std::exception& error) {
+    rejectImageLoads(env, {&load->deferred, 1}, error.what());
+  } catch (...) {
+    rejectImageLoads(env, {&load->deferred, 1}, "image byte installation failed");
+  }
+  if (installedHandle) owner->images.release(installedHandle);
   napi_delete_async_work(env, load->work);
 }
 
@@ -201,70 +220,58 @@ void executeImageLoad(napi_env, void* opaque) noexcept {
   }
 }
 
-void completeImageLoad(napi_env env, napi_status status, void* opaque) {
+void completeImageLoad(napi_env env, napi_status status, void* opaque) noexcept {
   std::unique_ptr<AsyncImageLoad> load(static_cast<AsyncImageLoad*>(opaque));
-  napi_delete_async_work(env, load->work);
-  load->work = nullptr;
-  // A caller may request CPU pixels after validation has already finished.
-  if (status == napi_ok && load->prepared && load->retainCpuPixels && !load->prepareCpuPixels) {
-    load->prepareCpuPixels = true;
-    if (queueImageWork(env, *load) == napi_ok) {
-      load.release();
-      return;
-    }
-    status = napi_generic_failure;
-  }
-  if (state) {
-    state->pendingImageLoads.erase(load->key);
-    if (load->tileValidationFailed) state->images.noteTileLoadFallback();
-  }
-  napi_value result;
-  if (status == napi_ok && (load->prepared || load->pixels)) {
-    const bool preparedAttempt = static_cast<bool>(load->prepared);
-    auto installed = load->prepared ? state->images.installPreparedLoad(
-      *load->source, std::move(load->prepared), load->retainCpuPixels) :
-      state->images.installDecoded(*load->source, std::move(*load->pixels), load->retainCpuPixels);
-    if (!installed && preparedAttempt) {
-      // No logical view was published. Decode the captured ordinary source on
-      // the worker, retaining every pending caller and leaving existing owners valid.
-      load->prepared.reset();
-      state->pendingImageLoads[load->key] = load.get();
+  const auto owner = state;
+  pmjs::ImageHandle installedHandle = 0;
+  std::size_t ownerships = 0;
+  try {
+    napi_delete_async_work(env, load->work);
+    load->work = nullptr;
+    if (!owner) throw std::runtime_error("image runtime is unavailable");
+    // A caller may request CPU pixels after validation has already finished.
+    if (status == napi_ok && load->prepared && load->retainCpuPixels && !load->prepareCpuPixels) {
+      load->prepareCpuPixels = true;
       if (queueImageWork(env, *load) == napi_ok) { load.release(); return; }
-      state->pendingImageLoads.erase(load->key);
+      status = napi_generic_failure;
     }
-    if (installed) {
-      bool retained = true;
-      std::size_t ownerships = 1;
-      for (std::size_t index = 1; index < load->deferreds.size(); ++index) {
-        if (!state->images.retain(installed->handle)) {
-          retained = false;
-          break;
-        }
+    if (load->tileValidationFailed) owner->images.noteTileLoadFallback();
+    if (status != napi_ok || (!load->prepared && !load->pixels))
+      throw std::runtime_error("cannot load image");
+    const bool preparedAttempt = static_cast<bool>(load->prepared);
+    auto installed = load->prepared ? owner->images.installPreparedLoad(
+      *load->source, std::move(load->prepared), load->retainCpuPixels) :
+      owner->images.installDecoded(*load->source, std::move(*load->pixels), load->retainCpuPixels);
+    if (!installed && preparedAttempt) {
+      // No view was published; retry the captured ordinary source for all callers.
+      load->prepared.reset();
+      if (queueImageWork(env, *load) == napi_ok) { load.release(); return; }
+    }
+    if (!installed) throw std::runtime_error("cannot install image");
+    installedHandle = installed->handle;
+    ownerships = 1;
+    std::vector<napi_value> results;
+    results.reserve(load->deferreds.size());
+    // Finish every allocation before publishing any coalesced ownership.
+    for (std::size_t i = 0; i < load->deferreds.size(); ++i) {
+      results.push_back(imageInfo(env, installed->handle, installed->width, installed->height));
+      if (i) {
+        if (!owner->images.retain(installed->handle)) throw std::runtime_error("cannot retain image");
         ++ownerships;
       }
-      if (retained) {
-        for (const auto deferred : load->deferreds) {
-          // Each retained native ownership needs its own JS wrapper. Sharing a
-          // wrapper also shares its FinalizationRegistry unregister token, so
-          // one explicit release can otherwise orphan the other ownerships.
-          napi_resolve_deferred(env, deferred,
-            imageInfo(env, installed->handle, installed->width,
-                      installed->height));
-        }
-        return;
-      }
-      while (ownerships > 0) {
-        --ownerships;
-        state->images.release(installed->handle);
-      }
     }
+    for (std::size_t i = 0; i < load->deferreds.size(); ++i) {
+      check(env, napi_resolve_deferred(env, load->deferreds[i], results[i]), "cannot resolve image");
+      --ownerships;
+    }
+  } catch (const std::exception& error) {
+    rejectImageLoads(env, load->deferreds, error.what());
+  } catch (...) {
+    rejectImageLoads(env, load->deferreds, "image installation failed");
   }
-  napi_value message;
-  napi_create_string_utf8(env, "cannot load image", NAPI_AUTO_LENGTH, &message);
-  napi_create_error(env, nullptr, message, &result);
-  for (const auto deferred : load->deferreds) {
-    napi_reject_deferred(env, deferred, result);
-  }
+  while (ownerships) { --ownerships; owner->images.release(installedHandle); }
+  if (owner) owner->pendingImageLoads.erase(load->key);
+  if (load->work) napi_delete_async_work(env, load->work);
 }
 
 napi_status queueImageWork(napi_env env, AsyncImageLoad& load) {

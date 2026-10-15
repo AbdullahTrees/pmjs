@@ -50,6 +50,63 @@ function settle() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+test('empty images are complete and clearing a pending source cancels its events', async () => {
+  const released = [], events = [];
+  let resolveLoad;
+  const context = imageContext(null, () => new Promise(resolve => { resolveLoad = resolve; }));
+  context.NativeHost.images.release = handle => released.push(handle);
+  const image = new context.Image();
+  assert.equal(image.complete, true);
+  assert.equal(image.naturalWidth, 0);
+  image.onload = () => events.push('load');
+  image.onerror = () => events.push('error');
+  image.src = 'pending.png';
+  await context.PMJS.tasks.idle();
+  assert.equal(image.complete, false);
+  image.src = '';
+  assert.equal(image.complete, true);
+  assert.equal(image.naturalWidth, 0);
+  assert.equal(image._nativeImage, null);
+  resolveLoad({ handle: 71, width: 2, height: 2 });
+  await settle();
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(events, []);
+  assert.deepEqual(released, [71]);
+  assert.equal(context.PMJS.images.pendingLoads, 0);
+});
+
+test('malformed URL encodings report asynchronous errors and replacement suppresses stale errors', async () => {
+  const paths = [], events = [];
+  const context = imageContext(null, path => {
+    paths.push(path);
+    return Promise.resolve({ handle: 72, width: 2, height: 2 });
+  });
+  const image = new context.Image();
+  image.onerror = event => events.push(event.type);
+  image.onload = event => events.push(event.type);
+  assert.doesNotThrow(() => { image.src = 'img/Sprite%FF.png'; });
+  assert.equal(image.complete, false);
+  assert.deepEqual(events, []);
+  await context.PMJS.tasks.idle();
+  await settle();
+  assert.equal(image.complete, true);
+  assert.equal(image.naturalWidth, 0);
+  assert.equal(image._pmjsLoadError.name, 'URIError');
+  assert.deepEqual(events, ['error']);
+  assert.deepEqual(paths, []);
+  image.src = 'bad%FF.png';
+  image.src = 'img/100%2520.png';
+  await context.PMJS.tasks.idle();
+  await settle();
+  assert.deepEqual(events, ['error', 'load']);
+  assert.deepEqual(paths, ['img/100%20.png']);
+  assert.equal(image.complete, true);
+  assert.equal(image._pmjsLoadFailed, false);
+  image.src = '';
+  assert.equal(image.complete, true);
+  assert.equal(context.PMJS.images.pendingLoads, 0);
+});
+
 test('object URLs retain blobs until revoked', async () => {
   const context = { Blob, URL: function URL() {} };
   vm.createContext(context);

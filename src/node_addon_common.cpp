@@ -166,9 +166,9 @@ void syncExternalMemory(napi_env env) {
 napi_value imageInfo(napi_env env, std::uint32_t handle, int width, int height) {
   napi_value result;
   check(env, napi_create_object(env, &result), "cannot create image result");
-  napi_set_named_property(env, result, "handle", uint32(env, handle));
-  napi_set_named_property(env, result, "width", number(env, width));
-  napi_set_named_property(env, result, "height", number(env, height));
+  check(env, napi_set_named_property(env, result, "handle", uint32(env, handle)), "cannot set image handle");
+  check(env, napi_set_named_property(env, result, "width", number(env, width)), "cannot set image width");
+  check(env, napi_set_named_property(env, result, "height", number(env, height)), "cannot set image height");
   return result;
 }
 

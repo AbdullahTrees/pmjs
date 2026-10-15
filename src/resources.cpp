@@ -678,14 +678,19 @@ std::optional<ImageInfo> ImageStore::installDecoded(
   auto created = createDecoded(pixels);
   if (!created) return std::nullopt;
   const std::size_t index = (created->handle & indexMask) - 1U;
-  slots_[index].cacheKey = cacheKey;
-  slots_[index].sourcePath = source.path();
-  slots_[index].retainCpuPixels = retainCpuPixels;
-  if (retainCpuPixels) {
-    slots_[index].cachedPixels = std::move(pixels);
-    slots_[index].cpuPixelFrames = 0;
+  try {
+    slots_[index].cacheKey = cacheKey;
+    slots_[index].sourcePath = source.path();
+    slots_[index].retainCpuPixels = retainCpuPixels;
+    if (retainCpuPixels) {
+      slots_[index].cachedPixels = std::move(pixels);
+      slots_[index].cpuPixelFrames = 0;
+    }
+    pathCache_.emplace(cacheKey, created->handle);
+  } catch (...) {
+    destroySlot(index);
+    throw;
   }
-  pathCache_.emplace(cacheKey, created->handle);
   return created;
 }
 
@@ -779,6 +784,13 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
     const void* pixels, bool premultiplied, int channels) {
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
+  std::size_t index = 0;
+  while (index < slots_.size() && slots_[index].live) ++index;
+  if (index >= indexMask) return std::nullopt;
+  if (index == slots_.size()) slots_.emplace_back();
+  auto sparseRegions = sparseTiling_ && pixels
+    ? sparseImageRegions(pixels, width, height, premultiplied)
+    : decltype(slots_[index].sparseRegions){};
   const auto texture = uploadTexture(width, height, pixels, channels);
   if (!texture) return std::nullopt;
   ++textureCreates_;
@@ -788,13 +800,6 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
         static_cast<std::uint64_t>(height) * channels;
   }
 
-  std::size_t index = 0;
-  while (index < slots_.size() && slots_[index].live) ++index;
-  if (index >= indexMask) {
-    glDeleteTextures(1, &texture);
-    return std::nullopt;
-  }
-  if (index == slots_.size()) slots_.emplace_back();
   auto& slot = slots_[index];
   ++slot.contentRevision;
   slot.texture = texture;
@@ -816,7 +821,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   slot.cachedPixels.reset();
   slot.sparseRegions.reset();
   slot.sparseRevision = slot.contentRevision;
-  if (sparseTiling_ && pixels) slot.sparseRegions = sparseImageRegions(pixels, width, height, premultiplied);
+  slot.sparseRegions = std::move(sparseRegions);
   slot.gpuOnly = pixels == nullptr;
   slot.renderTarget = false;
   slot.premultiplied = premultiplied;
@@ -1668,6 +1673,8 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
     } else if (retainCpu) retainCpuPixels(cached->handle);
     return cached;
   }
+  auto cacheKey = source.key();
+  auto sourcePath = source.path();
   auto backing = std::move(load->backing);
   const auto& descriptor = backing->descriptor;
   backing->cellImages.assign(backing->descriptor.cells.size() + 1, 0);
@@ -1682,7 +1689,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
   ++slot.contentRevision;
   slot.texture = slot.premultipliedTexture = 0;
   slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
-  slot.cacheKey = source.key(); slot.sourcePath = source.path();
+  slot.cacheKey = std::move(cacheKey); slot.sourcePath = std::move(sourcePath);
   slot.gpuOnly = slot.renderTarget = slot.premultiplied = false;
   slot.knownAllZero = descriptor.uniform ?
       std::all_of(descriptor.uniform->begin(), descriptor.uniform->end(),
@@ -1697,8 +1704,13 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
   slot.mipmapBytes = slot.premultipliedMipmapBytes = 0;
   slot.live = true; markUsed(slot); ++liveCount_; ++preparedHits_;
   const auto handle = makeHandle(index, slot.generation);
-  pathCache_[source.key()] = handle;
-  trimPreparedPages();
+  try {
+    pathCache_.emplace(slot.cacheKey, handle);
+    trimPreparedPages();
+  } catch (...) {
+    destroySlot(index);
+    throw;
+  }
   return inspect(handle);
 }
 

@@ -5,7 +5,7 @@ function NativeImage() {
   this.height = 0;
   this.naturalWidth = 0;
   this.naturalHeight = 0;
-  this.complete = false;
+  this.complete = true;
   this._src = '';
   this._nativeImage = null;
   this._nativeCanvas = null;
@@ -38,24 +38,20 @@ Object.defineProperty(NativeImage.prototype, 'src', {
     this._src = String(url);
     var source = this._src;
     var generation = ++this._loadGeneration;
+    this._pmjsLoadFailed = false;
+    this._pmjsLoadError = null;
     if (!this._src) {
       releaseNativeResource(this._nativeImage, 'image');
       this._nativeImage = null;
       this.width = this.height = this.naturalWidth = this.naturalHeight = 0;
-      this.complete = false;
+      this.complete = true;
       return;
     }
     var objectUrl = typeof globalThis.pmjsIsObjectURL === 'function' &&
       globalThis.pmjsIsObjectURL(source);
-    var encodedPath = source.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
-    var path = decodeURIComponent(encodedPath)
-      .replace(/^file:\/\/\/game\//, '')
-      .replace(/^\.\//, '');
     var image = this;
     var preparedTileSet = this._pmjsPreparedTileSet;
     image.complete = false;
-    image._pmjsLoadFailed = false;
-    image._pmjsLoadError = null;
     PMJS.tasks.enqueue(function() {
       if (generation !== image._loadGeneration) return;
       pendingNativeImageLoads++;
@@ -70,6 +66,10 @@ Object.defineProperty(NativeImage.prototype, 'src', {
             return NativeHost.images.loadBytesAsync(buffer, PMJS.images.shouldRetainPixels(source));
           });
         }
+        var encodedPath = source.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
+        var path = decodeURIComponent(encodedPath)
+          .replace(/^file:\/\/\/game\//, '')
+          .replace(/^\.\//, '');
         var prefix = 'generated-assets:/';
         var generated = path.indexOf(prefix) === 0;
         var loader = generated ? NativeHost.assets : NativeHost.images;
