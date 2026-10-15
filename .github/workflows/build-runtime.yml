@@ -115,7 +115,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ needs.build.outputs.build-id }}
         run: |
-          release_url=$(gh release create "$BUILD_ID" dist/* \
+          release_url=$(gh release create "$BUILD_ID" \
+            dist/pmjs-linux-arm64-development.tar.gz \
+            dist/pmjs-linux-arm64-development.tar.gz.sha256 \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "PMJS $BUILD_ID" \
             --notes "" --prerelease --latest=false)
