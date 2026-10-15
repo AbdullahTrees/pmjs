@@ -5,6 +5,13 @@ const path = require('node:path');
 const test = require('node:test');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
+test('Skia source downloads verify contents independently of generated archive timestamps', () => {
+  const result = spawnSync('python3', [path.resolve(__dirname, '../tools/skia65/provision_test.py')], {
+    encoding: 'utf8', env: { ...process.env, TMPDIR: temporaryDirectory('pmjs-skia-provision-') }
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('Skia raster cache preserves pinned sources and archive integrity', () => {
   const result = spawnSync('python3', [path.resolve(__dirname, '../tools/skia65/build_test.py')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stdout + result.stderr);

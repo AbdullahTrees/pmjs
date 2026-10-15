@@ -14,13 +14,13 @@
     {
       "name": "freetype",
       "url": "https://chromium.googlesource.com/chromium/src/third_party/freetype2/+archive/707cd028b2b419a5491d444b128d8092afd9f201.tar.gz",
-      "sha256": "e413fef8059ef2c295dc28063d8b7bd4ddef600f21c629a6faa7f8d89b23f8ee",
+      "contentSha256": "942222612bdf8700e3595483c0fd3f4e2567d91f3b78d2eb61e2f7b7d2a0c322",
       "strip": 0
     },
     {
       "name": "icu",
       "url": "https://chromium.googlesource.com/chromium/deps/icu/+archive/c8ca2962b46670ec89071ffd1291688983cd319c.tar.gz",
-      "sha256": "87d42c43db3fade0154ccb11f9e69f2911e92bc6fd0763ee53c0d18a0c0084cd",
+      "contentSha256": "d26d40b00e9617f6d4882ed5970455194c6b6b8c578f5d93e59831570210f3ef",
       "strip": 0
     }
   ],

@@ -17,6 +17,25 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def archive_digest(path):
+    # Gitiles generates fresh PAX timestamps for each download of the same commit.
+    # Pin the complete source tree without those generated archive attributes.
+    records = {}
+    with tarfile.open(path) as source:
+        for member in source:
+            if member.name in records:
+                raise RuntimeError(f"Duplicate source archive entry: {member.name}")
+            if member.isfile():
+                with source.extractfile(member) as payload:
+                    content = hashlib.file_digest(payload, "sha256").hexdigest()
+                records[member.name] = ["file", member.mode, content]
+            elif member.isdir():
+                records[member.name] = ["directory", member.mode]
+            else:
+                raise RuntimeError(f"Unsupported source archive entry: {member.name}")
+    return hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def extract_member(source, member, destination):
     # Verify extracted bytes against the archive on every invocation, while
     # preserving mtimes for unchanged compiler inputs. GN adaptations are
@@ -32,10 +51,11 @@ def extract_member(source, member, destination):
     source.extract(member, destination, filter="data")
 
 
-def download(url, destination, checksum):
+def download(url, destination, checksum, *, archive_contents=False):
+    checksum_of = archive_digest if archive_contents else digest
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
-        if digest(destination) != checksum:
+        if checksum_of(destination) != checksum:
             raise RuntimeError(f"Checksum mismatch in cached input: {destination}")
         return
     temporary = destination.with_suffix(destination.suffix + ".download")
@@ -43,7 +63,7 @@ def download(url, destination, checksum):
         request = urllib.request.Request(url, headers={"User-Agent": "pmjs-skia65"})
         with urllib.request.urlopen(request, timeout=60) as source, temporary.open("wb") as output:
             shutil.copyfileobj(source, output)
-        if digest(temporary) != checksum:
+        if checksum_of(temporary) != checksum:
             raise RuntimeError(f"Checksum mismatch downloading {url}")
         temporary.replace(destination)
     finally:
@@ -56,7 +76,10 @@ def provision(cache):
     # Always compare with verified archives, including existing source trees.
     for archive in lock["archives"]:
         filename = cache / (archive["name"] + ".tar.gz")
-        download(archive["url"], filename, archive["sha256"])
+        if "contentSha256" in archive:
+            download(archive["url"], filename, archive["contentSha256"], archive_contents=True)
+        else:
+            download(archive["url"], filename, archive["sha256"])
         with tarfile.open(filename) as source:
             for member in source.getmembers():
                 parts = pathlib.PurePosixPath(member.name).parts[archive["strip"]:]
