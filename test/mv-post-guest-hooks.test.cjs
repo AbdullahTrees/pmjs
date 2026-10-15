@@ -211,33 +211,6 @@ test('engine leaves guest WindowLayer initialize and filters untouched', () => {
     [{ guest: true }]);
 });
 
-test('trace _executeTint observes without replacing guest behavior', () => {
-  function Sprite() {}
-  Sprite.prototype._executeTint = function() { this.tinted = true; return 'guest'; };
-  const events = [];
-  const ctx = loadPmjsRuntime({
-    Sprite,
-    Graphics: {},
-    Utils: { isOptionValid() { return false; } },
-    PIXI: {},
-    __pmjsTrace: {
-      active: () => true,
-      revision: () => ({ id: 1 }),
-      id: () => 7,
-      event: (kind, name) => events.push([kind, name]),
-    },
-  });
-  const source = fs.readFileSync(path.join(root, 'js/pmjs-mv/renderer.js'), 'utf8');
-  vm.runInContext(source, ctx, { filename: 'js/pmjs-mv/renderer.js' });
-  ctx.PMJS.methods.install();
-
-  const sprite = new Sprite();
-  sprite._canvas = {};
-  sprite._bitmap = { baseTexture: { source: {} } };
-  assert.equal(sprite._executeTint(1, 2, 3, 4), 'guest');
-  assert.equal(sprite.tinted, true);
-  assert.deepEqual(events, [['tint', 'mv.cpu-tint-complete']]);
-});
 
 test('recognized MV decryptor uses prepared images and falls back on cache errors', () => {
   const { decryptImg } = require('./helpers/mv-reviewed-methods.cjs');

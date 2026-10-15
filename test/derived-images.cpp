@@ -49,15 +49,132 @@ std::vector<std::uint8_t> readGpu(const pmjs::ImageInfo& image, int x=0, int y=0
   require(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE, "GPU fixture framebuffer failed");
   glReadPixels(x,y,width,height,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data());
   glBindFramebuffer(GL_FRAMEBUFFER,0); glDeleteFramebuffers(1,&framebuffer);
+  // Framebuffer readback does not apply texture swizzles.
+  glBindTexture(GL_TEXTURE_2D,image.texture);
+  const std::array<GLenum,4> parameters{GL_TEXTURE_SWIZZLE_R,GL_TEXTURE_SWIZZLE_G,
+                                      GL_TEXTURE_SWIZZLE_B,GL_TEXTURE_SWIZZLE_A};
+  std::array<GLint,4> swizzles{};
+  for(std::size_t c=0;c<4;++c) glGetTexParameteriv(GL_TEXTURE_2D,parameters[c],&swizzles[c]);
+  for(std::size_t i=0;i<rgba.size();i+=4) {
+    const std::array<std::uint8_t,4> stored{rgba[i],rgba[i+1],rgba[i+2],rgba[i+3]};
+    for(std::size_t c=0;c<4;++c) {
+      const auto swizzle=swizzles[c];
+      rgba[i+c]=swizzle==GL_ONE ? 255 : swizzle==GL_ZERO ? 0 :
+        stored[swizzle==GL_RED ? 0 : swizzle==GL_GREEN ? 1 : swizzle==GL_BLUE ? 2 : 3];
+    }
+  }
   return rgba;
 }
 }
 int main() {
   pmjs::Platform platform(16,16,"Derived logical images");
-  char temporary[] = "/tmp/pmjs-derived-images-XXXXXX";
-  const auto* directory = mkdtemp(temporary);
+  const auto temporaryRoot = std::filesystem::current_path()/".cache/tests";
+  std::filesystem::create_directories(temporaryRoot);
+  const auto pattern = (temporaryRoot/"derived-images-XXXXXX").string();
+  std::vector<char> temporary(pattern.begin(), pattern.end());
+  temporary.push_back('\0');
+  const auto* directory = mkdtemp(temporary.data());
   require(directory,"temporary fixture failed");
   const std::filesystem::path root(directory);
+  for (const bool opaque : {false, true}) {
+    pmjs::ImageStore images;
+    std::vector<std::uint8_t> original(8*4*4),page(10*6*4);
+    for(int y=0;y<4;++y) for(int x=0;x<8;++x) {
+      auto* pixel=original.data()+static_cast<std::size_t>(y*8+x)*4;
+      pixel[0]=pixel[1]=pixel[2]=x*23+y*13;
+      pixel[3]=opaque || x%3==0 ? 255 : x%3==1 ? 157 : 0;
+    }
+    for(int y=0;y<6;++y) for(int x=0;x<10;++x)
+      std::copy_n(original.data()+(static_cast<std::size_t>(std::clamp(y-1,0,3))*8+
+                  std::clamp(x-1,0,7))*4,4,page.data()+static_cast<std::size_t>(y*10+x)*4);
+    write(root/"opaque-gray.png",8,4,original); write(root/"opaque-gray-page.png",10,6,page);
+    pmjs::PreparedImageDescriptor descriptor;
+    descriptor.width=8; descriptor.height=4;
+    descriptor.pages={{"opaque-gray-page.png",10,6}};
+    descriptor.cells={{{0,0,8,4},{0,0,8,4},{1,1,8,4},{0,0,0,0},0}};
+    require(images.installPrepared(root/"opaque-gray.png",root,descriptor),"opaque preparation failed");
+    const auto image=images.loadPng(root/"opaque-gray.png");
+    require(image.has_value(),"opaque image load failed");
+    for(const bool premultiplied:{false,true}) {
+      const auto region=images.resolveSpriteRegion(image->handle,0,0,8,4,premultiplied);
+      auto expected=page;
+      if (premultiplied) for (std::size_t i=0;i<expected.size();i+=4)
+        for(int channel=0;channel<3;++channel)
+          expected[i+channel]=(expected[i+channel]*expected[i+3]+127)/255;
+      require(region && readGpu(region->image)==expected,"grayscale prepared page changed RGBA bytes");
+    }
+    require(images.gpuBytes()==2*10*6*(opaque ? 1 : 2),"grayscale page lost compact backing");
+    require(images.readPixelsRegion(image->handle,0,0,8,4)->rgba==original,
+            "premultiplied page upload modified retained straight pixels");
+    const auto full=images.lookupPremultiplied(image->handle);
+    auto expected=original;
+    for(std::size_t i=0;i<expected.size();i+=4) for(int channel=0;channel<3;++channel)
+      expected[i+channel]=(expected[i+channel]*expected[i+3]+127)/255;
+    require(full && readGpu(*full)==expected,"grayscale full backing changed premultiplied RGBA bytes");
+    require(images.readPixelsRegion(image->handle,0,0,8,4)->rgba==original,
+            "full upload modified retained straight pixels");
+    images.release(image->handle); images.setWarmBudgetBytes(0); images.update();
+    require(images.gpuBytes()==0 && images.cpuBytes()==0,"opaque backing outlived its owner");
+  }
+  {
+    pmjs::ImageStore images;
+    pmjs::PreparedImageDescriptor descriptor;
+    descriptor.width=16; descriptor.height=9;
+    descriptor.pages={{"rectangles-0.png",5,5},{"rectangles-1.png",5,5}};
+    descriptor.cells={
+      {{0,0,8,5},{2,1,3,3},{1,1,3,3},{37,73,109,0},0},
+      {{8,0,8,5},{0,0,3,3},{1,1,3,3},{19,43,67,117},1},
+      {{0,5,8,4},{0,0,0,0},{0,0,0,0},{0,0,0,0},-1},
+      {{8,5,8,4},{3,1,3,2},{1,1,3,2},{11,23,47,255},0}};
+    std::array<std::vector<std::uint8_t>,2> pages;
+    for (std::size_t index=0;index<pages.size();++index) {
+      auto& page=pages[index]; page.resize(5*5*4);
+      for(int y=0;y<5;++y) for(int x=0;x<5;++x) {
+        const auto offset=static_cast<std::size_t>(y*5+x)*4;
+        page[offset]=x*31+index*17; page[offset+1]=y*43;
+        page[offset+2]=(x+y)*19; page[offset+3]=(x+y)%3 ? 157 : 0;
+      }
+      write(root/descriptor.pages[index].path,5,5,page);
+    }
+    std::vector<std::uint8_t> original(16*9*4);
+    for(const auto& cell:descriptor.cells) {
+      for(int y=0;y<cell.rect[3];++y) for(int x=0;x<cell.rect[2];++x) {
+        auto* destination=original.data()+
+            (static_cast<std::size_t>(cell.rect[1]+y)*16+cell.rect[0]+x)*4;
+        const int cx=x-cell.crop[0],cy=y-cell.crop[1];
+        if(cx>=0 && cy>=0 && cx<cell.crop[2] && cy<cell.crop[3]) {
+          const auto offset=(static_cast<std::size_t>(cell.atlas[1]+cy)*5+cell.atlas[0]+cx)*4;
+          std::copy_n(pages[cell.page].data()+offset,4,destination);
+        } else std::copy(cell.fill.begin(),cell.fill.end(),destination);
+      }
+    }
+    write(root/"rectangles.png",16,9,original);
+    require(images.installPrepared(root/"rectangles.png",root,descriptor),"rectangle preparation failed");
+    auto image=images.loadPng(root/"rectangles.png");
+    require(image && images.hasPreparedBacking(image->handle),"rectangle image lost preparation");
+    for(int y=0;y<9;++y) for(int x=0;x<16;++x)
+      for(int height=1;height<=9-y;++height) for(int width=1;width<=16-x;++width) {
+        const auto region=images.readPixelsRegion(image->handle,x,y,width,height);
+        require(region.has_value(),"bounded rectangle read failed");
+        for(int row=0;row<height;++row) {
+          const auto* expected=original.data()+(static_cast<std::size_t>(y+row)*16+x)*4;
+          require(std::equal(expected,expected+width*4,
+              region->rgba.data()+static_cast<std::size_t>(row)*width*4),
+              "rectangle read changed cropped, empty, shared or hidden RGBA pixels");
+        }
+      }
+    require(images.inspect(image->handle)->texture==0,"CPU rectangle reads realized a texture");
+    const auto straight=images.lookup(image->handle);
+    require(straight && readGpu(*straight)==original,"rectangle full backing changed RGBA bytes");
+    auto expected=original;
+    for(std::size_t i=0;i<expected.size();i+=4) for(int c=0;c<3;++c)
+      expected[i+c]=(expected[i+c]*expected[i+3]+127)/255;
+    const auto premultiplied=images.lookupPremultiplied(image->handle);
+    require(premultiplied && readGpu(*premultiplied)==expected,"rectangle full backing changed premultiplication");
+    images.release(image->handle); images.setWarmBudgetBytes(0); images.update();
+    require(images.gpuBytes()==0 && images.cpuBytes()==0,"rectangle backing outlived its owner");
+    std::puts("[derived-images] 6120 bounded rectangle reads preserve exact RGBA");
+  }
   {
     pmjs::ImageStore images;
     std::vector<std::uint8_t> original(8*4*4);

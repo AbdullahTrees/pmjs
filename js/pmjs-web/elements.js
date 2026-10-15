@@ -57,19 +57,7 @@ CanvasElement.prototype.constructor = CanvasElement;
 CanvasElement.prototype._pmjsContentChanged = function() {
   this.__pmjsContentRevision++;
 };
-function isCanvasDiagnosticsEnabled() {
-  return typeof NativeHost !== 'undefined' &&
-    NativeHost.runtime &&
-    typeof NativeHost.runtime.env === 'function' &&
-    NativeHost.runtime.env('PMJS_CANVAS_DIAG') === '1';
-}
 
-function logCanvasCreation(width, height, url) {
-  var bytes = width * height * 4;
-  var tag = url ? (' url=' + url) : '';
-  console.log('[pmjs-canvas-diag] create ' + width + 'x' + height +
-    ' (' + (bytes / 1024).toFixed(1) + ' KB)' + tag);
-}
 
 CanvasElement.prototype._releaseNativeCanvas = function() {
   if (this._pmjsPrimitiveContent) this._pmjsPrimitiveContent.reset();
@@ -85,9 +73,6 @@ CanvasElement.prototype._ensureNativeCanvas = function() {
     this._nativeCanvas = trackNativeResource(
       NativeHost.canvas.create(width, height, !!(this._context2d && this._context2d._alpha === false)),
       'canvas');
-    if (isCanvasDiagnosticsEnabled()) {
-      logCanvasCreation(width, height, this._pmjsBitmapUrl);
-    }
   }
   return this._nativeCanvas;
 };

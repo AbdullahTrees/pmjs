@@ -279,10 +279,6 @@ function nativePlainSpriteBinding(node) {
 }
 
 function writeNativePlainSpriteSegment(bindings, parentIndex) {
-  if (nativeSceneSegmentTracing) {
-    nativeSceneSegmentStats.runs++;
-    nativeSceneSegmentStats.sprites += bindings.length;
-  }
   for (var bindingIndex = 0; bindingIndex < bindings.length; bindingIndex++) {
     var binding = bindings[bindingIndex];
     var node = binding.node;
@@ -384,9 +380,6 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     PMJS.compat.hit('render.blend-mode',
       (node.constructor && node.constructor.name || 'node') + ':blend=' + node.blendMode);
     blendMode = 0;
-  }
-  if (!particleContext && globalThis.__pmjsTrace && __pmjsTrace.active()) {
-    __pmjsTrace.count('writer_filter_state_reads', 1);
   }
   var nodeFilters = null;
   if (!particleContext) {
@@ -608,50 +601,6 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
       nativeSceneValues[valueOffset + 36] =
         Math.max(0, nativeSceneValues[valueOffset + 36]);
     }
-    if (globalThis.__pmjsTrace && __pmjsTrace.active()) {
-      var selectedResource = __pmjsTrace.revision(nativeImage,
-        source && source._nativeCanvas ? 'canvas' : 'image');
-      var owner = node.parent;
-      var owningWindow = null;
-      while (owner) {
-        var ownerName = owner.constructor && owner.constructor.name || '';
-        if (ownerName.indexOf('Window') >= 0) {
-          owningWindow = owner;
-          break;
-        }
-        owner = owner.parent;
-      }
-      __pmjsTrace.describe(node, 'scene', 'scene.object', {
-        objectId: __pmjsTrace.id(node, 'display-object'),
-        className: node.constructor && node.constructor.name || 'Object',
-        pluginName: node.pluginName || '',
-        pmjsType: node._pmjsType === undefined ? null : node._pmjsType,
-        parentId: __pmjsTrace.id(node.parent, 'display-object'),
-        parentClass: node.parent && node.parent.constructor &&
-          node.parent.constructor.name || '',
-        owningWindowId: __pmjsTrace.id(owningWindow, 'display-object'),
-        owningWindowClass: owningWindow && owningWindow.constructor &&
-          owningWindow.constructor.name || ''
-      });
-      __pmjsTrace.event('scene', 'scene.sprite-source', {
-        objectId: __pmjsTrace.id(node, 'display-object'),
-        packetRecord: nodeIndex, resourceHandle: resource,
-        resourceId: selectedResource.id,
-        resourceRevision: selectedResource.revision,
-        cpuTinted: !!cpuTinted,
-        shaderTint: !!(nativeSceneMetadata[
-          nodeIndex * nativeSceneMetadataStride + 5] & 16),
-        alpha: particleValues ? particleValues.alpha :
-          forcedAlpha === undefined ? node.alpha : forcedAlpha,
-        blendMode: blendMode,
-        transformA: local.a, transformB: local.b,
-        transformC: local.c, transformD: local.d,
-        transformX: local.tx, transformY: local.ty,
-        mask: !!nativeMask, activeFilters: enabledFilterCount,
-        frameX: frame.x, frameY: frame.y,
-        frameWidth: frame.width, frameHeight: frame.height
-      });
-    }
   } else if (kind === 8) {
     if (texture && texture.baseTexture && PIXI.SCALE_MODES &&
         texture.baseTexture.scaleMode === PIXI.SCALE_MODES.NEAREST) {
@@ -784,23 +733,14 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
         while (segmentIndex < childLimit &&
             nativeSceneTraversesChild(kind, node, node.children[segmentIndex])) {
           var binding = nativePlainSpriteBinding(node.children[segmentIndex]);
-          if (nativeSceneSegmentTracing) {
-            nativeSceneSegmentStats.bindingProbes++;
-            if (!binding) nativeSceneSegmentStats.rejectedProbes++;
-          }
           if (!binding) break;
           segment.push(binding);
           segmentIndex++;
         }
-        if (nativeSceneSegmentTracing) nativeSceneSegmentStats.candidates += segment.length;
         if (segment.length >= 4) {
           writeNativePlainSpriteSegment(segment, nodeIndex);
           index = segmentIndex - 1;
           continue;
-        }
-        if (nativeSceneSegmentTracing && segment.length) {
-          nativeSceneSegmentStats.abandonedRuns++;
-          nativeSceneSegmentStats.abandonedSprites += segment.length;
         }
       }
       if (particleFrame) particleFrame.childIndex = index;
@@ -852,14 +792,11 @@ function encodeNativeScene(stage, backgroundColor = null) {
   nativeCustomFilterPlans = [];
   resetNativeSceneRecords();
   nativeSceneFilterDepth = 0;
-  nativeSceneSegmentTracing = !!(globalThis.__pmjsTrace &&
-    __pmjsTrace.active());
   if (backgroundColor !== null) {
     nativeSceneRecord(0xffffffff, 3, 0, backgroundColor,
       0, nativeIdentityTransform, 1, null, 0, null);
   }
   writeNativeSceneNode(stage, 0xffffffff);
-  traceNativeScenePacket();
   return { version: nativeScenePacketVersion,
     metadata: nativeSceneMetadata, values: nativeSceneValues,
     count: nativeSceneCount, customFilterPlans: nativeCustomFilterPlans };
@@ -870,8 +807,6 @@ function submitNativeScene(stage, backgroundColor = null) {
   if (!NativeHost.scene) {
     throw new Error('native scene was not rendered: scene service unavailable');
   }
-  var submitStarted = globalThis.__pmjsTrace && __pmjsTrace.active() ?
-    performance.now() : 0;
   try {
     NativeHost.scene.submit(packet.version, packet.metadata,
       packet.values, packet.count);
@@ -891,10 +826,6 @@ function submitNativeScene(stage, backgroundColor = null) {
     console.error('[pmjs-scene] submit failed resources=' +
       JSON.stringify(resources) + ' videos=' + JSON.stringify(videos));
     throw error;
-  }
-  if (submitStarted) {
-    __pmjsTrace.duration('phase', 'scene.native-submit', submitStarted,
-      performance.now(), { records: nativeSceneCount });
   }
   return true;
 }

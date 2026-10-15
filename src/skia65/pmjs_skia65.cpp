@@ -261,7 +261,7 @@ Run layout(pmjs_skia65_font* font, const std::string& text, const pmjs_skia65_st
   const size_t bytes = shaped.glyphs.size() * 128 + text.size() + sizeof(pmjs_skia65_font::Layout) +
     sizeof(SkTextBlob) + 2 * sizeof(void*);
   if (bytes <= 64 * 1024) {
-    while (!font->layouts.empty() && (font->layouts.size() >= 16 || font->layoutBytes + bytes > 64 * 1024)) {
+    while (!font->layouts.empty() && (font->layouts.size() >= 64 || font->layoutBytes + bytes > 64 * 1024)) {
       font->layoutBytes -= font->layouts.back().bytes;
       font->layouts.pop_back();
     }

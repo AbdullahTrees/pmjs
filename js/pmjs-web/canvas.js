@@ -181,21 +181,13 @@ function canvasReferenceEngine() {
   return globalThis.PMJS_RUNTIME_ENGINE || (globalThis.PMJS_RUNTIME_GAME && PMJS_RUNTIME_GAME.engine);
 }
 
-function canvasSourcePixels(source, nativeSource, operationId, region) {
+function canvasSourcePixels(source, nativeSource, region) {
   var x = region ? region.x : 0;
   var y = region ? region.y : 0;
   var width = region ? region.width : source.width;
   var height = region ? region.height : source.height;
-  var trace = globalThis.__pmjsTrace;
-  var sourceResource = trace && trace.active() ?
-    trace.revision(nativeSource, source && source._nativeCanvas ? 'canvas' : 'image') : null;
   if (source && source._nativeCanvas) {
     var canvasPixels = NativeHost.canvas.readPremultipliedPixels(nativeSource.handle, x, y, width, height);
-    if (trace && trace.active()) trace.event('canvas', 'canvas.source-read', {
-      parentOperationId: operationId, sourceId: sourceResource.id,
-      sourceRevision: sourceResource.revision, x: x, y: y, width: width,
-      height: height, bytes: canvasPixels.length, temporary: false
-    });
     return canvasPixels;
   }
   var temporary = NativeHost.canvas.create(width, height);
@@ -203,12 +195,6 @@ function canvasSourcePixels(source, nativeSource, operationId, region) {
     NativeHost.canvas.drawImage(temporary.handle, nativeSource.handle,
       x, y, width, height, 0, 0, width, height, 1);
     var imagePixels = NativeHost.canvas.readPremultipliedPixels(temporary.handle, 0, 0, width, height);
-    if (trace && trace.active()) trace.event('canvas', 'canvas.source-read', {
-      parentOperationId: operationId, sourceId: sourceResource.id,
-      sourceRevision: sourceResource.revision, x: x, y: y, width: width,
-      height: height, bytes: imagePixels.length, temporary: true,
-      temporaryWidth: width, temporaryHeight: height
-    });
     return imagePixels;
   } finally {
     releaseNativeResource(temporary, 'canvas');
@@ -340,7 +326,7 @@ function canvasNativePaint(style, context) {
 }
 
 function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
-    dx, dy, dw, dh, operationId, paintStyle, smoothing) {
+    dx, dy, dw, dh, paintStyle, smoothing) {
   if (!sw || !sh || !dw || !dh || source.width <= 0 || source.height <= 0) return;
   var t = context._transform;
   var determinant = t[0] * t[3] - t[1] * t[2];
@@ -355,13 +341,6 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
     };
     if (paintStyle) descriptor.paint = canvasNativePaint(paintStyle, { _transform: context._paintTransform || t, imageSmoothingEnabled: context.imageSmoothingEnabled });
     NativeHost.canvas.drawAffineImage(target.handle, nativeSource.handle, descriptor);
-    if (globalThis.__pmjsTrace && __pmjsTrace.active()) {
-      var resource = __pmjsTrace.revision(target, 'canvas', true);
-      __pmjsTrace.event('canvas', 'canvas.affine-native-complete', {
-        parentOperationId: operationId, destinationId: resource.id,
-        destinationRevision: resource.revision
-      });
-    }
     return;
   }
   var corners = [[dx, dy], [dx + dw, dy], [dx + dw, dy + dh], [dx, dy + dh]];
@@ -388,7 +367,7 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
     smoothing ? Math.ceil(Math.max(sy, sy + sh) + 1) :
       Math.floor(Math.max(sy, sy + sh)) + 1));
   var sourceWidth = sourceRight - sourceLeft;
-  var sourcePixels = canvasSourcePixels(source, nativeSource, operationId, {
+  var sourcePixels = canvasSourcePixels(source, nativeSource, {
     x: sourceLeft, y: sourceTop, width: sourceWidth,
     height: sourceBottom - sourceTop
   });
@@ -448,15 +427,6 @@ function drawAffineImage(context, source, nativeSource, sx, sy, sw, sh,
   }
   NativeHost.canvas.compositePixels(destination.handle, left, top,
     right - left, bottom - top, paintPixels, clipMask, context.globalCompositeOperation, alpha);
-  if (globalThis.__pmjsTrace && __pmjsTrace.active()) {
-    var destinationResource = __pmjsTrace.revision(destination, 'canvas', true);
-    __pmjsTrace.event('canvas', 'canvas.destination-write', {
-      parentOperationId: operationId, destinationId: destinationResource.id,
-      destinationRevision: destinationResource.revision,
-      x: left, y: top, width: right - left, height: bottom - top,
-      bytes: paintPixels.length
-    });
-  }
 }
 
 function canvasPolygonCoverage(points, x, y) {
@@ -1281,17 +1251,6 @@ CanvasContext2D.prototype.drawImage = function(source) {
   sw = clippedRight - clippedLeft; sh = clippedBottom - clippedTop;
   if (!this.canvas.width || !this.canvas.height || !dimensions[0] || !dimensions[1] ||
       !canvasTransformInvertible(this)) return;
-  var trace = globalThis.__pmjsTrace;
-  var tracedDestination = trace && trace.active() ?
-    this.canvas._ensureNativeCanvas() : null;
-  var operationId = trace && trace.active() ? trace.event('canvas', 'canvas.drawImage', {
-    sourceId: trace.id(nativeSource, source && source._nativeCanvas ? 'canvas' : 'image'),
-    destinationId: trace.id(tracedDestination, 'canvas'),
-    sourceX: sx, sourceY: sy, sourceWidth: sw, sourceHeight: sh,
-    destinationX: dx, destinationY: dy,
-    destinationWidth: dw, destinationHeight: dh,
-    composite: this.globalCompositeOperation
-  }) : 0;
   var smoothing = canvasImageSmoothing(this, sw, sh, dw, dh);
   var transformed = axisAlignedRect(this, dx, dy, dw, dh);
   if (!transformed || this._transform[0] < 0 || this._transform[3] < 0 ||
@@ -1299,7 +1258,7 @@ CanvasContext2D.prototype.drawImage = function(source) {
       this.globalCompositeOperation !== 'source-over') {
     var bitmapSource = { width: dimensions[0], height: dimensions[1], _nativeCanvas: source._nativeCanvas };
     drawAffineImage(this, bitmapSource, nativeSource, sx, sy, sw, sh,
-      dx, dy, dw, dh, operationId, null, smoothing);
+      dx, dy, dw, dh, null, smoothing);
     return;
   }
   dx = transformed.x; dy = transformed.y; dw = transformed.width; dh = transformed.height;
@@ -1308,19 +1267,6 @@ CanvasContext2D.prototype.drawImage = function(source) {
     destination.handle, nativeSource.handle,
     sx, sy, sw, sh, dx, dy, dw, dh,
     Math.max(0, Math.min(1, Number(this.globalAlpha))), smoothing);
-  if (trace && trace.active()) {
-    var destinationResource = trace.revision(destination, 'canvas', true);
-    trace.event('canvas', 'canvas.drawImage-complete', {
-      parentOperationId: operationId,
-      destinationId: destinationResource.id,
-      destinationRevision: destinationResource.revision,
-      x: Math.floor(dx), y: Math.floor(dy),
-      width: Math.floor(dw), height: Math.floor(dh),
-      submittedBytes: Math.max(0, Math.floor(dw)) *
-        Math.max(0, Math.floor(dh)) * 4,
-      implementation: 'native-cropped-draw'
-    });
-  }
 };
 function nativeTextStyle(context, font) {
   return { bold: font.weight >= 600, italic: font.style === 'italic' || font.style === 'oblique',
@@ -1393,7 +1339,7 @@ function drawCanvasText(context, text, x, y, stroke, maxWidth) {
       var drawing = Object.create(context); drawing._transform = [1, 0, 0, 1, 0, 0];
       drawing._paintTransform = transform;
       drawAffineImage(drawing, mask, mask, 0, 0, mask.width, mask.height,
-        0, 0, mask.width, mask.height, 0, style, false);
+        0, 0, mask.width, mask.height, style, false);
     } finally { releaseNativeResource(mask, 'canvas'); }
     return;
   }
@@ -1409,7 +1355,7 @@ function drawCanvasText(context, text, x, y, stroke, maxWidth) {
       _nativeCanvas: temporary };
     drawAffineImage(context, source, temporary, 0, 0, temporary.width,
       temporary.height, placement.x - padding, placement.top - padding,
-      temporary.width * horizontalScale, temporary.height, 0, dynamicStyle ? style : null);
+      temporary.width * horizontalScale, temporary.height, dynamicStyle ? style : null);
   } finally {
     releaseNativeResource(temporary, 'canvas');
   }
@@ -1691,7 +1637,7 @@ CanvasContext2D.prototype.createPattern = function(source, repetition) {
   }
   var pattern = { _pmjsStyle: 'pattern', repeat: repetition,
     width: dimensions[0], height: dimensions[1],
-    pixels: canvasSourcePixels(source, nativeSource, 0, { x: 0, y: 0, width: dimensions[0], height: dimensions[1] }), transform: [1, 0, 0, 1, 0, 0],
+    pixels: canvasSourcePixels(source, nativeSource, { x: 0, y: 0, width: dimensions[0], height: dimensions[1] }), transform: [1, 0, 0, 1, 0, 0],
     setTransform: function(matrix) {
       matrix = matrix || {};
       var values = [matrix.a === undefined ? 1 : Number(matrix.a), Number(matrix.b) || 0,

@@ -8,7 +8,6 @@
     "js/pmjs-rpgmaker/lifecycle.js",
     "js/pmjs-rpgmaker/plugins.js",
     "js/pmjs-rpgmaker/bootstrap.js",
-    "js/pmjs-core/operation-trace.js",
     "js/pmjs-web/runtime.js",
     "js/pmjs-web/scheduler.js",
     "js/pmjs-web/events.js",

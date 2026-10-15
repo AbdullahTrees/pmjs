@@ -1463,28 +1463,49 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
   ImagePixels result{width, height, std::vector<std::uint8_t>(extent->rgbaBytes)};
+  const auto fillRectangle = [&](int left, int top, int right, int bottom,
+                                 const std::array<std::uint8_t, 4>& color) {
+    if (left >= right || top >= bottom ||
+        std::all_of(color.begin(), color.end(), [](std::uint8_t value) { return value == 0; })) return;
+    const auto rowBytes = static_cast<std::size_t>(right - left) * 4U;
+    const auto stride = static_cast<std::size_t>(width) * 4U;
+    auto* first = result.rgba.data() + static_cast<std::size_t>(top - y) * stride +
+                  static_cast<std::size_t>(left - x) * 4U;
+    std::copy(color.begin(), color.end(), first);
+    for (std::size_t filled = 4; filled < rowBytes;) {
+      const auto count = std::min(filled, rowBytes - filled);
+      std::memcpy(first + filled, first, count);
+      filled += count;
+    }
+    for (int row = top + 1; row < bottom; ++row)
+      std::memcpy(first + static_cast<std::size_t>(row - top) * stride, first, rowBytes);
+  };
   if (backing.descriptor.uniform) {
-    for (std::size_t i = 0; i < result.rgba.size(); i += 4)
-      std::copy(backing.descriptor.uniform->begin(), backing.descriptor.uniform->end(), result.rgba.begin() + i);
+    fillRectangle(x, y, x + width, y + height, *backing.descriptor.uniform);
     return result;
   }
   for (const auto& cell : backing.descriptor.cells) {
     const int left = std::max(x, cell.rect[0]), top = std::max(y, cell.rect[1]);
     const int right = std::min(x + width, cell.rect[0] + cell.rect[2]);
     const int bottom = std::min(y + height, cell.rect[1] + cell.rect[3]);
-    const bool needsPage = left < right && top < bottom && cell.crop[2] > 0 && cell.crop[3] > 0 &&
-        left < cell.rect[0]+cell.crop[0]+cell.crop[2] && right > cell.rect[0]+cell.crop[0] &&
-        top < cell.rect[1]+cell.crop[1]+cell.crop[3] && bottom > cell.rect[1]+cell.crop[1];
-    const auto* page = needsPage ? preparedPixels(backing, cell.page) : nullptr;
-    if (needsPage && !page) return std::nullopt;
-    for (int row = top; row < bottom; ++row) for (int column = left; column < right; ++column) {
-      auto* destination = result.rgba.data() + (static_cast<std::size_t>(row - y) * width + column - x) * 4;
-      const int cx = column - cell.rect[0] - cell.crop[0], cy = row - cell.rect[1] - cell.crop[1];
-      if (cx >= 0 && cy >= 0 && cx < cell.crop[2] && cy < cell.crop[3]) {
-        const auto* pixel = page->rgba.data() +
-            (static_cast<std::size_t>(cell.atlas[1] + cy) * page->width + cell.atlas[0] + cx) * 4;
-        std::copy_n(pixel, 4, destination);
-      } else std::copy(cell.fill.begin(), cell.fill.end(), destination);
+    if (left >= right || top >= bottom) continue;
+    // Validated cells do not overlap; zero fill is already initialized.
+    fillRectangle(left, top, right, bottom, cell.fill);
+    const int cropX = cell.rect[0] + cell.crop[0], cropY = cell.rect[1] + cell.crop[1];
+    const int copyLeft = std::max(left, cropX), copyTop = std::max(top, cropY);
+    const int copyRight = std::min(right, cropX + cell.crop[2]);
+    const int copyBottom = std::min(bottom, cropY + cell.crop[3]);
+    if (copyLeft >= copyRight || copyTop >= copyBottom) continue;
+    const auto* page = preparedPixels(backing, cell.page);
+    if (!page) return std::nullopt;
+    const auto rowBytes = static_cast<std::size_t>(copyRight - copyLeft) * 4U;
+    for (int row = copyTop; row < copyBottom; ++row) {
+      auto* destination = result.rgba.data() +
+          (static_cast<std::size_t>(row - y) * width + copyLeft - x) * 4U;
+      const auto* source = page->rgba.data() +
+          (static_cast<std::size_t>(cell.atlas[1] + row - cropY) * page->width +
+           cell.atlas[0] + copyLeft - cropX) * 4U;
+      std::memcpy(destination, source, rowBytes);
     }
   }
   return result;
@@ -1527,11 +1548,16 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
     const auto* decoded = preparedPixels(backing, index);
     if (!decoded) return std::nullopt;
     const auto& pixels = *decoded;
-    auto bytes = pixels.rgba;
-    if (premultiplied) for (std::size_t i = 0; i < bytes.size(); i += 4)
-      for (std::size_t channel = 0; channel < 3; ++channel)
-        bytes[i + channel] = static_cast<std::uint8_t>((bytes[i + channel] * bytes[i + 3] + 127) / 255);
-    texture = uploadTexture(pixels.width, pixels.height, bytes.data(), page.channels);
+    std::vector<std::uint8_t> converted;
+    const auto* bytes = pixels.rgba.data();
+    if (premultiplied && page.channels != 1) {
+      converted = pixels.rgba;
+      for (std::size_t i = 0; i < converted.size(); i += 4)
+        for (std::size_t channel = 0; channel < 3; ++channel)
+          converted[i + channel] = static_cast<std::uint8_t>((converted[i + channel] * converted[i + 3] + 127) / 255);
+      bytes = converted.data();
+    }
+    texture = uploadTexture(pixels.width, pixels.height, bytes, page.channels);
     if (!texture) return std::nullopt;
     const auto uploaded = static_cast<std::size_t>(pixels.width) * pixels.height * page.channels;
     ++textureCreates_; ++textureEpoch_; textureUploadBytes_ += uploaded;
@@ -1628,8 +1654,8 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  const auto preparePixels = [premultiplied](ImagePixels& pixels) {
-    if (premultiplied) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
+  const auto preparePixels = [premultiplied, &slot](ImagePixels& pixels) {
+    if (premultiplied && slot.channels != 1) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
       for (std::size_t c = 0; c < 3; ++c)
         pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c] * pixels.rgba[i+3] + 127) / 255);
   };

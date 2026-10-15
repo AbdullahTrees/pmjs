@@ -421,12 +421,6 @@ if(BUILD_TESTING)
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=${PMJS_OVERLAY_WINDOW}")
   endforeach()
 
-  add_test(NAME node-presentation-timing COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
-    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-presentation-timing.cjs"
-    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
-  set_tests_properties(node-presentation-timing PROPERTIES ENVIRONMENT
-    "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=64x64;PMJS_PRESENT_TIMING=1;PMJS_PRESENT_FINISH=1")
-
   add_test(NAME node-presentation-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-presentation-pixels.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-presentation-pixels PROPERTIES ENVIRONMENT

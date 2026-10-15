@@ -20,7 +20,6 @@ function setupEnvironment({ config = {}, env = {} } = {}) {
       tagName: 'CANVAS',
       _width: width || 0,
       _height: height || 0,
-      _pmjsBitmapUrl: null,
       __pmjsContentRevision: 0,
       drawCalls: [],
       _ensureNativeCanvas() { return { handle: 1 }; },
@@ -373,25 +372,6 @@ test('optimization disabled: delegates to stock blt when disabled via PMJS_DISAB
     assert.equal(dst.__canvas.drawCalls.length, 1);
     assert.equal(dst.__canvas.drawCalls[0].img, src.__canvas);
   }
-});
-
-test('URL attribution: lazily created canvases receive _pmjsBitmapUrl from source bitmap _url', () => {
-  const { Bitmap } = setupEnvironment();
-
-  // With URL
-  const bmp1 = new Bitmap(120, 120);
-  bmp1._url = 'img/characters/MainCharacters.png';
-  assert.equal(bmp1.__canvas, null);
-  const canvas1 = bmp1._canvas;
-  assert.ok(canvas1);
-  assert.equal(canvas1._pmjsBitmapUrl, 'img/characters/MainCharacters.png');
-
-  // Without URL
-  const bmp2 = new Bitmap(120, 120);
-  assert.equal(bmp2.__canvas, null);
-  const canvas2 = bmp2._canvas;
-  assert.ok(canvas2);
-  assert.equal(canvas2._pmjsBitmapUrl, null);
 });
 
 test('unit full-bitmap fills establish revision-bound mask proof', () => {

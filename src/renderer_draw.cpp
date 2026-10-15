@@ -115,18 +115,8 @@ void Renderer::applyBlendMode(BlendMode mode) {
 }
 
 void Renderer::render() {
-  {
-    PresentationPhaseTimer timer(presentationTimings_.enabled, presentationTimings_.phases[0]);
-    renderScene();
-  }
-  {
-    PresentationPhaseTimer timer(presentationTimings_.enabled, presentationTimings_.phases[1]);
-    presentToDrawable();
-  }
-  if (presentationTimings_.finishBeforeSwap && !offscreenRender_) {
-    PresentationPhaseTimer timer(presentationTimings_.enabled, presentationTimings_.phases[4]);
-    glFinish();
-  }
+  renderScene();
+  presentToDrawable();
 }
 
 int Renderer::filterBoundsPadding(scene_packet::FilterKind kind,
@@ -2146,11 +2136,7 @@ void Renderer::presentToDrawable() {
   if (identity) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER,
                       composePresentation ? filterTarget_.framebuffer : sceneTarget_.framebuffer);
-    {
-      PresentationPhaseTimer timer(presentationTimings_.enabled, presentationTimings_.phases[2]);
-      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    }
-    PresentationPhaseTimer windowWrite(presentationTimings_.enabled, presentationTimings_.phases[3]);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glBlitFramebuffer(0, 0, width_, height_, 0, 0,
                       presentationWidth_, presentationHeight_,
                       GL_COLOR_BUFFER_BIT,
@@ -2172,10 +2158,7 @@ void Renderer::presentToDrawable() {
       presentation_.viewportHeight;
   const int destWidth = presentation_.viewportWidth;
   const int destHeight = presentation_.viewportHeight;
-  {
-    PresentationPhaseTimer timer(presentationTimings_.enabled, presentationTimings_.phases[2]);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glViewport(0, 0, drawableWidth, drawableHeight);
   glDisable(GL_SCISSOR_TEST);
   // Bars use a blit, not glClear: an unswapped window clear correlates
@@ -2185,14 +2168,12 @@ void Renderer::presentToDrawable() {
   if (!fullWindow) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, blackFramebuffer_);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-    PresentationPhaseTimer windowWrite(presentationTimings_.enabled, presentationTimings_.phases[3]);
     glBlitFramebuffer(0, 0, 1, 1, 0, 0, drawableWidth, drawableHeight,
                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
   }
   glBindFramebuffer(GL_READ_FRAMEBUFFER,
                     composePresentation ? filterTarget_.framebuffer : sceneTarget_.framebuffer);
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-  PresentationPhaseTimer windowWrite(presentationTimings_.enabled && fullWindow, presentationTimings_.phases[3]);
   glBlitFramebuffer(0, 0, width_, height_, destX, destY,
                     destX + destWidth, destY + destHeight,
                     GL_COLOR_BUFFER_BIT,

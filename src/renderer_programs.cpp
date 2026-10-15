@@ -111,10 +111,6 @@ Renderer::Renderer(int width, int height, ImageStore& images)
   if (maxTextureSize_ <= 0) {
     throw std::runtime_error("cannot query GL_MAX_TEXTURE_SIZE");
   }
-  const char* presentTiming = std::getenv("PMJS_PRESENT_TIMING");
-  presentationTimings_.enabled = presentTiming && std::string(presentTiming) == "1";
-  const char* presentFinish = std::getenv("PMJS_PRESENT_FINISH");
-  presentationTimings_.finishBeforeSwap = presentFinish && std::string(presentFinish) == "1";
   using namespace renderer_shaders;
   createPixiPrograms(pixiFragmentPrecision_);
   generatedTextureProgram_ = linkProgram(vertexSource,

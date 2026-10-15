@@ -99,21 +99,6 @@ Bitmap.snap = function(stage) {
   }
 })();
 
-// Annotate native canvases with their source bitmap URL for diagnosis.
-var _Bitmap_createCanvas = Bitmap.prototype._createCanvas;
-if (typeof _Bitmap_createCanvas === 'function') {
-  Bitmap.prototype._createCanvas = function(width, height) {
-    if (!this.__canvas && typeof document !== 'undefined' && document.createElement) {
-      this.__canvas = document.createElement('canvas');
-      this.__canvas._pmjsBitmapUrl = this._url || null;
-    }
-    _Bitmap_createCanvas.call(this, width, height);
-    if (this.__canvas && !this.__canvas._pmjsBitmapUrl) {
-      this.__canvas._pmjsBitmapUrl = this._url || null;
-    }
-  };
-}
-
 // Register pristine blt fast path with PMJS optimizations registry.
 if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
     typeof PMJS.optimizations.register === 'function') {

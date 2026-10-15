@@ -51,71 +51,6 @@ Utils.isOptionValid = function(name) {
     originalIsOptionValid.call(this, name);
 };
 
-var nativeFilterDescriptor = PIXI.DisplayObject &&
-  Object.getOwnPropertyDescriptor(PIXI.DisplayObject.prototype, 'filters');
-if (nativeFilterDescriptor && typeof nativeFilterDescriptor.get === 'function' &&
-    nativeFilterDescriptor.configurable) {
-  var nativeFilterGetter = nativeFilterDescriptor.get;
-  nativeFilterDescriptor.get = function() {
-    var filters = nativeFilterGetter.call(this);
-    if (globalThis.__pmjsTrace && __pmjsTrace.active()) {
-      __pmjsTrace.count('filters_getter_calls', 1);
-      if (Array.isArray(this._filters)) __pmjsTrace.count('filters_slice_calls', 1);
-    }
-    return filters;
-  };
-  Object.defineProperty(PIXI.DisplayObject.prototype, 'filters',
-    nativeFilterDescriptor);
-}
-
-// Capture provenance at the point MV has successfully produced tinted pixels.
-// Diagnostic-only while the bounded trace is active.
-function pmjsTraceExecuteTintWrap() {
-  return function(guestExecuteTint) {
-    var wrapped = function(x, y, width, height) {
-      var result = guestExecuteTint.apply(this, arguments);
-      if (globalThis.__pmjsTrace && __pmjsTrace.active() && this._canvas) {
-        var output = this._canvas._ensureNativeCanvas ?
-          this._canvas._ensureNativeCanvas() : this._canvas._nativeCanvas;
-        var outputResource = __pmjsTrace.revision(output, 'canvas', true);
-        var bitmapSource = this._bitmap && this._bitmap.baseTexture &&
-          this._bitmap.baseTexture.source;
-        var sourceNative = bitmapSource &&
-          (bitmapSource._nativeImage || bitmapSource._nativeCanvas);
-        var sourceResource = __pmjsTrace.revision(sourceNative,
-          bitmapSource && bitmapSource._nativeCanvas ? 'canvas' : 'image');
-        __pmjsTrace.event('tint', 'mv.cpu-tint-complete', {
-          objectId: __pmjsTrace.id(this, 'display-object'),
-          sourceId: sourceResource.id,
-          sourceRevision: sourceResource.revision,
-          outputId: outputResource.id,
-          outputRevision: outputResource.revision,
-          x: x, y: y, width: width, height: height,
-          colorTone: this._colorTone && Array.prototype.slice.call(this._colorTone),
-          blendColor: this._blendColor && Array.prototype.slice.call(this._blendColor)
-        });
-      }
-      return result;
-    };
-    wrapped._pmjsTraceExecuteTint = true;
-    return wrapped;
-  };
-}
-
-(function pmjsRegisterTraceExecuteTint() {
-  var methods = globalThis.PMJS && globalThis.PMJS.methods;
-  if (!methods || typeof methods.wrap !== 'function') return;
-  methods.wrap({
-    key: 'Sprite._executeTint',
-    id: 'pmjs.mv.trace-execute-tint',
-    getTarget: function() {
-      return (typeof Sprite !== 'undefined' && Sprite.prototype) || null;
-    },
-    method: '_executeTint',
-    wrap: pmjsTraceExecuteTintWrap()
-  });
-})();
-
 if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
     typeof PMJS.optimizations.register === 'function') {
   PMJS.optimizations.register({
@@ -135,6 +70,16 @@ if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
     });
   }
 }
+
+PMJS.methods.wrap({
+  key: 'Sprite._executeTint',
+  getTarget: function() {
+    return (typeof Sprite !== 'undefined' && Sprite.prototype) || null;
+  },
+  method: '_executeTint',
+  id: 'pmjs.mv.native-sprite-tint-execution-proof',
+  wrap: function(stockExecuteTint) { return stockExecuteTint; }
+});
 
 PMJS.methods.wrap({
   key: 'Sprite._needsTint',

@@ -182,9 +182,6 @@ var nativeMaterializationStats = {
   meshHits: 0, meshMisses: 0,
   cpuTintedSprites: 0, shaderToneSprites: 0
 };
-var nativeSceneSegmentStats = { runs: 0, sprites: 0, candidates: 0,
-  bindingProbes: 0, rejectedProbes: 0, abandonedRuns: 0, abandonedSprites: 0 };
-var nativeSceneSegmentTracing = false;
 
 function nativeTextureSource(source) {
   if (!source) return null;
@@ -474,9 +471,6 @@ function nativeRenderHitCount() {
   return PMJS.compat.count('render.');
 }
 var nativeSceneFilterAccessCache = new WeakMap();
-var nativeScenePreviousMetadata = new Uint32Array(0);
-var nativeScenePreviousValues = new Uint32Array(0);
-var nativeScenePreviousCount = 0;
 var nativeSceneNoFilters = Object.freeze([]);
 var nativeSceneNoFilterPlan = Object.freeze({ blur: 0,
   groups: nativeSceneNoFilters, unsupported: false });
@@ -537,93 +531,7 @@ function nativeSceneFilters(node) {
   return direct ? node._filters : node.filters;
 }
 
-function nativeScenePacketHash(metadataWords, valueWords) {
 
-  var left = 0x811c9dc5;
-  var right = 0x9e3779b9;
-  var index;
-  for (index = 0; index < metadataWords.length; index++) {
-    left = Math.imul(left ^ metadataWords[index], 0x01000193) >>> 0;
-    right = Math.imul(right ^ metadataWords[index], 0x85ebca6b) >>> 0;
-  }
-  for (index = 0; index < valueWords.length; index++) {
-    left = Math.imul(left ^ valueWords[index], 0x01000193) >>> 0;
-    right = Math.imul(right ^ valueWords[index], 0xc2b2ae35) >>> 0;
-  }
-  return left.toString(16).padStart(8, '0') +
-    right.toString(16).padStart(8, '0');
-}
-
-function traceNativeScenePacket() {
-  if (!globalThis.__pmjsTrace || !__pmjsTrace.active()) return;
-  var metadataLength = nativeSceneCount * nativeSceneMetadataStride;
-  var valuesLength = nativeSceneCount * nativeSceneValueStride;
-  var metadataWords = nativeSceneMetadata.subarray(0, metadataLength);
-  var valueWords = new Uint32Array(nativeSceneValues.buffer,
-    nativeSceneValues.byteOffset, valuesLength);
-  var initial = nativeScenePreviousCount === 0;
-  var changedMetadataRecords = 0;
-  var changedValueRecords = 0;
-  var changedRecords = 0;
-  var firstChangedRecords = [];
-  for (var record = 0; record < nativeSceneCount; record++) {
-    var metadataChanged = initial || record >= nativeScenePreviousCount;
-    var valuesChanged = initial || record >= nativeScenePreviousCount;
-    var offset;
-    if (!metadataChanged) {
-      for (offset = 0; offset < nativeSceneMetadataStride; offset++) {
-        var metadataIndex = record * nativeSceneMetadataStride + offset;
-        if (metadataWords[metadataIndex] !==
-            nativeScenePreviousMetadata[metadataIndex]) {
-          metadataChanged = true;
-          break;
-        }
-      }
-      for (offset = 0; offset < nativeSceneValueStride; offset++) {
-        var valueIndex = record * nativeSceneValueStride + offset;
-        if (valueWords[valueIndex] !== nativeScenePreviousValues[valueIndex]) {
-          valuesChanged = true;
-          break;
-        }
-      }
-    }
-    if (metadataChanged) changedMetadataRecords++;
-    if (valuesChanged) changedValueRecords++;
-    if (metadataChanged || valuesChanged) {
-      changedRecords++;
-      if (firstChangedRecords.length < 8) firstChangedRecords.push(record);
-    }
-  }
-  if (nativeScenePreviousCount > nativeSceneCount) {
-    changedRecords += nativeScenePreviousCount - nativeSceneCount;
-  }
-  __pmjsTrace.event('scene', 'scene.packet-summary', {
-    records: nativeSceneCount,
-    hash: nativeScenePacketHash(metadataWords, valueWords),
-    changedRecords: changedRecords,
-    changedMetadataRecords: changedMetadataRecords,
-    changedValueRecords: changedValueRecords,
-    firstChangedRecords: firstChangedRecords,
-    // Cumulative over traced submissions. Candidates include bindings discarded
-    // below the segment threshold; rejected eligibility probes are separate.
-    segmentRuns: nativeSceneSegmentStats.runs,
-    segmentSprites: nativeSceneSegmentStats.sprites,
-    segmentCandidates: nativeSceneSegmentStats.candidates,
-    segmentBindingProbes: nativeSceneSegmentStats.bindingProbes,
-    segmentRejectedProbes: nativeSceneSegmentStats.rejectedProbes,
-    segmentAbandonedRuns: nativeSceneSegmentStats.abandonedRuns,
-    segmentAbandonedSprites: nativeSceneSegmentStats.abandonedSprites,
-  });
-  if (nativeScenePreviousMetadata.length < metadataLength) {
-    nativeScenePreviousMetadata = new Uint32Array(metadataLength);
-  }
-  if (nativeScenePreviousValues.length < valuesLength) {
-    nativeScenePreviousValues = new Uint32Array(valuesLength);
-  }
-  nativeScenePreviousMetadata.set(metadataWords);
-  nativeScenePreviousValues.set(valueWords);
-  nativeScenePreviousCount = nativeSceneCount;
-}
 
 function nativeSceneRecord(parentIndex, kind, resource, tint, blendMode,
     local, alpha, clip, blur, mask) {
