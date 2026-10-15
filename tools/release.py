@@ -174,6 +174,9 @@ def sources(sdk, output):
 
 
 def manifest(stage, build, source):
+    build_id = os.environ.get('PMJS_BUILD_ID') or None
+    if build_id is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', build_id):
+        raise ValueError('PMJS_BUILD_ID must use letters, numbers, dots, underscores or hyphens and start with a letter or number')
     config = json.loads((build / 'build-config.json').read_text())
     values = cache_values(build)
     qualified = values.get('PMJS_RELEASE_PROVENANCE') == 'ON'
@@ -186,7 +189,7 @@ def manifest(stage, build, source):
                 compiled['dependencies'] != compiled_dependencies(build) or
                 compiled['addonSha256'] != digest(build / 'pmjs_native.node')):
             raise ValueError('Native inputs or binary changed since compilation; build again before installation')
-    info = {**config, 'schema': 1, 'source': identity,
+    info = {**config, 'schema': 1, 'buildId': build_id, 'source': identity,
             'compiledProvenance': qualified,
             'configuration': {key: value for key, value in values.items()
                               if key in ('CMAKE_C_FLAGS', 'CMAKE_CXX_FLAGS', 'PMJS_ENABLE_SANITIZERS',

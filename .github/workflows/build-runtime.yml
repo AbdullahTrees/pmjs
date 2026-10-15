@@ -1,0 +1,123 @@
+name: Build runtime
+run-name: Build PMJS (${{ github.ref_name }})
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build Linux ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      build-id: ${{ steps.identity.outputs.build-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Identify build
+        id: identity
+        run: |
+          build_date=$(date -u +%Y-%m-%d)
+          build_id="build-$build_date-${GITHUB_SHA:0:7}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "PMJS_BUILD_ID=$build_id" >> "$GITHUB_ENV"
+          echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git python3 curl \
+            clang-20=1:20.1.2-0ubuntu1~24.04.3 llvm-20=1:20.1.2-0ubuntu1~24.04.3 \
+            nodejs libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libpng-dev libwebp-dev zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev \
+            xvfb xauth libegl-mesa0 libgl1-mesa-dri
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Check JavaScript and licenses
+        run: |
+          npm ci
+          npm run lint
+          npm run licensing
+          npm test
+
+      - name: Cache prepared ARM64 dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/linux-arm64
+            .cache/skia65-arm64
+            .cache/components/arm64
+            .cache/effekseer
+          key: ${{ runner.os }}-arm64-v1-${{ hashFiles('tools/linux-arm64/**', 'tools/skia65/**', 'tools/effekseer.lock.json', 'third_party/skia65-*', 'src/skia65/**', 'src/text_layout.*', 'src/canvas_pixels.hpp', 'src/unicode_default_ignorables.hpp') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-v1-
+
+      - name: Build runtime
+        run: ./build.sh --target arm64 --jobs 2
+
+      - name: Verify host graphics and ARM64 package
+        run: |
+          python3 tools/release.py verify --stage dist/pmjs \
+            --report dist/verification-local.json --graphics --xvfb
+          python3 tools/release.py verify --stage dist/pmjs-arm64 \
+            --report dist/static-arm64.json --static
+
+      # Hosted runners cannot supply the handheld hardware graphics receipt.
+      - name: Archive development candidate
+        run: |
+          python3 tools/release.py archive --stage dist/pmjs-arm64 \
+            --report dist/static-arm64.json \
+            --output dist/pmjs-linux-arm64-development.tar.gz --development
+
+      - name: Save build files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pmjs-linux-arm64
+          path: |
+            dist/pmjs-linux-arm64-development.tar.gz
+            dist/pmjs-linux-arm64-development.tar.gz.sha256
+            dist/static-arm64.json
+            dist/verification-local.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  prerelease:
+    name: Publish build download
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pmjs-linux-arm64
+          path: dist
+
+      - name: Publish prerelease with build files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ID: ${{ needs.build.outputs.build-id }}
+        run: |
+          release_url=$(gh release create "$BUILD_ID" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "PMJS $BUILD_ID" \
+            --notes "" --prerelease --latest=false)
+          printf 'Build download: %s\n\nRelease assets have no automatic expiration.\n' \
+            "$release_url" >> "$GITHUB_STEP_SUMMARY"

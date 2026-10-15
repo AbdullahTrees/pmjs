@@ -71,12 +71,23 @@ try {
   const version = cli('--version');
   assert.equal(version.status, 0, version.stdout + version.stderr);
   assert.match(version.stdout, /^PMJS /);
+  const infoFile = path.join(stage, 'build-info.json');
+  const installedInfo = JSON.parse(fs.readFileSync(infoFile));
+  if (installedInfo.buildId) assert.ok(version.stdout.includes(`build=${installedInfo.buildId}`));
+  fs.writeFileSync(infoFile, JSON.stringify({ ...installedInfo, buildId: undefined }));
+  assert.equal(cli('--version').stdout.includes('build='), false, 'older packages without a build ID still work');
+  fs.writeFileSync(infoFile, JSON.stringify({ ...installedInfo, buildId: 'build-fixture' }));
+  assert.ok(cli('--version').stdout.includes('build=build-fixture'), 'relocated package reports its stored build ID');
   const help = cli('--help');
   assert.equal(help.status, 0, help.stdout + help.stderr);
   assert.match(help.stdout, /pmjs prepare --game DIR/);
   assert.match(cli().stdout, /Usage:/, 'no recognized game in the current directory shows help');
   const unprepared = cli('run', '--game', game, '--state', state);
   assert.equal(unprepared.status, 0, unprepared.stdout + unprepared.stderr);
+  assert.ok(unprepared.stdout.includes(`version=${installedInfo.version} build=build-fixture source=${installedInfo.source.commit}`));
+  const missingGame = cli('run', '--game', path.join(temporary, 'missing-game'));
+  assert.notEqual(missingGame.status, 0);
+  assert.ok(missingGame.stdout.includes('build=build-fixture'), 'startup failures still identify the installed build');
   assert.ok(fs.existsSync(path.join(state, 'prepared.json')), 'running prepares the game automatically');
   const fromGameDirectory = spawnSync(path.join(stage, 'bin/pmjs'), [], {
     cwd: game, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',

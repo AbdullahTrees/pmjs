@@ -1,5 +1,6 @@
 """Incremental native builds and installation provenance using a compiled fixture."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,7 +23,9 @@ class BuildProvenance(unittest.TestCase):
                      'third_party/effekseer-mz.patch', 'tools/effekseer.lock.json'):
             (self.root / name).write_text('fixture')
         (self.root / 'bin/pmjs').write_text('#!/bin/sh\nexit 0\n')
-        for name in ('build-js-runtime.mjs', 'game-inspect.mjs', 'pmjs.mjs', 'package-self-test.cjs'):
+        for name in ('build-js-runtime.mjs', 'game-inspect.mjs', 'game-bundle.mjs', 'pmjs.mjs',
+                     'package-self-test.cjs', 'portmaster.py', 'linux-arm64/audit-abi.py'):
+            (self.root / 'tools' / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / 'tools' / name).write_text('// fixture\n')
         (self.root / '.gitignore').write_text('build/\ndist/\ndependencies/\n')
         (self.root / 'docs/using.md').write_text('Original documentation\n')
@@ -55,8 +58,8 @@ include(cmake/Install.cmake)
         self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release')
         self.compile()
 
-    def command(self, *args, success=True):
-        result = subprocess.run(args, text=True, capture_output=True)
+    def command(self, *args, success=True, env=None):
+        result = subprocess.run(args, text=True, capture_output=True, env=env)
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -116,6 +119,21 @@ include(cmake/Install.cmake)
         with addon.open('ab') as file:
             file.write(b'tampered')
         self.install('rejected-binary', success=False)
+
+    def test_build_id_is_saved_at_install_without_relinking(self):
+        addon = self.build / 'pmjs_native.node'
+        before = (addon.read_bytes(), addon.stat().st_mtime_ns)
+        for name, build_id in [('named', 'build-2026-10-15-abc1234-123-1'), ('local', '')]:
+            destination = self.root / 'dist' / name
+            self.command('cmake', '--install', str(self.build), '--prefix', str(destination),
+                         env={**os.environ, 'PMJS_BUILD_ID': build_id})
+            info = json.loads((destination / 'build-info.json').read_text())
+            self.assertEqual(info['buildId'], build_id or None)
+        self.assertEqual(before, (addon.read_bytes(), addon.stat().st_mtime_ns))
+        for build_id in ('has spaces', 'build\nforged-log-line'):
+            result = self.command('cmake', '--install', str(self.build), '--prefix', str(self.root / 'dist/invalid'),
+                                  env={**os.environ, 'PMJS_BUILD_ID': build_id}, success=False)
+            self.assertIn('PMJS_BUILD_ID must use', result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

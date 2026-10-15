@@ -66,6 +66,7 @@ class PortMasterPackage(unittest.TestCase):
 
     def refresh_manifest(self):
         release.write_json(self.stage / 'build-info.json', {'schema': 1, 'architecture': 'x86_64',
+                           'buildId': 'build-package-fixture',
                            'source': {'sourceDateEpoch': 0}, 'files': release.inventory(self.stage)})
 
     def test_minimal_contents_and_stripping(self):
@@ -87,6 +88,7 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIn('minimal-game/runtime/share/pmjs/tools/pmjs.mjs', names)
             self.assertIn('minimal-game/runtime/build-info.json', names)
             packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertEqual(packaged_info['buildId'], 'build-package-fixture')
             expected_runtime_files = {name.removeprefix('minimal-game/runtime/') for name in names
                                       if name.startswith('minimal-game/runtime/') and not name.endswith('/')
                                       and name != 'minimal-game/runtime/build-info.json'}

@@ -12,7 +12,8 @@ const share = path.join(root, 'share/pmjs');
 const info = JSON.parse(fs.readFileSync(path.join(root, 'build-info.json'), 'utf8'));
 const args = process.argv.slice(3);
 const first = args.shift();
-const help = `PMJS ${info.version} (${info.source.commit.slice(0, 12)}${info.source.dirty ? ', modified' : ''})
+const version = `PMJS ${info.version}${info.buildId ? ` build=${info.buildId}` : ''} (${info.source.commit.slice(0, 12)}${info.source.dirty ? ', modified' : ''})`;
+const help = `${version}
 Usage:
   pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
@@ -133,7 +134,7 @@ function prepare(context) {
 }
 
 async function main() {
-  if (first === '--version') { console.log(help.split('\n')[0]); return; }
+  if (first === '--version') { console.log(version); return; }
   if (first === '--help' || first === 'help') { console.log(help); return; }
   if (first === 'self-test') {
     if (args.some(value => value !== '--graphics') || args.length > 1) throw new Error('invalid self-test arguments');
@@ -197,6 +198,9 @@ async function main() {
     options['--manifest'] = bundle.manifest;
     options.adapters = bundle.adapters;
   }
+  const packageSha256 = hash(path.join(root, 'build-info.json'));
+  console.log(`[pmjs] version=${info.version} build=${info.buildId || info.source.commit} ` +
+    `source=${info.source.commit}${info.source.dirty ? ',modified' : ''} package=${packageSha256}`);
   const game = gameDirectory(options['--game']);
   const id = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   const state = options['--state'] || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmjs', id);
@@ -207,7 +211,7 @@ async function main() {
   const manifest = options['--manifest'] || (command === 'run' && previous?.game === game ? previous.manifest : null);
   const adapters = options.adapters.length ? options.adapters :
     (command === 'run' && previous?.game === game && Array.isArray(previous.adapters) ? previous.adapters : []);
-  const context = { game, state, packageSha256: hash(path.join(root, 'build-info.json')),
+  const context = { game, state, packageSha256,
     runtimeIdentity: runtimeIdentity(), config, manifest, adapters,
     inputs: preparationInputs(game, config, manifest, adapters) };
   if (bundle) {
@@ -221,7 +225,6 @@ async function main() {
   if (command === 'prepare') { console.log(`Prepared ${game}`); return; }
   const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
   const { run } = await import('../runner/index.cjs');
-  console.log(`[pmjs] build=${info.source.commit} package=${record.packageSha256}`);
   await run({ addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
     bootstrap: path.join(state, record.bootstrap), saveRoot, config: record.config || undefined,
     assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'] });
