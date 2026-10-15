@@ -76,6 +76,30 @@ test('SRD menu adapter is selected only for enabled plugin demand', () => {
   assert.doesNotMatch(fs.readFileSync(out, 'utf8'), /BEGIN js\/pmjs-plugins\/srd\/menu-backgrounds\.js/);
 });
 
+test('loading and portable-achievement adapters follow enabled guest plugins', () => {
+  const root = temporaryDirectory('pmjs-loading-adapters-');
+  const entries = [
+    ['YEP_EventCopier', 'yanfly/event-copier'],
+    ['YEP_SaveCore', 'yanfly/save-core'],
+    ['YEP_CommonEventMenu', 'yanfly/common-event-menu'],
+    ['Irina_VisualNovelBusts', 'irina/visual-novel-busts'],
+    ['OrangeGreenworks', 'greenworks/orange']
+  ];
+  const game = writeMvGame(root, { plugins: entries.map(([name]) => ({ name, status: true })) });
+  const output = path.join(root, 'out.js');
+  const args = [tool, '--game', game, '--output', output];
+  childProcess.execFileSync(process.execPath, args);
+  const enabled = fs.readFileSync(output, 'utf8');
+  fs.writeFileSync(path.join(game, 'js/plugins.js'), 'var $plugins = ' +
+    JSON.stringify(entries.map(([name]) => ({ name, status: false }))) + ';');
+  childProcess.execFileSync(process.execPath, args);
+  const disabled = fs.readFileSync(output, 'utf8');
+  for (const [, module] of entries) {
+    assert.ok(enabled.includes('// BEGIN js/pmjs-plugins/' + module + '.js'));
+    assert.ok(!disabled.includes('// BEGIN js/pmjs-plugins/' + module + '.js'));
+  }
+});
+
 test('profile bundles accept configuration data without external code insertion', () => {
   const root = temporaryDirectory('pmjs-profile-');
   const config = path.join(root, 'config.json');

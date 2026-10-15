@@ -133,6 +133,62 @@
       "modules": [
         "js/pmjs-plugins/input-form/native-form.js"
       ]
+    },
+    {
+      "plugins": [
+        "YEP_EventCopier"
+      ],
+      "modules": [
+        "js/pmjs-plugins/yanfly/event-copier.js"
+      ]
+    },
+    {
+      "plugins": [
+        "Irina_VisualNovelBusts"
+      ],
+      "modules": [
+        "js/pmjs-plugins/irina/visual-novel-busts.js"
+      ]
+    },
+    {
+      "plugins": [
+        "YEP_CommonEventMenu"
+      ],
+      "modules": [
+        "js/pmjs-plugins/yanfly/common-event-menu.js"
+      ]
+    },
+    {
+      "plugins": [
+        "YEP_SaveCore"
+      ],
+      "modules": [
+        "js/pmjs-plugins/yanfly/save-core.js"
+      ]
+    },
+    {
+      "plugins": [
+        "YEP_X_VisualATBGauge"
+      ],
+      "modules": [
+        "js/pmjs-plugins/yanfly/visual-atb-gauge.js"
+      ]
+    },
+    {
+      "plugins": [
+        "physical_attack_animation"
+      ],
+      "modules": [
+        "js/pmjs-plugins/coelocanth/physical-attacks.js"
+      ]
+    },
+    {
+      "plugins": [
+        "volume setting"
+      ],
+      "modules": [
+        "js/pmjs-plugins/volume-control/menu.js"
+      ]
     }
   ]
 }
