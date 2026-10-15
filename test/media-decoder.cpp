@@ -1,6 +1,8 @@
 #include "media_decoder.hpp"
 
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -9,6 +11,34 @@
 int main(int argc, char** argv) {
   if (argc != 3) return 2;
   const std::filesystem::path path(argv[1]);
+  for (const auto* name : {"601", "709", "709-full", "709-odd"}) {
+    const auto stem = std::string("video-matrix-") + name;
+    const bool odd = std::string(name) == "709-odd";
+    const auto movie = path.parent_path() / (stem + (odd ? ".mkv" : ".ts"));
+    std::ifstream expectedFile(path.parent_path() / (stem + ".rgba"), std::ios::binary);
+    const std::vector<std::uint8_t> expected{std::istreambuf_iterator<char>(expectedFile), {}};
+    std::string colorError;
+    pmjs::VideoDecoderSession colors(movie);
+    const auto frame = colors.frame(0.0, &colorError);
+    const auto standalone = pmjs::MediaDecoder::decodeVideoFrame(
+      movie, 0.0, &colorError);
+    if (expected.size() != (odd ? 17U * 13U * 4U : 32U * 24U * 4U) || !frame || !standalone ||
+        frame->rgba != expected || standalone->rgba != expected) {
+      std::cerr << "video color metadata mismatch: " << name << ' ' << colorError << '\n';
+      return 1;
+    }
+  }
+  pmjs::VideoDecoderSession changingColors(path.parent_path() / "video-matrix-switch.ts");
+  for (int index = 0; index < 2; ++index) {
+    std::ifstream expectedFile(path.parent_path() /
+      (index ? "video-matrix-709.rgba" : "video-matrix-601.rgba"), std::ios::binary);
+    const std::vector<std::uint8_t> expected{std::istreambuf_iterator<char>(expectedFile), {}};
+    const auto frame = changingColors.frame(index * 0.5);
+    if (!frame || frame->rgba != expected) {
+      std::cerr << "midstream matrix change reused incompatible conversion\n";
+      return 1;
+    }
+  }
   std::string error;
   const auto pcm = pmjs::MediaDecoder::decodeAudio(argv[2], &error);
   pmjs::AudioDecoderSession audio(argv[2]);

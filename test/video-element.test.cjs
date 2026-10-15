@@ -63,6 +63,101 @@ function makeHarness(videoResource, runtimeEnv) {
   return { context, calls, telemetry };
 }
 
+test('unknown-duration playback ends only after native EOF and releases event waits', async () => {
+  const { context } = makeHarness();
+  const video = context.document.createElement('video');
+  video.src = 'unknown-duration.webm';
+  await context.PMJS.tasks.idle();
+  video.duration = 0;
+  let complete = false, ended = 0;
+  const stops = [];
+  context.NativeHost.media.videoEnded = () => complete;
+  context.NativeHost.media.stopAudio = handle => stops.push(handle);
+  video._audio = { handle: 77 };
+  video.onended = () => { ended++; };
+  await video.play();
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(video.ended, false, 'a repeated frame is not EOF');
+  complete = true;
+  video.currentTime = 1;
+  assert.equal(context.PMJS.web.video.update(), 0);
+  assert.equal(video.ended, true);
+  assert.equal(video.paused, true);
+  assert.equal(video.currentTime, 1);
+  assert.equal(ended, 1);
+  assert.deepEqual(stops, [77]);
+  context.PMJS.web.video.update();
+  assert.equal(ended, 1);
+});
+
+test('unknown-duration loops restart without ending and known durations retain their clock', async () => {
+  const { context, calls } = makeHarness();
+  const video = context.document.createElement('video');
+  video.src = 'unknown-duration.webm';
+  await context.PMJS.tasks.idle();
+  video.duration = 0;
+  video.loop = true;
+  let queries = 0;
+  context.NativeHost.media.videoEnded = () => ++queries === 1;
+  await video.play();
+  video.currentTime = 1;
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(video.currentTime, 0);
+  assert.equal(video.ended, false);
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(calls.updateVideo.at(-1)[1], 0);
+  video.duration = 12;
+  video.currentTime = 2;
+  context.NativeHost.media.videoEnded = () => { throw new Error('known duration queried EOF'); };
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(video.ended, false);
+});
+
+test('native playback failures pause audio, dispatch the original error once, and leave other videos running', async () => {
+  const { context } = makeHarness();
+  const failed = context.document.createElement('video');
+  const healthy = context.document.createElement('video');
+  failed.src = healthy.src = 'movies/Opening.mp4';
+  await context.PMJS.tasks.idle();
+  await Promise.all([failed.play(), healthy.play()]);
+  failed._audio = { handle: 77 };
+  const stops = [], errors = [];
+  const error = new Error('video conversion failed');
+  const update = context.NativeHost.media.updateVideo;
+  context.NativeHost.media.updateVideo = function(handle, time) {
+    if (handle === failed._media.handle) throw error;
+    return update(handle, time);
+  };
+  context.NativeHost.media.stopAudio = handle => stops.push(handle);
+  failed.onerror = event => errors.push(event.error);
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.deepEqual(errors, [error]);
+  assert.deepEqual(stops, [77]);
+  assert.equal(failed.paused, true);
+  assert.equal(failed.ended, false);
+  assert.equal(healthy.paused, false);
+});
+
+test('a playback error handler can replace and restart the video source', async () => {
+  const { context } = makeHarness();
+  const video = context.document.createElement('video');
+  video.src = 'movies/Opening.mp4';
+  await context.PMJS.tasks.idle();
+  await video.play();
+  const update = context.NativeHost.media.updateVideo;
+  context.NativeHost.media.updateVideo = () => { throw new Error('decode failed'); };
+  video.onerror = () => {
+    context.NativeHost.media.updateVideo = update;
+    video.src = 'movies/Replacement.mp4';
+  };
+  assert.equal(context.PMJS.web.video.update(), 0);
+  await context.PMJS.tasks.idle();
+  await video.play();
+  assert.equal(context.PMJS.web.video.update(), 1);
+  assert.equal(video.paused, false);
+});
+
 function pixi4TextureFromVideo(video) {
   const texture = { valid: false, frame: { width: 0, height: 0 } };
   const baseTexture = {
@@ -232,7 +327,7 @@ test('MV load returns before loadeddata and video-playing state clears on end', 
 
   graphics._playVideo('movies/Opening.mp4');
   assert.equal(graphics._videoLoading, true);
-  assert.equal(video.style.opacity, undefined);
+  assert.equal(video.style.opacity, '');
   assert.equal(graphics.isVideoPlaying(), true);
   await context.PMJS.tasks.idle();
   await Promise.resolve();

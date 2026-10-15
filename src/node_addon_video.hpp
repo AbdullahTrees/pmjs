@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <thread>
 
@@ -16,6 +17,7 @@ struct Video {
   void request(double targetTime);
   void resetForSeek();
   std::optional<pmjs::VideoFrame> take();
+  bool ended(double timestamp);
   pmjs::VideoDecodeStats workerStats();
   double workerQueueMs();
   std::uint64_t coalescedRequests();
@@ -32,6 +34,8 @@ struct Video {
   std::optional<double> requested;
   std::chrono::steady_clock::time_point requestedAt;
   std::optional<pmjs::VideoFrame> ready;
+  std::exception_ptr failure;
+  std::optional<double> finishedAt;
   std::chrono::steady_clock::time_point readyAt;
   std::vector<std::uint8_t> recycledRgba;
   pmjs::VideoDecodeStats decodeStats;

@@ -292,6 +292,14 @@ if(BUILD_TESTING)
   target_include_directories(pmjs-media-decoder-test PRIVATE src)
   target_compile_options(pmjs-media-decoder-test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(pmjs-media-decoder-test PRIVATE pmjs_runtime)
+  add_executable(pmjs-video-failure-test test/video-failure.cpp src/node_addon_video.cpp)
+  target_include_directories(pmjs-video-failure-test PRIVATE src)
+  target_compile_options(pmjs-video-failure-test PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_options(pmjs-video-failure-test PRIVATE "-Wl,--wrap=sws_scale" "-Wl,--wrap=av_read_frame")
+  target_link_libraries(pmjs-video-failure-test PRIVATE pmjs_runtime)
+  add_library(pmjs-video-load-fault SHARED test/video-load-fault.cpp)
+  target_link_libraries(pmjs-video-load-fault PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_options(pmjs-video-load-fault PRIVATE -Wall -Wextra -Wpedantic)
   add_library(pmjs-image-load-fault SHARED test/image-load-fault.cpp)
   target_link_libraries(pmjs-image-load-fault PRIVATE ${CMAKE_DL_LIBS})
   target_compile_options(pmjs-image-load-fault PRIVATE -Wall -Wextra -Wpedantic)
@@ -303,11 +311,6 @@ if(BUILD_TESTING)
     $<TARGET_FILE:pmjs-image-install-failure-test> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(native-image-install-failure PROPERTIES
     FIXTURES_REQUIRED pmjs_assets ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
-  add_test(NAME node-image-load-failure COMMAND ${XVFB_RUN} -a "${CMAKE_COMMAND}" -E env
-    "LD_PRELOAD=$<TARGET_FILE:pmjs-image-load-fault>" "LIBGL_ALWAYS_SOFTWARE=1" "SDL_AUDIODRIVER=dummy"
-    ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/node-image-load-failure.cjs"
-    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
-  set_tests_properties(node-image-load-failure PROPERTIES TIMEOUT 20)
   add_executable(pmjs-audio-failure-test test/audio-failure.cpp)
   target_include_directories(pmjs-audio-failure-test PRIVATE src)
   target_link_libraries(pmjs-audio-failure-test PRIVATE pmjs_runtime)
@@ -351,11 +354,28 @@ if(BUILD_TESTING)
   add_test(NAME native-media-decoder COMMAND pmjs-media-decoder-test
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets/fixture-video.mp4"
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets/empty-packet.ogg")
+  add_test(NAME native-video-failure COMMAND pmjs-video-failure-test
+    "${CMAKE_CURRENT_BINARY_DIR}/test-assets/fixture-video.mp4")
+  set_tests_properties(native-video-failure PROPERTIES FIXTURES_REQUIRED pmjs_assets)
+  add_test(NAME node-video-load-failure COMMAND ${XVFB_RUN} -a "${CMAKE_COMMAND}" -E env
+    "LD_PRELOAD=$<TARGET_FILE:pmjs-video-load-fault>" "LIBGL_ALWAYS_SOFTWARE=1" "SDL_AUDIODRIVER=dummy"
+    ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/node-video-load-failure.cjs"
+    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   add_test(NAME native-audio-seek COMMAND pmjs-audio-seek-test
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets/short-audio.flac")
   add_test(NAME native-audio-failure COMMAND pmjs-audio-failure-test
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets/short-audio.flac")
   set_tests_properties(native-audio-failure PROPERTIES FIXTURES_REQUIRED pmjs_assets TIMEOUT 15)
+  add_test(NAME node-image-load-failure COMMAND ${XVFB_RUN} -a "${CMAKE_COMMAND}" -E env
+    "LD_PRELOAD=$<TARGET_FILE:pmjs-image-load-fault>" "LIBGL_ALWAYS_SOFTWARE=1" "SDL_AUDIODRIVER=dummy"
+    ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/node-image-load-failure.cjs"
+    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  set_tests_properties(node-image-load-failure PROPERTIES TIMEOUT 20)
+  add_test(NAME node-video-eof COMMAND ${XVFB_RUN} -a "${CMAKE_COMMAND}" -E env
+    "LIBGL_ALWAYS_SOFTWARE=1" "SDL_AUDIODRIVER=dummy"
+    ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/node-video-eof.cjs"
+    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  set_tests_properties(node-video-eof PROPERTIES TIMEOUT 10)
   add_executable(pmjs-canvas-pixels-test test/canvas-pixels.cpp)
   target_include_directories(pmjs-canvas-pixels-test PRIVATE src)
   target_compile_options(pmjs-canvas-pixels-test PRIVATE -UNDEBUG)

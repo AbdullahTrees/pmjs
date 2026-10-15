@@ -46,6 +46,35 @@ using Frame = std::unique_ptr<AVFrame, FrameDeleter>;
 using Swr = std::unique_ptr<SwrContext, SwrDeleter>;
 using Sws = std::unique_ptr<SwsContext, decltype(&sws_freeContext)>;
 
+bool configureVideoColors(SwsContext* scaler, const AVFrame& frame, std::string* error) {
+  int* sourceCoefficients = nullptr;
+  int* outputCoefficients = nullptr;
+  int sourceRange = 0, outputRange = 0, brightness = 0, contrast = 0, saturation = 0;
+  if (sws_getColorspaceDetails(scaler, &sourceCoefficients, &sourceRange,
+        &outputCoefficients, &outputRange, &brightness, &contrast, &saturation) < 0) {
+    fail(error, "cannot inspect video conversion colors");
+    return false;
+  }
+  int matrix = SWS_CS_DEFAULT;
+  switch (frame.colorspace) {
+    case AVCOL_SPC_BT709: matrix = SWS_CS_ITU709; break;
+    case AVCOL_SPC_FCC: matrix = SWS_CS_FCC; break;
+    case AVCOL_SPC_BT470BG:
+    case AVCOL_SPC_SMPTE170M: matrix = SWS_CS_ITU601; break;
+    case AVCOL_SPC_SMPTE240M: matrix = SWS_CS_SMPTE240M; break;
+    case AVCOL_SPC_BT2020_NCL: matrix = SWS_CS_BT2020; break;
+    default: break;
+  }
+  if (frame.color_range != AVCOL_RANGE_UNSPECIFIED)
+    sourceRange = frame.color_range == AVCOL_RANGE_JPEG ? 1 : 0;
+  if (sws_setColorspaceDetails(scaler, sws_getCoefficients(matrix), sourceRange,
+        outputCoefficients, outputRange, brightness, contrast, saturation) < 0) {
+    fail(error, "cannot configure video conversion colors");
+    return false;
+  }
+  return true;
+}
+
 struct MemoryInput {
   explicit MemoryInput(std::vector<std::uint8_t> source) : bytes(std::move(source)) {
     constexpr int bufferSize = 32768;
@@ -346,6 +375,7 @@ struct VideoDecoderSession::Impl {
     queued.clear();
     sentEof = false; exhausted = false; lastTimestamp = -1.0;
     hasPresentedFrame = false;
+    lastFrameEnd = 0;
     if (telemetryEnabled) ++stats.seeks;
     if (lastRequestedTimestamp && timestamp < *lastRequestedTimestamp)
       if (telemetryEnabled) ++stats.backwardSeeks;
@@ -364,6 +394,15 @@ struct VideoDecoderSession::Impl {
         const auto best = decoded->best_effort_timestamp;
         const double timestamp = best == AV_NOPTS_VALUE ? 0.0
           : best * av_q2d(stream->time_base);
+#if LIBAVUTIL_VERSION_MAJOR >= 58
+        const auto frameDuration = decoded->duration;
+#else
+        const auto frameDuration = decoded->pkt_duration;
+#endif
+        const double duration = frameDuration > 0 ? frameDuration * av_q2d(stream->time_base)
+          : info.videoFrameRate > 0 ? 1.0 / info.videoFrameRate
+          : lastTimestamp >= 0 && timestamp > lastTimestamp ? timestamp - lastTimestamp : 0.0;
+        lastFrameEnd = std::max(lastFrameEnd, timestamp + duration);
         lastTimestamp = timestamp;
         if (telemetryEnabled) ++stats.decodedFrames;
         if (telemetryEnabled && countingAfterSeek) ++stats.decodedAfterSeek;
@@ -436,18 +475,28 @@ struct VideoDecoderSession::Impl {
       output.browser420 = std::move(backing);
     } else {
       if (!scaler || scalerWidth != width || scalerHeight != height ||
-          scalerFormat != decoded->format) {
+          scalerFormat != decoded->format || scalerColorspace != decoded->colorspace ||
+          scalerRange != decoded->color_range) {
         scaler.reset(sws_getContext(width, height,
           static_cast<AVPixelFormat>(decoded->format), width, height,
           AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr));
+        if (scaler && !configureVideoColors(scaler.get(), *decoded, error)) scaler.reset();
         scalerWidth = width; scalerHeight = height; scalerFormat = decoded->format;
+        scalerColorspace = decoded->colorspace; scalerRange = decoded->color_range;
       }
       if (!scaler) {
         av_frame_unref(decoded.get());
-        fail(error, "cannot initialize video conversion");
+        if (!error || error->empty()) fail(error, "cannot initialize video conversion");
         return std::nullopt;
       }
-      sws_scale(scaler.get(), decoded->data, decoded->linesize, 0, height, planes, strides);
+      const int rows = sws_scale(scaler.get(), decoded->data, decoded->linesize,
+                                 0, height, planes, strides);
+      if (rows != height) {
+        av_frame_unref(decoded.get());
+        fail(error, rows < 0 ? "video conversion failed: " + ffError(rows)
+                             : "video conversion produced an incomplete frame");
+        return std::nullopt;
+      }
     }
     if (telemetryEnabled) stats.convertMs += std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - convertStarted).count();
@@ -463,7 +512,8 @@ struct VideoDecoderSession::Impl {
   Sws scaler{nullptr, sws_freeContext};
   AVStream* stream = nullptr; int streamIndex = -1;
   int scalerWidth = 0, scalerHeight = 0, scalerFormat = -1;
-  double lastTimestamp = -1.0; bool sentEof = false;
+  int scalerColorspace = -1, scalerRange = -1;
+  double lastTimestamp = -1.0, lastFrameEnd = 0.0; bool sentEof = false;
   std::optional<double> lastRequestedTimestamp;
   bool exhausted = false;
   bool hasPresentedFrame = false;
@@ -500,6 +550,7 @@ std::size_t VideoDecoderSession::queuedFrames() const {
 }
 
 bool VideoDecoderSession::exhausted() const { return impl_->exhausted; }
+double VideoDecoderSession::endTime() const { return impl_->lastFrameEnd; }
 
 std::optional<VideoFrame> VideoDecoderSession::frame(double timestamp,
                                                      std::string* error) {
@@ -523,7 +574,16 @@ std::optional<VideoFrame> VideoDecoderSession::frame(
   av_frame_unref(impl_->selected.get());
   std::optional<double> selectedTimestamp;
   while (true) {
-    if (impl_->queued.empty() && !prefetchOne(error)) break;
+    if (impl_->queued.empty()) {
+      std::string decodeError;
+      if (!prefetchOne(&decodeError)) {
+        if (!decodeError.empty()) {
+          fail(error, decodeError);
+          return std::nullopt;
+        }
+        break;
+      }
+    }
     if (impl_->queued.empty()) break;
     if (impl_->queued.front().timestamp > timestamp + epsilon && selectedTimestamp)
       break;
@@ -772,21 +832,27 @@ std::optional<VideoFrame> MediaDecoder::decodeVideoFrame(
           const auto best = frame->best_effort_timestamp;
           const double frameTime = best == AV_NOPTS_VALUE ? 0.0 : best * av_q2d(stream->time_base);
           if (frameTime + 0.000001 < timestamp) continue;
-          const auto extent = checkedImageExtent(codec->width, codec->height, 8192, 128 * 1024 * 1024);
+          const auto extent = checkedImageExtent(frame->width, frame->height, 8192, 128 * 1024 * 1024);
           if (!extent) {
             fail(error, "invalid video frame dimensions");
             return std::nullopt;
           }
           VideoFrame output{extent->width, extent->height, frameTime, {}, {}};
           output.rgba.resize(extent->rgbaBytes);
-          Sws scaler(sws_getContext(output.width, output.height, codec->pix_fmt,
+          Sws scaler(sws_getContext(output.width, output.height, static_cast<AVPixelFormat>(frame->format),
             output.width, output.height, AV_PIX_FMT_RGBA, SWS_BILINEAR,
             nullptr, nullptr, nullptr), sws_freeContext);
           if (!scaler) { fail(error, "cannot initialize video conversion"); return std::nullopt; }
+          if (!configureVideoColors(scaler.get(), *frame, error)) return std::nullopt;
           std::uint8_t* planes[] = {output.rgba.data(), nullptr, nullptr, nullptr};
           int strides[] = {output.width * 4, 0, 0, 0};
-          sws_scale(scaler.get(), frame->data, frame->linesize, 0,
-                    output.height, planes, strides);
+          const int rows = sws_scale(scaler.get(), frame->data, frame->linesize, 0,
+                                      output.height, planes, strides);
+          if (rows != output.height) {
+            fail(error, rows < 0 ? "video conversion failed: " + ffError(rows)
+                                 : "video conversion produced an incomplete frame");
+            return std::nullopt;
+          }
           return output;
         }
       }

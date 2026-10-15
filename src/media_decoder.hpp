@@ -88,6 +88,7 @@ class VideoDecoderSession {
   bool prefetchOne(std::string* error = nullptr);
   std::size_t queuedFrames() const;
   bool exhausted() const;
+  double endTime() const;
   std::optional<VideoFrame> frame(double timestamp,
                                   std::string* error = nullptr);
   std::optional<VideoFrame> frame(double timestamp,

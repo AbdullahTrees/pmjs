@@ -301,7 +301,27 @@ VideoElement.prototype._update = function() {
   }
   var frameTime = time;
   if (frameTime !== this._decodedTime) {
-    this._decodedTime = NativeHost.media.updateVideo(this._media.handle, frameTime);
+    try {
+      this._decodedTime = NativeHost.media.updateVideo(this._media.handle, frameTime);
+      var nativeEnded = !(this.duration > 0) && NativeHost.media.videoEnded(this._media.handle, time);
+    } catch (error) {
+      this._currentTime = time;
+      this.paused = true;
+      this._playRequested = false;
+      if (this._audio) NativeHost.media.stopAudio(this._audio.handle);
+      this._settlePlayPromises(error);
+      this.dispatchEvent({ type: 'error', target: this, error: error });
+      return !this.paused && !!this._media;
+    }
+    if (nativeEnded) {
+      if (this.loop) { this.currentTime = 0; this._decodedTime = undefined; }
+      else {
+        this._currentTime = time; this.paused = true; this.ended = true;
+        if (this._audio) NativeHost.media.stopAudio(this._audio.handle);
+        this.dispatchEvent({ type: 'ended', target: this });
+        return !this.paused && !!this._media;
+      }
+    }
   }
   return true;
 };

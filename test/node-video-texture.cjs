@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const native = require(path.resolve(process.argv[2]));
 const root = path.resolve(process.argv[3]);
 native.initialize({
@@ -239,6 +240,30 @@ async function main() {
     if (native.images.memory().liveCount !== lifecycleBaseline) {
       throw new Error('queued video work retained its image after release');
     }
+  }
+
+  for (const direction of ['shrink', 'expand']) {
+    const changing = await native.media.loadVideoAsync('fixture-video-' + direction + '.ts');
+    try {
+      const dimensions = [changing.width, changing.height];
+      assert.deepEqual(dimensions, direction === 'shrink' ? [32, 24] : [16, 12]);
+      const limit = Date.now() + 5000;
+      let rejected = false;
+      while (Date.now() < limit) {
+        try { native.media.updateVideo(changing.handle, 0.75); }
+        catch (error) {
+          assert.match(error.message, /video frame dimensions changed/);
+          rejected = true;
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(rejected, true, direction + ' must fail before uploading mismatched pixels');
+    } finally {
+      native.media.releaseVideo(changing.handle);
+      if (changing.audio) native.media.releaseAudio(changing.audio);
+    }
+    assert.equal(native.images.memory().liveCount, lifecycleBaseline);
   }
 
   console.log('[pmjs-node-video-texture] ready');

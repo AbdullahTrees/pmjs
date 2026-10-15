@@ -472,27 +472,38 @@ napi_value loadVideo(napi_env env, napi_callback_info info) try {
   const auto image = value.images.createRgba(frame->width, frame->height,
                                               frame->rgba.data());
   if (!image) throw std::runtime_error("cannot allocate video texture");
-  std::uint32_t handle = value.nextVideo++;
-  if (!handle) handle = value.nextVideo++;
-  const double duration = decoder->info().duration;
-  const double sourceFps = decoder->info().videoFrameRate;
-  auto video = std::make_unique<Video>(std::move(decoder), telemetry);
-  video->image = image->handle;
-  video->duration = duration; video->sourceFps = sourceFps;
-  video->timestamp = frame->timestamp;
-  video->browser420 = std::move(frame->browser420);
-  video->recycle(std::move(frame->rgba));
-  value.videos.emplace(handle, std::move(video));
-  syncExternalMemory(env);
-  napi_value result; napi_create_object(env, &result);
-  napi_set_named_property(env, result, "handle", uint32(env, handle));
-  napi_set_named_property(env, result, "image", uint32(env, image->handle));
-  napi_set_named_property(env, result, "width", number(env, frame->width));
-  napi_set_named_property(env, result, "height", number(env, frame->height));
-  napi_set_named_property(env, result, "duration", number(env, duration));
-  return result;
+  std::uint32_t handle = 0;
+  bool stored = false;
+  try {
+    handle = value.nextVideo++;
+    if (!handle) handle = value.nextVideo++;
+    const double duration = decoder->info().duration;
+    const double sourceFps = decoder->info().videoFrameRate;
+    auto video = std::make_unique<Video>(std::move(decoder), telemetry);
+    video->image = image->handle;
+    video->duration = duration; video->sourceFps = sourceFps;
+    video->timestamp = frame->timestamp;
+    video->browser420 = std::move(frame->browser420);
+    video->recycle(std::move(frame->rgba));
+    value.videos.emplace(handle, std::move(video));
+    stored = true;
+    syncExternalMemory(env);
+    napi_value result; napi_create_object(env, &result);
+    napi_set_named_property(env, result, "handle", uint32(env, handle));
+    napi_set_named_property(env, result, "image", uint32(env, image->handle));
+    napi_set_named_property(env, result, "width", number(env, frame->width));
+    napi_set_named_property(env, result, "height", number(env, frame->height));
+    napi_set_named_property(env, result, "duration", number(env, duration));
+    return result;
+  } catch (...) {
+    if (stored) value.videos.erase(handle);
+    value.images.release(image->handle);
+    throw;
+  }
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
+} catch (...) {
+  napi_throw_error(env, nullptr, "video load failed"); return nullptr;
 }
 
 napi_value updateVideo(napi_env env, napi_callback_info info) try {
@@ -511,6 +522,11 @@ napi_value updateVideo(napi_env env, napi_callback_info info) try {
   if (video.telemetryEnabled) ++video.requests;
   if (auto frame = video.take()) {
     if (frame->timestamp > video.timestamp + 0.000001) {
+      const auto image = value.images.inspect(video.image);
+      if (!image || frame->width != image->width || frame->height != image->height ||
+          frame->rgba.size() != static_cast<std::size_t>(image->width) * image->height * 4U) {
+        throw std::runtime_error("video frame dimensions changed or pixel buffer is incomplete");
+      }
       const auto started = video.telemetryEnabled ? Clock::now() : Clock::time_point{};
       if (!value.images.updateRgba(video.image, frame->rgba.data()))
         throw std::runtime_error("video texture update failed");
@@ -541,6 +557,20 @@ napi_value updateVideo(napi_env env, napi_callback_info info) try {
   return number(env, video.timestamp);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
+} catch (...) {
+  napi_throw_error(env, nullptr, "video decoder failed"); return nullptr;
+}
+
+napi_value videoEnded(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 2);
+  auto& videos = host(env).videos;
+  const auto found = videos.find(asUint32(env, args.at(0)));
+  if (found == videos.end()) throw std::runtime_error("invalid video handle");
+  return boolean(env, found->second->ended(asNumber(env, args.at(1))));
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+} catch (...) {
+  napi_throw_error(env, nullptr, "video decoder failed"); return nullptr;
 }
 
 // The canvas/texture consumer requests its own conversion lazily. The image
@@ -676,6 +706,7 @@ void registerMediaBindings(napi_env env, napi_value exports) {
   method(env, media, "loadVideo", loadVideo);
   method(env, media, "loadVideoAsync", loadVideoAsync);
   method(env, media, "updateVideo", updateVideo);
+  method(env, media, "videoEnded", videoEnded);
   method(env, media, "videoCanvasImage", videoCanvasImage);
   method(env, media, "releaseVideo", releaseVideo);
   check(env, napi_set_named_property(env, exports, "media", media), "cannot export media module");
