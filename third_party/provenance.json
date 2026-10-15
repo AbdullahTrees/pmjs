@@ -82,6 +82,12 @@
       "license": "MIT",
       "notice": "LICENSE"
     },
+    "js/pmjs-plugins/yanfly/core-text.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
+    },
     "js/pmjs-plugins/yanfly/message-core.js": {
       "origin": "compatibility",
       "source": "PMJS",

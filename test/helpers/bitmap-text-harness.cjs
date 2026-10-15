@@ -58,12 +58,13 @@ function installBitmapFixture() {
   globalThis.nativeBootPhase = function() {};
 }
 
-function makeBitmapTextHarness(native, enabled = true) {
+function makeBitmapTextHarness(native, enabled = true, deferActivation = false) {
   const context = createHostContext(native, { graphics: false });
   context.PMJS.config.disableOptimizations = enabled ? [] : ['bitmap.native-draw-text'];
   context.NativeHost = { ...native, runtime: { ...native.runtime, loadScript() {} } };
   vm.runInContext('(' + installBitmapFixture.toString() + ')()', context);
-  for (const file of ['pmjs-core/optimizations', 'pmjs-mv/bitmap']) {
+  for (const file of ['pmjs-core/optimizations',
+    ...(deferActivation ? ['pmjs-rpgmaker/lifecycle'] : []), 'pmjs-mv/bitmap']) {
     vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../js', file + '.js'), 'utf8'), context);
   }
   return context;

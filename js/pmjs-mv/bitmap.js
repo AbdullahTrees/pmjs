@@ -185,31 +185,27 @@ if (typeof _Bitmap_blt === 'function') {
   var stockOutline = Bitmap.prototype._drawTextOutline;
   var stockBody = Bitmap.prototype._drawTextBody;
   var stockFontName = Bitmap.prototype._makeFontNameText;
-  function activateNativeDrawText() {
-    if (!PMJS.optimizations.isEnabled('bitmap.native-draw-text')) return;
-    var originalDrawText = Bitmap.prototype.drawText;
-    var originalOutline = Bitmap.prototype._drawTextOutline;
-    var originalBody = Bitmap.prototype._drawTextBody;
-
+  // Adapters may replace a captured stock leaf while keeping outer plugin wrappers.
+  PMJS.mv.bitmap.createNativeDrawText = function(originalDrawText, expectedFont, fontStillValid) {
     if (typeof stockDrawText !== 'function' || typeof stockOutline !== 'function' ||
-        typeof stockBody !== 'function' || typeof stockFontName !== 'function' ||
-        originalDrawText !== stockDrawText || originalOutline !== stockOutline ||
-        originalBody !== stockBody || Bitmap.prototype._makeFontNameText !== stockFontName) {
-      PMJS.optimizations.refuse('bitmap.native-draw-text',
-        'modified Bitmap text method composition');
-      return;
-    }
+        typeof stockBody !== 'function' || typeof expectedFont !== 'function' ||
+        originalDrawText !== stockDrawText || Bitmap.prototype._drawTextOutline !== stockOutline ||
+        Bitmap.prototype._drawTextBody !== stockBody) return null;
 
-    Bitmap.prototype.drawText = function(text, x, y, maxWidth, lineHeight, align) {
-      var context = this._context;
-      if (this._drawTextOutline !== originalOutline ||
-          this._drawTextBody !== originalBody || this._makeFontNameText !== stockFontName ||
+    return function(text, x, y, maxWidth, lineHeight, align) {
+      var textType = typeof text;
+      if ((text !== null && textType !== 'string' && textType !== 'number' && textType !== 'boolean') ||
+          this._drawTextOutline !== stockOutline || this._drawTextBody !== stockBody ||
+          this._makeFontNameText !== expectedFont || (fontStillValid && !fontStillValid()) ||
           !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(lineHeight) ||
           !Number.isFinite(this.fontSize) || this.fontSize <= 0 ||
           (maxWidth && !Number.isFinite(maxWidth)) ||
-          (align && align !== 'left' && align !== 'center' && align !== 'right') ||
-          (!align && context.textAlign && context.textAlign !== 'left' && context.textAlign !== 'start') ||
-          text === undefined || !PMJS.web.canvas.supportsNativeText(context, maxWidth, align,
+          (align && align !== 'left' && align !== 'center' && align !== 'right')) {
+        return originalDrawText.apply(this, arguments);
+      }
+      var context = this._context;
+      if ((!align && context.textAlign && context.textAlign !== 'left' && context.textAlign !== 'start') ||
+          !PMJS.web.canvas.supportsNativeText(context, maxWidth, align,
             { outlineColor: this.outlineColor, color: this.textColor })) {
         return originalDrawText.apply(this, arguments);
       }
@@ -227,6 +223,19 @@ if (typeof _Bitmap_blt === 'function') {
       pmjsBitmapCanvasChanged(this);
       this._setDirty();
     };
+  };
+
+  function activateNativeDrawText() {
+    if (!PMJS.optimizations.isEnabled('bitmap.native-draw-text')) return;
+    var draw = Bitmap.prototype.drawText === stockDrawText &&
+      Bitmap.prototype._makeFontNameText === stockFontName &&
+      PMJS.mv.bitmap.createNativeDrawText(stockDrawText, stockFontName);
+    if (typeof draw !== 'function') {
+      PMJS.optimizations.refuse('bitmap.native-draw-text',
+        'modified Bitmap text method composition');
+      return;
+    }
+    Bitmap.prototype.drawText = draw;
   }
   if (PMJS.phases && typeof PMJS.phases.on === 'function') {
     PMJS.phases.on('afterGuestPlugins', 'pmjs.mv.native-draw-text',

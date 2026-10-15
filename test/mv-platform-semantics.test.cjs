@@ -708,6 +708,7 @@ test('Window_Base and Sprite_Base execute update without suppression', () => {
 });
 
 test('Bitmap.prototype.drawText installs native acceleration only for stock pipeline and respects overrides', () => {
+  const { createHostContext } = require('./helpers/mz-host-context.cjs');
   let stockOutlineCalls = 0;
   let customOutlineCalls = 0;
   let nativeDrawCalls = 0;
@@ -721,32 +722,17 @@ test('Bitmap.prototype.drawText installs native acceleration only for stock pipe
       this.outlineWidth = 2;
       this.outlineColor = '#000000';
       this.textColor = '#ffffff';
-      this._context = {
-        globalAlpha: 1,
-        globalCompositeOperation: 'source-over',
-        _transform: [1, 0, 0, 1, 0, 0],
-        _clipPaths: [],
-        save() {},
-        restore() {},
-        strokeText() {},
-        fillText() {}
-      };
-      this._canvas = { _ensureNativeCanvas() { return { handle: 1 }; } };
-      this._context.canvas = this._canvas;
+      this._canvas = MockBitmap.makeCanvas();
+      this._canvas.width = this.width; this._canvas.height = this.height;
+      this._context = this._canvas.getContext('2d');
     }
     MockBitmap.prototype._makeFontNameText = function() { return '16px sans-serif'; };
     MockBitmap.prototype._setDirty = function() {};
-    MockBitmap.prototype._drawTextOutline = function(text, tx, ty, maxWidth) {
-      var context = this._context;
-      context.strokeStyle = this.outlineColor;
-      context.strokeText(text, tx, ty, maxWidth);
+    // Raster leaves count ordinary dispatch; the surrounding Canvas state is real.
+    MockBitmap.prototype._drawTextOutline = function() {
       stockOutlineCalls++;
     };
-    MockBitmap.prototype._drawTextBody = function(text, tx, ty, maxWidth) {
-      var context = this._context;
-      context.fillStyle = this.textColor;
-      context.fillText(text, tx, ty, maxWidth);
-    };
+    MockBitmap.prototype._drawTextBody = function() {};
     MockBitmap.prototype.drawText = customDrawText || function(text, x, y, maxWidth, lineHeight, align) {
       if (text !== undefined) {
         var tx = x;
@@ -768,28 +754,26 @@ test('Bitmap.prototype.drawText installs native acceleration only for stock pipe
   function createContext(BitmapClass, disabled = false) {
     nativeDrawCalls = 0;
     nativeDrawArguments = [];
-    const sandbox = {
-      Bitmap: BitmapClass,
-      Sprite: function() {},
-      Graphics: Object.assign(function() {}, { width: 100, height: 100 }),
-      Input: function() {},
-      nativeBootPhase: function() {},
-      NativeHost: {
-        runtime: { loadScript() {} },
-        render: {},
-        canvas: {
-          measureText: function() { return 50; },
-          drawText: function() {
-            nativeDrawCalls++;
-            nativeDrawArguments.push(Array.from(arguments));
-          }
+    const native = {
+      runtime: { env() { return ''; }, loadScript() {} },
+      render: {},
+      canvas: {
+        create(width, height) { return { handle: 1, width, height }; },
+        release() {}, clear() {},
+        measureText: function() { return 50; },
+        drawText: function() {
+          nativeDrawCalls++;
+          nativeDrawArguments.push(Array.from(arguments));
         }
       }
     };
-    const context = vm.createContext(sandbox);
-    context.PMJS = { config: { disableOptimizations: disabled ? ['bitmap.native-draw-text'] : [] } };
+    const context = createHostContext(native, { graphics: false });
+    Object.assign(context, { Bitmap: BitmapClass, Sprite: function() {},
+      Graphics: Object.assign(function() {}, { width: 100, height: 100 }),
+      Input: function() {}, nativeBootPhase: function() {} });
+    BitmapClass.makeCanvas = () => context.document.createElement('canvas');
+    context.PMJS.config.disableOptimizations = disabled ? ['bitmap.native-draw-text'] : [];
     vm.runInContext(fs.readFileSync(path.join(jsDir, 'pmjs-core/optimizations.js'), 'utf8'), context);
-    vm.runInContext(fs.readFileSync(path.join(jsDir, 'pmjs-web/canvas.js'), 'utf8'), context);
     const bitmapCode = fs.readFileSync(path.join(jsDir, 'pmjs-mv/bitmap.js'), 'utf8');
     vm.runInContext(bitmapCode, context);
     return context;
@@ -822,7 +806,9 @@ test('Bitmap.prototype.drawText installs native acceleration only for stock pipe
   stockBmp.drawText('translated', 10, 0, 0, 20, 'left');
   assert.equal(nativeDrawCalls, 0, 'translated text must retain Canvas path');
   stockBmp._context._transform = [1, 0, 0, 1, 0, 0];
-  stockBmp._context._clipPaths = [{}];
+  stockBmp._context.beginPath();
+  stockBmp._context.rect(0, 0, 20, 20);
+  stockBmp._context.clip();
   stockBmp.drawText('clipped', 10, 0, 0, 20, 'left');
   assert.equal(nativeDrawCalls, 0, 'clipped text must retain Canvas path');
 

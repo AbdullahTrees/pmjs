@@ -1981,10 +1981,10 @@ Object.assign(PMJS.web.canvas, {
     return null;
   },
   supportsNativeText: function(context, maxWidth, align, style) {
-    return canvasIsUntransformedSourceOver(context) &&
-      (!(context instanceof CanvasContext2D) || nativeTextCanvasMethods.every(function(entry) {
+    return context instanceof CanvasContext2D && context.canvas instanceof CanvasElement &&
+      canvasIsUntransformedSourceOver(context) && nativeTextCanvasMethods.every(function(entry) {
         return context[entry.name] === entry.method;
-      })) &&
+      }) &&
       (!style || [style.outlineColor, style.color].every(function(color) {
         return typeof color === 'string' && parseCanvasColor(color) !== null;
       })) &&
