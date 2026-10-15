@@ -304,8 +304,67 @@ function progressLines(progress) {
   return lines;
 }
 
+function createPreparationLog(details, { log = message => console.log(message), now = () => performance.now() } = {}) {
+  const started = now();
+  let updated = started, phaseStarted = started, progressAt = started, finished = false;
+  let current = { phase: 'start', source: '', completed: 0, total: 0, generated: 0, hits: 0, fallback: 0 };
+  const phases = {};
+  const elapsed = value => Math.max(0, value).toFixed(1);
+  const emit = (event, fields) => log(`[pmjs] preparation stage=${details.stage} event=${event} ${fields}`);
+  emit('start', `started_at=${new Date().toISOString()} codec=${details.codec} ` +
+    `verify_hashes=${details.verifyHashes} cache_root=${JSON.stringify(details.cacheRoot)}`);
+  function progress(value) {
+    if (finished) return;
+    const time = now();
+    if (['phase', 'source', 'completed', 'generated', 'hits', 'fallback'].some(key => current[key] !== value[key])) progressAt = time;
+    if (current.phase !== value.phase) {
+      phases[current.phase] = (phases[current.phase] || 0) + time - phaseStarted;
+      phaseStarted = time;
+      if (!(value.phase in phases) || /^(map-)?(discover|wait|catalog|install|publish|cleanup)$/.test(value.phase))
+        emit('phase', `phase=${value.phase} elapsed_ms=${elapsed(time - started)} source=${JSON.stringify(value.source || '')}`);
+    }
+    current = value;
+  }
+  return {
+    progress,
+    heartbeat() {
+      const time = now();
+      if (finished || time - updated < 10000) return;
+      updated = time;
+      emit('progress', `phase=${current.phase} elapsed_ms=${elapsed(time - started)} ` +
+        `phase_elapsed_ms=${elapsed(time - phaseStarted)} no_progress_ms=${elapsed(time - progressAt)} ` +
+        `completed=${current.completed || 0} total=${current.total || 0} generated=${current.generated || 0} ` +
+        `hits=${current.hits || 0} fallback=${current.fallback || 0} source=${JSON.stringify(current.source || '')}`);
+    },
+    finish(result, error) {
+      if (finished) return;
+      finished = true;
+      const time = now();
+      phases[current.phase] = (phases[current.phase] || 0) + time - phaseStarted;
+      const status = error ? 'failed' : result.cancelled ? 'cancelled' : result.error ? 'failed' :
+        result.failedFiles || result.installFailures || result.installed < result.prepared ? 'partial' : 'complete';
+      const reused = (result.hits || 0) + (result.indexedNegative || 0) + (result.compilationHits || 0);
+      const cache = status !== 'complete' ? 'incomplete' : result.generated ? (reused ? 'mixed' : 'cold') :
+        (reused || result.catalogHit ? 'warm' : 'empty');
+      emit('finish', `status=${status} cache=${cache} catalog_hit=${result.catalogHit === true} ` +
+        `catalog=${result.catalogStatus || 'not-checked'} duration_ms=${elapsed(time - started)} ` +
+        `codec=${details.codec} verify_hashes=${details.verifyHashes} cache_root=${JSON.stringify(details.cacheRoot)} ` +
+        `generated=${result.generated || 0} hits=${result.hits || 0} fallback=${result.fallback ?? result.refused ?? 0} ` +
+        `total=${result.total ?? result.maps?.length ?? 0} prepared=${result.prepared ?? result.selected ?? 0} ` +
+        `installed=${result.installed || 0} failed_files=${result.failedFiles || 0} install_failures=${result.installFailures || 0} ` +
+        `hashed_files=${result.validation?.hashedFiles || 0} ` +
+        `hashed_bytes=${result.validation?.hashedBytes || 0} reused_files=${result.validation?.reusedFiles || 0} ` +
+        `phase_ms=${JSON.stringify(Object.fromEntries(Object.entries(phases).map(([phase, ms]) => [phase, Number(elapsed(ms))])))} ` +
+        `error=${JSON.stringify(error?.message || result.error || result.catalogError || '')}`);
+    }
+  };
+}
+
 async function run(input) {
+  const startupStarted = performance.now();
   const options = validate(input);
+  console.log(`[pmjs] startup event=start started_at=${new Date().toISOString()} ` +
+    `preparation=${options.assetPreparation.enabled ? 'on' : 'off'} maps=${options.assetPreparation.maps ? 'on' : 'off'}`);
   const hostProcess = process;
   // Load host addons before the bootstrap installs the guest process and require.
   const greenworks = options.greenworksModule ? require(options.greenworksModule) : null;
@@ -328,6 +387,7 @@ async function run(input) {
     preparedFrameCacheBytes: options.preparedFrameCacheBytes,
     preparedCompactSampling: options.preparedCompactSampling,
     preparedCropUploads: options.preparedCropUploads });
+  console.log(`[pmjs] startup stage=host-initialized elapsed_ms=${(performance.now() - startupStarted).toFixed(1)}`);
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidateImages, invalidateMaps;
   let dispatcher;
@@ -346,6 +406,10 @@ async function run(input) {
     native.storage = createStorage(options.saveRoot);
     native.fs = createGameFilesystem(native.fs, path.join(options.saveRoot, 'game-files'));
     if (options.assetPreparation.enabled) {
+      const preparationStarted = performance.now();
+      console.log(`[pmjs] preparation event=start workspace_bytes=${options.assetPreparation.workspaceBytes} ` +
+        `processor=${JSON.stringify(native.assets.preparationVersion || null)} ` +
+        `lz4_version=${JSON.stringify(native.assets.preparationLz4Version || null)}`);
       const portableIndex = require('./asset-index.cjs').loadAssetIndex(options.assetIndex, native, options);
       let cancelled = false;
       let preparationFailed = false;
@@ -373,15 +437,19 @@ async function run(input) {
           fonts: options.preparationFonts });
       };
       showProgress();
+      let activeLog;
       const pump = setInterval(() => {
         if (cancelled) return;
         try {
           if (!native.pollEvents()) cancelled = true;
+          activeLog?.heartbeat();
           showProgress();
         } catch (error) { failPreparation(error); }
       }, 16);
-      let preparation;
+      let preparation, preparationStatus = 'failed';
       try {
+        activeLog = createPreparationLog({ stage: 'images', codec: options.assetPreparation.pageCodec,
+          cacheRoot: options.assetPreparation.cacheRoot, verifyHashes: options.assetPreparation.verifyHashes });
         preparation = await prepareAssets({ gameRoot: options.gameRoot,
           cacheRoot: options.assetPreparation.cacheRoot, recipes: options.assetPreparation.recipes, native,
           portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
@@ -390,41 +458,57 @@ async function run(input) {
           pageCodec: options.assetPreparation.pageCodec,
           shouldCancel: () => cancelled,
           onProgress: progress => {
+            activeLog.progress(progress);
             current = progress;
             try { showProgress(); }
             catch (error) { failPreparation(error); }
           } });
+        activeLog.finish(preparation, preparationFailed ? preparationError : undefined);
+        console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
+          `decrypted=${preparation.decrypted} fallback=${preparation.fallback} ` +
+          `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
+          `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
+          `unindexed_processed=${preparation.unindexedProcessed} ` +
+          `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
+          `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
         if (!cancelled && options.assetPreparation.maps) {
+          activeLog = createPreparationLog({ stage: 'maps', codec: 'png',
+            cacheRoot: path.join(options.assetPreparation.cacheRoot, 'maps'), verifyHashes: options.assetPreparation.verifyHashes });
+          current = { phase: 'map-discover', completed: 0, total: 0 };
           preparation.maps = await prepareMaps({ gameRoot: options.gameRoot,
             cacheRoot: options.assetPreparation.cacheRoot, native, width: options.width, height: options.height,
             portableIndex: portableIndex?.maps,
             portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
             verifyHashes: options.assetPreparation.verifyHashes,
-            shouldCancel: () => cancelled, onProgress: progress => { current = progress; showProgress(); } });
+            shouldCancel: () => cancelled, onProgress: progress => {
+              activeLog.progress(progress); current = progress;
+              try { showProgress(); }
+              catch (error) { failPreparation(error); }
+            } });
+          const maps = preparation.maps;
+          activeLog.finish(maps, preparationFailed ? preparationError : undefined);
+          console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
+            `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
+            `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
+            `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
+            `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
         }
+        preparationStatus = preparationFailed ? 'failed' :
+          cancelled || preparation.cancelled || preparation.maps?.cancelled ? 'cancelled' :
+            preparation.error || preparation.maps?.error ? 'failed' :
+              preparation.failedFiles || preparation.installFailures ? 'partial' : 'complete';
       } catch (error) {
+        activeLog?.finish({ ...current, cancelled }, preparationFailed ? preparationError : error);
         throw preparationFailed ? preparationError : error;
-      } finally { clearInterval(pump); }
+      } finally {
+        clearInterval(pump);
+        console.log(`[pmjs] preparation event=finish status=${preparationStatus} duration_ms=${(performance.now() - preparationStarted).toFixed(1)}`);
+      }
       if (preparationFailed) throw preparationError;
       invalidateImages = preparation.invalidateCatalog;
       invalidateMaps = preparation.maps && preparation.maps.invalidateCatalog;
       const { entries, decryptedEntries, releaseCacheLease, invalidateCatalog, ...preparationStats } = preparation;
       native.assets.preparationStats = preparationStats;
-      console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
-        `decrypted=${preparation.decrypted} fallback=${preparation.fallback} ` +
-        `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
-        `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
-        `unindexed_processed=${preparation.unindexedProcessed} ` +
-        `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
-        `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
-      if (preparation.maps) {
-        const maps = preparation.maps;
-        console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
-          `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
-          `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
-          `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
-          `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
-      }
       if (cancelled || preparation.cancelled) { native.runtime.quit(); return; }
     } else if (native.assets && typeof native.assets.installPrepared === 'function') {
       native.assets.installPrepared([]);
@@ -522,7 +606,7 @@ async function run(input) {
     let deadline = timing.uncapped ? 0 : native.runtime.monotonicNow() + period;
     console.log(`[pmjs] timing logic_hz=${timing.logicHz} ` +
       (timing.uncapped ? 'render_hz=uncapped' : `render_hz=${timing.renderHz}`));
-    console.log(`[pmjs] ready size=${options.width}x${options.height}`);
+    console.log(`[pmjs] ready size=${options.width}x${options.height} startup_ms=${(performance.now() - startupStarted).toFixed(1)}`);
     await new Promise((resolve, reject) => {
       finishSession = resolve;
       native.runtime.scheduling.onFatal = reject;
@@ -596,5 +680,5 @@ async function run(input) {
   }
 }
 
-module.exports = { run, validate, resolveDefaults, progressLines, stageProgress, stageKeyOf, parseTimingConfig, resolveSwapDefault, advanceDeadline,
+module.exports = { run, createPreparationLog, validate, resolveDefaults, progressLines, stageProgress, stageKeyOf, parseTimingConfig, resolveSwapDefault, advanceDeadline,
   PMJS_MV_LOGIC_HZ, PMJS_SUPPORTED_RENDER_HZ };

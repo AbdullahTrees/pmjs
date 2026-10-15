@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "platform.hpp"
 
 #include <SDL.h>
@@ -47,10 +48,9 @@ void printLoadedLibraries() {
   dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void*) {
     const std::string name = info->dlpi_name ? info->dlpi_name : "";
     if (name.find(".so") != std::string::npos || name.find(".node") != std::string::npos)
-      std::cout << "[pmjs-library] path=" << name << '\n';
+      Log() << "[pmjs-library] path=" << name << '\n';
     return 0;
   }, nullptr);
-  std::cout.flush();
 }
 
 int swapIntervalFromEnvironment() {
@@ -306,15 +306,18 @@ Platform::Platform(int width, int height, std::string title) {
     SDL_version compiled{}, runtime{};
     SDL_VERSION(&compiled);
     SDL_GetVersion(&runtime);
-    std::cout << "[pmjs-platform] requested_gles=3.0 sdl_compiled="
-              << int(compiled.major) << '.' << int(compiled.minor) << '.' << int(compiled.patch)
-              << " sdl_runtime=" << int(runtime.major) << '.' << int(runtime.minor) << '.' << int(runtime.patch)
-              << " available_drivers=";
-    for (int index = 0; index < SDL_GetNumVideoDrivers(); ++index) {
-      if (index) std::cout << ',';
-      std::cout << SDL_GetVideoDriver(index);
+    {
+      Log message;
+      message << "[pmjs-platform] requested_gles=3.0 sdl_compiled="
+                << int(compiled.major) << '.' << int(compiled.minor) << '.' << int(compiled.patch)
+                << " sdl_runtime=" << int(runtime.major) << '.' << int(runtime.minor) << '.' << int(runtime.patch)
+                << " available_drivers=";
+      for (int index = 0; index < SDL_GetNumVideoDrivers(); ++index) {
+        if (index) message << ',';
+        message << SDL_GetVideoDriver(index);
+      }
+      message << '\n';
     }
-    std::cout << std::endl;
     printLoadedLibraries();
   }
   // SDL's compiled library names can differ from the renderer's linked providers.
@@ -327,7 +330,7 @@ Platform::Platform(int width, int height, std::string title) {
     if (!std::getenv(name) && dladdr(symbol, &info) && info.dli_fname)
       SDL_setenv(name, info.dli_fname, 0);
     if (environmentFlag("PMJS_GRAPHICS_DIAGNOSTICS"))
-      std::cout << "[pmjs-platform] " << name << '='
+      Log() << "[pmjs-platform] " << name << '='
                 << (std::getenv(name) ? std::getenv(name) : "default") << '\n';
   }
   // The renderer calls EGL/GLES directly; an X11 GLX context uses another API.
@@ -397,7 +400,7 @@ Platform::Platform(int width, int height, std::string title) {
       std::to_string(rgb[2]) + "): " + SDL_GetError();
     if (!creationErrors.empty()) creationErrors += "; ";
     creationErrors += error;
-    std::cerr << "[pmjs-platform] " << error << '\n';
+    Log(LogLevel::Warning) << "[pmjs-platform] " << error << '\n';
     if (window_) SDL_DestroyWindow(window_);
     window_ = nullptr;
   }
@@ -425,7 +428,7 @@ Platform::Platform(int width, int height, std::string title) {
     throw std::runtime_error("PMJS requires an OpenGL ES 3.0 or newer context");
   }
   const auto drawable = drawableSize();
-  std::cout << "[pmjs] display=" << displayWidth_ << "x" << displayHeight_
+  Log() << "[pmjs] display=" << displayWidth_ << "x" << displayHeight_
             << " window=" << windowWidth_ << "x" << windowHeight_
             << " drawable=" << drawable.first << "x" << drawable.second
             << '\n';
@@ -435,18 +438,20 @@ Platform::Platform(int width, int height, std::string title) {
   swapIntervalAccepted_ = swapResult == 0;
   swapInterval_ = SDL_GL_GetSwapInterval();
   if (environmentFlag("PMJS_GRAPHICS_DIAGNOSTICS")) {
-    std::cout << "[pmjs] swap_interval requested=" << requestedSwapInterval_
+    {
+      Log message;
+      message << "[pmjs] swap_interval requested=" << requestedSwapInterval_
               << " accepted=" << (swapIntervalAccepted_ ? "yes" : "no")
               << " sdl_reported=" << swapInterval_
               << " reported_match=" << (swapIntervalAccepted_ && swapInterval_ == requestedSwapInterval_ ? "yes" : "no");
-    if (swapResult != 0) std::cout << " error=\"" << SDL_GetError() << '\"';
-    std::cout << '\n';
+      if (swapResult != 0) message << " error=\"" << SDL_GetError() << '\"';
+    }
     printGraphicsDiagnostics();
   } else if (swapResult != 0) {
-    std::cerr << "[pmjs] swap interval unavailable: " << SDL_GetError() << '\n';
+    Log(LogLevel::Warning) << "[pmjs] swap interval unavailable: " << SDL_GetError() << '\n';
   }
   if (swapIntervalAccepted_ && swapInterval_ != requestedSwapInterval_) {
-    std::cerr << "[pmjs] SDL reports swap interval " << swapInterval_
+    Log(LogLevel::Warning) << "[pmjs] SDL reports swap interval " << swapInterval_
               << " instead of requested " << requestedSwapInterval_ << '\n';
   }
   const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
@@ -815,7 +820,7 @@ void Platform::printGraphicsDiagnostics() const {
     const GLubyte* value = glGetString(name);
     return value ? reinterpret_cast<const char*>(value) : "unknown";
   };
-  std::cout << "[pmjs] gl vendor=\"" << glText(GL_VENDOR)
+  Log() << "[pmjs] gl vendor=\"" << glText(GL_VENDOR)
             << "\" renderer=\"" << glText(GL_RENDERER)
             << "\" version=\"" << glText(GL_VERSION) << "\"\n";
 
@@ -843,7 +848,7 @@ void Platform::printGraphicsDiagnostics() const {
     display == EGL_NO_DISPLAY ? nullptr : eglQueryString(display, EGL_VENDOR);
   const char* eglVersion =
     display == EGL_NO_DISPLAY ? nullptr : eglQueryString(display, EGL_VERSION);
-  std::cout << "[pmjs] egl vendor=\"" << (eglVendor ? eglVendor : "unknown")
+  Log() << "[pmjs] egl vendor=\"" << (eglVendor ? eglVendor : "unknown")
             << "\" version=\"" << (eglVersion ? eglVersion : "unknown")
             << "\" config=" << configId << " min_swap=" << minSwap
             << " max_swap=" << maxSwap << '\n';
@@ -886,7 +891,7 @@ void Platform::printGraphicsDiagnostics() const {
   glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxRenderbufferSize);
   glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &maxVertexAttributes);
   const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-  std::cout << "[pmjs-gpu] sdl_driver="
+  Log() << "[pmjs-gpu] sdl_driver="
             << (SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "unknown")
             << " available_drivers=" << drivers.str()
             << " window=" << windowWidth << 'x' << windowHeight
@@ -904,10 +909,9 @@ void Platform::printGraphicsDiagnostics() const {
             << " software=" << (softwareRenderer(renderer) ? "yes" : "no") << '\n';
   GLint precisionRange[2] = {}, precisionBits = 0;
   glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, precisionRange, &precisionBits);
-  std::cout << "[pmjs-gpu] fragment_highp_bits=" << precisionBits
+  Log() << "[pmjs-gpu] fragment_highp_bits=" << precisionBits
             << " fragment_highp_range=" << precisionRange[0] << ',' << precisionRange[1] << '\n';
   printLoadedLibraries();
-  std::cout.flush();
 }
 
 }  // namespace pmjs

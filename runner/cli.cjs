@@ -34,7 +34,8 @@ function parse(argv) {
 }
 
 if (require.main === module) {
-  runSupervised(parse(process.argv.slice(2))).then(result => {
+  require('./logging.cjs').installConsoleLogging();
+  Promise.resolve().then(() => runSupervised(parse(process.argv.slice(2)))).then(result => {
     if (result.signal) process.kill(process.pid, result.signal);
     else process.exitCode = result.code;
   }).catch(error => {

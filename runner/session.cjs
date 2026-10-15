@@ -1,6 +1,7 @@
 'use strict';
 
 const sessionProcess = process;
+require('./logging.cjs').installConsoleLogging();
 const { run } = require('./index.cjs');
 sessionProcess.once('message', async options => {
   try {

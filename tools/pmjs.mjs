@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { detectEngine, preparationInputs } from './game-inspect.mjs';
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
+import { installConsoleLogging } from '../runner/logging.cjs';
 
 const root = path.resolve(process.argv[2]);
 const share = path.join(root, 'share/pmjs');
@@ -202,6 +203,7 @@ async function main() {
     options.adapters = bundle.adapters;
   }
   const packageSha256 = hash(path.join(root, 'build-info.json'));
+  installConsoleLogging();
   console.log(`[pmjs] version=${info.version} build=${info.buildId || info.source.commit} ` +
     `source=${info.source.commit}${info.source.dirty ? ',modified' : ''} package=${packageSha256}`);
   const game = gameDirectory(options['--game']);
@@ -241,4 +243,8 @@ async function main() {
   else process.exitCode = result.code;
 }
 
-main().catch(error => { console.error(`[pmjs] ${error.stack || error}`); process.exitCode = 1; });
+main().catch(error => {
+  installConsoleLogging();
+  console.error(`[pmjs] ${error.stack || error}`);
+  process.exitCode = 1;
+});

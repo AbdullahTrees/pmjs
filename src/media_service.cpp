@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "media_service.hpp"
 #include "media_mix.hpp"
 #include <SDL.h>
@@ -82,12 +83,12 @@ struct MediaService::Impl {
     device = SDL_OpenAudioDevice(nullptr, 0, &requested, &obtained, 0);
     if (diagnostics) {
       const char* driver = SDL_GetCurrentAudioDriver();
-      std::cout << "[pmjs-audio] driver=" << (driver ? driver : "none")
+      Log message(device ? LogLevel::Info : LogLevel::Warning);
+      message << "[pmjs-audio] driver=" << (driver ? driver : "none")
                 << " device_open=" << (device ? "yes" : "no")
                 << " frequency=" << obtained.freq << " channels=" << int(obtained.channels)
                 << " format=" << obtained.format << " samples=" << obtained.samples;
-      if (!device) std::cout << " error=\"" << SDL_GetError() << '\"';
-      std::cout << std::endl;
+      if (!device) message << " error=\"" << SDL_GetError() << '\"';
     }
     try {
       worker = std::thread([this] {

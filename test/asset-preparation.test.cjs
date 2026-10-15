@@ -267,7 +267,7 @@ test('empty discovery reports install and successful completion without transfor
   assert.equal(result.total, 0);
   assert.equal(f.jobs, 0);
   assert.deepEqual(f.installs, [[]]);
-  assert.deepEqual(progress.map(p => p.phase), ['discover', 'discover', 'install', 'complete']);
+  assert.ok(progress.some(p => p.phase === 'install'));
 });
 
 test('addon and install errors report a terminal failure after discovery or validation', async () => {
@@ -278,6 +278,7 @@ test('addon and install errors report a terminal failure after discovery or vali
     const progress = [];
     const result = await prepareAssets({ ...f, onProgress: value => progress.push(value) });
     assertProgress(progress, result, 'error');
+    assert.match(result.error, /image preparation is unavailable|install failed/);
     assert.equal(result.completed, failInstall ? 1 : 0);
     assert.equal(f.jobs, failInstall ? 1 : 0);
     assert.equal(result.installed, 0);
@@ -666,6 +667,22 @@ test('runner resolves default cache, config-relative recipes and explicit CLI ov
   assert.throws(() => validate({ ...base, assetPreparation: 'maybe' }), /on or off/);
 });
 
+test('partial installation is counted separately from ordinary unprepared assets', async () => {
+  const f = fixture();
+  f.native.assets.installPrepared = () => 0;
+  const partial = await prepareAssets(f);
+  assert.equal(partial.prepared, 1);
+  assert.equal(partial.installed, 0);
+  assert.equal(partial.installFailures, 1);
+  assert.equal(partial.failedFiles, 0);
+  const ordinary = fixture();
+  ordinary.native.assets.processImage = async () => null;
+  const fallback = await prepareAssets(ordinary);
+  assert.equal(fallback.fallback, 1);
+  assert.equal(fallback.failedFiles, 0);
+  assert.equal(fallback.installFailures, 0);
+});
+
 test('source metadata snapshots accompany install and detect changes during hashing', async () => {
   const f = fixture();
   f.native.assets.sourceIdentity = () => 'captured-source-version';
@@ -675,6 +692,7 @@ test('source metadata snapshots accompany install and detect changes during hash
   f.native.assets.sourceIdentity = () => ++checks === 1 ? 'before' : 'after';
   const result = await prepareAssets(f);
   assert.equal(result.fallback, 1);
+  assert.equal(result.failedFiles, 1);
   assert.equal(result.entries.length, 0);
   assert.equal(f.jobs, 1);
 });

@@ -25,6 +25,28 @@ function mutatePayloadString(stored, mutate) {
   return JSON.stringify(payload);
 }
 
+test('catalog diagnostics distinguish first launch, changed binding and damaged cache', async () => {
+  const root = temporaryDirectory('pmjs-catalog-diagnostics-');
+  const { binding, payload } = fixture(root);
+  const file = path.join(root, 'catalog.json'), reasons = [];
+  const read = selected => readCatalog(file, selected, root, reason => reasons.push(reason));
+  assert.equal(await read(binding), null);
+  assert.deepEqual(reasons.splice(0), ['missing']);
+  await publishCatalog(file, binding, root, payload);
+  assert.deepEqual(await read(binding), payload);
+  assert.deepEqual(reasons, []);
+  assert.equal(await read({ processor: 'v2' }), null);
+  assert.deepEqual(reasons.splice(0), ['binding-mismatch']);
+  const stored = JSON.parse(await fs.readFile(file));
+  stored.checksum = 'damaged';
+  await fs.writeFile(file, JSON.stringify(stored));
+  assert.equal(await read(binding), null);
+  assert.deepEqual(reasons.splice(0), ['integrity-mismatch']);
+  await fs.writeFile(file, '{interrupted');
+  assert.equal(await read(binding), null);
+  assert.deepEqual(reasons, ['unreadable-or-invalid']);
+});
+
 test('catalog publication validates integrity, version, binding and cache paths', async () => {
   const root = temporaryDirectory('pmjs-catalog-');
   const { binding, payload } = fixture(root);

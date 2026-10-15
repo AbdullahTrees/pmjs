@@ -305,14 +305,23 @@ test('warm map catalogs skip map inputs and dependency scans; viewport changes r
     return install(entries);
   };
   f.native.assets.installTileSetCatalog=entries=>entries.length;
-  const cold=await prepareMaps(f);
+  const progress=[];
+  const cold=await prepareMaps({...f,onProgress:value=>progress.push(value)});
   assert.equal(cold.installed,1);
+  assert.equal(cold.catalogStatus,'missing');
+  for(const phase of ['map-discover','map-catalog','map-compile','map-install','map-publish','map-cleanup'])
+    assert.ok(progress.some(value=>value.phase===phase),phase);
   const read=f.native.fs.readBytes, sourceIdentity=f.native.assets.sourceIdentity;
   f.native.fs.readBytes=()=>{throw new Error('unexpected map read');};
   f.native.assets.sourceIdentity=()=>{throw new Error('unexpected dependency scan');};
   try {
-    const warm=await prepareMaps(f);
+    progress.length=0;
+    const warm=await prepareMaps({...f,onProgress:value=>progress.push(value)});
     assert.equal(warm.catalogHit,true);
+    assert.equal(warm.catalogStatus,'hit');
+    assert.ok(progress.some(value=>value.phase==='map-catalog'));
+    assert.ok(progress.some(value=>value.phase==='map-install'));
+    assert.equal(progress.some(value=>value.phase==='map-compile'),false);
     assert.deepEqual(warm.index,cold.index);
     assert.deepEqual(warm.maps,cold.maps);
     assert.equal(warm.generated,0);
@@ -320,6 +329,7 @@ test('warm map catalogs skip map inputs and dependency scans; viewport changes r
   } finally {f.native.fs.readBytes=read;f.native.assets.sourceIdentity=sourceIdentity;}
   const resized=await prepareMaps({...f,width:640,height:480});
   assert.equal(resized.catalogHit,undefined);
+  assert.equal(resized.catalogStatus,'binding-mismatch');
   assert.equal(resized.installed,1);
   resized.releaseCacheLease();cold.releaseCacheLease();
 });

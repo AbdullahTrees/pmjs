@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "runtime_core.hpp"
 #include "scene_packet.hpp"
 
@@ -52,7 +53,7 @@ bool RuntimeCore::submitScene(std::uint32_t version,
     if (sceneMetadataScratch_[offset + 5] & scene_packet::NodeFlags::hasAlphaMask) {
       const auto mask = resolveImage(sceneMetadataScratch_[offset + 6]);
       if (!mask) {
-        std::cerr << "[pmjs-scene] invalid alpha-mask handle="
+        Log(LogLevel::Error) << "[pmjs-scene] invalid alpha-mask handle="
                   << sceneMetadataScratch_[offset + 6]
                   << " node=" << index << '\n';
         return false;
@@ -66,7 +67,7 @@ bool RuntimeCore::submitScene(std::uint32_t version,
            static_cast<std::uint32_t>(scene_packet::FilterKind::alphaMask))) {
       const auto image = resolveImage(sceneMetadataScratch_[offset + 2]);
       if (!image) {
-        std::cerr << "[pmjs-scene] invalid filter image handle="
+        Log(LogLevel::Error) << "[pmjs-scene] invalid filter image handle="
                   << sceneMetadataScratch_[offset + 2]
                   << " node=" << index << '\n';
         return false;
@@ -77,7 +78,7 @@ bool RuntimeCore::submitScene(std::uint32_t version,
         kind != scene_packet::NodeKind::tilingSprite) continue;
     const auto image = resolveImage(sceneMetadataScratch_[offset + 2]);
     if (!image) {
-      std::cerr << "[pmjs-scene] invalid sprite image handle="
+      Log(LogLevel::Error) << "[pmjs-scene] invalid sprite image handle="
                 << sceneMetadataScratch_[offset + 2]
                 << " node=" << index
                 << " kind=" << static_cast<std::uint32_t>(kind) << '\n';
@@ -93,7 +94,7 @@ bool RuntimeCore::submitScene(std::uint32_t version,
     valueCount,
     nodeCount);
   if (!queued) {
-    std::cerr << "[pmjs-scene] renderer rejected packet nodes="
+    Log(LogLevel::Error) << "[pmjs-scene] renderer rejected packet nodes="
               << nodeCount << '\n';
   }
   return queued;

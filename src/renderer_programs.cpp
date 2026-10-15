@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "renderer.hpp"
 #include "renderer_shaders.hpp"
 #include "renderer_identity_shader.hpp"
@@ -377,7 +378,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
         if (nearestTile) glDeleteProgram(nearestTile);
         if (nearestFourTile) glDeleteProgram(nearestFourTile);
         nearestTile = nearestFourTile = 0;
-        std::fprintf(stderr, "[pmjs-renderer] nearest tile shader unavailable: %s\n", error.what());
+        Log(LogLevel::Warning) << "[pmjs-renderer] nearest tile shader unavailable: " << error.what();
       }
     }
     const auto overlaySource = meshPostTintOverlayFragmentSourceWithPrecision("mediump");

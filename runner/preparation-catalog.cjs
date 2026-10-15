@@ -28,30 +28,31 @@ function paths(payload, root, encode) {
   const decryptedEntries = payload.decryptedEntries?.map(entry => ({ ...entry, file: cachePath(entry.file) }));
   return { ...payload, entries, ...(decryptedEntries ? { decryptedEntries } : {}) };
 }
-async function readCatalog(file, binding, root) {
+async function readCatalog(file, binding, root, onMiss = () => {}) {
+  const miss = reason => { onMiss(reason); return null; };
   try {
     const catalog = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (catalog.binding !== checksum(binding)) return null;
+    if (catalog.binding !== checksum(binding)) return miss('binding-mismatch');
     // Version 3 stores the payload as a string so integrity is verified by
     // hashing the stored bytes: no canonical re-serialization pass is needed.
     // Version 2 (payload object, checksum over re-serialization) stays readable
     // so existing caches keep their fast path across the upgrade.
     let payload;
     if (catalog.version === 3 && typeof catalog.payload === 'string') {
-      if (catalog.checksum !== checksumRaw(catalog.payload)) return null;
+      if (catalog.checksum !== checksumRaw(catalog.payload)) return miss('integrity-mismatch');
       payload = JSON.parse(catalog.payload);
     } else if (catalog.version === 2 && catalog.checksum === checksum(catalog.payload)) {
       payload = catalog.payload;
-    } else return null;
-    if (!Array.isArray(payload.keys) || !payload.keys.every(key => HASH.test(key))) return null;
+    } else return miss('format-or-integrity-mismatch');
+    if (!Array.isArray(payload.keys) || !payload.keys.every(key => HASH.test(key))) return miss('invalid-metadata');
     if (!Array.isArray(payload.entries) || payload.entries.length > 100000 || !payload.summary ||
         payload.summary.installed !== payload.entries.length ||
-        !Object.values(payload.summary).every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return null;
+        !Object.values(payload.summary).every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0)) return miss('invalid-metadata');
     if (payload.decryptedEntries !== undefined) {
-      if (!Array.isArray(payload.decryptedEntries) || payload.decryptedEntries.length > 100000) return null;
-    } else if (!Array.isArray(payload.maps) || !payload.index || typeof payload.index !== 'object' || Array.isArray(payload.index)) return null;
+      if (!Array.isArray(payload.decryptedEntries) || payload.decryptedEntries.length > 100000) return miss('invalid-metadata');
+    } else if (!Array.isArray(payload.maps) || !payload.index || typeof payload.index !== 'object' || Array.isArray(payload.index)) return miss('invalid-metadata');
     return paths(payload, root, false);
-  } catch (_) { return null; }
+  } catch (error) { return miss(error.code === 'ENOENT' ? 'missing' : 'unreadable-or-invalid'); }
 }
 async function publishCatalog(file, binding, root, payload) {
   payload = JSON.stringify(paths(payload, root, true));

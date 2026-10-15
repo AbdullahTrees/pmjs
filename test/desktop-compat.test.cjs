@@ -170,3 +170,14 @@ test('sequential desktop resize plugins use the current physical viewport', () =
   assert.equal(c.nw.Window.get().width, 816); assert.equal(c.nw.Window.get().height, 624);
   assert.equal(c.nativeLogicalWidth, 960); assert.equal(c.nativeLogicalHeight, 864);
 });
+
+test('MV and MZ retain stock desktop detection before plugin initialization', () => {
+  for (const engine of ['mv', 'mz']) {
+    const h = desktop(engine), c = h.context;
+    vm.runInContext('globalThis.Utils={isNwjs:function(){return typeof require === "function" && typeof process === "object";}};', c);
+    const stock = c.Utils.isNwjs;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-rpgmaker/platform.js'), 'utf8'), c);
+    assert.equal(c.Utils.isNwjs, stock); assert.equal(c.Utils.isNwjs(), true);
+    assert.equal(c.process.versions.nw, engine === 'mz' ? '0.48.4' : '0.29.0');
+  }
+});

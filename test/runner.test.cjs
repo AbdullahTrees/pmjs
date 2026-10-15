@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { parse } = require('../runner/cli.cjs');
-const { run, validate, parseTimingConfig, resolveSwapDefault, advanceDeadline } = require('../runner/index.cjs');
+const { run, createPreparationLog, validate, parseTimingConfig, resolveSwapDefault, advanceDeadline } = require('../runner/index.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
 function fixture(source) {
@@ -42,6 +42,89 @@ function writeAddon(root, polls = [true, false]) {
   fs.writeFileSync(addon, `module.exports = (${native.toString()})(${JSON.stringify(polls)});`);
   return addon;
 }
+
+test('preparation logs bounded heartbeats, current work and phase durations with a monotonic clock', () => {
+  let clock = 0;
+  const lines = [];
+  const reporter = createPreparationLog({ stage: 'images', codec: 'lz4', cacheRoot: '/cache', verifyHashes: false },
+    { now: () => clock, log: line => lines.push(line) });
+  reporter.progress({ phase: 'catalog', completed: 0, total: 2 });
+  clock = 2000;
+  reporter.progress({ phase: 'prepare', source: 'img/a\n.png', completed: 0, total: 2 });
+  clock = 9999; reporter.heartbeat();
+  assert.equal(lines.some(line => line.includes('event=progress')), false);
+  clock = 10000; reporter.heartbeat();
+  const heartbeat = lines.at(-1);
+  assert.match(heartbeat, /phase=prepare elapsed_ms=10000.0 phase_elapsed_ms=8000.0 no_progress_ms=8000.0/);
+  assert.ok(heartbeat.includes('source="img/a\\n.png"'));
+  reporter.heartbeat();
+  assert.equal(lines.filter(line => line.includes('event=progress')).length, 1);
+  clock = 12000;
+  reporter.finish({ generated: 2, installed: 2, catalogStatus: 'missing', validation: { hashedFiles: 2, hashedBytes: 400 } });
+  assert.match(lines.at(-1), /status=complete cache=cold catalog_hit=false catalog=missing duration_ms=12000.0/);
+  assert.match(lines.at(-1), /hashed_files=2 hashed_bytes=400/);
+  assert.match(lines.at(-1), /phase_ms=\{"start":0,"catalog":2000,"prepare":10000\}/);
+  const count = lines.length;
+  clock = 30000; reporter.heartbeat(); reporter.finish({});
+  assert.equal(lines.length, count);
+});
+
+test('preparation summaries distinguish cache reuse, partial generation, failure and cancellation', () => {
+  for (const [result, expected] of [
+    [{ generated: 0, hits: 20, catalogHit: true, catalogStatus: 'hit' }, 'status=complete cache=warm catalog_hit=true catalog=hit'],
+    [{ generated: 0, hits: 20, catalogStatus: 'binding-mismatch' }, 'status=complete cache=warm catalog_hit=false catalog=binding-mismatch'],
+    [{ generated: 1, hits: 20 }, 'status=complete cache=mixed'],
+    [{ generated: 1, indexedNegative: 20 }, 'status=complete cache=mixed'],
+    [{ generated: 0 }, 'status=complete cache=empty'],
+    [{ generated: 0, hits: 20, cancelled: true }, 'status=cancelled cache=incomplete'],
+    [{ generated: 0, cancelled: true, error: 'map preparation cancelled' }, 'status=cancelled cache=incomplete'],
+    [{ generated: 0, hits: 20, failedFiles: 1 }, 'status=partial cache=incomplete'],
+    [{ generated: 1, prepared: 2, installed: 1 }, 'status=partial cache=incomplete'],
+    [{ generated: 1, installFailures: 1 }, 'status=partial cache=incomplete'],
+    [{ generated: 0, hits: 20, error: 'disk failed' }, 'status=failed cache=incomplete']
+  ]) {
+    const lines = [];
+    const reporter = createPreparationLog({ stage: 'images', codec: 'lz4', cacheRoot: '/cache', verifyHashes: false },
+      { now: () => 0, log: line => lines.push(line) });
+    reporter.finish(result);
+    assert.ok(lines.at(-1).includes(expected), lines.at(-1));
+  }
+});
+
+test('runner logs cold and validated warm preparation before boot and includes total startup time', async t => {
+  const options = fixture('NativeHost.input.checkBoot(); globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};');
+  options.mapPreparation = 'off';
+  fs.mkdirSync(path.join(options.gameRoot, 'img/pictures'), { recursive: true });
+  fs.writeFileSync(path.join(options.gameRoot, 'img/pictures/test.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64'));
+  const host = require(options.addon);
+  host.assets.processImage = async () => null;
+  host.assets.installPrepared = () => 0;
+  const lines = [];
+  t.mock.method(console, 'log', line => lines.push(line));
+  t.mock.method(console, 'warn', () => {});
+  let booted = false;
+  host.input.checkBoot = () => { booted = true; };
+  host.pollEvents = () => !booted;
+  for (const cache of ['cold', 'warm']) {
+    booted = false;
+    await run(options);
+    const summary = lines.findIndex(line => line.includes('event=finish status=complete cache='+cache));
+    const ready = lines.findIndex(line => line.includes('[pmjs] ready'));
+    assert.ok(summary >= 0 && ready > summary, lines.join('\n'));
+    assert.match(lines[ready], /startup_ms=\d+\.\d/);
+    assert.ok(lines.some(line => /preparation event=finish status=complete duration_ms=\d+\.\d/.test(line)));
+    lines.length = 0;
+  }
+  options.mapPreparation = 'on';
+  booted = false;
+  await run(options);
+  const imageFinish = lines.findIndex(line => line.includes('stage=images event=finish'));
+  const mapStart = lines.findIndex(line => line.includes('stage=maps event=start'));
+  assert.ok(imageFinish >= 0 && imageFinish < mapStart);
+  assert.ok(lines.some(line => line.includes('stage=maps event=finish status=failed cache=incomplete')));
+  assert.ok(lines.some(line => line.includes('preparation event=finish status=failed')));
+});
 
 test('CLI parses the documented options including --config', () => {
   const value = parse(['--addon','a','--game-root','g','--bootstrap','b','--save-root','s',

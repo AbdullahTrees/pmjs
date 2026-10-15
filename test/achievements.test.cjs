@@ -413,6 +413,20 @@ test('Steam callbacks use the dispatcher and cannot run after session terminatio
   assert.equal(calls, 0);
 });
 
+test('provider defaults enable local emulation and preserve explicit backend choices', () => {
+  const code = fs.readFileSync(path.join(root, 'js/pmjs-core/config.js'), 'utf8');
+  for (const [provider, backend, expected] of [
+    [undefined, null, 'portable'], [undefined, {}, 'greenworks'],
+    ['none', {}, 'none'], ['portable', {}, 'portable'], ['greenworks', null, 'greenworks']
+  ]) {
+    const config = { steam: { appId: 42, ...(provider === undefined ? {} : { provider }) } };
+    const context = vm.createContext({ PMJS_GAME_CONFIG: config, NativeHost: { greenworks: backend } });
+    vm.runInContext(code, context);
+    assert.equal(context.PMJS.config.steam.provider, expected);
+    assert.equal(context.PMJS.config.steam.appId, 42);
+  }
+});
+
 test('session flush persists direct store use without initializing an unused provider', () => {
   const h = harness();
   h.context.pmjsSteam.flush();

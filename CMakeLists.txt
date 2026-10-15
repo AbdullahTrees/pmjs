@@ -184,6 +184,8 @@ if(BUILD_TESTING)
   endfunction()
 
   pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp src/vfs.cpp src/file_identity.cpp)
+  pmjs_add_cpp_test(pmjs-log-test native-log test/log.cpp)
+  target_link_libraries(pmjs-log-test PRIVATE pthread)
   target_link_libraries(pmjs-vfs-test PRIVATE PkgConfig::AVUTIL)
   pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp src/asset_processor.cpp)
   pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp src/prepared_page.cpp)

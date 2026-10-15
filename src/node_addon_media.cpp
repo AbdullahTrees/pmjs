@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "node_addon_internal.hpp"
 #include "node_addon_video.hpp"
 
@@ -36,7 +37,7 @@ void reportVideo(Video& video, double requestedPts) {
   const double workerWaitTotal = video.workerQueueMs();
   const double workerWaitMs = workerWaitTotal - video.reportedWorkerWaitMs;
   const double readyWaitMs = video.readyWaitMs - video.reportedReadyWaitMs;
-  std::cerr << "[pmjs-video] {\"path\":\"image\",\"sourceFps\":" << video.sourceFps
+  Log(LogLevel::Info) << "[pmjs-video] {\"path\":\"image\",\"sourceFps\":" << video.sourceFps
     << ",\"requested\":" << requests
     << ",\"decoded\":" << (decode.decodedFrames - video.reportedDecodeStats.decodedFrames)
     << ",\"skipped\":" << (decode.skippedFrames - video.reportedDecodeStats.skippedFrames)
@@ -168,7 +169,7 @@ void reportVideoLoad(const AsyncVideoLoad& load, double installMs,
   if (!load.telemetryEnabled) return;
   const double totalMs = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - load.queuedAt).count();
-  std::cerr << "[pmjs-video-load] {\"success\":"
+  Log(success ? LogLevel::Info : LogLevel::Error) << "[pmjs-video-load] {\"success\":"
     << (success ? "true" : "false")
     << ",\"totalMs\":" << totalMs
     << ",\"videoOpenMs\":" << load.videoOpenMs

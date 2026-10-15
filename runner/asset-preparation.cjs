@@ -279,7 +279,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   const offline = preparationContext === 'offline';
   const started = performance.now();
   const result = { enabled: true, total: 0, completed: 0, generated: 0, hits: 0, negativeHits: 0,
-    fallback: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
+    fallback: 0, failedFiles: 0, installFailures: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
     indexedNegative: 0, indexedLayoutAttempts: 0, indexedZeroPage: 0,
     indexedPageCopies: 0, unindexedProcessed: 0,
     cancelled: false, entries: [], decryptedEntries: [], decisions: [], durationMs: 0 };
@@ -321,14 +321,19 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       contentIdentity: 1 };
     const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
       typeof native.assets.installDerivedCatalog === 'function';
+    result.catalogStatus = offline ? 'offline' : verifyHashes ? 'verify-hashes' :
+      catalogCapable ? 'checking' : 'unsupported';
     if (!offline && !verifyHashes && catalogCapable) {
       await fsp.mkdir(cacheRoot, { recursive: true });
+      report('wait');
       release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
       if (!release) return result;
-      const catalog = await readCatalog(catalogFile, binding, cacheRoot);
+      report('catalog');
+      const catalog = await readCatalog(catalogFile, binding, cacheRoot, reason => { result.catalogStatus = reason; });
       if (catalog && !cancelled()) {
         let lease;
         try {
+          report('install');
           lease = await createImageLease(cacheRoot, catalog.keys, native.assets);
           await native.assets.installDerivedCatalog(catalog.decryptedEntries);
           const installed = await native.assets.installPreparedCatalog(catalog.entries);
@@ -338,10 +343,12 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           installedLeases.set(native.assets, lease);
           if (previous) previous();
           Object.assign(result, catalog.summary, { entries: catalog.entries, decryptedEntries: catalog.decryptedEntries,
-            generated: 0, catalogHit: true, releaseCacheLease: lease });
+            generated: 0, failedFiles: 0, installFailures: 0, catalogHit: true, catalogStatus: 'hit', releaseCacheLease: lease });
           report('install');
           return result;
-        } catch (_) {
+        } catch (error) {
+          result.catalogStatus = 'install-rejected';
+          result.catalogError = error.message;
           if (lease) lease();
           await clearIndexes();
         }
@@ -349,6 +356,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       await release(); release = undefined;
       if (cancelled()) return result;
     }
+    report('discover');
     const sources = await discover(gameRoot, cacheRoot);
     const settings = await encryptionSettings(native, gameRoot);
     result.total = sources.length;
@@ -364,8 +372,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       return result;
     }
     await fsp.mkdir(path.join(cacheRoot, 'entries'), { recursive: true });
+    report('wait');
     release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
     if (!release) return result;
+    report('validate');
     const files = await preparationFiles(cacheRoot, verifyHashes);
     result.validation = files.stats;
     async function refreshIdentity(source, expectedHash, previous) {
@@ -521,6 +531,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         }
       } catch (error) {
         result.fallback += 1;
+        result.failedFiles += 1;
         logger.warn(`[pmjs] asset preparation fallback ${source}: ${error.message}`);
       } finally {
         if (stage) await fsp.rm(stage, { recursive: true, force: true });
@@ -551,6 +562,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       if (native.assets.installDecrypted) {
         await native.assets.installDecrypted(result.decryptedEntries, catalogCapable);
         result.decrypted = result.decryptedEntries.filter(entry => native.assets.hasDecrypted(entry.logicalSource)).length;
+        result.installFailures += result.decryptedEntries.length - result.decrypted;
         result.fallback += result.decryptedEntries.length - result.decrypted;
         result.entries = result.entries.filter(entry => {
           if (!entry.decryptedFile) return true;
@@ -566,10 +578,12 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       result.prepared = result.entries.length;
       result.installed = Number.isInteger(installed) ? installed : result.entries.length;
       result.fallback += result.prepared - result.installed;
+      result.installFailures += result.prepared - result.installed;
       if (result.installed < result.prepared) {
         logger.warn(`[pmjs] prepared image index installed ${result.installed}/${result.prepared}; remaining images use ordinary loading`);
       }
       if (catalogCapable && result.installed === result.entries.length && result.decrypted === result.decryptedEntries.length) {
+        report('publish');
         const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
         summary.hits = keys.length + indexedNegativeSkips;
         summary.negativeHits = catalogNegativeHits;
@@ -603,6 +617,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     }
   } catch (error) {
     terminalPhase = 'error';
+    result.error = error.message;
     if (result.releaseCacheLease) {
       result.releaseCacheLease(); delete result.releaseCacheLease;
       await clearIndexes();

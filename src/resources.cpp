@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "resources.hpp"
 #include <EGL/egl.h>
 #include "prepared_page.hpp"
@@ -2401,11 +2402,10 @@ std::optional<CompactImageRegion> ImageStore::resolveCompactRegion(ImageHandle h
     if (tileDiagnostics_) {
       const auto elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-      std::fprintf(stderr,
-        "[pmjs-images] compact-image ready source=\"%s\" logical=%dx%d atlas=%dx%d "
-        "atlas_bytes=%zu lookup_bytes=%zu upload_bytes=%zu realize_ms=%.3f\n",
-        slot.sourcePath.generic_string().c_str(), info->width, info->height, atlasWidth, atlasHeight,
-        pixels.size(), static_cast<std::size_t>(info->width + info->height) * 8U, bytes, elapsedMs);
+      Log() << "[pmjs-images] compact-image ready source=\"" << slot.sourcePath.generic_string()
+        << "\" logical=" << info->width << 'x' << info->height << " atlas=" << atlasWidth << 'x' << atlasHeight
+        << " atlas_bytes=" << pixels.size() << " lookup_bytes=" << static_cast<std::size_t>(info->width + info->height) * 8U
+        << " upload_bytes=" << bytes << " realize_ms=" << std::fixed << std::setprecision(3) << elapsedMs;
     }
   }
   ++preparedRegions_;
@@ -2581,14 +2581,13 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   if (tileDiagnostics_) {
     const auto elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    std::fprintf(stderr,
-        "[pmjs-images] %s %s source=\"%s\" last_sampling_reason=%s "
-        "size=%dx%d backing=%s upload_bytes=%zu materialize_ms=%.3f realization=%s resident_bytes=%zu\n",
-        slot.tiles ? "tiled" : "prepared", cropUpload ? "crop-upload ready" : "full-image fallback",
-        slot.sourcePath.generic_string().c_str(),
-        slot.lastPreparedFallbackReason.empty() ? "not-recorded" : slot.lastPreparedFallbackReason.c_str(),
-        slot.width, slot.height, premultiplied ? "premultiplied" : "straight", uploaded, elapsedMs,
-        cropUpload ? "crop-upload" : "cpu-reconstruction", bytes);
+    Log() << "[pmjs-images] " << (slot.tiles ? "tiled" : "prepared")
+      << ' ' << (cropUpload ? "crop-upload ready" : "full-image fallback")
+      << " source=\"" << slot.sourcePath.generic_string()
+      << "\" last_sampling_reason=" << (slot.lastPreparedFallbackReason.empty() ? "not-recorded" : slot.lastPreparedFallbackReason)
+      << " size=" << slot.width << 'x' << slot.height << " backing=" << (premultiplied ? "premultiplied" : "straight")
+      << " upload_bytes=" << uploaded << " materialize_ms=" << std::fixed << std::setprecision(3) << elapsedMs
+      << " realization=" << (cropUpload ? "crop-upload" : "cpu-reconstruction") << " resident_bytes=" << bytes;
   }
   return true;
 }

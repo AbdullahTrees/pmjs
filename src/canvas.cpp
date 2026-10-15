@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "canvas.hpp"
 #include "checked_bounds.hpp"
 #include "text_layout.hpp"
@@ -683,7 +684,7 @@ struct CanvasStore::FontState {
       ? (100.0 * static_cast<double>(s.glyphMaskHits) / static_cast<double>(totalMaskReqs))
       : 100.0;
 
-    std::cerr << "[pmjs-font] {"
+    Log(LogLevel::Info) << "[pmjs-font] {"
       << "\"faces\":" << s.fontFaces
       << ",\"strikes\":" << s.fontStrikes
       << ",\"glyphs\":" << s.glyphEntries

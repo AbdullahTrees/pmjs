@@ -1,3 +1,4 @@
+#include "log.hpp"
 #include "node_addon_internal.hpp"
 #include <cmath>
 #include <span>
@@ -711,7 +712,7 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
       }
     } else if (const auto current = Vfs::fileIdentity(*path); current != identity) {
       if (changedSource < 3)
-        std::cerr << "[pmjs] prepared source identity differs " << sourceName
+        Log(LogLevel::Warning) << "[pmjs] prepared source identity differs " << sourceName
           << " expected=" << identity << " actual=" << current << '\n';
       ++changedSource;
     } else if (std::any_of(pagePaths.begin(), pagePaths.end(), [](const auto& file) {
@@ -721,7 +722,7 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
     else ++invalidEntry;
   }
   if (installed != count)
-    std::cerr << "[pmjs] prepared install failures missing_source=" << missingSource
+    Log(LogLevel::Warning) << "[pmjs] prepared install failures missing_source=" << missingSource
       << " changed_source=" << changedSource << " missing_page=" << missingPage
       << " invalid_entry=" << invalidEntry << '\n';
   return number(env, installed);
