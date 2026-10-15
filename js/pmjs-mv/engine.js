@@ -2,7 +2,6 @@
 
 // Graphics capability shims: native host always has a GL surface.
 if (typeof Graphics !== 'undefined') {
-  Graphics.isWebGL = function() { return true; };
   Graphics.hasWebGL = function() { return true; };
   Graphics.canUseSaturationBlend = function() { return true; };
   Graphics.canUseDifferenceBlend = function() { return true; };

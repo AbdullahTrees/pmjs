@@ -6,6 +6,8 @@ const { createMzContext, runModule } = require('./helpers/mz-context.cjs');
 
 function harness(enabled = true) {
   const f = createMzContext(), c = f.context;
+  f.warnings = [];
+  c.console = { ...console, warn(message) { f.warnings.push(message); } };
   const program = {};
   class BlurPass { apply() {} }
   class BlurFilter {
@@ -73,6 +75,7 @@ test('MZ caches one premultiplied full-screen image while preserving authored ob
   assert.equal(second.values[index * 41 + 6], 1, 'source opacity is already in cached texels');
   assert.equal(b.bitmap, bitmap); assert.equal(b.texture, texture); assert.equal(b.filters, filters);
   assert.equal(b.alpha, 192 / 255); assert.equal(b.cacheAsBitmap, undefined);
+  assert.deepEqual(f.warnings, []);
 });
 
 test('MZ cache rebuilds after pixels, opacity, filter and texture changes', () => {
@@ -89,6 +92,7 @@ test('MZ cache rebuilds after pixels, opacity, filter and texture changes', () =
     assert.equal(f.created.length, before + 1);
     assert.equal(f.released.length, f.created.length - 1);
   }
+  assert.deepEqual(f.warnings, []);
 });
 
 test('MZ backgrounds with children, transforms, masks or custom sampling use ordinary rendering', () => {
@@ -105,6 +109,7 @@ test('MZ backgrounds with children, transforms, masks or custom sampling use ord
     assert.equal(f.created.length, 1);
     assert.equal(f.released.length, 1);
     assert.equal(f.filters(packet), 1);
+    assert.ok(f.warnings.some(line => line.includes('mz.menu-background-cache refused for this use:')));
   }
 });
 
@@ -146,6 +151,7 @@ test('MZ scene return and renderer destruction release only derived resources', 
 
 test('MZ snapshot allocation failure restores ordinary rendering and releases stale cache', () => {
   const f = harness();
+  f.context.PMJS.optimizations.finalize();
   f.draw();
   f.background.texture.baseTexture.resource.source.__pmjsContentRevision++;
   const bitmap = f.background.bitmap, filters = f.background.filters;
@@ -158,6 +164,10 @@ test('MZ snapshot allocation failure restores ordinary rendering and releases st
   assert.deepEqual(f.sizes.at(-1), [64, 64]);
   assert.equal(f.background.bitmap, bitmap);
   assert.equal(f.background.filters, filters);
+  assert.equal(f.warnings.filter(line => line.includes('[pmjs-opt]')).length, 1);
+  assert.match(f.warnings.find(line => line.includes('[pmjs-opt]')),
+    /mz.menu-background-cache refused for this use: menu background image allocation failed \(allocation failed\)/);
+  assert.equal(f.context.PMJS.optimizations.isEnabled('mz.menu-background-cache'), true);
   f.context.NativeHost.render.renderToImage = capture;
   assert.equal(f.filters(f.draw()), 0);
   assert.equal(f.created.length, 2);

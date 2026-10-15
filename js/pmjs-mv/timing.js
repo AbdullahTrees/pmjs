@@ -97,20 +97,35 @@
     } catch (_) {}
   }
 
-  // Direct-stepping overrides cannot be safely controlled by this gate.
-  function pmjsMvRecognizesUpdateMain(fn) {
-    var source = '';
-    try {
-      source = Function.prototype.toString.call(fn);
-    } catch (_) {
-      return false;
+  function reviewedUpdateMain() {
+    if (Utils.isMobileSafari()) {
+      this.changeScene();
+      this.updateScene();
+    } else {
+      var newTime = this._getTimeInMsWithoutMobileSafari();
+      var fTime = (newTime - this._currentTime) / 1000;
+      if (fTime > 0.25) fTime = 0.25;
+      this._currentTime = newTime;
+      this._accumulator += fTime;
+      while (this._accumulator >= this._deltaTime) {
+        this.updateInputData();
+        this.changeScene();
+        this.updateScene();
+        this._accumulator -= this._deltaTime;
+      }
     }
-    return /this\._currentTime\s*=\s*newTime/.test(source) &&
-      /this\._accumulator\s*\+=\s*fTime/.test(source) &&
-      /while\s*\(\s*this\._accumulator\s*>=\s*this\._deltaTime\s*\)/.test(source) &&
-      /this\.updateInputData\(\)\s*;\s*this\.changeScene\(\)\s*;\s*this\.updateScene\(\)/.test(source) &&
-      /this\._accumulator\s*-=\s*this\._deltaTime/.test(source) &&
-      /this\.renderScene\(\)\s*;\s*this\.requestUpdate\(\)/.test(source);
+    this.renderScene();
+    this.requestUpdate();
+  }
+
+  function reviewedSource(fn) {
+    return Function.prototype.toString.call(fn).replace(/\r\n/g, '\n')
+      .replace(/^function(?:\s+[\w$]+)?\s*\(/, 'function(')
+      .split('\n').map(function(line) { return line.trim(); }).join('\n');
+  }
+
+  function pmjsMvRecognizesUpdateMain(fn) {
+    return reviewedSource(fn) === reviewedSource(reviewedUpdateMain);
   }
 
   function pmjsMvRefuseTimingContract(reason) {
@@ -129,8 +144,14 @@
 
   function pmjsMvInstallTimingContract(options) {
     if (!PMJS.optimizations.isEnabled(timingOptimizationId)) return false;
-    if (typeof SceneManager === 'undefined' || !SceneManager) return false;
-    if (typeof SceneManager.updateMain !== 'function') return false;
+    if (typeof SceneManager === 'undefined' || !SceneManager) {
+      PMJS.optimizations.reportFallback(timingOptimizationId, 'SceneManager unavailable');
+      return false;
+    }
+    if (typeof SceneManager.updateMain !== 'function') {
+      PMJS.optimizations.reportFallback(timingOptimizationId, 'SceneManager.updateMain unavailable');
+      return false;
+    }
     if (SceneManager.updateMain._pmjsTimingWrapped) return true;
     if (SceneManager.updateMain._pmjsTimingRefused) return false;
     if (!pmjsMvRecognizesUpdateMain(SceneManager.updateMain)) {
@@ -144,31 +165,44 @@
       PMJS.optimizations.refuse(timingOptimizationId, 'missing SceneManager.resume');
       return false;
     }
+    if (SceneManager._deltaTime !== 1 / PMJS_MV_LOGIC_HZ) {
+      pmjsMvRefuseTimingContract('modified-deltaTime');
+      PMJS.optimizations.refuse(timingOptimizationId, 'modified SceneManager._deltaTime');
+      return false;
+    }
     var original = SceneManager.updateMain;
-    SceneManager._deltaTime = 1 / PMJS_MV_LOGIC_HZ;
     var gate = pmjsMvCreateStepGate(options);
     var clockGetter = '_getTimeInMsWithoutMobileSafari';
     function wrappedUpdateMain() {
+      var scene = this;
+      if (scene._deltaTime !== 1 / PMJS_MV_LOGIC_HZ) {
+        gate.clockMs = null;
+        gate.accMs = 0;
+        PMJS.optimizations.reportFallback(timingOptimizationId, 'modified SceneManager._deltaTime');
+        return original.apply(scene, arguments);
+      }
       var nowMs = performance.now();
-      SceneManager._deltaTime = 1 / PMJS_MV_LOGIC_HZ;
-      var gated = pmjsMvGateSteps(gate, nowMs);
-      // Feed only the steps selected by the gate into stock updateMain.
-      SceneManager._currentTime = nowMs;
-      SceneManager._accumulator = gated.feedMs / 1000;
-      if (gated.overload) pmjsMvReportOverload(gated.droppedMs);
-      // Prevent stock's second clock read from changing the selected steps.
-      var hadGetter = false;
-      var savedGetter;
+      var savedGetter = scene[clockGetter];
+      var fed = false;
       try {
-        hadGetter = typeof SceneManager[clockGetter] === 'function';
-        savedGetter = SceneManager[clockGetter];
-        SceneManager[clockGetter] = function() { return nowMs; };
-        return original.apply(this, arguments);
+        // Stock calls this clock only in its accumulator branch. Leave the
+        // Mobile Safari branch and its platform-detection calls untouched.
+        scene[clockGetter] = function() {
+          var gated = pmjsMvGateSteps(gate, nowMs);
+          scene._currentTime = nowMs;
+          scene._accumulator = gated.feedMs / 1000;
+          if (gated.overload || gated.droppedMs > 0) pmjsMvReportOverload(gated.droppedMs);
+          fed = true;
+          return nowMs;
+        };
+        return original.apply(scene, arguments);
       } finally {
-        try {
-          if (hadGetter) SceneManager[clockGetter] = savedGetter;
-          else delete SceneManager[clockGetter];
-        } catch (_) {}
+        scene[clockGetter] = savedGetter;
+        if (!fed) {
+          gate.clockMs = null;
+          gate.accMs = 0;
+          PMJS.optimizations.reportFallback(timingOptimizationId, 'Mobile Safari timing branch');
+        }
       }
     }
     wrappedUpdateMain._pmjsTimingWrapped = true;

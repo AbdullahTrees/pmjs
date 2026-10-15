@@ -6,17 +6,22 @@ const { createMvBlurContext } = require('./helpers/mv-blur-context.cjs');
 
 function harness(options) {
   const calls = [];
+  const warnings = [];
   const native = { runtime: { env: () => '' }, canvas: {
     create: (width, height) => ({ handle: 7, width, height }), release() {},
     blurMv(handle) { calls.push(handle); return true; },
     drawImage() {}, fillRect() {}, compositePixels() {},
     readPremultipliedPixels(_handle, _x, _y, width, height) { return new Uint8Array(width*height*4); },
   } };
-  return { context: createMvBlurContext(native, options), native, calls };
+  const context = createMvBlurContext(native, options);
+  context.console = { ...console, warn(message) {
+    if (message.startsWith('[pmjs-opt] bitmap.native-blur ')) warnings.push(message);
+  } };
+  return { context, native, calls, warnings };
 }
 
 test('native MV blur preserves Canvas state and invalidates bitmap content without JS readback', () => {
-  const { context, calls } = harness();
+  const { context, calls, warnings } = harness();
   context.PMJS.phases.emit('afterGuestPlugins');
   const bitmap = new context.Bitmap(8, 8);
   bitmap._context.fillStyle = 'red';
@@ -31,6 +36,7 @@ test('native MV blur preserves Canvas state and invalidates bitmap content witho
   assert.equal(bitmap._context.globalAlpha, 1);
   assert.equal(bitmap._context.globalCompositeOperation, 'source-over');
   assert.equal(bitmap._context._stateStack.length, 1);
+  assert.deepEqual(warnings, []);
 });
 
 test('MV blur retains the stock method for unsupported state, methods, or native content', () => {
@@ -46,7 +52,7 @@ test('MV blur retains the stock method for unsupported state, methods, or native
     bitmap => { bitmap.width = 2; },
   ];
   for (const mutate of mutations) {
-    const { context, calls } = harness();
+    const { context, calls, warnings } = harness();
     context.PMJS.phases.emit('afterGuestPlugins');
     const bitmap = new context.Bitmap(8, 8);
     mutate(bitmap);
@@ -54,6 +60,8 @@ test('MV blur retains the stock method for unsupported state, methods, or native
     assert.equal(bitmap.dirtyCalls, 1);
 
     assert.deepEqual(calls, []);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /bitmap.native-blur refused for this use: /);
   }
   const { context, native } = harness();
   context.PMJS.phases.emit('afterGuestPlugins');

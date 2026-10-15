@@ -11,10 +11,15 @@ function loadTiming(extra) {
   const context = {
     console, performance, Math, Number,
     globalThis: null, SceneManager: undefined,
+    Utils: { isMobileSafari() { return false; } },
   };
   context.globalThis = context;
   if (extra) extra(context);
   vm.createContext(context);
+  if (context.SceneManager && context.SceneManager.updateMain &&
+      context.SceneManager.updateMain.toString() === stockUpdateMainSource) {
+    context.SceneManager.updateMain = vm.runInContext('(' + stockUpdateMainSource + ')', context);
+  }
   vm.runInContext(fs.readFileSync(path.join(__dirname,
     '../js/pmjs-core/config.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,
@@ -22,6 +27,27 @@ function loadTiming(extra) {
   vm.runInContext(code, context);
   return context;
 }
+
+const stockUpdateMainSource = `function() {
+    if (Utils.isMobileSafari()) {
+      this.changeScene();
+      this.updateScene();
+    } else {
+      var newTime = this._getTimeInMsWithoutMobileSafari();
+      var fTime = (newTime - this._currentTime) / 1000;
+      if (fTime > 0.25) fTime = 0.25;
+      this._currentTime = newTime;
+      this._accumulator += fTime;
+      while (this._accumulator >= this._deltaTime) {
+        this.updateInputData();
+        this.changeScene();
+        this.updateScene();
+        this._accumulator -= this._deltaTime;
+      }
+    }
+    this.renderScene();
+    this.requestUpdate();
+  }`;
 
 function stockShapedScene() {
   return {
@@ -43,23 +69,28 @@ function stockShapedScene() {
       this._currentTime = this._getTimeInMsWithoutMobileSafari();
       this._accumulator = 0;
     },
-    updateMain() {
-      const newTime = this._getTimeInMsWithoutMobileSafari();
-      let fTime = (newTime - this._currentTime) / 1000;
-      if (fTime > 0.25) fTime = 0.25;
-      this._currentTime = newTime;
-      this._accumulator += fTime;
-      while (this._accumulator >= this._deltaTime) {
-        this.updateInputData();
-        this.changeScene();
-        this.updateScene();
-        this._accumulator -= this._deltaTime;
-      }
-      this.renderScene();
-      this.requestUpdate();
-    },
+    updateMain: vm.runInNewContext('(' + stockUpdateMainSource + ')', {
+      Utils: { isMobileSafari() { return false; } }
+    }),
   };
 }
+
+test('missing timing prerequisites warn with reasons and remain eligible for later installation', () => {
+  const warnings = [];
+  const context = loadTiming(ctx => {
+    ctx.console = { ...console, warn(message) { warnings.push(message); } };
+  });
+  assert.equal(context.pmjsMvInstallTimingContract(), false);
+  assert.equal(context.pmjsMvInstallTimingContract(), false);
+  context.SceneManager = {};
+  assert.equal(context.pmjsMvInstallTimingContract(), false);
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /mv.logic-timing-contract refused for this use: SceneManager unavailable/);
+  assert.match(warnings[1], /SceneManager.updateMain unavailable/);
+  context.SceneManager = stockShapedScene();
+  assert.equal(context.pmjsMvInstallTimingContract(), true);
+  assert.equal(context.PMJS.optimizations.isEnabled('mv.logic-timing-contract'), true);
+});
 
 function startTiming(options, configure) {
   const ctx = loadTiming(context => {
@@ -151,13 +182,17 @@ test('smooth catch-up preserves ordinary 45 ms elapsed time and its fractional r
 });
 
 test('smooth catch-up discards excess whole steps while retaining fractional debt', () => {
-  const { ctx, step } = startTiming({ renderHz: 60, catchupMode: 'smooth' });
+  const logs = [];
+  const { ctx, step } = startTiming({ renderHz: 60, catchupMode: 'smooth' }, context => {
+    context.console = { log(message) { logs.push(String(message)); } };
+  });
   step(0);
   assert.equal(step(105), 2);
   assert.equal(step(115), 0);
   assert.equal(step(120), 1);
   assert.equal(step(120), 0);
-  assert.equal(ctx.__pmjsOverloadDiscontinuities, undefined);
+  assert.equal(ctx.__pmjsOverloadDiscontinuities, 1);
+  assert.deepEqual(logs, ['[pmjs] overload-debt-clamp dropped_ms=66.7']);
 });
 
 test('30 Hz burst catch-up pays retained debt before returning to normal cadence', () => {
@@ -257,6 +292,53 @@ test('direct-stepping overrides remain unchanged and execute their authored beha
   assert.equal(logs.filter(line => line.includes('timing-contract refused')).length, 1);
   ctx.SceneManager.updateMain();
   assert.equal(ctx.SceneManager.logicSteps, 1);
+});
+
+test('stock-looking time scaling is refused without changing guest simulation', () => {
+  const ctx = loadTiming(context => { context.SceneManager = stockShapedScene(); });
+  const source = stockUpdateMainSource.replace('this._currentTime = newTime;',
+    'fTime *= 0.5; this._currentTime = newTime;');
+  const update = ctx.SceneManager.updateMain = vm.runInContext('(' + source + ')', ctx);
+  assert.equal(ctx.pmjsMvInstallTimingContract(), false);
+  assert.equal(ctx.SceneManager.updateMain, update);
+  ctx.SceneManager._now = 1000 / 30;
+  update.call(ctx.SceneManager);
+  assert.equal(ctx.SceneManager.logicSteps, 1);
+});
+
+test('custom logic intervals remain authored at installation and after finalization', () => {
+  const ctx = loadTiming(context => { context.SceneManager = stockShapedScene(); });
+  ctx.SceneManager._deltaTime = 1 / 30;
+  const original = ctx.SceneManager.updateMain;
+  assert.equal(ctx.pmjsMvInstallTimingContract(), false);
+  assert.equal(ctx.SceneManager.updateMain, original);
+  assert.equal(ctx.SceneManager._deltaTime, 1 / 30);
+
+  const { ctx: installed, step } = startTiming();
+  step(0);
+  installed.PMJS.optimizations.finalize();
+  installed.SceneManager._deltaTime = 1 / 30;
+  assert.equal(step(1000 / 30), 1);
+  assert.equal(installed.SceneManager._deltaTime, 1 / 30);
+});
+
+test('Mobile Safari branch stays authored across runtime platform changes', () => {
+  let mobile = true;
+  let detections = 0;
+  const { ctx, step } = startTiming({}, context => {
+    context.Utils.isMobileSafari = () => { detections++; return mobile; };
+  });
+  ctx.PMJS.optimizations.finalize();
+  assert.equal(step(0), 1);
+  assert.equal(step(1000 / 30), 1);
+  assert.equal(ctx.SceneManager._currentTime, 0);
+  assert.equal(detections, 2);
+  mobile = false;
+  assert.equal(step(100), 0);
+  assert.equal(step(100 + 1000 / 30), 2);
+  mobile = true;
+  assert.equal(step(200), 1);
+  assert.equal(detections, 5);
 });
 
 test('stock clock drift cannot add a logic step and the original clock getter is restored', () => {

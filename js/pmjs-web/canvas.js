@@ -1917,6 +1917,9 @@ Object.assign(PMJS.web.canvas, {
   readPixel: function(canvas, context, x, y) {
     if (canvas && (!canvas.width || !canvas.height)) return [0, 0, 0, 0];
     if (canvas && canvas._nativeCanvas) {
+      x = canvasImageDataInteger(x);
+      y = canvasImageDataInteger(y);
+      if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return [0, 0, 0, 0];
       var rgba = NativeHost.canvas.pixel(canvas._ensureNativeCanvas().handle, x, y);
       return [(rgba >>> 24) & 255, (rgba >>> 16) & 255,
         (rgba >>> 8) & 255, rgba & 255];
@@ -1983,9 +1986,14 @@ Object.assign(PMJS.web.canvas, {
 // Keep proof state private; consumers receive only a validated rectangle.
 (function() {
   var maskProofs = new WeakMap();
+  var maskFillMethods = ['fillRect', 'save', 'restore'].map(function(name) {
+    return { name: name, method: CanvasContext2D.prototype[name] };
+  });
   PMJS.web.canvas.trackMaskFill = function(context, x, y, width, height, color, draw) {
     var canvas = context && context.canvas;
-    var eligible = canvas && Number.isFinite(canvas.__pmjsContentRevision) &&
+    var eligible = context instanceof CanvasContext2D && canvas instanceof CanvasElement &&
+      maskFillMethods.every(function(entry) { return context[entry.name] === entry.method; }) &&
+      Number.isFinite(canvas.__pmjsContentRevision) &&
       Number(x) === 0 && Number(y) === 0 &&
       Number(width) === canvas.width && Number(height) === canvas.height &&
       Number(context.globalAlpha) === 1 &&

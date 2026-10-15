@@ -63,19 +63,17 @@ function installNativeStorageManager() {
     return Object.prototype.hasOwnProperty.call(cache, key);
   }
 
-  // Keyed by storage path, not savefileId. Missing files decompress a null
-  // payload, matching stock.
+  // Keyed by storage path, not savefileId. Decoding remains guest-observable.
   function pmjsReadDecompressed(storagePath) {
     var burst = currentReadBurst();
+    var raw;
     if (burst && storagePath && hasBurstEntry(burst.loads, storagePath)) {
-      return burst.loads[storagePath];
+      raw = burst.loads[storagePath];
+    } else {
+      raw = NativeHost.storage.readText(storagePath);
+      if (burst && storagePath) burst.loads[storagePath] = raw;
     }
-    var raw = NativeHost.storage.readText(storagePath);
-    var data = raw === null ? null : LZString.decompressFromBase64(raw);
-    if (burst && storagePath) {
-      burst.loads[storagePath] = data;
-    }
-    return data;
+    return raw === null ? null : LZString.decompressFromBase64(raw);
   }
 
   // Null content may recover from a backup; read/decompression errors propagate.

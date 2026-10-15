@@ -18,29 +18,37 @@
 
   function signature(renderer, stage, sprite) {
     var width = renderer.screen.width, height = renderer.screen.height;
+    if (!sprite || !sprite.visible || !sprite.renderable) return null;
     if (renderer.resolution !== 1 || width <= 0 || height <= 0 ||
-        width > 2048 || height > 2048 || !sprite || sprite.constructor !== Sprite ||
-        !sprite.visible || !sprite.renderable ||
+        width > 2048 || height > 2048) return unsupported('renderer resolution or menu background dimensions unsupported');
+    if (sprite.constructor !== Sprite ||
         !(sprite.alpha > 0 && sprite.alpha <= 1) || !identity(sprite, sprite.alpha) ||
         sprite.anchor.x !== 0 || sprite.anchor.y !== 0 || sprite.children.length ||
         sprite.cacheAsBitmap || sprite.blendMode !== PIXI.BLEND_MODES.NORMAL ||
         sprite.tint !== 0xffffff || sprite._colorFilter ||
-        spriteMethods.some(function(entry) { return sprite[entry[0]] !== entry[1]; })) return null;
+        spriteMethods.some(function(entry) { return sprite[entry[0]] !== entry[1]; })) {
+      return unsupported('menu background sprite geometry, effects or render methods unsupported');
+    }
     for (var ancestor = sprite; ancestor !== stage;) {
       ancestor = ancestor.parent;
-      if (!ancestor || !identity(ancestor, 1) || ancestor.cacheAsBitmap) return null;
+      if (!ancestor || !identity(ancestor, 1) || ancestor.cacheAsBitmap) {
+        return unsupported('menu background ancestor transform, alpha or cache unsupported');
+      }
     }
     var bitmap = sprite.bitmap;
     var texture = sprite.texture, base = texture && texture.baseTexture;
     var frame = texture && texture.frame, orig = texture && texture.orig;
     var source = base && base.resource && base.resource.source;
     var filters = sprite.filters, filter = filters && filters[0];
-    if (!bitmap || !bitmap.isReady() || bitmap.width !== width || bitmap.height !== height ||
+    if (!bitmap || !bitmap.isReady()) return null;
+    if (bitmap.width !== width || bitmap.height !== height ||
         !source || !Number.isFinite(source.__pmjsContentRevision) ||
         !frame || frame.x !== 0 || frame.y !== 0 || frame.width !== width || frame.height !== height ||
         !orig || orig.width !== width || orig.height !== height || texture.trim || texture.rotate ||
-        base.resolution !== 1 || base.wrapMode !== PIXI.WRAP_MODES.CLAMP ||
-        !filters || filters.length !== 1 || !filter || filter.constructor !== PIXI.filters.BlurFilter ||
+        base.resolution !== 1 || base.wrapMode !== PIXI.WRAP_MODES.CLAMP) {
+      return unsupported('menu snapshot dimensions, texture sampling or content revision unsupported');
+    }
+    if (!filters || filters.length !== 1 || !filter || filter.constructor !== PIXI.filters.BlurFilter ||
         filter.enabled !== true || filter.blurX !== filter.blurY || filter.resolution !== 1 ||
         filter.repeatEdgePixels || filter.padding !== Math.abs(filter.blur) * 2 ||
         !Number.isInteger(filter.quality) || filter.quality < 1 || filter.quality > 15 ||
@@ -48,10 +56,17 @@
         filter.blurXFilter.apply !== stock.blurXFilter.apply ||
         filter.blurYFilter.apply !== stock.blurYFilter.apply ||
         filter.blurXFilter.program !== stock.blurXFilter.program ||
-        filter.blurYFilter.program !== stock.blurYFilter.program) return null;
+        filter.blurYFilter.program !== stock.blurYFilter.program) {
+      return unsupported('menu background blur filter composition or parameters unsupported');
+    }
     return [sprite, bitmap, texture, base, source, source.__pmjsContentRevision,
       base._updateID, texture._updateID, base.scaleMode, width, height, sprite.alpha,
       filter, filter.blur, filter.quality, filter.blurYFilter.quality, renderer.roundPixels];
+  }
+
+  function unsupported(reason) {
+    PMJS.optimizations.reportFallback(id, reason);
+    return null;
   }
 
   function release(renderer) {
@@ -79,6 +94,7 @@
         records.set(renderer, record);
       } catch (error) {
         if (error.code !== 'PMJS_RENDER_IMAGE_ALLOCATION') throw error;
+        PMJS.optimizations.reportFallback(id, 'menu background image allocation failed', error);
         return;
       } finally {
         NativeHost.render.setScreenRenderSize(renderer.width, renderer.height);

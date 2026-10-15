@@ -61,10 +61,17 @@
     return true;
   }
 
-  function activate(constructor) {
+  function rejectActivation(reason, beforeBoot) {
+    [paintingId, animationId].forEach(function(id) {
+      if (beforeBoot) PMJS.optimizations.refuse(id, reason);
+      else PMJS.optimizations.reportFallback(id, reason);
+    });
+    if (PMJS.maps) PMJS.maps.tiledContract = function() { return reason; };
+  }
+
+  function activate(constructor, beforeBoot) {
     if (typeof constructor !== 'function') {
-      PMJS.optimizations.refuse(paintingId, 'tilemap constructor unavailable');
-      PMJS.optimizations.refuse(animationId, 'tilemap constructor unavailable');
+      rejectActivation('tilemap constructor unavailable', beforeBoot);
       return;
     }
     if (contracts.has(constructor)) {
@@ -79,8 +86,7 @@
           matches(prototype[name], reviewedMethods[name]);
       });
     if (!qualified) {
-      PMJS.optimizations.refuse(paintingId, 'unrecognized tile preparation composition');
-      PMJS.optimizations.refuse(animationId, 'unrecognized tile preparation composition');
+      rejectActivation('unrecognized tile preparation composition', beforeBoot);
       if (PMJS.maps) PMJS.maps.tiledContract = function() { return 'unreviewed-tiled-methods'; };
       return;
     }
@@ -92,14 +98,17 @@
     var painting = PMJS.optimizations.isEnabled(paintingId);
     var animation = painting && PMJS.optimizations.isEnabled(animationId);
     if (!painting && PMJS.optimizations.isEnabled(animationId)) {
-      PMJS.optimizations.refuse(animationId, 'requires ' + paintingId);
+      if (beforeBoot) PMJS.optimizations.refuse(animationId, 'requires ' + paintingId);
+      else PMJS.optimizations.reportFallback(animationId, 'requires ' + paintingId);
     }
 
     function methodsUnchanged(instance) {
       return names.every(function(name) { return instance[name] === effective[name]; });
     }
-    function deactivate(instance) {
+    function deactivate(instance, reason) {
       if (disabled.has(instance)) return;
+      PMJS.optimizations.reportFallback(paintingId, reason);
+      if (animation) PMJS.optimizations.reportFallback(animationId, reason);
       disabled.add(instance);
       instance._pmjsIndexedAnimation = false;
       instance._pmjsIndexedPaintLoops = false;
@@ -110,9 +119,15 @@
     }
     function eligible(instance) {
       if (disabled.has(instance)) return false;
-      if (methodsUnchanged(instance) && retained.supported(instance)) return true;
-      deactivate(instance);
-      return false;
+      if (!methodsUnchanged(instance)) {
+        deactivate(instance, 'tilemap methods changed after installation');
+        return false;
+      }
+      if (!retained.supported(instance)) {
+        deactivate(instance, 'tilemap data or instance contract unsupported');
+        return false;
+      }
+      return true;
     }
     function coordinates(instance) {
       var camera = instance.origin;
@@ -123,7 +138,7 @@
       if (!eligible(instance)) return false;
       var window = coordinates(instance);
       if (!retained.prepare(instance, window[0], window[1])) {
-        deactivate(instance);
+        deactivate(instance, 'retained tile preparation rejected');
         return false;
       }
       instance._sortChildren();
@@ -134,7 +149,7 @@
       var wrapped = function() {
         if (!eligible(this)) return guest.apply(this, arguments);
         if (operation.apply(this, arguments) === false) {
-          deactivate(this);
+          deactivate(this, 'retained tile operation rejected: ' + name);
           return guest.apply(this, arguments);
         }
       };
@@ -189,7 +204,7 @@
   });
   PMJS.plugins.onLoaded('YED_Tiled', 'pmjs.adapter.yed-tiled', function() {
     PMJS.phases.on('afterGuestPlugins', 'pmjs.adapter.yed-tiled', function() {
-      if (typeof globalThis.TiledTilemap === 'function') activate(globalThis.TiledTilemap);
+      if (typeof globalThis.TiledTilemap === 'function') activate(globalThis.TiledTilemap, true);
     });
   });
 })();

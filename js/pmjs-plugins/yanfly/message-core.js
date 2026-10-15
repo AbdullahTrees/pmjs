@@ -39,6 +39,7 @@ PMJS.plugins.registerOptimization('YEP_MessageCore', {
         var contents = this.contents;
         if (!contents ||
             contents._drawTextOutline !== outline || contents._drawTextBody !== body) {
+          PMJS.optimizations.reportFallback(id, 'message contents or Bitmap text methods unsupported');
           return measure.apply(this, arguments);
         }
         var ownOutline = Object.getOwnPropertyDescriptor(contents, '_drawTextOutline');
@@ -46,6 +47,7 @@ PMJS.plugins.registerOptimization('YEP_MessageCore', {
         if ((ownOutline && (!ownOutline.writable || !ownOutline.configurable)) ||
             (ownBody && (!ownBody.writable || !ownBody.configurable)) ||
             !Object.isExtensible(contents)) {
+          PMJS.optimizations.reportFallback(id, 'message contents cannot temporarily replace text drawing methods');
           return measure.apply(this, arguments);
         }
         contents._drawTextOutline = contents._drawTextBody = function() {};

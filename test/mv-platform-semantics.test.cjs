@@ -953,19 +953,19 @@ test('synchronous-burst storage read coalescing preserves stock DataManager obje
   }
 
   assert.equal(storageReads, 1, 'Only 1 storage read for the entire burst of 16 calls');
-  assert.equal(lzDecompresses, 1, 'Only 1 LZString decompression for the entire burst of 16 calls');
+  assert.equal(lzDecompresses, 16, 'Every load must call the effective guest decompressor');
   assert.equal(storageStats, 38, 'Missing slots check primary and backup once per burst');
 
   context.StorageManager.remove(1);
   const c = context.DataManager.loadGlobalInfo();
   assert.equal(storageReads, 2, 'Storage mutation must invalidate burst cache, causing fresh read');
-  assert.equal(lzDecompresses, 2, 'Storage mutation must invalidate burst cache, causing fresh decompression');
+  assert.equal(lzDecompresses, 17, 'Loads continue decoding after a storage mutation');
   assert.equal(storageStats, 76, 'Storage mutation must invalidate burst cache, causing fresh stats');
 
   await new Promise(resolve => queueMicrotask(resolve));
   const d = context.DataManager.loadGlobalInfo();
   assert.equal(storageReads, 3, 'New microtask turn must execute fresh storage read');
-  assert.equal(lzDecompresses, 3, 'New microtask turn must execute fresh decompression');
+  assert.equal(lzDecompresses, 18, 'Loads continue decoding in the next microtask turn');
   assert.equal(storageStats, 114, 'New microtask turn must execute fresh stats');
 });
 

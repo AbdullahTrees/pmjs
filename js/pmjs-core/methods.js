@@ -15,10 +15,27 @@
     return record.getTarget() || null;
   }
 
-  function liveMethod(record) {
-    var target = targetOf(record);
-    if (!target) return undefined;
-    return target[record.method];
+  function methodSnapshot(record) {
+    try {
+      var target = targetOf(record);
+      var owner = target;
+      while (owner) {
+        var descriptor = Object.getOwnPropertyDescriptor(owner, record.method);
+        if (descriptor) return { target: target, owner: owner, descriptor: descriptor };
+        owner = Object.getPrototypeOf(owner);
+      }
+      return { target: target, owner: null, descriptor: {} };
+    } catch (_) {
+      // Missing diagnostic evidence must not change guest plugin execution.
+      return null;
+    }
+  }
+
+  function sameSnapshot(before, after) {
+    if (before.target !== after.target || before.owner !== after.owner) return false;
+    return ['value', 'get', 'set', 'writable', 'enumerable', 'configurable'].every(function(key) {
+      return before.descriptor[key] === after.descriptor[key];
+    });
   }
 
   function register(definition, mode) {
@@ -56,6 +73,9 @@
         fail(record.id + ' did not return a function');
       }
       target[record.method] = replacement;
+      if (target[record.method] !== replacement) {
+        fail(record.id + ' replacement did not become the effective method');
+      }
       record.state = 'installed';
       record.reason = 'installed';
     } catch (error) {
@@ -85,7 +105,7 @@
 
     beginPlugin: function(pluginName) {
       var token = { name: String(pluginName), snapshots: Object.create(null) };
-      order.forEach(function(key) { token.snapshots[key] = liveMethod(methods[key]); });
+      order.forEach(function(key) { token.snapshots[key] = methodSnapshot(methods[key]); });
       return token;
     },
 
@@ -95,8 +115,8 @@
       }
       order.forEach(function(key) {
         var before = token.snapshots[key];
-        var after = liveMethod(methods[key]);
-        if (before === after || (before === undefined && after === undefined)) return;
+        var after = methodSnapshot(methods[key]);
+        if (!before || !after || sameSnapshot(before, after)) return;
         methods[key].mutations.push({
           plugin: token.name, failed: !!(options && (options.failed || options.error))
         });

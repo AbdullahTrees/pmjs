@@ -3,6 +3,7 @@ var nativeSceneEmission = null;
 function writeNativeSceneRectTileLayer(node, parentIndex) {
   var layerHandle = ensureNativeRectTileLayer(node);
   if (!layerHandle) {
+    if (node.pointsBuf && node.pointsBuf.length === 0) return;
     PMJS.compat.hit('render.tilemap',
       (node.constructor && node.constructor.name || 'node') + ':layer-unrealized');
     return;

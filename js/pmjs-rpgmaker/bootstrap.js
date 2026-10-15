@@ -10,6 +10,7 @@
   }
 
   function bootStarted() {
+    PMJS.phases.emit('windowLoaded');
     if (typeof nativeBootPhase === 'function') {
       nativeBootPhase('scene-boot-started');
     }

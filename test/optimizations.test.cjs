@@ -37,6 +37,29 @@ function registerOwnerIds(PMJS, ids) {
 const sceneIds = ['scene.graphics-cache', 'scene.tiling-texture-cache'];
 const terraxId = 'terrax.native-lighting';
 
+test('registry internals stay private despite guest global name collisions', () => {
+  const { context, PMJS } = loadRegistry({
+    config: { disableOptimizations: [sceneIds[0]] }
+  });
+  assert.deepEqual(Object.keys(context).filter(name => /^pmjs(?:Optimization|LogOptimization)/.test(name)), []);
+  vm.runInContext(`
+    var pmjsOptimizationStates = null;
+    var pmjsOptimizationFinalized = true;
+    var pmjsOptimizationConfigDisabled = null;
+    var pmjsOptimizationEnvDisabled = null;
+    function pmjsOptimizationState() { throw new Error('guest helper'); }
+    function pmjsOptimizationEnv() { throw new Error('guest helper'); }
+    function pmjsLogOptimizationPolicy() { throw new Error('guest helper'); }
+  `, context);
+  registerOwnerIds(PMJS, sceneIds);
+  assert.equal(PMJS.optimizations.isEnabled(sceneIds[0]), false);
+  assert.equal(PMJS.optimizations.isEnabled(sceneIds[1]), true);
+  PMJS.optimizations.finalize();
+  assert.throws(() => PMJS.optimizations.register({
+    id: 'late', owner: 'test', fallback: 'ordinary'
+  }), /finalized/);
+});
+
 test('registered optimizations default to enabled without any configuration', () => {
   const { PMJS } = loadRegistry({ config: {}, env: {} });
   registerOwnerIds(PMJS, [...sceneIds, terraxId]);
@@ -250,4 +273,61 @@ test('refusal keeps an earlier disable cause and validates input', () => {
   assert.throws(() => PMJS.optimizations.refuse('no.such.id', 'reason'),
     /Unknown PMJS optimization/);
   assert.deepEqual(warnings, []);
+});
+
+test('runtime fallback reasons warn once per optimization and reason without changing boot policy', () => {
+  const { PMJS, warnings } = loadRegistry({ config: {} });
+  registerOwnerIds(PMJS, sceneIds);
+  PMJS.optimizations.finalize();
+  PMJS.optimizations.reportFallback(sceneIds[0], 'unsupported drawing state', 'first instance');
+  PMJS.optimizations.reportFallback(sceneIds[0], 'unsupported drawing state', 'second instance');
+  PMJS.optimizations.reportFallback(sceneIds[0], 'source revision unavailable');
+  PMJS.optimizations.reportFallback(sceneIds[1], 'unsupported drawing state');
+  assert.deepEqual(warnings, [
+    '[pmjs-opt] scene.graphics-cache refused for this use: unsupported drawing state (first instance); fallback: test fallback',
+    '[pmjs-opt] scene.graphics-cache refused for this use: source revision unavailable; fallback: test fallback',
+    '[pmjs-opt] scene.tiling-texture-cache refused for this use: unsupported drawing state; fallback: test fallback',
+  ]);
+  assert.equal(PMJS.optimizations.reason(sceneIds[0]), 'enabled');
+  const record = PMJS.optimizations.dump().find(entry => entry.id === sceneIds[0]);
+  assert.equal(record.enabled, true);
+  assert.equal(record.refusalReason, null);
+  assert.deepEqual(Array.from(record.fallbackReasons), ['unsupported drawing state', 'source revision unavailable']);
+  record.fallbackReasons.push('unowned reason');
+  assert.equal(PMJS.optimizations.dump()[0].fallbackReasons.length, 2);
+});
+
+test('runtime fallback reporting preserves explicit disables and global refusals', () => {
+  const { PMJS, warnings } = loadRegistry({
+    config: { disableOptimizations: [sceneIds[0]] },
+  });
+  registerOwnerIds(PMJS, sceneIds);
+  PMJS.optimizations.refuse(sceneIds[1], 'unrecognized producer');
+  PMJS.optimizations.finalize();
+  PMJS.optimizations.reportFallback(sceneIds[0], 'unsupported drawing state');
+  PMJS.optimizations.reportFallback(sceneIds[1], 'unsupported drawing state');
+  assert.equal(warnings.length, 1);
+  assert.equal(PMJS.optimizations.reason(sceneIds[0]), 'disabled by configuration');
+  assert.equal(PMJS.optimizations.reason(sceneIds[1]), 'refused: unrecognized producer');
+  assert.ok(PMJS.optimizations.dump().every(entry => entry.fallbackReasons.length === 0));
+});
+
+test('runtime fallback reporting validates its owner and cannot propagate logging failures', () => {
+  const { PMJS, context } = loadRegistry({ config: {} });
+  registerOwnerIds(PMJS, sceneIds);
+  assert.throws(() => PMJS.optimizations.reportFallback('missing', 'reason'), /Unknown PMJS optimization/);
+  assert.throws(() => PMJS.optimizations.reportFallback(sceneIds[0], ''), /nonempty string reason/);
+  context.console.warn = () => { throw new Error('logger failed'); };
+  assert.doesNotThrow(() => PMJS.optimizations.reportFallback(sceneIds[0], 'unsupported state'));
+  assert.equal(PMJS.optimizations.isEnabled(sceneIds[0]), true);
+});
+
+test('unreadable exception details cannot suppress the refusal reason or escape into gameplay', () => {
+  const { PMJS, warnings } = loadRegistry({ config: {} });
+  registerOwnerIds(PMJS, sceneIds);
+  const detail = Object.defineProperty({}, 'message', { get() { throw new Error('unreadable'); } });
+  assert.doesNotThrow(() => PMJS.optimizations.reportFallback(sceneIds[0], 'capture failed', detail));
+  assert.deepEqual(warnings, [
+    '[pmjs-opt] scene.graphics-cache refused for this use: capture failed; fallback: test fallback',
+  ]);
 });

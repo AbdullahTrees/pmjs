@@ -1,8 +1,8 @@
 PMJS.mv = PMJS.mv || {};
 PMJS.mv.bitmap = PMJS.mv.bitmap || {};
-PMJS.mv.bitmap.createPrimitiveRecorder = function(bitmap) {
+PMJS.mv.bitmap.createPrimitiveRecorder = function(bitmap, onFallback) {
   if (!bitmap || !PMJS.web || !PMJS.web.canvas) return null;
-  var recorder = PMJS.web.canvas.createPrimitiveRecorder(bitmap._canvas);
+  var recorder = PMJS.web.canvas.createPrimitiveRecorder(bitmap._canvas, onFallback);
   if (!recorder) return null;
   var originalDestroy = bitmap.destroy;
   bitmap.destroy = function() {

@@ -123,6 +123,12 @@ PMJS.methods.wrap({
             this._blendColor = blend;
           }
         }
+        if (hasTone) PMJS.optimizations.reportFallback('sprite.native-tint',
+          'sprite subclass requires Canvas tone processing');
+      } else if (this._pmjsNativeSpriteTint !== false &&
+          PMJS.optimizations.isEnabled('sprite.native-tint')) {
+        PMJS.optimizations.reportFallback('sprite.native-tint',
+          'sprite instance or tint methods differ from the installed contract');
       }
       return stockRefresh.apply(this, arguments);
     };

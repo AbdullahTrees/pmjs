@@ -16,8 +16,10 @@ const methodsSource = fs.readFileSync(
 
 function setupEnvironment({ config = {}, env = {}, beforeInstall,
   afterRegister } = {}) {
+  const warnings = [];
   const context = {
-    console: { log() {} },
+    warnings,
+    console: { log() {}, warn(message) { warnings.push(message); } },
     PMJS_GAME_CONFIG: config,
     NativeHost: {
       runtime: {
@@ -236,6 +238,7 @@ test('sprite with explicit opt-out (_pmjsNativeSpriteTint = false) falls back to
   assert.equal(sprite.executeTintCalls, 1);
   assert.equal(sprite.texture.baseTexture, sprite._tintTexture);
   assert.notEqual(sprite.texture.baseTexture, bitmap.baseTexture);
+  assert.deepEqual(ctx.warnings, []);
 });
 
 test('default sprite with non-neutral tone bypasses CPU tint', () => {
@@ -508,6 +511,8 @@ test('subclasses with non-neutral tone retain CPU tint across tone updates', () 
   assert.equal(picture.texture.baseTexture, picture._tintTexture);
   assert.equal(picture.texture.frame.width, 816);
   assert.equal(picture.texture.frame.height, 624);
+  assert.equal(ctx.warnings.length, 1);
+  assert.match(ctx.warnings[0], /sprite.native-tint refused for this use: sprite subclass requires Canvas tone processing/);
 });
 
 for (const method of ['_refresh', '_executeTint', '_needsTint']) {
@@ -526,6 +531,8 @@ for (const method of ['_refresh', '_executeTint', '_needsTint']) {
     assert.equal(sprite.customCalls, 1);
     assert.equal(sprite.executeTintCalls, 1);
     assert.equal(sprite.texture.baseTexture, sprite._tintTexture);
+    assert.equal(ctx.warnings.length, 1);
+    assert.match(ctx.warnings[0], /sprite instance or tint methods differ from the installed contract/);
   });
 }
 

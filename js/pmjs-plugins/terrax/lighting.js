@@ -68,8 +68,14 @@
     function installGpuLightRecorder(lightmask) {
       var bitmap = lightmask._maskBitmap;
       var recorder = PMJS.mv && PMJS.mv.bitmap &&
-        PMJS.mv.bitmap.createPrimitiveRecorder(bitmap);
-      if (!recorder) return;
+        PMJS.mv.bitmap.createPrimitiveRecorder(bitmap, function(reason, detail) {
+          PMJS.optimizations.reportFallback('terrax.native-lighting', reason, detail);
+        });
+      if (!recorder) {
+        PMJS.optimizations.reportFallback('terrax.native-lighting',
+          'lightmask primitive recorder unavailable');
+        return;
+      }
       var originalUpdateMask = lightmask._updateMask;
       lightmask._updateMask = function() {
         if (this !== lightmask) return originalUpdateMask.apply(this, arguments);
@@ -83,10 +89,19 @@
     Spriteset_Map.prototype.createLightmask = function() {
       var result = createLightmask.apply(this, arguments);
       var lightmask = this._lightmask;
-      if (!lightmask || !lightmask._sprites ||
-          !isKnownTerraxUpdateMask(lightmask._updateMask) ||
-          !isKnownTerraxAddSprite(lightmask._addSprite) ||
-          !isKnownTerraxRemoveSprite(lightmask._removeSprite)) return result;
+      if (!lightmask || !lightmask._sprites) {
+        PMJS.optimizations.reportFallback('terrax.native-lighting',
+          'lightmask instance or sprite list unavailable');
+        return result;
+      }
+      var rejectedMethod = !isKnownTerraxUpdateMask(lightmask._updateMask) ? '_updateMask' :
+        !isKnownTerraxAddSprite(lightmask._addSprite) ? '_addSprite' :
+        !isKnownTerraxRemoveSprite(lightmask._removeSprite) ? '_removeSprite' : null;
+      if (rejectedMethod) {
+        PMJS.optimizations.reportFallback('terrax.native-lighting',
+          'unrecognized lightmask instance method: ' + rejectedMethod);
+        return result;
+      }
       installGpuLightRecorder(lightmask);
 
       lightmask._addSprite = function(x, y, bitmap) {

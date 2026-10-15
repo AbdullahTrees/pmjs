@@ -237,6 +237,16 @@ test('recognized MV decryptor uses prepared images and falls back on cache error
   bitmap._image.dispatchEvent({ type: 'load' });
   assert.equal(bitmap.completed, 1);
   assert.equal(requests.length, 0);
+  const superseded = new Bitmap(); superseded._image = new NativeImage();
+  decrypter.decryptImg('img/old.png', superseded);
+  const oldImage = superseded._image;
+  superseded._image = new NativeImage();
+  superseded._image.src = 'img/new.png';
+  oldImage.dispatchEvent({ type: 'error' });
+  oldImage.dispatchEvent({ type: 'load' });
+  assert.equal(requests.length, 0, 'obsolete errors must not restart guest decryption');
+  assert.equal(superseded._image.src, 'img/new.png');
+  assert.equal(superseded.completed, undefined);
   const failed = new Bitmap(); failed._image = new NativeImage();
   decrypter.decryptImg('img/a.png', failed);
   failed._image.dispatchEvent({ type: 'error' });

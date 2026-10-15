@@ -153,6 +153,7 @@ test('native Terrax adapter retains one mask sprite', () => {
 test('native Terrax adapter records supported mask draws into one GPU layer', () => {
   const hooks = {};
   const updates = [];
+  const warnings = [];
   function Sprite() {}
   function SpritesetMap() {}
   const canvas = { width: 64, height: 48, getContext() { return context2d; } };
@@ -174,6 +175,7 @@ test('native Terrax adapter records supported mask draws into one GPU layer', ()
     };
   });
   const context = {
+    console: { warn(message) { warnings.push(message); } },
     Sprite, Spriteset_Map: SpritesetMap,
     NativeHost: { runtime: { env() { return ''; } }, render: {
       createPrimitiveSurface() {
@@ -205,6 +207,21 @@ test('native Terrax adapter records supported mask draws into one GPU layer', ()
   assert.deepEqual(Array.from(updates[0][1]), [0, 0, 0, 1]);
   assert.equal(updates[0][2].length, 26);
   assert.equal(context2d.cpuFills, 0);
+  assert.equal(canvas._nativeImage.handle, 84);
+  assert.deepEqual(warnings, []);
+  context.PMJS.optimizations.finalize();
+  const submit = context.NativeHost.render.renderPrimitiveSurface;
+  context.NativeHost.render.renderPrimitiveSurface = () => { throw new Error('GPU allocation failed'); };
+  context2d.setTransform = function() {};
+  spriteset._lightmask._updateMask();
+  spriteset._lightmask._updateMask();
+  assert.equal(context2d.cpuFills, 4);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /terrax.native-lighting refused for this use: native primitive submission failed \(GPU allocation failed\)/);
+  assert.equal(context.PMJS.optimizations.isEnabled('terrax.native-lighting'), true);
+  context.NativeHost.render.renderPrimitiveSurface = submit;
+  spriteset._lightmask._updateMask();
+  assert.equal(updates.length, 2);
   assert.equal(canvas._nativeImage.handle, 84);
 });
 
@@ -263,6 +280,7 @@ test('Terrax adapter leaves an unknown createLightmask implementation untouched'
 });
 
 test('Terrax adapter preserves unknown per-instance sprite methods', () => {
+  const warnings = [];
   function SpritesetMap() {}
   function customAddSprite() { this.customAdd = true; }
   function customRemoveSprite() { this.customRemove = true; }
@@ -275,6 +293,7 @@ test('Terrax adapter preserves unknown per-instance sprite methods', () => {
     };
   });
   const context = {
+    console: { warn(message) { warnings.push(message); } },
     Spriteset_Map: SpritesetMap,
     pmjsRegisterHook() {}
   };
@@ -288,6 +307,9 @@ test('Terrax adapter preserves unknown per-instance sprite methods', () => {
   spriteset.createLightmask();
   assert.equal(spriteset._lightmask._addSprite, customAddSprite);
   assert.equal(spriteset._lightmask._removeSprite, customRemoveSprite);
+  spriteset.createLightmask();
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /terrax.native-lighting refused for this use: unrecognized lightmask instance method: _addSprite/);
 });
 
 test('Terrax token-shaped factories retain their authored behavior', () => {
@@ -504,6 +526,7 @@ test('terrax.native-lighting disabled by PMJS_DISABLE_OPT runs the ordinary Canv
 
 function recorderHarness() {
   const renders = [];
+  const fallbacks = [];
   const releases = [];
   const registrations = new Set();
   class Registry {
@@ -530,8 +553,9 @@ function recorderHarness() {
   drawing.fill = function() { cpu.push({ fill: true }); };
   const bitmap = { _canvas: canvas, destroy() { return 'guest destroyed'; } };
   const originalFillRect = drawing.fillRect;
-  const recorder = context.PMJS.mv.bitmap.createPrimitiveRecorder(bitmap);
-  return { context, canvas, drawing, bitmap, recorder, renders, releases, registrations, cpu, originalFillRect };
+  const recorder = context.PMJS.mv.bitmap.createPrimitiveRecorder(bitmap,
+    (reason, detail) => fallbacks.push({ reason, detail }));
+  return { context, canvas, drawing, bitmap, recorder, renders, releases, registrations, cpu, originalFillRect, fallbacks };
 }
 
 test('Canvas recorder replays supported rectangles before an unsupported draw and can recover next frame', () => {
@@ -548,6 +572,7 @@ test('Canvas recorder replays supported rectangles before an unsupported draw an
   assert.equal(h.renders.length, 0);
   assert.deepEqual(h.cpu.map(op => op.args), [[1, 2, 3, 4], [5, 6, 7, 8]]);
   assert.equal(h.cpu[0].style, '#ffffff');
+  assert.equal(h.fallbacks[0].reason, 'primitive update lacks a full opaque initial fill');
   assert.deepEqual(h.cpu[0].transform, [1, 0, 0, 1, 0, 0]);
   h.drawing.resetTransform();
   h.recorder.record(() => h.drawing.fillRect(0, 0, 64, 48));
@@ -561,6 +586,9 @@ test('Canvas recorder falls back on native submission failure and preserves draw
   h.recorder.record(() => h.drawing.fillRect(0, 0, 64, 48));
   assert.equal(h.cpu.length, 1);
   assert.equal(h.canvas._nativeImage, undefined);
+  assert.equal(h.fallbacks.length, 1);
+  assert.equal(h.fallbacks[0].reason, 'native primitive submission failed');
+  assert.equal(h.fallbacks[0].detail.message, 'GPU failed');
   const error = new Error('guest failed');
   assert.throws(() => h.recorder.record(() => {
     h.drawing.fillRect(5, 6, 7, 8);

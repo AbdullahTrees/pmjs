@@ -203,7 +203,11 @@
     }
     function remember(window) {
       var bitmap = window.contents;
-      if (!window._actor || !bitmap || !bitmap._canvas || !supported(window)) return;
+      if (!window._actor || !bitmap || !bitmap._canvas) return;
+      if (!supported(window)) {
+        PMJS.optimizations.reportFallback(id, 'battle status layout, Canvas state or drawing methods unsupported');
+        return;
+      }
       var snapshot = state(window);
       if (!snapshot) return;
       var masterCanvas = window._isMaster && window._statusWindow.contents._canvas;

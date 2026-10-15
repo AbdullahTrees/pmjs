@@ -49,7 +49,9 @@ function fixture(options = {}) {
   }
   if (options.unknown) Guest.prototype[options.unknown] = function() { this.calls.push('unknown'); };
   const operations = [];
-  const context = { console, __pmjsBuiltinRequire: require, TiledTilemap: Guest,
+  const warnings = [];
+  const context = { console: { ...console, warn(message) { warnings.push(message); } },
+    __pmjsBuiltinRequire: require, TiledTilemap: Guest,
     Spriteset_Map: function() {}, PIXI: { Container: { prototype: {
       updateTransform() { this.calls.push('container'); }
     } } }, PMJS: { maps: {}, yedRetainedTiles: {
@@ -75,7 +77,7 @@ function fixture(options = {}) {
   vm.runInContext(source, context);
   context.PMJS.plugins.execute('YED_Tiled', function() {});
   context.PMJS.phases.emit('afterGuestPlugins');
-  return { context, Guest, original, operations };
+  return { context, Guest, original, operations, warnings };
 }
 
 const painting = 'tilemap.yed-indexed-paint-loops';
@@ -115,7 +117,8 @@ test('unknown method composition refuses both paths', () => {
 });
 
 test('instance override permanently restores guest behavior and invalidates retained state once', () => {
-  const { Guest, operations } = fixture();
+  const { context, Guest, operations, warnings } = fixture();
+  context.PMJS.optimizations.finalize();
   const map = new Guest();
   map._getPriority = function() { return 9; };
   map._paintAllTiles(0,0);
@@ -124,14 +127,22 @@ test('instance override permanently restores guest behavior and invalidates reta
   assert.deepEqual(operations, [['invalidate']]);
   assert.equal(map._pmjsIndexedAnimation, false);
   assert.equal(map._needsRepaint, true);
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.every(line => line.includes('refused for this use: tilemap methods changed after installation')));
+  assert.equal(context.PMJS.optimizations.isEnabled(painting), true);
+  const other = new Guest();
+  other._paintAllTiles(0, 0);
+  assert.deepEqual(other.calls, []);
+  assert.deepEqual(operations.at(-1), ['paint', 0, 0]);
 });
 
 test('unsupported instance falls back without invoking retained producer', () => {
-  const { Guest, operations } = fixture();
+  const { Guest, operations, warnings } = fixture();
   const map = new Guest(); map.supported = false;
   map.updateTransform();
   assert.deepEqual(map.calls, ['updateTransform']);
   assert.deepEqual(operations, [['invalidate']]);
+  assert.ok(warnings.every(line => line.includes('tilemap data or instance contract unsupported')));
 });
 
 test('late prototype replacement invalidates the public map contract', () => {
@@ -151,18 +162,21 @@ test('map contract rejects unsupported geometry and flip encodings', () => {
 });
 
 test('failed retained preparation returns to guest transform and invalidates once', () => {
-  const { Guest, operations } = fixture({ fail: 'prepare' });
+  const { Guest, operations, warnings } = fixture({ fail: 'prepare' });
   const map = new Guest();
   map.updateTransform(); map.updateTransform();
   assert.deepEqual(map.calls, ['updateTransform', 'updateTransform']);
   assert.deepEqual(operations, [['prepare', 0, 0], ['invalidate']]);
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.every(line => line.includes('retained tile preparation rejected')));
 });
 
 test('failed retained painting invokes the guest producer', () => {
-  const { Guest, operations } = fixture({ fail: 'paint' });
+  const { Guest, operations, warnings } = fixture({ fail: 'paint' });
   const map = new Guest(); map._paintAllTiles(3, 4);
   assert.deepEqual(map.calls, ['_paintAllTiles']);
   assert.deepEqual(operations, [['paint', 3, 4], ['invalidate']]);
+  assert.ok(warnings.every(line => line.includes('retained tile operation rejected: _paintAllTiles')));
 });
 
 test('late instance transform overrides remain effective', () => {
@@ -178,12 +192,40 @@ test('private reached constructor qualifies before guest resource loading', () =
   const { context, Guest, original } = fixture({ privateConstructor: true });
   context.$gameMap = { isTiledMap() { return true; } };
   context.PMJS.methods.install();
+  context.PMJS.optimizations.finalize();
   const spriteset = new context.Spriteset_Map();
   spriteset._tilemap = new Guest();
   spriteset.loadTileset();
   assert.equal(spriteset.contractBeforeLoad, true);
   assert.equal(spriteset.loaded, true);
   assert.notEqual(Guest.prototype._paintAllTiles, original._paintAllTiles);
+});
+
+test('unknown private constructors reach guest loading after policy finalization', () => {
+  const { context, Guest, original } = fixture({ privateConstructor: true, unknown: '_paintTile' });
+  context.$gameMap = { isTiledMap() { return true; } };
+  context.PMJS.methods.install();
+  context.PMJS.optimizations.finalize();
+  const spriteset = new context.Spriteset_Map();
+  spriteset._tilemap = new Guest();
+  spriteset.loadTileset();
+  assert.equal(spriteset.loaded, true);
+  assert.equal(spriteset.contractBeforeLoad, 'unreviewed-tiled-methods');
+  assert.equal(Guest.prototype._paintAllTiles, original._paintAllTiles);
+  assert.equal(context.PMJS.optimizations.isEnabled(painting), true);
+});
+
+test('late private constructors respect disabled painting without changing animation policy', () => {
+  const { context, Guest, original } = fixture({ privateConstructor: true, disabled: [painting] });
+  context.$gameMap = { isTiledMap() { return true; } };
+  context.PMJS.methods.install();
+  context.PMJS.optimizations.finalize();
+  const spriteset = new context.Spriteset_Map();
+  spriteset._tilemap = new Guest();
+  spriteset.loadTileset();
+  assert.equal(spriteset.loaded, true);
+  assert.equal(Guest.prototype._paintAllTiles, original._paintAllTiles);
+  assert.equal(context.PMJS.optimizations.isEnabled(animation), true);
 });
 
 test('native preparation hook returns false for unsupported instance', () => {

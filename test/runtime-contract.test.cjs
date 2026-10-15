@@ -8,6 +8,22 @@ const vm = require('node:vm');
 
 const runtimeRoot = path.resolve(__dirname, '..');
 
+test('MV WebGL availability follows the initialized renderer', () => {
+  const graphics = { isWebGL() {
+    return this._renderer && this._renderer.type === 1;
+  } };
+  const original = graphics.isWebGL;
+  vm.runInNewContext(fs.readFileSync(path.join(runtimeRoot, 'js/pmjs-mv/engine.js'), 'utf8'),
+    { Graphics: graphics, NativeHost: { runtime: { loadScript() {} } } });
+  assert.equal(graphics.isWebGL, original);
+  assert.equal(Boolean(graphics.isWebGL()), false);
+  graphics._renderer = { type: 1 };
+  assert.equal(graphics.isWebGL(), true);
+  graphics._renderer = { type: 2 };
+  assert.equal(graphics.isWebGL(), false);
+  assert.equal(graphics.hasWebGL(), true);
+});
+
 test('web runtime keeps V8 RegExp and String built-ins', () => {
   const source = fs.readFileSync(path.join(runtimeRoot,
     'js/pmjs-web/runtime.js'), 'utf8');
@@ -112,20 +128,21 @@ test('MV image cache retrims completed loads without destroying bitmap backing',
   vm.runInNewContext(source.slice(0, end), context, { filename: 'images.js' });
   context.PMJS.methods.install();
   assert.equal(context.PMJS.methods.dump().find(entry =>
-    entry.key === 'ImageCache._truncateCache').mode, 'own');
+    entry.key === 'ImageCache._truncateCache'), undefined);
   assert.equal(ImageCache.limit, 64);
   ImageCache.limit = 50;
   assert.equal(ImageCache.limit, 50);
   ImageCache.limit = 200;
   assert.equal(ImageCache.limit, 64);
   const patchedTruncate = cache._truncateCache;
+  let pluginCalls = 0;
   cache._truncateCache = function() {
-    this.trimCount++;
+    pluginCalls++;
     return patchedTruncate.apply(this, arguments);
   };
 
   cache._truncateCache();
-  assert.deepEqual(Object.keys(cache._items).sort(), ['held', 'recent']);
+  assert.deepEqual(Object.keys(cache._items).sort(), ['held', 'old', 'recent']);
   assert.equal(retainedSource.src, 'retained.png');
   cache.trimCount = 0;
 
@@ -140,13 +157,42 @@ test('MV image cache retrims completed loads without destroying bitmap backing',
   assert.equal(cache.trimCount, 0);
   await Promise.resolve();
   assert.equal(cache.trimCount, 1);
+  assert.equal(pluginCalls, 2);
   assert.deepEqual(first.events, ['loaded']);
   assert.deepEqual(second.events, ['loaded']);
 
   cache._items = null;
-  assert.equal(cache._truncateCache(), 3);
-  assert.equal(cache.trimCount, 3);
-  assert.equal(compatibilityHits.at(-1)[0], 'imageCache.truncateError');
+  assert.equal(cache._truncateCache(), 2);
+  assert.equal(cache.trimCount, 2);
+  assert.deepEqual(compatibilityHits, []);
+});
+
+test('compatibility observations retain bounded distinct details without unsupported hits', () => {
+  for (const strict of [false, true]) {
+    const events = [];
+    const context = { PMJS: {}, Graphics: Object.assign(function() {}, { frameCount: 42 }),
+      console: { log(message) { events.push(JSON.parse(message.slice('[pmjs-compat] '.length))); } },
+      NativeHost: { runtime: { env: name => name === 'PMJS_STRICT_COMPAT' && strict ? '1' : '' } } };
+    vm.runInNewContext(fs.readFileSync(path.join(runtimeRoot,
+      'js/pmjs-core/compatibility.js'), 'utf8'), context);
+    const compat = context.PMJS.compat;
+    for (const detail of ['__proto__', 'constructor', 'toString', ...Array.from({ length: 30 }, (_, i) => 'method-' + i)]) {
+      compat.observed('render.renderMethodOverride', detail);
+      compat.observed('render.renderMethodOverride', detail);
+    }
+    assert.equal(events.length, 16);
+    assert.deepEqual(events.map(event => event.detail),
+      ['__proto__', 'constructor', 'toString', ...Array.from({ length: 13 }, (_, i) => 'method-' + i)]);
+    assert.deepEqual(events[0], { capability: 'render.renderMethodOverride', detail: '__proto__', frame: 42 });
+    compat.observed('render.rendererPluginRegistration', '__proto__');
+    compat.observed('render.rendererPluginRegistration');
+    compat.observed('render.rendererPluginRegistration', '');
+    assert.equal(events.length, 18, 'each capability has an independent detail budget');
+    assert.equal(events.at(-1).detail, '');
+    assert.equal(compat.count(), 0);
+    assert.equal(compat.count('render.'), 0);
+    assert.deepEqual(Object.keys(compat.dump()), []);
+  }
 });
 
 test('PMJS.compat.hit logs on first hit, stacks on verbose, and throws on strict', () => {

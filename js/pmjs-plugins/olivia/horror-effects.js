@@ -19,28 +19,33 @@
     if (typeof fn !== 'function' || !globalThis.__pmjsBuiltinRequire) return false;
     var source = Function.prototype.toString.call(fn)
       .replace(/^function(?:\s+[\w$]+)?\s*\(/, 'function(');
-    return globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
-      .update(source).digest('hex') === expected;
+    var digest = globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
+      .update(source).digest('hex');
+    return expected.indexOf(digest) >= 0;
   }
 
   function isKnownOliviaUpdateHorrorEffects(fn) {
-    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn,
-      '5a2e127a3a66d10dbac9ea5a08ce2f600c8c51737d8e60141b8e3fab61f4b66f');
+    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn, [
+      '5a2e127a3a66d10dbac9ea5a08ce2f600c8c51737d8e60141b8e3fab61f4b66f',
+      '7cd8f49ed0c48d2c09f74c0929d746aa386144b15fd2cfef36355e72c242d0c6']);
   }
 
   function isKnownOliviaNoise(fn) {
-    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn,
-      '5886848c86d64f40d6342cd985179c8d0f328e8d4231011f044ebcd3b8c2d686');
+    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn, [
+      '5886848c86d64f40d6342cd985179c8d0f328e8d4231011f044ebcd3b8c2d686',
+      '06a62ec9c00c829546c651d7c248fa5cf1c9d5007094b9868e64630fd4dc6cbe']);
   }
 
   function isKnownOliviaGlitch(fn) {
-    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn,
-      '1dfffbc540671e82481f9d99431290422c72a8c1b036a25c68e52708457b406c');
+    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn, [
+      '1dfffbc540671e82481f9d99431290422c72a8c1b036a25c68e52708457b406c',
+      'faba80faab2954519f730e298bd4b9315b7dc9b5a6c72c60669fabd179ef66ee']);
   }
 
   function isKnownOliviaTV(fn) {
-    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn,
-      'f5469ca6d318fe389e00824aa5daf6f698f3e4a300b21a79372910c5434f2254');
+    return !fn?._pmjsOliviaGuard && matchesReviewedFunction(fn, [
+      'f5469ca6d318fe389e00824aa5daf6f698f3e4a300b21a79372910c5434f2254',
+      '995aed7c210f48e6e16c01934644f6ba6bf5bcffe81ee1a1bb8b848fcd7a8164']);
   }
 
   function hasActiveHorrorFilter(sprite) {
@@ -51,7 +56,11 @@
 
   function installOliviaHorrorEffects() {
     if (typeof Sprite !== 'function' || !globalThis.Olivia ||
-        !globalThis.Olivia.HorrorEffects) return false;
+        !globalThis.Olivia.HorrorEffects) {
+      PMJS.optimizations.refuse('plugins.olivia.horror-effects',
+        'Olivia Sprite or HorrorEffects globals unavailable');
+      return false;
+    }
     var proto = Sprite.prototype;
     if (!proto || proto._pmjsOliviaInstalled) return true;
     if (typeof proto.updateHorrorEffects !== 'function') {
@@ -71,8 +80,14 @@
     var knownGlitch = proto.updateHorrorGlitch;
     var knownTV = proto.updateHorrorTV;
     var knownDispatcher = isKnownOliviaUpdateHorrorEffects(updateEffects);
-    var knownDelegates = isKnownOliviaNoise(knownNoise) &&
-      isKnownOliviaGlitch(knownGlitch) && isKnownOliviaTV(knownTV);
+    var recognizedLeaves = {
+      updateHorrorNoise: isKnownOliviaNoise(knownNoise),
+      updateHorrorGlitch: isKnownOliviaGlitch(knownGlitch),
+      updateHorrorTV: isKnownOliviaTV(knownTV)
+    };
+    var knownDelegates = Object.keys(recognizedLeaves).every(function(name) {
+      return recognizedLeaves[name];
+    });
     if (knownDispatcher && knownDelegates) {
       proto.updateHorrorEffects = (function(original) {
         var guarded = function() {
@@ -82,6 +97,8 @@
           if (delegatesUnchanged && !hasActiveHorrorFilter(this)) {
             return;
           }
+          if (!delegatesUnchanged) PMJS.optimizations.reportFallback('plugins.olivia.horror-effects',
+            'sprite HorrorEffects methods changed after installation');
           return original.apply(this, arguments);
         };
         guarded._pmjsOliviaGuard = true;
@@ -121,8 +138,12 @@
     }
 
     if (!integrated) {
+      var unrecognized = Object.keys(recognizedLeaves).filter(function(name) {
+        return !recognizedLeaves[name];
+      });
+      if (!knownDispatcher) unrecognized.unshift('updateHorrorEffects');
       PMJS.optimizations.refuse('plugins.olivia.horror-effects',
-        'unrecognized Olivia method composition');
+        'unrecognized Olivia method composition: ' + unrecognized.join(', '));
       return false;
     }
     proto._pmjsOliviaInstalled = true;

@@ -31,9 +31,12 @@ function nativeCompatibilityHit(capability, detail) {
 }
 
 function nativeCompatibilityObserved(capability, detail) {
-  var count = (nativeCompatibilityObservations[capability] || 0) + 1;
-  nativeCompatibilityObservations[capability] = count;
-  if (count !== 1) return;
+  var details = nativeCompatibilityObservations[capability];
+  if (!details) details = nativeCompatibilityObservations[capability] = [];
+  if (details.length >= 16) return;
+  var text = detail ? String(detail) : '';
+  if (details.indexOf(text) !== -1) return;
+  details.push(text);
   var event = {
     capability: capability,
     detail: detail || '',

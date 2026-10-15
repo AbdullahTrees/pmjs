@@ -34,7 +34,7 @@
         };
       }
       var draw = core && bitmap && typeof bitmap.createNativeDrawText === 'function' &&
-        bitmap.createNativeDrawText(core.Bitmap_drawText, font, fontStillValid);
+        bitmap.createNativeDrawText(core.Bitmap_drawText, font, fontStillValid, id);
       if (typeof draw !== 'function') {
         PMJS.optimizations.refuse(id, 'unrecognized captured Bitmap text drawing contract');
         return;

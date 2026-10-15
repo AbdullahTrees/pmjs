@@ -59,43 +59,6 @@ if (typeof ImageCache !== 'undefined') {
   });
 }
 
-if (typeof ImageCache !== 'undefined' && ImageCache.prototype._truncateCache) {
-  var pmjsImageCacheTruncateMethods = globalThis.PMJS && globalThis.PMJS.methods;
-  if (pmjsImageCacheTruncateMethods &&
-      typeof pmjsImageCacheTruncateMethods.own === 'function') {
-    pmjsImageCacheTruncateMethods.own({
-      key: 'ImageCache._truncateCache',
-      id: 'pmjs.mv.image-cache-budget',
-      getTarget: function() { return ImageCache.prototype || null; },
-      method: '_truncateCache',
-      replace: function(guestTruncate) {
-        var wrapped = function() {
-          try {
-            var items = this._items;
-            var sizeLeft = ImageCache.limit;
-            var sorted = Object.keys(items).map(function(k){ return items[k]; }).sort(function(a,b){ return b.touch - a.touch; });
-            var self = this;
-            sorted.forEach(function(item){
-              if (sizeLeft > 0 || self._mustBeHeld(item)) {
-                var bmp = item.bitmap;
-                sizeLeft -= bmp.width * bmp.height;
-              } else {
-                delete items[item.key];
-              }
-            });
-            return;
-          } catch (e) {
-            PMJS.compat.hit('imageCache.truncateError', e && e.message || '');
-          }
-          return guestTruncate.apply(this, arguments);
-        };
-        wrapped._pmjsImageCacheBudget = true;
-        return wrapped;
-      }
-    });
-  }
-}
-
 // Pending images must be held by MV's ImageCache. Once a Bitmap becomes ready,
 // coalesce cache reconsideration so a burst of async decodes causes one scan.
 var pmjsImageCacheTrimPending = false;

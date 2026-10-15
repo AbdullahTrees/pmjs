@@ -72,6 +72,13 @@ if (typeof PMJS !== 'undefined' && PMJS.plugins &&
         if (Array.isArray(slipTiles) && slipTiles.length === 0 &&
             slipTiles.contains === stockContains &&
             slipTiles.indexOf === nativeIndexOf) return false;
+        if (Array.isArray(slipTiles) && slipTiles.length === 0) {
+          PMJS.optimizations.reportFallback('plugins.yanfly.slippery-tiles',
+            'tileset array membership methods changed after installation');
+        }
+      } else {
+        PMJS.optimizations.reportFallback('plugins.yanfly.slippery-tiles',
+          'slippery region or array membership methods changed after installation');
       }
       return originalIsSlippery.call(this, mx, my);
     };

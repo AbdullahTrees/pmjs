@@ -32,10 +32,12 @@ function makeHost({
   disableOptimizations = []
 } = {}) {
   const calls = { constructed: 0, original: 0 };
+  const warnings = [];
   const hooks = {};
   const context = {
     __pmjsBuiltinRequire: require,
     calls,
+    warnings,
     hooks,
     PMJS_GAME_CONFIG: { disableOptimizations },
     SceneManager: { _scene: { _spriteset: {} } },
@@ -46,7 +48,7 @@ function makeHost({
         }
       }
     },
-    console: { log() {} },
+    console: { log() {}, warn(message) { warnings.push(message); } },
     pmjsRegisterHook(name, callback) { hooks[name] = callback; }
   };
 
@@ -229,8 +231,30 @@ test('external classifier selection cannot replace the bundled classifier', () =
 
 test('classifier errors preserve the original construction path', () => {
   const context = makeHost();
+  context.PMJS.optimizations.finalize();
   const { sprite, model } = eventSprite(context, { id: 'plain' });
   model.list = () => { throw new Error('guest list failed'); };
   sprite.setupMiniLabel();
   assert.equal(context.calls.constructed, 1);
+  const other = eventSprite(context, {}).sprite;
+  other._character.list = model.list;
+  other.setupMiniLabel();
+  assert.equal(context.calls.constructed, 2);
+  assert.equal(context.warnings.length, 1);
+  assert.match(context.warnings[0], /plugins.yanfly.event-mini-label refused for this use: event page classification failed \(guest list failed\)/);
+  assert.equal(context.PMJS.optimizations.isEnabled('plugins.yanfly.event-mini-label'), true);
+});
+
+test('page lookup failures and non-Error exceptions preserve guest construction and report their reasons', () => {
+  const context = makeHost();
+  const first = eventSprite(context, {}).sprite;
+  first._character.event = () => { throw new Error('event lookup failed'); };
+  first.setupMiniLabel();
+  const second = eventSprite(context, {}).sprite;
+  second._character.list = () => { throw null; };
+  second.setupMiniLabel();
+  assert.equal(context.calls.constructed, 2);
+  assert.equal(context.warnings.length, 2);
+  assert.match(context.warnings[0], /event page lookup failed \(event lookup failed\)/);
+  assert.match(context.warnings[1], /event page classification failed/);
 });

@@ -22,6 +22,23 @@ function createMvBlurContext(native, { stockBlur, disableOptimizations = [] } = 
       this.dirtyCalls = 0; this.stockCalls = 0;
     }
     Bitmap.prototype._setDirty = function() { this.dirtyCalls++; };
+    Bitmap.prototype.fillRect = function(x, y, width, height, color) {
+      this._context.save();
+      this._context.fillStyle = color;
+      this._context.fillRect(x, y, width, height);
+      this._context.restore();
+      this._setDirty();
+    };
+    Bitmap.prototype.fillAll = function(color) { this.fillRect(0, 0, this.width, this.height, color); };
+    Bitmap.prototype._makeFontNameText = function() { return '24px GameFont'; };
+    Bitmap.prototype.measureTextWidth = function(text) {
+      var context = this._context;
+      context.save();
+      context.font = this._makeFontNameText();
+      var width = context.measureText(text).width;
+      context.restore();
+      return width;
+    };
     Bitmap.prototype.blur = ${stockBlur || blur.toString()};
     function Sprite() {}
     function Graphics() {}

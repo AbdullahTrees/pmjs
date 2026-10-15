@@ -20,18 +20,19 @@ test('plugin failure remains primary when a method accessor also fails during au
     Object.defineProperty(target, 'update', { get() { throw audit; } });
     throw original;
   }), error => error === original);
-  assert.ok(logs.some(args => args.includes(audit)), 'the secondary audit failure remains visible');
+  assert.deepEqual(logs, [], 'auditing must not invoke the accessor');
   assert.equal(ctx.PMJS.plugins.dump().counts.failed, 1);
 });
 
-test('method audit failure fails an otherwise successful plugin load', () => {
+test('method accessors cannot fail an otherwise successful plugin load', () => {
   const ctx = loadPmjsRuntime();
   const error = new Error('accessor failure'), target = { update() {} };
   ctx.PMJS.methods.wrap({ key: 'K.update', id: 'pmjs.k', method: 'update', getTarget: () => target, wrap: next => next });
-  assert.throws(() => ctx.PMJS.plugins.execute('Example', () => {
+  assert.equal(ctx.PMJS.plugins.execute('Example', () => {
     Object.defineProperty(target, 'update', { get() { throw error; } });
-  }), caught => caught === error);
-  assert.equal(ctx.PMJS.plugins.dump().counts.failed, 1);
+  }), true);
+  assert.equal(ctx.PMJS.plugins.dump().counts.failed, 0);
+  assert.equal(ctx.PMJS.plugins.dump().counts.loaded, 1);
 });
 
 test('a falsy plugin exception remains primary when auditing fails', () => {

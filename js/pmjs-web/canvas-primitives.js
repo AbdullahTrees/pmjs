@@ -28,7 +28,7 @@
   globalThis.PMJS = globalThis.PMJS || {};
   PMJS.web = PMJS.web || {};
   PMJS.web.canvas = PMJS.web.canvas || {};
-  PMJS.web.canvas.createPrimitiveRecorder = function(canvas) {
+  PMJS.web.canvas.createPrimitiveRecorder = function(canvas, onFallback) {
     if (typeof NativeHost === 'undefined' || !NativeHost.render ||
         typeof NativeHost.render.createPrimitiveSurface !== 'function' ||
         typeof NativeHost.render.renderPrimitiveSurface !== 'function' ||
@@ -49,9 +49,12 @@
     var recording = false;
     var fallback = false;
 
-    function replayRecordedCanvasOperations(force) {
+    function replayRecordedCanvasOperations(force, reason, detail) {
       if (fallback || !force && !recording && canvas._nativeImage !== surface.image) return;
       fallback = true;
+      if (reason && onFallback) {
+        try { onFallback(reason, detail); } catch (_) {}
+      }
       delete canvas._nativeImage;
       var operations = priorReplay.concat(replay);
       priorReplay.length = 0;
@@ -88,7 +91,7 @@
       if (!identity || this._clipPaths && this._clipPaths.length ||
           (colorToRgba(this.shadowColor) & 255) && (this.shadowBlur || this.shadowOffsetX || this.shadowOffsetY) ||
           blendMode < 0 || (!supportedGradient && !supportedSolid)) {
-        replayRecordedCanvasOperations();
+        replayRecordedCanvasOperations(false, 'unsupported primitive drawing state or fill style');
         return originalFillRect.apply(this, arguments);
       }
       var bounds = [x + transform[4], y + transform[5], width, height];
@@ -98,7 +101,7 @@
       // A full opaque first fill reconstructs the surface independently. Other
       // updates must preserve existing Canvas content through its ordinary owner.
       if (replay.length === 0 && !fullOpaque) {
-        replayRecordedCanvasOperations();
+        replayRecordedCanvasOperations(false, 'primitive update lacks a full opaque initial fill');
         return originalFillRect.apply(this, arguments);
       }
       if (replay.length === 0) priorReplay.length = 0;
@@ -123,7 +126,7 @@
     };
     context.fill = function() {
       if (recording && !fallback || surface && canvas._nativeImage === surface.image) {
-        replayRecordedCanvasOperations();
+        replayRecordedCanvasOperations(false, 'primitive path fill requires Canvas drawing');
       }
       return originalFill.apply(this, arguments);
     };
@@ -138,7 +141,7 @@
       recording = true;
       try {
         if (canvas.width !== surfaceWidth || canvas.height !== surfaceHeight) {
-          replayRecordedCanvasOperations();
+          replayRecordedCanvasOperations(false, 'primitive surface dimensions changed');
         }
         var result = draw();
       } catch (error) {
@@ -154,8 +157,8 @@
             surface.handle, clearColor, records);
           canvas._nativeImage = surface.image;
           if (canvas._pmjsContentChanged) canvas._pmjsContentChanged();
-        } catch (_) {
-          replayRecordedCanvasOperations(true);
+        } catch (error) {
+          replayRecordedCanvasOperations(true, 'native primitive submission failed', error);
         }
       }
       return result;

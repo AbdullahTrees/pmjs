@@ -15,7 +15,12 @@
 //
 // An owner must register an optimization only when disabling it genuinely
 // bypasses the accelerator and reaches its verified ordinary fallback.
+// Runtime guards report rejected uses through reportFallback(id, reason, detail).
+// Reasons are stable owner-defined strings, logged once per ID/reason without
+// changing policy. Normal cache misses and work outside the accelerator's scope
+// stay quiet. dump() separates these fallbackReasons from a global refusalReason.
 
+(function() {
 function pmjsOptimizationEnv(name) {
   try {
     if (typeof NativeHost !== 'undefined' && NativeHost.runtime &&
@@ -118,7 +123,7 @@ PMJS.optimizations = {
       (pmjsOptimizationConfigDisabled[id] ? 'configuration' : null);
     pmjsOptimizationStates[id] = { enabled: disabledBy === null,
       disabledBy: disabledBy, owner: definition.owner,
-      fallback: definition.fallback };
+      fallback: definition.fallback, fallbackReasons: Object.create(null) };
   },
   isEnabled: function(id) {
     return pmjsOptimizationState(id).enabled;
@@ -149,6 +154,22 @@ PMJS.optimizations = {
     } catch (_) {}
     return state.disabledBy;
   },
+  // A rejected use does not disable other eligible objects or change boot policy.
+  reportFallback: function(id, reason, detail) {
+    var state = pmjsOptimizationState(id);
+    if (typeof reason !== 'string' || !reason) {
+      throw new Error('PMJS optimization fallback requires a nonempty string reason: ' + id);
+    }
+    if (!state.enabled || state.fallbackReasons[reason]) return;
+    state.fallbackReasons[reason] = true;
+    try {
+      var message = '[pmjs-opt] ' + id + ' refused for this use: ' + reason;
+      if (detail) {
+        try { message += ' (' + String(detail.message || detail) + ')'; } catch (_) {}
+      }
+      console.warn(message + '; fallback: ' + state.fallback);
+    } catch (_) {}
+  },
   ids: function() {
     return Object.keys(pmjsOptimizationStates);
   },
@@ -157,7 +178,8 @@ PMJS.optimizations = {
       var state = pmjsOptimizationStates[id];
       return { id: id, owner: state.owner, fallback: state.fallback,
         enabled: state.enabled, disabledBy: state.disabledBy,
-        refusalReason: state.refusalReason || null };
+        refusalReason: state.refusalReason || null,
+        fallbackReasons: Object.keys(state.fallbackReasons) };
     });
   },
   finalize: function() {
@@ -177,3 +199,4 @@ PMJS.optimizations = {
     pmjsLogOptimizationPolicy();
   }
 };
+})();

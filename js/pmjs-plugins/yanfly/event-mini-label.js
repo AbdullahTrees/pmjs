@@ -58,7 +58,11 @@
   function classify(character) {
     try {
       return defaultPageHasMiniLabel(character);
-    } catch (_) { return null; }
+    } catch (error) {
+      PMJS.optimizations.reportFallback('plugins.yanfly.event-mini-label',
+        'event page classification failed', error);
+      return null;
+    }
   }
 
   function pageKey(character) {
@@ -68,7 +72,11 @@
       var event = character.event();
       if (!event || !Array.isArray(event.pages)) return undefined;
       return event.pages[character._pageIndex];
-    } catch (_) { return undefined; }
+    } catch (error) {
+      PMJS.optimizations.reportFallback('plugins.yanfly.event-mini-label',
+        'event page lookup failed', error);
+      return undefined;
+    }
   }
 
   function fingerprint(fn) {

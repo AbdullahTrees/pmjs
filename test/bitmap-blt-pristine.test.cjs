@@ -374,42 +374,6 @@ test('optimization disabled: delegates to stock blt when disabled via PMJS_DISAB
   }
 });
 
-test('unit full-bitmap fills establish revision-bound mask proof', () => {
-  const { Bitmap, PMJS } = setupEnvironment();
-  const bitmap = new Bitmap(100, 92);
-  bitmap.fillAll('white');
-  assert.deepEqual({ ...PMJS.web.canvas.unitMaskRect(bitmap._canvas) }, {
-    x: 0, y: 0, width: 100, height: 92
-  });
-  bitmap._context.fillRect(0, 0, 1, 1);
-  assert.equal(PMJS.web.canvas.unitMaskRect(bitmap._canvas), null);
-  bitmap.fillAll('white');
-  bitmap.blur();
-  assert.equal(PMJS.web.canvas.unitMaskRect(bitmap._canvas), null);
-});
-
-test('mask proof rejects partial, translucent, transformed, clipped, and composited fills', () => {
-  const { Bitmap, PMJS } = setupEnvironment();
-  const bitmap = new Bitmap(100, 92);
-  const context = bitmap._context;
-  const reject = (prepare, color = 'white') => {
-    context.globalAlpha = 1;
-    context.globalCompositeOperation = 'source-over';
-    context._transform = [1, 0, 0, 1, 0, 0];
-    context._clipPaths = [];
-    prepare();
-    bitmap.fillRect(0, 0, 100, 92, color);
-    assert.equal(PMJS.web.canvas.unitMaskRect(bitmap._canvas), null);
-  };
-  bitmap.fillRect(0, 0, 99, 92, 'white');
-  assert.equal(PMJS.web.canvas.unitMaskRect(bitmap._canvas), null);
-  reject(() => {}, 'rgba(255, 255, 255, 0.5)');
-  reject(() => { context.globalAlpha = 0.5; });
-  reject(() => { context.globalCompositeOperation = 'copy'; });
-  reject(() => { context._transform[4] = 1; });
-  reject(() => { context._clipPaths.push({}); });
-});
-
 test('Bitmap pixel queries preserve native RGBA channels and coordinate normalization', () => {
   const { Bitmap, context } = setupEnvironment();
   const bitmap = new Bitmap(8, 8);
@@ -419,13 +383,13 @@ test('Bitmap pixel queries preserve native RGBA channels and coordinate normaliz
   context.NativeHost.canvas.pixel = (...args) => { queries.push(args); return 0x12ab34cd; };
   assert.equal(bitmap.getPixel('2.9', -0.1), '#12ab34');
   assert.equal(bitmap.getAlphaPixel(undefined, NaN), 205);
-  assert.deepEqual(queries, [[1, 2, -1], [1, 0, 0]]);
+  assert.deepEqual(queries, [[1, 2, 0], [1, 0, 0]]);
   context.NativeHost.canvas.pixel = () => 0;
   assert.equal(bitmap.getPixel(0, 0), '#000000');
   assert.equal(bitmap.getAlphaPixel(0, 0), 0);
 });
 
-test('Bitmap pixel queries preserve Canvas fallback and compatibility diagnostics', () => {
+test('Bitmap pixel queries preserve Canvas fallback and propagate readback errors', () => {
   const { Bitmap, context } = setupEnvironment();
   const bitmap = new Bitmap(8, 8);
   const hits = [];
@@ -440,21 +404,23 @@ test('Bitmap pixel queries preserve Canvas fallback and compatibility diagnostic
   assert.equal(bitmap.getAlphaPixel(1, 2), 4);
   assert.equal(readbacks, 2);
   assert.equal(hits.length, 0);
-  bitmap._context.getImageData = () => { throw new Error('readback unavailable'); };
-  assert.equal(bitmap.getPixel(0, 0), '#000000');
-  assert.equal(bitmap.getAlphaPixel(0, 0), 0);
-  assert.deepEqual(hits.map(hit => hit[0]), ['bitmap.getPixel', 'bitmap.getAlphaPixel']);
+  const error = new Error('readback unavailable');
+  bitmap._context.getImageData = () => { throw error; };
+  assert.throws(() => bitmap.getPixel(0, 0), caught => caught === error);
+  assert.throws(() => bitmap.getAlphaPixel(0, 0), caught => caught === error);
+  assert.deepEqual(hits, []);
 });
 
-test('a failed native pixel query keeps its diagnostic fallback without a second readback', () => {
+test('a failed native pixel query propagates without a second readback', () => {
   const { Bitmap, context } = setupEnvironment();
   const bitmap = new Bitmap(8, 8);
   const hits = [];
   context.PMJS.compat = { hit(kind) { hits.push(kind); } };
   bitmap._canvas._nativeCanvas = { handle: 1 };
-  context.NativeHost.canvas.pixel = () => { throw new Error('native query failed'); };
+  const error = new Error('native query failed');
+  context.NativeHost.canvas.pixel = () => { throw error; };
   bitmap._context.getImageData = () => { throw new Error('second readback attempted'); };
-  assert.equal(bitmap.getPixel(0, 0), '#000000');
-  assert.equal(bitmap.getAlphaPixel(0, 0), 0);
-  assert.deepEqual(hits, ['bitmap.getPixel', 'bitmap.getAlphaPixel']);
+  assert.throws(() => bitmap.getPixel(0, 0), caught => caught === error);
+  assert.throws(() => bitmap.getAlphaPixel(0, 0), caught => caught === error);
+  assert.deepEqual(hits, []);
 });

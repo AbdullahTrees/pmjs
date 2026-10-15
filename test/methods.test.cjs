@@ -138,6 +138,52 @@ test('plugin mutation audit records mutator and failure', () => {
   assert.deepEqual(method(ctx, 'K.update').mutations, [{ plugin: 'Changer', failed: true }]);
 });
 
+test('plugin audits observe accessors without invoking them and track descriptor changes', () => {
+  let reads = 0;
+  const target = Object.create(Object.defineProperty({}, 'update', {
+    configurable: true, get() { reads++; throw new Error('guest getter'); }
+  }));
+  const ctx = context();
+  ctx.PMJS.methods.wrap({ key: 'K.update', id: 'pmjs.k', method: 'update',
+    getTarget: () => target, wrap: next => next });
+  const unchanged = ctx.PMJS.methods.beginPlugin('Unchanged');
+  ctx.PMJS.methods.endPlugin(unchanged);
+  assert.equal(reads, 0);
+  assert.deepEqual(method(ctx, 'K.update').mutations, []);
+  const changed = ctx.PMJS.methods.beginPlugin('Changer');
+  Object.defineProperty(target, 'update', { value() {}, configurable: true });
+  ctx.PMJS.methods.endPlugin(changed);
+  assert.equal(reads, 0);
+  assert.deepEqual(method(ctx, 'K.update').mutations, [{ plugin: 'Changer', failed: false }]);
+});
+
+test('unavailable audit evidence cannot prevent plugin execution or replace its error', () => {
+  const ctx = context();
+  const error = new Error('unavailable resolver');
+  ctx.PMJS.methods.wrap({ key: 'K.update', id: 'pmjs.k', method: 'update',
+    getTarget() { throw error; }, wrap: next => next });
+  const token = ctx.PMJS.methods.beginPlugin('Guest');
+  assert.equal(ctx.PMJS.methods.endPlugin(token, { failed: true }), 'Guest');
+  assert.deepEqual(method(ctx, 'K.update').mutations, []);
+  assert.throws(() => ctx.PMJS.methods.install(), caught => caught === error);
+});
+
+test('ignored method assignments fail installation and cannot be retried', () => {
+  const guest = () => 'guest';
+  const target = Object.defineProperty({}, 'update', { get: () => guest, set() {} });
+  const ctx = context();
+  ctx.PMJS.methods.own({ key: 'K.update', id: 'pmjs.k', method: 'update',
+    getTarget: () => target, replace: () => () => 'native' });
+  let error;
+  assert.throws(() => ctx.PMJS.methods.install(), caught => {
+    error = caught;
+    return /replacement did not become the effective method/.test(caught.message);
+  });
+  assert.equal(target.update(), 'guest');
+  assert.equal(method(ctx, 'K.update').state, 'failed');
+  assert.throws(() => ctx.PMJS.methods.install(), caught => caught === error);
+});
+
 test('wrap composes around subclass methods capturing the parent', () => {
   const ctx = context();
   vm.runInContext(`

@@ -87,7 +87,9 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
     PMJS: { plugins: {
       registerOptimization() {}, onLoaded(name, owner, callback) { loaded.set(name, callback); }
     }, phases: { on(name, owner, callback) { phases.set(name, callback); } },
-    optimizations: { isEnabled() { return !disabled; }, refuse(id, reason) { refusals.push(reason); } } } };
+    optimizations: { isEnabled() { return !disabled; },
+      reportFallback(id, reason) { refusals.push(reason); },
+      refuse(id, reason) { refusals.push(reason); } } } };
   vm.runInNewContext(patched, context);
   loaded.get('SRD_BattleStatusCustomizer')();
   phases.get('beforeBoot')();

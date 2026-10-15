@@ -117,12 +117,20 @@ test('word-wrap no-op drawing leaves suppress raster without bypassing public wr
 test('late instance and prototype outline/body overrides retain authored calls', () => {
   for (const method of ['_drawTextOutline', '_drawTextBody']) for (const instance of [true, false]) {
     const h = harness(); h.install(); const b = h.bitmap(); let calls = 0;
+    const warnings = [];
+    h.context.console = { ...console, warn(message) { warnings.push(message); } };
+    h.context.PMJS.optimizations.finalize();
     assert.notEqual(h.context.Yanfly.Core.Bitmap_drawText, h.original);
     const target = instance ? b : h.context.Bitmap.prototype, original = target[method];
     target[method] = function(...args) { calls++; return original.apply(this, args); };
     draw(b);
     assert.equal(calls, 1, method); assert.equal(h.native.calls.outlined.length, 0);
     assert.equal(b.dirtyCount, 1); assert.equal(h.native.calls.text.length, 2);
+    draw(b);
+    assert.equal(calls, 2);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /plugins.yanfly.core-native-text refused for this use: Bitmap text methods changed after installation/);
+    assert.equal(h.context.PMJS.optimizations.isEnabled(optimization), true);
   }
 });
 

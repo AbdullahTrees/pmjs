@@ -78,6 +78,21 @@ test('Canvas mutations and dimension resets invalidate revision-bound proof', ()
   assert.equal(context.PMJS.web.canvas.unitMaskRect(canvas), null);
 });
 
+test('modified Canvas drawing cannot establish a full rectangular mask', () => {
+  for (const name of ['fillRect', 'save', 'restore']) {
+    const realm = harness();
+    const canvas = new realm.CanvasElement();
+    const context = canvas.getContext('2d');
+    const original = context[name];
+    context[name] = name === 'fillRect' ? function(x, y, width, height) {
+      return original.call(this, x, y, width / 2, height);
+    } : function() { return original.apply(this, arguments); };
+    realm.PMJS.web.canvas.trackMaskFill(context, 0, 0, canvas.width, canvas.height,
+      'white', () => { context.fillStyle = 'white'; context.fillRect(0, 0, canvas.width, canvas.height); });
+    assert.equal(realm.PMJS.web.canvas.unitMaskRect(canvas), null, name);
+  }
+});
+
 test('ellipse construction retains content proof until fill or stroke mutates pixels', () => {
   const realm = harness();
   const canvas = new realm.CanvasElement();

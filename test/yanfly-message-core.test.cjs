@@ -12,7 +12,7 @@ const source = fs.readFileSync(path.join(__dirname,
 function install({ enabled = true, changedCharacter = false, changedBody = false, changedMeasure = false,
   fontWrapper = false } = {}) {
   const phases = [];
-  const state = { raster: [], fonts: 0, dirty: 0, refused: null };
+  const state = { raster: [], fonts: 0, dirty: 0, refused: null, fallbacks: [] };
   const context = vm.createContext({ state, __pmjsBuiltinRequire: require, PMJS: {
     plugins: {
       registerOptimization(plugin, definition) { state.definition = definition; },
@@ -20,6 +20,7 @@ function install({ enabled = true, changedCharacter = false, changedBody = false
     },
     phases: { on(phase, id, callback) { phases.push(callback); } },
     optimizations: { isEnabled() { return enabled; },
+      reportFallback(id, reason) { state.fallbacks.push({ id, reason }); },
       refuse(id, reason) { state.refused = reason; } }
   } });
   vm.runInContext(`
@@ -130,6 +131,8 @@ test('disabled, modified pipelines and instance drawing methods keep ordinary be
   message.contents._drawTextBody = function(text) { state.raster.push('custom:' + text); };
   assert.equal(message.textWidthExCheck('x'), 1);
   assert.deepEqual(state.raster, ['outline:x', 'custom:x']);
+  assert.equal(state.fallbacks[0].id, 'plugins.yanfly.message-word-wrap-measure');
+  assert.equal(state.fallbacks[0].reason, 'message contents or Bitmap text methods unsupported');
 });
 
 

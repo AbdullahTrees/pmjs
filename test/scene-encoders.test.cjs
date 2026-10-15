@@ -416,7 +416,7 @@ test('rendered frames report exact versus degraded counts', () => {
   assert.equal(sandbox.renderNativeStage._framesDegraded, 1);
 });
 
-test('unrealized tile layers log instead of vanishing silently', () => {
+test('empty tile layers preserve exact frame accounting without compatibility warnings', () => {
   const harness = makeHarness();
   const { sandbox } = harness;
   const root = new sandbox.PIXI.Container();
@@ -424,8 +424,21 @@ test('unrealized tile layers log instead of vanishing silently', () => {
     visible: true, renderable: true, alpha: 1 };
   root.addChild(layer);
   assert.equal(sandbox.submitNativeScene(root), true);
-  assert.deepEqual(harness.compatHits,
-    [['render.tilemap', 'Object:layer-unrealized']]);
+  assert.deepEqual(harness.compatHits, []);
+  sandbox.renderNativeStage(root);
+  assert.equal(sandbox.renderNativeStage._framesDegraded || 0, 0);
+});
+
+test('nonempty unrealized tile layers still report missing drawing', () => {
+  const harness = makeHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  root.addChild({ pointsBuf: [0, 0, 0, 0, 16, 16, 0, 0, 0], textures: [],
+    visible: true, renderable: true, alpha: 1 });
+  assert.equal(sandbox.submitNativeScene(root), true);
+  assert.deepEqual(harness.compatHits, [['render.tilemap', 'Object:layer-unrealized']]);
+  sandbox.renderNativeStage(root);
+  assert.equal(sandbox.renderNativeStage._framesDegraded, 1);
 });
 
 test('reached custom render hooks report the native approximation', () => {
@@ -550,8 +563,7 @@ test('structural tile layers cannot bypass render-method reporting', () => {
   root.addChild({ pointsBuf: [], textures: [], renderWebGL() {} });
   sandbox.submitNativeScene(root);
   assert.deepEqual(harness.compatHits, [
-    ['render.render-method', 'Object.renderWebGL'],
-    ['render.tilemap', 'Object:layer-unrealized']
+    ['render.render-method', 'Object.renderWebGL']
   ]);
 });
 
@@ -701,18 +713,28 @@ test('active rectangle mask resolves to a scissor without alpha work', () => {
   assert.equal(packet.metadata[1 * 7 + 5] & 1, 1);
 });
 
+function fillMask(harness, mask) {
+  const { sandbox } = harness;
+  const source = new sandbox.CanvasElement();
+  source.width = mask.texture.baseTexture.width;
+  source.height = mask.texture.baseTexture.height;
+  source.__pmjsContentRevision = 0;
+  source._pmjsContentChanged = () => { source.__pmjsContentRevision++; };
+  const context = new sandbox.CanvasContext2D(source);
+  context.fillStyle = 'white';
+  sandbox.NativeHost.canvas.fillRect = () => {};
+  mask.texture.baseTexture.source = source;
+  sandbox.PMJS.web.canvas.trackMaskFill(context, 0, 0, source.width, source.height,
+    'white', () => context.fillRect(0, 0, source.width, source.height));
+}
+
 test('proven full-frame Sprite mask resolves to a scissor without alpha work', () => {
   const harness = makeHarness();
   const { sandbox, sprite } = harness;
   const root = new sandbox.PIXI.Container();
   const masked = sprite();
   const mask = sprite(100, 92);
-  const source = mask.texture.baseTexture.source;
-  source.__pmjsContentRevision = 0;
-  sandbox.PMJS.web.canvas.trackMaskFill({ canvas: source,
-    globalAlpha: 1, globalCompositeOperation: 'source-over',
-    _transform: [1, 0, 0, 1, 0, 0], _clipPaths: [] },
-  0, 0, 100, 92, 'white', () => { source.__pmjsContentRevision++; });
+  fillMask(harness, mask);
   mask.x = 7;
   mask.y = 25;
   masked.mask = mask;
@@ -739,12 +761,7 @@ test('uncertain Sprite masks retain the alpha-mask path', () => {
     const root = new sandbox.PIXI.Container();
     const masked = sprite();
     const mask = sprite(100, 92);
-    const source = mask.texture.baseTexture.source;
-    source.__pmjsContentRevision = 0;
-    sandbox.PMJS.web.canvas.trackMaskFill({ canvas: source,
-      globalAlpha: 1, globalCompositeOperation: 'source-over',
-      _transform: [1, 0, 0, 1, 0, 0], _clipPaths: [] },
-    0, 0, 100, 92, 'white', () => { source.__pmjsContentRevision++; });
+    fillMask(harness, mask);
     change(mask);
     masked.mask = mask;
     root.addChild(masked);
@@ -762,12 +779,7 @@ test('Sprite rectangle masks resolve anchor, negative scale, and another parent 
   const maskLayer = new sandbox.PIXI.Container();
   const masked = sprite();
   const mask = sprite(100, 92);
-  const source = mask.texture.baseTexture.source;
-  source.__pmjsContentRevision = 0;
-  sandbox.PMJS.web.canvas.trackMaskFill({ canvas: source,
-    globalAlpha: 1, globalCompositeOperation: 'source-over',
-    _transform: [1, 0, 0, 1, 0, 0], _clipPaths: [] },
-  0, 0, 100, 92, 'white', () => { source.__pmjsContentRevision++; });
+  fillMask(harness, mask);
   mask.anchor = { x: 0.5, y: 0.5 };
   mask.transform.localTransform = { a: -1, b: 0, c: 0, d: 1, tx: 107, ty: 71 };
   mask.transform.updateLocalTransform = function() {};
@@ -790,12 +802,7 @@ test('disabled Sprite rectangle lowering retains the alpha-mask path', () => {
   const root = new sandbox.PIXI.Container();
   const masked = sprite();
   const mask = sprite(100, 92);
-  const source = mask.texture.baseTexture.source;
-  source.__pmjsContentRevision = 0;
-  sandbox.PMJS.web.canvas.trackMaskFill({ canvas: source,
-    globalAlpha: 1, globalCompositeOperation: 'source-over',
-    _transform: [1, 0, 0, 1, 0, 0], _clipPaths: [] },
-  0, 0, 100, 92, 'white', () => { source.__pmjsContentRevision++; });
+  fillMask(harness, mask);
   masked.mask = mask;
   root.addChild(masked);
   submitOnly(harness, root);

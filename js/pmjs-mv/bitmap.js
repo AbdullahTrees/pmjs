@@ -84,9 +84,14 @@ Bitmap.snap = function(stage) {
     }
     Bitmap.prototype.blur = function() {
       var canvas = this._canvas;
-      if (canvas.width !== this.width || canvas.height !== this.height ||
-          typeof PMJS.web.canvas.blurMv !== 'function' ||
+      if (canvas.width !== this.width || canvas.height !== this.height) {
+        PMJS.optimizations.reportFallback('bitmap.native-blur', 'bitmap and Canvas dimensions differ');
+        return stockBlur.apply(this, arguments);
+      }
+      if (typeof PMJS.web.canvas.blurMv !== 'function' ||
           !PMJS.web.canvas.blurMv(this._context)) {
+        PMJS.optimizations.reportFallback('bitmap.native-blur',
+          'native MV blur unavailable or Canvas drawing state unsupported');
         return stockBlur.apply(this, arguments);
       }
       this._setDirty();
@@ -171,27 +176,36 @@ if (typeof _Bitmap_blt === 'function') {
   var stockBody = Bitmap.prototype._drawTextBody;
   var stockFontName = Bitmap.prototype._makeFontNameText;
   // Adapters may replace a captured stock leaf while keeping outer plugin wrappers.
-  PMJS.mv.bitmap.createNativeDrawText = function(originalDrawText, expectedFont, fontStillValid) {
+  PMJS.mv.bitmap.createNativeDrawText = function(originalDrawText, expectedFont, fontStillValid, optimizationId) {
     if (typeof stockDrawText !== 'function' || typeof stockOutline !== 'function' ||
         typeof stockBody !== 'function' || typeof expectedFont !== 'function' ||
         originalDrawText !== stockDrawText || Bitmap.prototype._drawTextOutline !== stockOutline ||
         Bitmap.prototype._drawTextBody !== stockBody) return null;
 
+    optimizationId = optimizationId || 'bitmap.native-draw-text';
     return function(text, x, y, maxWidth, lineHeight, align) {
       var textType = typeof text;
-      if ((text !== null && textType !== 'string' && textType !== 'number' && textType !== 'boolean') ||
-          this._drawTextOutline !== stockOutline || this._drawTextBody !== stockBody ||
-          this._makeFontNameText !== expectedFont || (fontStillValid && !fontStillValid()) ||
-          !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(lineHeight) ||
+      if (text !== null && textType !== 'string' && textType !== 'number' && textType !== 'boolean') {
+        if (text !== undefined) PMJS.optimizations.reportFallback(optimizationId, 'text value unsupported');
+        return originalDrawText.apply(this, arguments);
+      }
+      if (this._drawTextOutline !== stockOutline || this._drawTextBody !== stockBody ||
+          this._makeFontNameText !== expectedFont || (fontStillValid && !fontStillValid())) {
+        PMJS.optimizations.reportFallback(optimizationId, 'Bitmap text methods changed after installation');
+        return originalDrawText.apply(this, arguments);
+      }
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(lineHeight) ||
           !Number.isFinite(this.fontSize) || this.fontSize <= 0 ||
           (maxWidth && !Number.isFinite(maxWidth)) ||
           (align && align !== 'left' && align !== 'center' && align !== 'right')) {
+        PMJS.optimizations.reportFallback(optimizationId, 'text dimensions, font size or alignment unsupported');
         return originalDrawText.apply(this, arguments);
       }
       var context = this._context;
       if ((!align && context.textAlign && context.textAlign !== 'left' && context.textAlign !== 'start') ||
           !PMJS.web.canvas.supportsNativeText(context, maxWidth, align,
             { outlineColor: this.outlineColor, color: this.textColor })) {
+        PMJS.optimizations.reportFallback(optimizationId, 'Canvas text drawing state unsupported');
         return originalDrawText.apply(this, arguments);
       }
 
@@ -205,7 +219,6 @@ if (typeof _Bitmap_blt === 'function') {
         font: descriptor, outlineColor: this.outlineColor,
         outlineWidth: this.outlineWidth, color: this.textColor, maxWidth: width, align: align
       });
-      pmjsBitmapCanvasChanged(this);
       this._setDirty();
     };
   };
@@ -231,32 +244,20 @@ if (typeof _Bitmap_blt === 'function') {
 })();
 
 
-Bitmap.prototype.measureTextWidth = function(text) {
-  return PMJS.web.canvas.measureTextWidth(text, this._makeFontNameText());
-};
-
 // Pixel queries support canvas-backed bitmaps without forcing image readback.
 Bitmap.prototype.getPixel = function(x, y) {
-  x = Math.floor(Number(x) || 0);
-  y = Math.floor(Number(y) || 0);
-  try {
-    var data = PMJS.web.canvas.readPixel(this._canvas, this._context, x, y);
-    if (data) {
-      return '#' + ('000000' + ((data[0] << 16 | data[1] << 8 | data[2]) >>> 0).toString(16)).slice(-6);
-    }
-  } catch (_) {}
+  var data = PMJS.web.canvas.readPixel(this._canvas, this._context, x, y);
+  if (data) {
+    return '#' + ('000000' + ((data[0] << 16 | data[1] << 8 | data[2]) >>> 0).toString(16)).slice(-6);
+  }
   PMJS.compat.hit('bitmap.getPixel',
     'x=' + x + ' y=' + y + ' w=' + this.width + ' h=' + this.height);
   return '#000000';
 };
 
 Bitmap.prototype.getAlphaPixel = function(x, y) {
-  x = Math.floor(Number(x) || 0);
-  y = Math.floor(Number(y) || 0);
-  try {
-    var data = PMJS.web.canvas.readPixel(this._canvas, this._context, x, y);
-    if (data) return data[3];
-  } catch (_) {}
+  var data = PMJS.web.canvas.readPixel(this._canvas, this._context, x, y);
+  if (data) return data[3];
   PMJS.compat.hit('bitmap.getAlphaPixel',
     'x=' + x + ' y=' + y + ' w=' + this.width + ' h=' + this.height);
   return 0;
