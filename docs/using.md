@@ -37,6 +37,11 @@ Set `assetPreparation.pageCodec` to `"png"` in your configuration to select
 PNG image pages. Changing codecs prepares the affected images again on the
 next launch; keep the cache directory so reusable maps can still be used.
 
+Image and map preparation use kernel file locks in their cache directories. If
+a cache stays busy for 15 seconds, preparation falls back to the original assets.
+The lock releases automatically when its process exits; leave `.prepare.lock`
+in place so all preparers continue to lock the same file.
+
 The `preserveBitmapReloadPixels` configuration option defaults to `true`;
 it keeps the previous image visible while that image reloads. Set it to
 `false` for the original loading behavior.

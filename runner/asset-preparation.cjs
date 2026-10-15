@@ -323,7 +323,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       typeof native.assets.installDerivedCatalog === 'function';
     if (!offline && !verifyHashes && catalogCapable) {
       await fsp.mkdir(cacheRoot, { recursive: true });
-      release = await acquireLock(cacheRoot, cancelled, () => report('wait'));
+      release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
       if (!release) return result;
       const catalog = await readCatalog(catalogFile, binding, cacheRoot);
       if (catalog && !cancelled()) {
@@ -364,7 +364,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       return result;
     }
     await fsp.mkdir(path.join(cacheRoot, 'entries'), { recursive: true });
-    release = await acquireLock(cacheRoot, cancelled, () => report('wait'));
+    release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
     if (!release) return result;
     const files = await preparationFiles(cacheRoot, verifyHashes);
     result.validation = files.stats;

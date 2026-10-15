@@ -172,7 +172,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     const catalogCapable = typeof native.assets.installTileSetCatalog === 'function';
     if (!offline && !verifyHashes && !verifyRegions && catalogCapable) {
       await fsp.mkdir(root, { recursive: true });
-      release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, 0));
+      release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, 0), native.assets);
       if (!release) { result.cancelled = true; return result; }
       const catalog = await readCatalog(catalogFile, binding, cacheRoot);
       if (catalog && !shouldCancel()) {
@@ -225,7 +225,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     }
     await fsp.mkdir(path.join(root, 'entries'), { recursive: true });
     await fsp.mkdir(path.join(root, 'sources'), { recursive: true });
-    release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, data.length));
+    release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, data.length), native.assets);
     if (!release) { result.cancelled = true; return result; }
     files = await preparationFiles(root, verifyHashes);
     result.validation = files.stats;

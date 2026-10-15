@@ -65,34 +65,38 @@ async function retainLeases(cacheRoot, retained) {
     for (const key of lease.keys) if (HASH.test(key)) retained.add(key);
   }
 }
-async function acquireLock(cacheRoot, cancelled, onWait) {
-  const lock = path.join(cacheRoot, '.prepare-lock');
+async function acquireLock(cacheRoot, cancelled, onWait, assets, waitMilliseconds = 15000) {
+  if (typeof assets?.tryAcquirePreparationLock !== 'function' ||
+      typeof assets?.releasePreparationLock !== 'function')
+    throw new Error('kernel preparation locking is unavailable');
   const started = performance.now();
   for (;;) {
     if (cancelled()) return null;
-    try {
-      await fsp.mkdir(lock);
-      try { await writeJson(path.join(lock, 'owner.json'), { pid: process.pid, hostname: os.hostname(), start: processStart(process.pid) }); }
-      catch (error) { await fsp.rm(lock, { recursive: true, force: true }); throw error; }
-      return async () => fsp.rm(lock, { recursive: true, force: true });
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      const owner = await readJson(path.join(lock, 'owner.json'));
-      let stale = false;
-      if (owner && owner.hostname === os.hostname() && Number.isInteger(owner.pid) && owner.pid > 0) {
-        stale = !ownerAlive(owner);
-      } else if (owner && typeof owner.hostname === 'string' && Number.isInteger(owner.pid) && owner.pid > 0) {
-        if (performance.now() - started >= 15000) {
-          throw new Error('preparation cache is locked by another host');
+    const token = assets.tryAcquirePreparationLock(cacheRoot);
+    let foreign = false;
+    if (token) {
+      let retained = false;
+      try {
+        // Respect a live legacy preparer, but never remove its directory: stale
+        // directory deletion can race with a replacement owner.
+        const legacy = path.join(cacheRoot, '.prepare-lock');
+        const owner = await readJson(path.join(legacy, 'owner.json'));
+        const exists = owner || fs.existsSync(legacy);
+        if (!exists || (owner && owner.hostname === os.hostname() &&
+            Number.isInteger(owner.pid) && owner.pid > 0 && !ownerAlive(owner))) {
+          retained = true;
+          return () => assets.releasePreparationLock(token);
         }
-      } else {
-        try { stale = Date.now() - (await fsp.stat(lock)).mtimeMs > 60000; }
-        catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+        foreign = owner && typeof owner.hostname === 'string' && owner.hostname !== os.hostname();
+      } finally {
+        if (!retained) assets.releasePreparationLock(token);
       }
-      if (stale) { await fsp.rm(lock, { recursive: true, force: true }); continue; }
-      onWait();
-      await new Promise(resolve => setTimeout(resolve, 100));
     }
+    if (performance.now() - started >= waitMilliseconds)
+      throw new Error(foreign ? 'preparation cache is locked by another host'
+        : 'preparation cache lock wait timed out');
+    onWait();
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
 }
 

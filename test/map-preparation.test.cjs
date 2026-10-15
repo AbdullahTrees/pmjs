@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const test = require('node:test');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
+const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 const { png } = require('./helpers/png.cjs');
 const { compileRpgMap, compileTiledMap, engineTilemap } = require('../runner/map-demand.cjs');
 const { prepareMaps, validTileDescriptor } = require('../runner/map-preparation.cjs');
@@ -34,7 +35,7 @@ function fixture(t) {
   }
   const native={fs:{readBytes(source){const file=resolved(source);return file?fs.readFileSync(file):null;},
     exists(source){return !!resolved(source);},readDirectory(source){const file=resolved(source);return file?fs.readdirSync(file):null;}},
-    assets:{tilePreparationVersion:'test',sourcePath:resolved,
+    assets:{...preparationLocks(),tilePreparationVersion:'test',sourcePath:resolved,
     sourceIdentity(source){const file=resolved(source);return file?crypto.createHash('sha256').update(file).update(fs.readFileSync(file)).digest('hex'):null;},
     async processTiles(inputs,stage){jobs++;fs.writeFileSync(path.join(stage,'tiles-0.png'),png(50,50,Buffer.alloc(50*50*4,73)));
       return {ordinaryBytes:inputs.length*512*512*4,version:1,halo:1,pages:[{path:'tiles-0.png',width:50,height:50}],sources:inputs.map(input=>({width:512,height:512,

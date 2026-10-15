@@ -6,9 +6,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const test = require('node:test');
 const { prepareAssets, validDescriptor } = require('../runner/asset-preparation.cjs');
+const { acquireLock } = require('../runner/preparation-lifetime.cjs');
 const { validate } = require('../runner/index.cjs');
 const { parse } = require('../runner/cli.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
+const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64');
 function fixture() {
@@ -25,7 +27,7 @@ function fixture() {
     return { version: 1, width: 1, height: 1, pages: [{ path: 'page-0.png', width: 1, height: 1 }],
       cells: [{ rect: [0, 0, 1, 1], crop: [0, 0, 1, 1], fill: [0, 0, 0, 0], page: 0, atlas: [0, 0, 1, 1] }] };
   };
-  const native = { assets: { processImage, installPrepared(entries) { installs.push(entries); } } };
+  const native = { assets: { ...preparationLocks(), processImage, installPrepared(entries) { installs.push(entries); } } };
   const warnings = [];
   return { root, gameRoot, source, native, pageCodec: 'png', cacheRoot: path.join(root, 'cache'),
     logger: { warn(message) { warnings.push(message); } }, warnings,
@@ -522,6 +524,20 @@ test('concurrent preparers serialize and reuse completed output', async () => {
   progress.forEach((events, i) => assertProgress(events, results[i], 'complete'));
 });
 
+test('a live preparation owner cannot cause an unbounded wait or lose its lock', async () => {
+  const f = fixture();
+  const lock = path.join(f.cacheRoot, '.prepare-lock');
+  fs.mkdirSync(lock, { recursive: true });
+  const owner = JSON.stringify({ pid: process.pid, hostname: require('node:os').hostname() });
+  fs.writeFileSync(path.join(lock, 'owner.json'), owner);
+  let waits = 0;
+  await assert.rejects(acquireLock(f.cacheRoot, () => false, () => { waits++; }, f.native.assets, 20),
+    /preparation cache lock wait timed out/);
+  assert.ok(waits > 0);
+  assert.equal(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'), owner);
+  assert.equal(f.jobs, 0);
+});
+
 test('lock-wait cancellation reports remaining sources and leaves the active lock intact', async () => {
   const f = fixture();
   const lock = path.join(f.cacheRoot, '.prepare-lock');
@@ -540,13 +556,13 @@ test('lock-wait cancellation reports remaining sources and leaves the active loc
   assert.equal(fs.existsSync(lock), true);
 });
 
-test('stale locks and interrupted staging directories are repaired', async () => {
+test('dead legacy owners do not block preparation or staging cleanup', async () => {
   const f = fixture();
   fs.mkdirSync(path.join(f.cacheRoot, '.prepare-lock'), { recursive: true });
   fs.writeFileSync(path.join(f.cacheRoot, '.prepare-lock/owner.json'), JSON.stringify({ pid: 2147483647, hostname: require('node:os').hostname() }));
   fs.mkdirSync(path.join(f.cacheRoot, 'entries/.stage-abandoned'), { recursive: true });
   assert.equal((await prepareAssets(f)).generated, 1);
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, '.prepare-lock')), false);
+  assert.equal(fs.existsSync(path.join(f.cacheRoot, '.prepare-lock')), true);
   assert.equal(fs.existsSync(path.join(f.cacheRoot, 'entries/.stage-abandoned')), false);
 });
 

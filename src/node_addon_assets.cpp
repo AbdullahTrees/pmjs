@@ -3,13 +3,55 @@
 #include "tile_assets.hpp"
 
 #include <cmath>
+#include <cerrno>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <png.h>
 
 namespace pmjs::addon {
 namespace {
+struct PreparationLock {
+  int fd = -1;
+  void release() noexcept { if (fd >= 0) { ::close(fd); fd = -1; } }
+  ~PreparationLock() { release(); }
+};
+constexpr napi_type_tag preparationLockTag{0x83fd418168e74ea4ULL, 0xa105b95063b2803eULL};
+napi_value tryAcquirePreparationLock(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  const auto file = std::filesystem::path(asString(env, args.at(0))) / ".prepare.lock";
+  auto lock = std::make_unique<PreparationLock>();
+  // Keep the inode in place: unlinking a lock file allows two independent owners.
+  lock->fd = ::open(file.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  struct stat status{};
+  if (lock->fd < 0 || ::fstat(lock->fd, &status) != 0 || !S_ISREG(status.st_mode))
+    throw std::runtime_error("cannot open preparation lock");
+  if (::flock(lock->fd, LOCK_EX | LOCK_NB) != 0) {
+    if (errno == EWOULDBLOCK || errno == EAGAIN) return null(env);
+    throw std::runtime_error("cannot acquire preparation lock");
+  }
+  napi_value token;
+  check(env, napi_create_external(env, lock.get(), [](napi_env, void* data, void*) {
+    delete static_cast<PreparationLock*>(data);
+  }, nullptr, &token), "cannot create preparation lock token");
+  auto* owned = lock.release();
+  const auto tagged = napi_type_tag_object(env, token, &preparationLockTag);
+  if (tagged != napi_ok) owned->release();
+  check(env, tagged, "cannot tag preparation lock token");
+  return token;
+} catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+napi_value releasePreparationLock(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  bool valid = false;
+  check(env, napi_check_object_type_tag(env, args.at(0), &preparationLockTag, &valid),
+    "invalid preparation lock token");
+  if (!valid) throw std::runtime_error("invalid preparation lock token");
+  void* data = nullptr;
+  check(env, napi_get_value_external(env, args[0], &data), "invalid preparation lock token");
+  static_cast<PreparationLock*>(data)->release();
+  return undefined(env);
+} catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 int integer(napi_env env, napi_value value) {
   const auto input = asNumber(env, value);
   if (!std::isfinite(input) || input != std::floor(input) || input < 0 || input > 0x7fffffff)
@@ -438,6 +480,8 @@ napi_value tileSlot(napi_env env, napi_callback_info info) try {
 }
 void registerAssetMethods(napi_env env, napi_value exports) {
   const auto assets = property(env, exports, "assets");
+  method(env, assets, "tryAcquirePreparationLock", tryAcquirePreparationLock);
+  method(env, assets, "releasePreparationLock", releasePreparationLock);
   method(env, assets, "consumePreparationInvalidations", consumePreparationInvalidations);
   method(env, assets, "processImage", processImage);
   method(env, assets, "processTiles", processTiles);

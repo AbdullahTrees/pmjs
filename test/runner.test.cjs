@@ -19,11 +19,21 @@ function fixture(source) {
 }
 function native(polls = [true, false]) {
   let now = 0;
+  const locks = new Map();
   return { initialize() {}, pollEvents: () => polls.shift() ?? false,
     finishLogicStep() {}, beginFrame() {}, renderFrame() {}, swapFrame() {},
     runtime: { env() { return ''; }, monotonicNow: () => (now += 100), quit() {} },
     fs: { mountWritableOverlay() {}, updateWritableOverlay() {}, readText() { return null; } },
-    render: {}, scene: {}, images: {}, assets: { preparationWorkspaceVersion: 1, preparationLz4Version: 'fixture-lz4-v1' },
+    render: {}, scene: {}, images: {}, assets: {
+      preparationWorkspaceVersion: 1, preparationLz4Version: 'fixture-lz4-v1',
+      tryAcquirePreparationLock(root) {
+        if (locks.has(root)) return null;
+        const token = { root };
+        locks.set(root, token);
+        return token;
+      },
+      releasePreparationLock(token) { if (locks.get(token.root) === token) locks.delete(token.root); }
+    },
     input: { snapshot() { return {}; }, consumePressed() {} }, canvas: {}, media: {} };
 }
 
