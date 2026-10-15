@@ -470,10 +470,72 @@ Platform::~Platform() {
 
 std::uint32_t Platform::windowId() const { return SDL_GetWindowID(window_); }
 
+std::pair<int, int> Platform::windowPosition() const {
+  int x, y;
+  SDL_GetWindowPosition(window_, &x, &y);
+  return {x, y};
+}
+
+void Platform::windowCommand(const std::string& command, int x, int y) {
+  if (command == "move") SDL_SetWindowPosition(window_, x, y);
+  else if (command == "resize") {
+    if (x < 1 || y < 1 || x > 16384 || y > 16384) throw std::runtime_error("invalid window dimensions");
+    SDL_SetWindowSize(window_, x, y);
+    SDL_GetWindowSize(window_, &windowWidth_, &windowHeight_);
+  } else if (command == "show") SDL_ShowWindow(window_);
+  else if (command == "hide") SDL_HideWindow(window_);
+  else if (command == "focus") SDL_RaiseWindow(window_);
+  else if (command == "minimize") SDL_MinimizeWindow(window_);
+  else if (command == "maximize") SDL_MaximizeWindow(window_);
+  else if (command == "restore") SDL_RestoreWindow(window_);
+  else if (command == "minimum") SDL_SetWindowMinimumSize(window_, x, y);
+  else if (command == "maximum") SDL_SetWindowMaximumSize(window_, x, y);
+  else if (command == "resizable") SDL_SetWindowResizable(window_, x ? SDL_TRUE : SDL_FALSE);
+  else if (command == "alwaysOnTop") {
+    using SetAlwaysOnTop = void (*)(SDL_Window*, SDL_bool);
+    void* library = SDL_LoadObject("libSDL2-2.0.so.0");
+    auto set = library ? reinterpret_cast<SetAlwaysOnTop>(SDL_LoadFunction(library, "SDL_SetWindowAlwaysOnTop")) : nullptr;
+    if (!set) {
+      if (library) SDL_UnloadObject(library);
+      throw std::runtime_error("always-on-top windows are unavailable");
+    }
+    set(window_, x ? SDL_TRUE : SDL_FALSE);
+    SDL_UnloadObject(library);
+  }
+  else throw std::runtime_error("unsupported window operation: " + command);
+}
+
+std::vector<Platform::WindowEvent> Platform::takeWindowEvents() {
+  std::vector<WindowEvent> result;
+  result.swap(windowEvents_);
+  return result;
+}
+
+void Platform::setTextInput(bool enabled) {
+  textInputEnabled_ = enabled;
+  if (enabled) SDL_StartTextInput();
+  else SDL_StopTextInput();
+}
+
 bool Platform::pollEvents() {
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
-    if (event.type == SDL_QUIT) return false;
+    if (event.type == SDL_QUIT) {
+      if (!interceptWindowClose_) return false;
+      if (std::none_of(windowEvents_.begin(), windowEvents_.end(), [](const auto& value) { return value.type == "close"; }))
+        windowEvents_.push_back({"close"});
+      continue;
+    }
+    if (event.type == SDL_TEXTINPUT && windowFocused_ && textInputEnabled_ &&
+        event.text.windowID == SDL_GetWindowID(window_)) {
+      KeyEvent text{};
+      text.text = event.text.text;
+      keyEvents_.push_back(std::move(text));
+      continue;
+    }
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+    if (event.type == SDL_DISPLAYEVENT) windowEvents_.push_back({"display", static_cast<int>(event.display.display), event.display.event});
+#endif
     if (event.type == SDL_CONTROLLERDEVICEADDED && SDL_IsGameController(event.cdevice.which)) {
       const int instance = SDL_JoystickGetDeviceInstanceID(event.cdevice.which);
       const auto existing = std::find_if(controllers_.begin(), controllers_.end(), [&](auto* candidate) {
@@ -502,7 +564,20 @@ bool Platform::pollEvents() {
     }
     if (event.type == SDL_WINDOWEVENT && event.window.windowID ==
         SDL_GetWindowID(window_)) {
-      switch (event.window.event) {
+      const auto type = event.window.event;
+      const char* name = nullptr;
+      switch (type) {
+        case SDL_WINDOWEVENT_FOCUS_GAINED: name = "focus"; break;
+        case SDL_WINDOWEVENT_FOCUS_LOST: name = "blur"; break;
+        case SDL_WINDOWEVENT_MOVED: name = "move"; break;
+        case SDL_WINDOWEVENT_SIZE_CHANGED: name = "resize"; break;
+        case SDL_WINDOWEVENT_MINIMIZED: name = "minimize"; break;
+        case SDL_WINDOWEVENT_MAXIMIZED: name = "maximize"; break;
+        case SDL_WINDOWEVENT_RESTORED: name = "restore"; break;
+        default: break;
+      }
+      if (name) windowEvents_.push_back({name, event.window.data1, event.window.data2});
+      switch (type) {
         case SDL_WINDOWEVENT_FOCUS_GAINED: windowFocused_ = true; break;
         case SDL_WINDOWEVENT_SIZE_CHANGED:
           SDL_GetWindowSize(window_, &windowWidth_, &windowHeight_);
@@ -575,7 +650,7 @@ bool Platform::pollEvents() {
           browserKey(event.key.keysym.sym), (event.key.keysym.mod & KMOD_SHIFT) != 0,
           (event.key.keysym.mod & KMOD_CTRL) != 0,
           (event.key.keysym.mod & KMOD_ALT) != 0,
-          (event.key.keysym.mod & KMOD_GUI) != 0});
+          (event.key.keysym.mod & KMOD_GUI) != 0, {}});
       }
       if (isDown && event.key.repeat) action = nullptr;
     } else if (event.type == SDL_CONTROLLERBUTTONDOWN ||
@@ -717,9 +792,12 @@ std::pair<int, int> Platform::drawableSize() const {
 }
 
 void Platform::setFullscreen(bool enabled) {
+  const bool previous = fullscreen();
   if (SDL_SetWindowFullscreen(window_, enabled ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {
     throw std::runtime_error(std::string("SDL_SetWindowFullscreen failed: ") + SDL_GetError());
   }
+  SDL_GetWindowSize(window_, &windowWidth_, &windowHeight_);
+  if (previous != fullscreen()) windowEvents_.push_back({enabled ? "enter-fullscreen" : "leave-fullscreen"});
 }
 
 bool Platform::fullscreen() const {

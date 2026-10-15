@@ -1,5 +1,7 @@
 'use strict';
 
+const { createSubprocesses } = require('./subprocess.cjs');
+
 const { prepareMaps } = require('./map-preparation.cjs');
 
 const fs = require('node:fs');
@@ -298,6 +300,7 @@ async function run(input) {
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidateImages, invalidateMaps;
   let dispatcher;
+  let subprocesses, reloadRequested = false, finishSession;
   let cancelFrameSchedule = () => {};
   native.assets.invalidateMapCatalog = () => { pendingInvalidations |= 2; };
   function flushPreparationInvalidations(force = false) {
@@ -404,6 +407,37 @@ async function run(input) {
     native.runtime.runScript = source => vm.runInThisContext(String(source), {
       filename: 'inline-script.js'
     });
+    const packageFile = [path.join(options.gameRoot, 'package.json'),
+      ...(path.basename(options.gameRoot).toLowerCase() === 'www' ? [path.join(path.dirname(options.gameRoot), 'package.json')] : [])]
+      .find(filename => fs.existsSync(filename));
+    native.runtime.manifest = packageFile ? JSON.parse(fs.readFileSync(packageFile, 'utf8')) : {};
+    native.runtime.arguments = options.guestArguments || [];
+    native.runtime.reload = () => {
+      if (reloadRequested) return true;
+      if (!options.supervised) throw new Error('Session reload requires the runtime supervisor');
+      try {
+        if (globalThis.pmjsSteam) globalThis.pmjsSteam.flush();
+        else if (globalThis.pmjsAchievements && globalThis.pmjsAchievements.initialized) globalThis.pmjsAchievements.flush();
+      } catch (error) { console.error('[pmjs] reload blocked by save failure:', error); return false; }
+      reloadRequested = true;
+      if (dispatcher) dispatcher.stop();
+      native.runtime.quit();
+      if (finishSession) finishSession();
+      return true;
+    };
+    subprocesses = createSubprocesses({ tasks: () => globalThis.PMJS.tasks,
+      resolveDirectory: directory => {
+        const virtual = path.posix.resolve('/game', String(directory).replace(/\\/g, '/'));
+        const storage = virtual === '/save' || virtual.startsWith('/save/');
+        const host = storage ? native.storage : native.fs;
+        const relative = virtual === '/save' || virtual === '/game' ? '.' :
+          storage ? virtual.slice(6) : virtual.startsWith('/game/') ? virtual.slice(6) : null;
+        if (relative === null) throw new Error('working directory is outside the virtual filesystem');
+        const physical = host.resolvePath(relative);
+        if (physical === null) throw Object.assign(new Error('working directory does not exist'), { code: 'ENOENT' });
+        return physical;
+      }, openExternal: url => native.runtime.openExternal(url) });
+    native.runtime.childProcess = subprocesses.api;
     const hostSetTimeout = hostTimers.setTimeout;
     const hostSetImmediate = hostTimers.setImmediate;
     native.runtime.scheduling = { ...hostTimers };
@@ -448,12 +482,14 @@ async function run(input) {
       throw new Error('bootstrap did not install __pmjsTick and __pmjsRender');
     }
 
+    if (reloadRequested) return { reload: true };
     const period = timing.renderPeriod;
     let deadline = timing.uncapped ? 0 : native.runtime.monotonicNow() + period;
     console.log(`[pmjs] timing logic_hz=${timing.logicHz} ` +
       (timing.uncapped ? 'render_hz=uncapped' : `render_hz=${timing.renderHz}`));
     console.log(`[pmjs] ready size=${options.width}x${options.height}`);
-    return await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
+      finishSession = resolve;
       native.runtime.scheduling.onFatal = reject;
       let frameHandle, immediateFrame = false;
       cancelFrameSchedule = () => {
@@ -477,6 +513,11 @@ async function run(input) {
           if (typeof globalThis.__pmjsUpdateWindowState === 'function') {
             globalThis.__pmjsUpdateWindowState(native.runtime.windowState());
           }
+          if (typeof native.runtime.windowEvents === 'function' && globalThis.__pmjsDispatchWindowEvents) {
+            const events = native.runtime.windowEvents();
+            if (dispatcher) dispatcher.enqueue(() => globalThis.__pmjsDispatchWindowEvents(events), { errorMode: 'event' });
+            else globalThis.__pmjsDispatchWindowEvents(events);
+          }
           if (typeof globalThis.__pmjsReceiveInput === 'function' &&
               typeof native.input.snapshot === 'function') {
             globalThis.__pmjsReceiveInput(native.input.snapshot());
@@ -488,6 +529,7 @@ async function run(input) {
               if (dispatcher && dispatcher.stopped) return;
               globalThis.__pmjsRender(now);
               native.renderFrame();
+              if (globalThis.__pmjsAfterPresent) globalThis.__pmjsAfterPresent();
               native.swapFrame();
               flushPreparationInvalidations();
             });
@@ -505,6 +547,9 @@ async function run(input) {
       }
       schedule();
     });
+    if (globalThis.pmjsSteam) globalThis.pmjsSteam.flush();
+    else if (globalThis.pmjsAchievements && globalThis.pmjsAchievements.initialized) globalThis.pmjsAchievements.flush();
+    return { reload: reloadRequested };
   } catch (error) {
     try { flushPreparationInvalidations(true); } catch (_) {}
     try { native.runtime.quit(); } catch (_) {}
@@ -512,6 +557,7 @@ async function run(input) {
   } finally {
     cancelFrameSchedule();
     if (dispatcher) dispatcher.stop();
+    if (subprocesses) await subprocesses.stop();
   }
 }
 

@@ -7,8 +7,8 @@ const test = require('node:test');
 const zlib = require('node:zlib');
 
 test('guest zlib aliases inflate real buffers and preserve decompression errors', () => {
-  const context = vm.createContext({ PMJS: { config: {} }, Buffer, __pmjsBuiltinRequire: require,
-    nativePlatform: { platform: 'linux', arch: process.arch }, NativeHost: { runtime: {} } });
+  const context = vm.createContext({ PMJS: { config: {}, tasks: { onStop() {} } }, Buffer, __pmjsBuiltinRequire: require,
+    nativePlatform: { platform: 'linux', arch: process.arch }, location: {}, NativeHost: { fs: { readText() { return null; } }, runtime: { isFullscreen() { return false; } } } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/modules.js'), 'utf8'), context);
   const source = Buffer.from('globalThis.loadedFromCompressedScript = true;');
   for (const name of ['zlib', 'node:zlib']) {

@@ -93,6 +93,10 @@ napi_value windowState(napi_env env, napi_callback_info) try {
     boolean(env, platform.windowFocused())), "cannot set window focus state");
   check(env, napi_set_named_property(env, result, "visible",
     boolean(env, platform.windowVisible())), "cannot set window visibility state");
+  const auto [x, y] = platform.windowPosition();
+  napi_set_named_property(env, result, "x", number(env, x));
+  napi_set_named_property(env, result, "y", number(env, y));
+  napi_set_named_property(env, result, "fullscreen", boolean(env, platform.fullscreen()));
   napi_set_named_property(env, result, "width", number(env, platform.windowWidth()));
   napi_set_named_property(env, result, "height", number(env, platform.windowHeight()));
   return result;
@@ -520,6 +524,87 @@ napi_value isFullscreen(napi_env env, napi_callback_info) try {
   return nullptr;
 }
 
+napi_value screens(napi_env env, napi_callback_info) try {
+  napi_value result;
+  const int count = SDL_GetNumVideoDisplays();
+  if (count < 0) throw std::runtime_error(SDL_GetError());
+  napi_create_array_with_length(env, count, &result);
+  for (int index = 0; index < count; ++index) {
+    SDL_Rect bounds{}, work{};
+    if (SDL_GetDisplayBounds(index, &bounds) != 0) throw std::runtime_error(SDL_GetError());
+    if (SDL_GetDisplayUsableBounds(index, &work) != 0) work = bounds;
+    auto rectangle = [&](const SDL_Rect& value) {
+      napi_value object = moduleObject(env);
+      napi_set_named_property(env, object, "x", number(env, value.x));
+      napi_set_named_property(env, object, "y", number(env, value.y));
+      napi_set_named_property(env, object, "width", number(env, value.w));
+      napi_set_named_property(env, object, "height", number(env, value.h));
+      return object;
+    };
+    napi_value screen = moduleObject(env);
+    napi_set_named_property(env, screen, "id", number(env, index));
+    napi_set_named_property(env, screen, "bounds", rectangle(bounds));
+    napi_set_named_property(env, screen, "work_area", rectangle(work));
+    napi_set_named_property(env, screen, "scaleFactor", number(env, 1));
+    napi_set_element(env, result, index, screen);
+  }
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value windowCommand(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 3);
+  const auto command = asString(env, args.at(0));
+  const auto x = asNumber(env, args.at(1)), y = asNumber(env, args.at(2));
+  if (!std::isfinite(x) || !std::isfinite(y) || x < -32768 || x > 32767 || y < -32768 || y > 32767)
+    throw std::runtime_error("invalid window coordinates");
+  host(env).platform.windowCommand(command, static_cast<int>(x), static_cast<int>(y));
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value interceptWindowClose(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 1);
+  host(env).platform.interceptWindowClose(asBoolean(env, args.at(0)));
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value windowEvents(napi_env env, napi_callback_info) try {
+  const auto events = host(env).platform.takeWindowEvents();
+  napi_value result;
+  napi_create_array_with_length(env, events.size(), &result);
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    napi_value event = moduleObject(env);
+    napi_set_named_property(env, event, "type", string(env, events[index].type));
+    napi_set_named_property(env, event, "x", number(env, events[index].x));
+    napi_set_named_property(env, event, "y", number(env, events[index].y));
+    napi_set_element(env, result, index, event);
+  }
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value clipboardText(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 1);
+  if (!args.empty()) {
+    const auto text = asString(env, args[0]);
+    if (SDL_SetClipboardText(text.c_str()) != 0) throw std::runtime_error(SDL_GetError());
+    return undefined(env);
+  }
+  char* text = SDL_GetClipboardText();
+  if (!text) throw std::runtime_error(SDL_GetError());
+  const std::string value(text);
+  SDL_free(text);
+  return string(env, value);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value openExternal(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 1);
   host(env);
@@ -560,6 +645,11 @@ void registerRuntimeBindings(napi_env env, napi_value exports) {
   method(env, runtime, "windowState", windowState);
   method(env, runtime, "displaySize", displaySize);
   method(env, runtime, "windowSize", windowSize);
+  method(env, runtime, "windowCommand", windowCommand);
+  method(env, runtime, "windowEvents", windowEvents);
+  method(env, runtime, "interceptWindowClose", interceptWindowClose);
+  method(env, runtime, "screens", screens);
+  method(env, runtime, "clipboardText", clipboardText);
   method(env, runtime, "setWindowTitle", setWindowTitle);
   method(env, runtime, "setFullscreen", setFullscreen);
   method(env, runtime, "isFullscreen", isFullscreen);

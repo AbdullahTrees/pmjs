@@ -3,6 +3,7 @@
 #include <SDL.h>
 
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 
 int main() {
@@ -45,6 +46,15 @@ int main() {
   event.window.event = SDL_WINDOWEVENT_FOCUS_GAINED;
   if (SDL_PushEvent(&event) != 1 || !platform.pollEvents()) return 1;
   platform.clearPointerEvents();
+  platform.clearKeyEvents();
+  platform.setTextInput(true);
+  event = {}; event.type = SDL_TEXTINPUT; event.text.windowID = platform.windowId();
+  std::strcpy(event.text.text, "A猫");
+  if (SDL_PushEvent(&event) != 1 || !platform.pollEvents() ||
+      platform.keyEvents().size() != 1 || platform.keyEvents()[0].text != "A猫") return 1;
+  platform.clearKeyEvents();
+  platform.setTextInput(false);
+  if (SDL_PushEvent(&event) != 1 || !platform.pollEvents() || !platform.keyEvents().empty()) return 1;
   for (Uint32 type : {SDL_MOUSEBUTTONDOWN, SDL_MOUSEBUTTONUP}) {
     event = {}; event.type = type; event.button.windowID = platform.windowId();
     event.button.button = SDL_BUTTON_LEFT; event.button.x = 17; event.button.y = 23;
@@ -206,6 +216,27 @@ int main() {
   if (!buttonEvent(firstInstance, SDL_CONTROLLER_BUTTON_LEFTSTICK, false)) return 1;
   if (buttonEvent(secondInstance, SDL_CONTROLLER_BUTTON_LEFTSTICK, true)) {
     std::cerr << "configured exit chord did not quit\n";
+    return 1;
+  }
+  if (!buttonEvent(secondInstance, SDL_CONTROLLER_BUTTON_LEFTSTICK, false)) return 1;
+  platform.takeWindowEvents();
+  SDL_Event close{};
+  close.type = SDL_QUIT;
+  platform.interceptWindowClose(true);
+  if (SDL_PushEvent(&close) != 1 || !platform.pollEvents()) {
+    std::cerr << "window close bypassed guest interception\n";
+    return 1;
+  }
+  const auto closeEvents = platform.takeWindowEvents();
+  int closes = 0;
+  for (const auto& value : closeEvents) if (value.type == "close") ++closes;
+  if (closes != 1 || !platform.takeWindowEvents().empty()) {
+    std::cerr << "window close count=" << closes << " events=" << closeEvents.size() << "\n";
+    return 1;
+  }
+  platform.interceptWindowClose(false);
+  if (SDL_PushEvent(&close) != 1 || platform.pollEvents()) {
+    std::cerr << "pre-session window close was ignored\n";
     return 1;
   }
   SDL_JoystickClose(third);

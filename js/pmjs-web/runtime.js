@@ -99,7 +99,7 @@ globalThis.screen = {
     return nativeDisplayHeight;
   }
 };
-var nativeViewportUsesWindow = false;
+var nativeViewportUsesWindow = true;
 PMJS.web.usePhysicalViewport = function() { nativeViewportUsesWindow = true; };
 Object.defineProperty(globalThis, 'innerWidth', {
   configurable: true,

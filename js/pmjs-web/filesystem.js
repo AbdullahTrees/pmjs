@@ -213,7 +213,7 @@ var fsModule = {
     return fsReadContents(path, options);
   },
   readFile: function(path, options, callback) {
-    if (typeof options === 'function') { callback = options; options = null; }
+    if (typeof options === 'function') { callback = options; options = undefined; }
     PMJS.tasks.enqueue(function() {
       Promise.resolve().then(function() { return fsReadContentsAsync(path, options); }).then(
         function(result) { PMJS.tasks.enqueue(function() { callback(null, result); }); },
@@ -236,9 +236,9 @@ var fsModule = {
     } else throw new Error('filesystem byte writes are unavailable');
   },
   writeFile: function(path, contents, options, callback) {
-    if (typeof options === 'function') { callback = options; options = null; }
+    if (typeof options === 'function') { callback = options; options = undefined; }
     var error = null;
-    try { this.writeFileSync(path, contents, options); } catch (caught) { error = caught; }
+    try { fsModule.writeFileSync(path, contents, options); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() { if (callback) callback(error); });
   },
   appendFileSync: function(path, contents, options) {
@@ -257,23 +257,26 @@ var fsModule = {
     var writable = writablePath(path);
     var host = writable !== null ? NativeHost.storage : NativeHost.fs;
     if (!host) throw new Error('EACCES: ' + path);
-    if (writable !== '') host.makeDirectory(writable !== null ? writable : gamePath(path), options);
+    if (writable === '' && !(options && options.recursive)) throw Object.assign(new Error('EEXIST: ' + path), { code: 'EEXIST' });
+    if (writable !== '') (host.mkdir || host.makeDirectory).call(host, writable !== null ? writable : gamePath(path), options);
   },
   mkdir: function(path, options, callback) {
-    if (typeof options === 'function') { callback = options; options = null; }
+    if (typeof options === 'function') { callback = options; options = undefined; }
     var error = null;
-    try { this.mkdirSync(path, options); } catch (caught) { error = caught; }
+    try { fsModule.mkdirSync(path, options); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() { if (callback) callback(error); });
   },
   unlinkSync: function(path) {
     var writable = writablePath(path);
     var host = writable !== null ? NativeHost.storage : NativeHost.fs;
     if (!host) throw new Error('EACCES: ' + path);
+    if (!fsModule.existsSync(path)) throw Object.assign(new Error('ENOENT: ' + path), { code: 'ENOENT' });
+    if (fsModule.statSync(path).isDirectory()) throw Object.assign(new Error('EISDIR: ' + path), { code: 'EISDIR' });
     host.remove(writable !== null ? writable : gameReadPath(path));
   },
   unlink: function(path, callback) {
     var error = null;
-    try { this.unlinkSync(path); } catch (caught) { error = caught; }
+    try { fsModule.unlinkSync(path); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() { if (callback) callback(error); });
   },
   renameSync: function(from, to) {
@@ -290,41 +293,88 @@ var fsModule = {
   },
   rename: function(from, to, callback) {
     var error = null;
-    try { this.renameSync(from, to); } catch (caught) { error = caught; }
+    try { fsModule.renameSync(from, to); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() { if (callback) callback(error); });
   },
-  readdirSync: function(path) {
+  readdirSync: function(path, options) {
+    if (!fsModule.statSync(path).isDirectory()) throw Object.assign(new Error('ENOTDIR: ' + path),
+      { code: 'ENOTDIR', path: String(path), syscall: 'scandir' });
     var writable = writablePath(path);
     var entries = writable !== null && NativeHost.storage
       ? NativeHost.storage.readDirectory(writable)
       : NativeHost.fs.readDirectory(gamePath(path));
-    if (entries === null) throw new Error('ENOENT: ' + path);
-    return gameDirectoryEntries(path, entries);
+    if (entries === null) throw Object.assign(new Error('ENOENT: ' + path), { code: 'ENOENT' });
+    var names = gameDirectoryEntries(path, entries);
+    if (options && options.withFileTypes) return names.map(function(name) {
+      var stats = fsModule.lstatSync(pathModule.join(String(path), name));
+      return { name: name, isFile: stats.isFile.bind(stats), isDirectory: stats.isDirectory.bind(stats),
+        isSymbolicLink: stats.isSymbolicLink.bind(stats) };
+    });
+    var encoding = typeof options === 'string' ? options : options && options.encoding;
+    return encoding === 'buffer' ? names.map(function(name) { return Buffer.from(name); }) : names;
   },
-  statSync: function(path) {
-    var writable = writablePath(path);
-    var exists, directory;
-    if (writable !== null && NativeHost.storage) {
-      exists = writable === '' || NativeHost.storage.exists(writable);
-      directory = exists && (writable === '' || NativeHost.storage.isDirectory(writable));
-    } else {
-      var resolved = gameReadPath(path);
-      exists = NativeHost.fs.exists(resolved);
-      directory = exists && NativeHost.fs.isDirectory(resolved);
+  statSync: function(path, options) { return fsMetadata('stat', path, options); },
+  lstatSync: function(path, options) { return fsMetadata('lstat', path, options); },
+  accessSync: function(path, mode) { return fsMetadata('access', path, mode || 0); },
+  rmdirSync: function(path, options) { return fsMetadata('removeDirectory', path, options); },
+  rmSync: function(path, options) {
+    if (options && options.force && !fsModule.existsSync(path)) return;
+    if (fsModule.statSync(path).isDirectory()) {
+      if (!options || !options.recursive) throw Object.assign(new Error('EISDIR: ' + path), { code: 'EISDIR' });
+      return fsMetadata('removeDirectory', path, options);
     }
-    if (!exists) {
-      var error = new Error('ENOENT: ' + path);
-      error.code = 'ENOENT';
-      throw error;
+    return fsModule.unlinkSync(path);
+  },
+  realpathSync: function(path) { fsModule.statSync(path); return pathModule.resolve(path); },
+  copyFileSync: function(source, destination, flags) {
+    if (flags && (flags & 1) && fsModule.existsSync(destination)) {
+      throw Object.assign(new Error('EEXIST: ' + destination), { code: 'EEXIST' });
     }
-    return { isDirectory: function() { return directory; },
-      isFile: function() { return !directory; } };
+    fsModule.writeFileSync(destination, fsModule.readFileSync(source));
   },
   stat: function(path, options, callback) {
-    if (typeof options === 'function') { callback = options; options = null; }
+    if (typeof options === 'function') { callback = options; options = undefined; }
     if (typeof callback !== 'function') throw new TypeError('stat requires a callback');
     var result, error = null;
     try { result = fsModule.statSync(path, options); } catch (caught) { error = caught; }
     PMJS.tasks.enqueue(function() { callback(error, result); });
   }
 };
+
+function fsMetadata(method, path, options) {
+  var writable = writablePath(path);
+  var host = writable !== null ? NativeHost.storage : NativeHost.fs;
+  try { return host[method](writable !== null ? writable : gameReadPath(path), options); }
+  catch (error) {
+    if ((method === 'stat' || method === 'lstat') && options && options.throwIfNoEntry === false && error.code === 'ENOENT') return;
+    if (error.code) {
+      error.path = String(path);
+      if (!error.syscall) error.syscall = method;
+    }
+    throw error;
+  }
+}
+fsModule.constants = globalThis.__pmjsBuiltinRequire('fs').constants;
+['appendFile', 'readdir', 'lstat', 'access', 'rmdir', 'rm', 'realpath', 'copyFile'].forEach(function(name) {
+  fsModule[name] = function() {
+    var args = Array.prototype.slice.call(arguments), callback = args.pop();
+    if (typeof callback !== 'function') throw new TypeError(name + ' requires a callback');
+    var result, error = null;
+    try { result = fsModule[name + 'Sync'].apply(fsModule, args); } catch (caught) { error = caught; }
+    PMJS.tasks.enqueue(function() {
+      if (['access', 'rmdir', 'rm', 'appendFile', 'copyFile'].indexOf(name) >= 0) callback(error);
+      else callback(error, result);
+    });
+  };
+});
+fsModule.promises = {};
+['readFile', 'writeFile', 'appendFile', 'mkdir', 'unlink', 'rename', 'readdir', 'stat',
+  'lstat', 'access', 'rmdir', 'rm', 'realpath', 'copyFile'].forEach(function(name) {
+  fsModule.promises[name] = function() {
+    var args = Array.prototype.slice.call(arguments);
+    return new Promise(function(resolve, reject) {
+      args.push(function(error, result) { if (error) reject(error); else resolve(result); });
+      fsModule[name].apply(fsModule, args);
+    });
+  };
+});

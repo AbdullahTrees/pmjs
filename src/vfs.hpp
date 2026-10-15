@@ -46,6 +46,7 @@ class Vfs {
                              const std::vector<std::string>& deletionMarkers);
 
   std::optional<std::filesystem::path> resolve(const std::string& path) const;
+  std::optional<std::filesystem::path> resolvePath(const std::string& path) const;
   std::optional<std::string> readText(const std::string& path) const;
   std::optional<std::vector<std::uint8_t>> readBytes(const std::string& path) const;
   std::unique_ptr<FileReader> openRead(const std::string& path, std::uint64_t start = 0) const;

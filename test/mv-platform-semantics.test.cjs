@@ -168,6 +168,25 @@ test('document.currentScript stack exposes file:///game/ URL and restores on ret
   assert.equal(scriptsLoaded[4].currentScriptSrc, 'file:///game/outer.js');
 });
 
+function runDesktopModules(context, code) {
+  context.__pmjsBuiltinRequire ||= require;
+  context.PMJS.tasks ||= { enqueue() {}, onStop() {} };
+  context.NativeHost ||= {};
+  context.NativeHost.fs ||= { readText() { return null; } };
+  context.NativeHost.runtime ||= {};
+  context.NativeHost.runtime.isFullscreen ||= () => false;
+  const state = { x: 0, y: 0, width: 640, height: 480 };
+  context.NativeHost.runtime.windowState ||= () => state;
+  context.NativeHost.runtime.windowCommand ||= (name, x, y) => {
+    if (name === 'resize') { state.width = x; state.height = y; }
+    if (name === 'move') { state.x = x; state.y = y; }
+  };
+  context.NativeHost.runtime.clipboardText ||= () => '';
+  context.location ||= {};
+  context.__pmjsUpdateWindowState ||= () => {};
+  vm.runInContext(code || fs.readFileSync(path.join(jsDir, 'pmjs-web/modules.js'), 'utf8'), context);
+}
+
 test('nw.gui unsupported calls are diagnosed and external links reach the host', () => {
   const hits = [];
   const opened = [];
@@ -185,29 +204,24 @@ test('nw.gui unsupported calls are diagnosed and external links reach the host',
   };
   vm.createContext(context);
   const modulesCode = fs.readFileSync(path.join(jsDir, 'pmjs-web/modules.js'), 'utf8');
-  vm.runInContext(modulesCode, context);
+  runDesktopModules(context, modulesCode);
 
   const gui = context.require('nw.gui');
   assert.equal(context.nw, gui);
 
-  assert.equal(gui.Window.get(), gui.Window.open());
-  assert.equal(gui.Menu().items.length, 0);
-  assert.equal(gui.MenuItem({ label: 'x' }).label, 'x');
+  assert.throws(() => gui.Window.open('editor.html'), { code: 'ERR_NW_UNSUPPORTED_WINDOW' });
+  assert.equal((new gui.Menu()).items.length, 0);
+  assert.equal((new gui.MenuItem({ label: 'x' })).label, 'x');
   assert.equal(gui.Clipboard.get().get(), '');
   assert.equal(hits.length, 0);
 
   gui.Window.get().show();
   gui.Window.get().show();
   gui.Shell.openExternal('https://example.com');
-  gui.Menu().append({});
-  gui.MenuItem({}).click();
+  (new gui.Menu()).append({});
   gui.App.clearCache();
   assert.deepEqual(opened, ['https://example.com']);
   assert.deepEqual(hits, [
-    ['browser.nwGui', 'Window.show'],
-    ['browser.nwGui', 'Window.show'],
-    ['browser.nwGui', 'Menu.append'],
-    ['browser.nwGui', 'MenuItem.click'],
     ['browser.nwGui', 'App.clearCache']
   ]);
 });
@@ -226,7 +240,7 @@ test('process.versions and process.version reflect host Node and NW.js compatibi
   };
   vm.createContext(context);
   const modulesCode = fs.readFileSync(path.join(jsDir, 'pmjs-web/modules.js'), 'utf8');
-  vm.runInContext(modulesCode, context);
+  runDesktopModules(context, modulesCode);
 
   assert.ok(context.process.versions);
   assert.equal(context.process.version, 'v25.4.0');
@@ -279,7 +293,7 @@ test('guest OS identity queries reach Node while filesystem paths remain virtual
     nativePlatform: { platform: process.platform, arch: process.arch },
     PMJS: { config: {} },
     __pmjsBuiltinRequire(name) {
-      assert.equal(name, 'os');
+      if (name !== 'os') return require(name);
       return {
         hostname: () => hostOs.hostname(),
         userInfo: options => hostOs.userInfo(options),
@@ -287,7 +301,7 @@ test('guest OS identity queries reach Node while filesystem paths remain virtual
       };
     }
   });
-  vm.runInContext(fs.readFileSync(path.join(jsDir, 'pmjs-web/modules.js'), 'utf8'), context);
+  runDesktopModules(context);
   const os = context.require('os');
   assert.equal(os.hostname(), hostOs.hostname());
   assert.equal(os.networkInterfaces(), network);
@@ -1297,7 +1311,7 @@ test('document.title and nw.Window.title read from and write to authoritative __
   vm.createContext(context);
   vm.runInContext(eventsCode, context);
   vm.runInContext(elementsCode, context);
-  vm.runInContext(modulesCode, context);
+  runDesktopModules(context, modulesCode);
 
   assert.equal(context.document.title, 'Authoritative Game Title');
   const nw = context.require('nw.gui');
@@ -1308,7 +1322,7 @@ test('document.title and nw.Window.title read from and write to authoritative __
   assert.equal(nw.Window.get().title, 'New Mutated Title');
 });
 
-test('screen and nw.Window report host dimensions while innerWidth/innerHeight report logical viewport', () => {
+test('DOM and NW window dimensions agree while the authored viewport stays separate', () => {
   const eventsCode = fs.readFileSync(path.join(jsDir, 'pmjs-web/events.js'), 'utf8');
   const elementsCode = require('./helpers/web-element-sources.cjs').source;
   const runtimeCode = fs.readFileSync(path.join(jsDir, 'pmjs-web/runtime.js'), 'utf8');
@@ -1341,15 +1355,15 @@ test('screen and nw.Window report host dimensions while innerWidth/innerHeight r
   vm.runInContext(runtimeCode, context);
   vm.runInContext(eventsCode, context);
   vm.runInContext(elementsCode, context);
-  vm.runInContext(modulesCode, context);
+  runDesktopModules(context, modulesCode);
 
   // Screen reports physical display
   assert.equal(context.screen.width, 640);
   assert.equal(context.screen.height, 480);
 
-  // Viewport / inner window reports logical game dimensions
-  assert.equal(context.innerWidth, 960);
-  assert.equal(context.innerHeight, 720);
+  // DOM inner dimensions report the physical window.
+  assert.equal(context.innerWidth, 640);
+  assert.equal(context.innerHeight, 480);
 
   const nw = context.require('nw.gui');
   const win = nw.Window.get();
@@ -1357,17 +1371,17 @@ test('screen and nw.Window report host dimensions while innerWidth/innerHeight r
   assert.equal(win.height, 480);
   assert.equal(win.title, 'Demo Game');
 
-  // NW window dimensions describe the native window and unsupported setters are no-ops.
+  // NW setters change the window without changing the authored resolution.
   win.width = 1000;
-  assert.equal(win.width, 640);
+  assert.equal(win.width, 1000);
   assert.equal(context.__pmjsGameInfo.width, 960);
-  assert.equal(context.innerWidth, 960);
+  assert.equal(context.innerWidth, 1000);
   assert.equal(context.screen.width, 640, 'screen.width remains physical display');
 
-  // Logical viewport dimensions are observational rather than resize commands.
+  // Inner dimensions are observational rather than resize commands.
   assert.throws(() => { context.innerWidth = 1280; }, TypeError);
-  assert.equal(context.innerWidth, 960);
-  assert.equal(win.width, 640);
+  assert.equal(context.innerWidth, 1000);
+  assert.equal(win.width, 1000);
   assert.equal(context.__pmjsGameInfo.width, 960);
 
   // Title mutation propagates to NativeHost.runtime.setWindowTitle

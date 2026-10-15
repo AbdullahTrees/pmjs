@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const hostProcess = process;
 const { createHash } = require('node:crypto');
 const readerFinalizer = new FinalizationRegistry(descriptor => fs.closeSync(descriptor));
 
@@ -39,6 +40,21 @@ function createStorage(root) {
   }
 
   return {
+    resolvePath(relative) { return relative === '' || relative === '.' ? saveRoot : resolve(relative); },
+    stat(relative, options) { return fs.statSync(this.resolvePath(relative), options); },
+    lstat(relative, options) { return fs.lstatSync(this.resolvePath(relative), options); },
+    access(relative, mode) { return fs.accessSync(this.resolvePath(relative), mode); },
+    mkdir(relative, options) {
+      mutationGeneration++;
+      return fs.mkdirSync(resolve(relative), options);
+    },
+    removeDirectory(relative, options) {
+      mutationGeneration++;
+      const directory = resolve(relative);
+      if (options && options.recursive) fs.rmSync(directory, options);
+      else fs.rmdirSync(directory);
+      syncDirectory(path.dirname(directory));
+    },
     generation() { return mutationGeneration; },
     readText(relative) {
       try { return fs.readFileSync(resolve(relative), 'utf8'); }
@@ -112,7 +128,7 @@ function createStorage(root) {
       mutationGeneration++;
       const destination = resolve(relative);
       makeDirectory(path.dirname(destination));
-      const temporary = `${destination}.tmp-${process.pid}-${++temporaryId}`;
+      const temporary = `${destination}.tmp-${hostProcess.pid}-${++temporaryId}`;
       let descriptor;
       try {
         descriptor = fs.openSync(temporary, 'wx', 0o600);
@@ -274,7 +290,38 @@ function createGameFilesystem(host, root) {
   recoverRename(true);
   host.mountWritableOverlay(overlayRoot);
   changedPaths.clear(); changedMarkers.clear();
+  function resolvedPath(relative) {
+    const value = host.resolvePath(relative);
+    if (value === null) throw error('ENOENT', relative);
+    return value;
+  }
   return Object.assign(host, {
+    stat(relative, options) { return fs.statSync(resolvedPath(relative), options); },
+    lstat(relative, options) { return fs.lstatSync(resolvedPath(relative), options); },
+    access(relative, mode) {
+      const physicalPath = resolvedPath(relative);
+      // Writes target the overlay, never the read-only source tree.
+      fs.accessSync(physicalPath, mode & ~fs.constants.W_OK);
+      if (mode & fs.constants.W_OK) fs.accessSync(overlayRoot, fs.constants.W_OK);
+    },
+    removeDirectory(relative, options) {
+      const name = normalize(relative);
+      return mutate([name], () => {
+        if (name === '.') throw error('EBUSY', name);
+        if (!host.exists(name)) {
+          if (options && options.force) return;
+          throw error('ENOENT', name);
+        }
+        if (!host.isDirectory(name)) throw error('ENOTDIR', name);
+        if (!(options && options.recursive) && host.readDirectory(name).length) throw error('ENOTEMPTY', name);
+        hide(name);
+        const directory = physical(name);
+        if (fs.existsSync(directory)) {
+          fs.rmSync(directory, { recursive: true });
+          syncDirectory(path.dirname(directory));
+        }
+      });
+    },
     writeBytes(relative, contents) {
       const name = normalize(relative);
       return mutate([name], () => {

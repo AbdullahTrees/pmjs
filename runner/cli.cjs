@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const { run } = require('./index.cjs');
+const { runSupervised } = require('./supervisor.cjs');
 
 function parse(argv) {
   const result = {};
@@ -16,6 +16,7 @@ function parse(argv) {
     ['--asset-recipes', 'assetRecipes'], ['--map-preparation', 'mapPreparation'],
   ]);
   for (let index = 0; index < argv.length; index += 2) {
+    if (argv[index] === '--') { result.guestArguments = argv.slice(index + 1); break; }
     const name = names.get(argv[index]);
     if (!name || index + 1 >= argv.length) throw new Error(`invalid argument: ${argv[index]}`);
     result[name] = argv[index + 1];
@@ -29,7 +30,10 @@ function parse(argv) {
 }
 
 if (require.main === module) {
-  run(parse(process.argv.slice(2))).catch(error => {
+  runSupervised(parse(process.argv.slice(2))).then(result => {
+    if (result.signal) process.kill(process.pid, result.signal);
+    else process.exitCode = result.code;
+  }).catch(error => {
     console.error(error && error.stack || error);
     process.exitCode = 1;
   });

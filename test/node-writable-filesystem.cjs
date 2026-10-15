@@ -408,3 +408,25 @@ test('replacement during pending image loads preserves each file version and coa
     assert.deepEqual(imagePixel(current, 1), [0, 0, 255, 255]);
   } finally { for (const image of [old, shared, current]) native.images.release(image.handle); }
 });
+
+test('desktop metadata follows actual overlay bytes, links, directories and deletion markers', t => {
+  const { host, guest, gameRoot, restart } = fixture(t);
+  const original = fs.statSync(path.join(gameRoot, 'data/Original.txt'));
+  assert.equal(guest.statSync('/game/DATA/original.TXT').size, original.size);
+  assert.equal(guest.statSync('/game/data/Original.txt').mtimeMs, original.mtimeMs);
+  assert.equal(guest.statSync('/game/data').isDirectory(), true);
+  guest.writeFileSync('/game/data/Original.txt', 'a longer overlay');
+  assert.equal(guest.statSync('/game/data/Original.txt').size, Buffer.byteLength('a longer overlay'));
+  assert.equal(fs.readFileSync(path.join(gameRoot, 'data/Original.txt'), 'utf8'), 'original');
+  host.makeDirectory('data/empty');
+  assert.equal(guest.lstatSync('/game/data/empty').isDirectory(), true);
+  guest.rmdirSync('/game/data/empty');
+  assert.equal(guest.existsSync('/game/data/empty'), false);
+  guest.mkdirSync('/game/data/remove-me');
+  guest.writeFileSync('/game/data/remove-me/file', 'data');
+  assert.throws(() => guest.rmdirSync('/game/data/remove-me'), { code: 'ENOTEMPTY' });
+  guest.rmSync('/game/data/remove-me', { recursive: true });
+  assert.equal(guest.existsSync('/game/data/remove-me/file'), false);
+  restart();
+  assert.equal(guest.existsSync('/game/data/remove-me'), false);
+});

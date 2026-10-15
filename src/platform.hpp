@@ -16,8 +16,9 @@ int standardGamepadButton(int sdlButton);
 
 class Platform {
  public:
-  struct KeyEvent { int keyCode; bool down; bool repeat; bool capsLock; std::string code; std::string key; bool shift; bool ctrl; bool alt; bool meta; };
+  struct KeyEvent { int keyCode; bool down; bool repeat; bool capsLock; std::string code; std::string key; bool shift; bool ctrl; bool alt; bool meta; std::string text; };
   struct PointerEvent { std::string type; double x, y; int button; std::uint32_t buttons; double deltaX, deltaY; bool cancelled = false; };
+  struct WindowEvent { std::string type; int x = 0, y = 0; };
   struct GamepadState { int index; int instance; bool connected; std::string id; std::vector<int> buttonsDown; std::vector<int> buttonsPressed; std::vector<double> axes; };
   Platform(int width, int height, std::string title);
   ~Platform();
@@ -32,6 +33,7 @@ class Platform {
   const std::vector<int>& keysPressed() const { return keysPressed_; }
   const std::vector<KeyEvent>& keyEvents() const { return keyEvents_; }
   void clearKeyEvents() { keyEvents_.clear(); }
+  void setTextInput(bool enabled);
   const std::vector<PointerEvent>& pointerEvents() const { return pointerEvents_; }
   void clearPointerEvents() { pointerEvents_.clear(); }
   std::vector<GamepadState> gamepads() const;
@@ -45,6 +47,10 @@ class Platform {
   int windowHeight() const { return windowHeight_; }
   int displayWidth() const { return displayWidth_ > 0 ? displayWidth_ : windowWidth_; }
   int displayHeight() const { return displayHeight_ > 0 ? displayHeight_ : windowHeight_; }
+  std::pair<int, int> windowPosition() const;
+  void windowCommand(const std::string& command, int x, int y);
+  std::vector<WindowEvent> takeWindowEvents();
+  void interceptWindowClose(bool enabled) { interceptWindowClose_ = enabled; }
   void setWindowTitle(const std::string& title);
   void setFullscreen(bool enabled);
   bool fullscreen() const;
@@ -60,6 +66,7 @@ class Platform {
 
  private:
   void recomputeLegacyInput();
+  std::vector<WindowEvent> windowEvents_;
   SDL_Window* window_ = nullptr;
   SDL_GLContext context_ = nullptr;
   std::vector<SDL_GameController*> controllers_;
@@ -78,7 +85,9 @@ class Platform {
   int windowHeight_ = 0;
   int displayWidth_ = -1;
   int displayHeight_ = -1;
+  bool interceptWindowClose_ = false;
   bool windowFocused_ = true;
+  bool textInputEnabled_ = false;
   bool windowVisible_ = true;
   bool swapIntervalAccepted_ = false;
   int requestedSwapInterval_ = 1;

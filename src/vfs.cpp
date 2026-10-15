@@ -257,6 +257,26 @@ std::optional<std::filesystem::path> Vfs::resolve(const std::string& path) const
   return resolveDerived(path);
 }
 
+std::optional<std::filesystem::path> Vfs::resolvePath(const std::string& path) const {
+  if (path.empty() || path == ".") return root_;
+  if (const auto file = resolve(path)) return file;
+  const auto key = normalize(path);
+  if (!key) return std::nullopt;
+  const auto overlay = std::atomic_load(&overlay_);
+  if (overlay) {
+    if (overlay->files->directories_.contains(*key)) return overlay->files->directories_.at(*key);
+    if (overlay->hides(*key)) return std::nullopt;
+    auto prefix = *key;
+    while (prefix.find('/') != std::string::npos) {
+      prefix.resize(prefix.rfind('/'));
+      if (overlay->files->files_.contains(prefix)) return std::nullopt;
+    }
+  }
+  const auto directory = directories_.find(*key);
+  return directory == directories_.end() ? std::nullopt :
+    std::optional<std::filesystem::path>{directory->second};
+}
+
 std::optional<std::filesystem::path> Vfs::resolveOriginal(const std::string& path) const {
   const auto key = normalize(path);
   if (!key) return std::nullopt;

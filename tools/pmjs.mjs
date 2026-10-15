@@ -11,11 +11,14 @@ const root = path.resolve(process.argv[2]);
 const share = path.join(root, 'share/pmjs');
 const info = JSON.parse(fs.readFileSync(path.join(root, 'build-info.json'), 'utf8'));
 const args = process.argv.slice(3);
+const guestDelimiter = args.indexOf('--');
+const guestArguments = guestDelimiter < 0 ? [] : args.splice(guestDelimiter).slice(1);
+
 const first = args.shift();
 const version = `PMJS ${info.version}${info.buildId ? ` build=${info.buildId}` : ''} (${info.source.commit.slice(0, 12)}${info.source.dirty ? ', modified' : ''})`;
 const help = `${version}
 Usage:
-  pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...]
+  pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...] [-- GAME_ARGUMENT ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
       [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs BUNDLE [--game DIR]
@@ -221,13 +224,21 @@ async function main() {
     context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
       JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game));
   }
-  const record = command === 'prepare' || !previous || !matches(previous, context) ? prepare(context) : previous;
+  let record = command === 'prepare' || !previous || !matches(previous, context) ? prepare(context) : previous;
   if (command === 'prepare') { console.log(`Prepared ${game}`); return; }
   const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
-  const { run } = await import('../runner/index.cjs');
-  await run({ addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
+  const { runSupervised } = await import('../runner/supervisor.cjs');
+  const result = await runSupervised(() => {
+    context.inputs = preparationInputs(game, config, manifest, adapters);
+    if (bundle) context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
+      JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game));
+    if (!matches(record, context)) record = prepare(context);
+    return { addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
     bootstrap: path.join(state, record.bootstrap), saveRoot, config: record.config || undefined,
-    assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'] });
+    assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'], guestArguments };
+  });
+  if (result.signal) process.kill(process.pid, result.signal);
+  else process.exitCode = result.code;
 }
 
 main().catch(error => { console.error(`[pmjs] ${error.stack || error}`); process.exitCode = 1; });

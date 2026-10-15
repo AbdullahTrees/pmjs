@@ -428,3 +428,92 @@ for (const failure of ['poll', 'presentation', 'progress callback']) {
     assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/entries')), []);
   });
 }
+test('CLI preserves guest arguments after the separator', () => {
+  const options = parse(['--game-root', 'game', '--', 'test', '--custom', 'value']);
+  assert.deepEqual(options.guestArguments, ['test', '--custom', 'value']);
+});
+
+test('supervisor reloads into fresh processes, rechecks scripts and preserves saved state', async () => {
+  const { runSupervised } = require('../runner/supervisor.cjs');
+  const options = fixture('');
+  const addon = require(options.addon);
+  // Keep the fixture alive until the guest explicitly quits.
+  fs.writeFileSync(options.addon, `let alive=true; const value=(${native.toString()})([]); value.pollEvents=()=>alive; value.runtime.quit=()=>{alive=false;}; module.exports=value;`);
+  options.assetPreparation = 'off';
+  let launches = 0;
+  const result = await runSupervised(() => {
+    launches++;
+    const version = launches;
+    fs.writeFileSync(options.bootstrap, `
+      if(globalThis.sessionMarker) throw Error('globals survived reload');
+      globalThis.sessionMarker=true;
+      const previous = Number(NativeHost.storage.readText('counter') || 0);
+      if(previous !== ${version - 1}) throw Error('save did not survive');
+      NativeHost.storage.writeText('counter', String(previous+1));
+      globalThis.pmjsSteam={flush(){NativeHost.storage.writeText('flushed',String(${version}));}};
+      let ticked=false;
+      globalThis.__pmjsTick=()=>{if(ticked)return;ticked=true;
+        ${version < 3 ? 'NativeHost.runtime.reload();NativeHost.runtime.reload();' : 'NativeHost.runtime.quit();'}
+      };
+      globalThis.__pmjsRender=()=>{};
+    `);
+    return options;
+  });
+  assert.equal(result.code, 0);
+  assert.equal(launches, 3);
+  assert.equal(fs.readFileSync(path.join(options.saveRoot, 'counter'), 'utf8'), '3');
+  assert.equal(fs.readFileSync(path.join(options.saveRoot, 'flushed'), 'utf8'), '3');
+  assert.ok(addon);
+});
+
+test('supervisor propagates session failure without restarting', async () => {
+  const { runSupervised } = require('../runner/supervisor.cjs');
+  const options = fixture('throw Error("session crash");');
+  let launches = 0;
+  const result = await runSupervised(() => { launches++; return { ...options, assetPreparation: 'off' }; });
+  assert.equal(result.code, 1);
+  assert.equal(launches, 1);
+});
+
+test('a failed reload flush leaves the current session running and permits a retry', async () => {
+  const { runSupervised } = require('../runner/supervisor.cjs');
+  const options = fixture('');
+  fs.writeFileSync(options.addon, `let alive=true; const value=(${native.toString()})([]); value.pollEvents=()=>alive; value.runtime.quit=()=>{alive=false;}; module.exports=value;`);
+  options.assetPreparation = 'off';
+  let launches = 0;
+  const result = await runSupervised(() => {
+    launches++;
+    fs.writeFileSync(options.bootstrap, launches === 1 ? `
+      let failed=true;
+      globalThis.pmjsSteam={flush(){if(failed)throw Error('disk full');NativeHost.storage.writeText('flushed','yes');}};
+      globalThis.__pmjsTick=()=>{
+        if(NativeHost.runtime.reload()!==false)throw Error('failed flush accepted');
+        NativeHost.storage.writeText('session-survived','yes');failed=false;
+        if(NativeHost.runtime.reload()!==true)throw Error('retry rejected');
+      };
+      globalThis.__pmjsRender=()=>{};
+    ` : `globalThis.__pmjsTick=()=>NativeHost.runtime.quit();globalThis.__pmjsRender=()=>{};`);
+    return options;
+  });
+  assert.equal(result.code, 0); assert.equal(launches, 2);
+  assert.equal(fs.readFileSync(path.join(options.saveRoot, 'session-survived'), 'utf8'), 'yes');
+  assert.equal(fs.readFileSync(path.join(options.saveRoot, 'flushed'), 'utf8'), 'yes');
+});
+
+test('supervisor forwards termination to the active session without starting a replacement', async () => {
+  const { runSupervised } = require('../runner/supervisor.cjs');
+  const options = fixture("NativeHost.storage.writeText('ready','yes');globalThis.__pmjsTick=()=>{};globalThis.__pmjsRender=()=>{};");
+  fs.writeFileSync(options.addon, `let alive=true; const value=(${native.toString()})([]); value.pollEvents=()=>alive; value.runtime.quit=()=>{alive=false;}; module.exports=value;`);
+  fs.mkdirSync(options.saveRoot, { recursive: true });
+  let watcher, launches = 0;
+  const ready = new Promise(resolve => {
+    watcher = fs.watch(options.saveRoot, (_event, name) => { if (name === 'ready') resolve(); });
+  });
+  try {
+    const running = runSupervised(() => { launches++; return { ...options, assetPreparation: 'off' }; });
+    await ready;
+    process.emit('SIGTERM');
+    const result = await running;
+    assert.equal(result.signal, 'SIGTERM'); assert.equal(launches, 1);
+  } finally { watcher.close(); }
+});

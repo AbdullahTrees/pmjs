@@ -264,6 +264,17 @@ napi_value exists(napi_env env, napi_callback_info info) try {
   napi_throw_type_error(env, nullptr, error.what()); return nullptr;
 }
 
+napi_value resolvePath(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 1);
+  const auto value = host(env).vfs.resolvePath(asString(env, args.at(0)));
+  if (value) return string(env, value->string());
+  napi_value result;
+  napi_get_null(env, &result);
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value isDirectory(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 1);
   return boolean(env, host(env).vfs.isDirectory(asString(env, args.at(0))));
@@ -281,6 +292,14 @@ napi_value readDirectory(napi_env env, napi_callback_info info) try {
     napi_set_element(env, result, index, string(env, (*entries)[index]));
   }
   return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value setTextInput(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 1);
+  host(env).platform.setTextInput(asBoolean(env, args.at(0)));
+  return undefined(env);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
@@ -308,6 +327,7 @@ napi_value inputSnapshot(napi_env env, napi_callback_info) try {
     check(env, napi_set_named_property(env, event, "capsLock", boolean(env, key.capsLock)), "cannot set caps lock");
     check(env, napi_set_named_property(env, event, "code", string(env, key.code)), "cannot set code");
     check(env, napi_set_named_property(env, event, "key", string(env, key.key)), "cannot set key");
+    if (!key.text.empty()) napi_set_named_property(env, event, "text", string(env, key.text));
     check(env, napi_set_named_property(env, event, "shift", boolean(env, key.shift)), "cannot set shift");
     check(env, napi_set_named_property(env, event, "ctrl", boolean(env, key.ctrl)), "cannot set ctrl");
     check(env, napi_set_named_property(env, event, "alt", boolean(env, key.alt)), "cannot set alt");
@@ -382,9 +402,11 @@ void registerPlatformBindings(napi_env env, napi_value exports) {
   method(env, fs, "openReadAsync", openReadAsync);
   method(env, fs, "readDirectory", readDirectory);
   method(env, fs, "exists", exists);
+  method(env, fs, "resolvePath", resolvePath);
   method(env, fs, "isDirectory", isDirectory);
   napi_value input = moduleObject(env);
   method(env, input, "snapshot", inputSnapshot);
+  method(env, input, "setTextInput", setTextInput);
   method(env, input, "consumePressed", inputConsumePressed);
   check(env, napi_set_named_property(env, exports, "fs", fs), "cannot export fs module");
   check(env, napi_set_named_property(env, exports, "input", input), "cannot export input module");

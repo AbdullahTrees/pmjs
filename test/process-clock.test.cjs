@@ -8,8 +8,8 @@ const test = require('node:test');
 
 test('guest process retains monotonic tuple, difference and bigint clocks', () => {
   const hostCwd = process.cwd();
-  const context = vm.createContext({ process, PMJS: { config: {} },
-    nativePlatform: { platform: process.platform, arch: process.arch }, NativeHost: { runtime: {} } });
+  const context = vm.createContext({ process, PMJS: { config: {}, tasks: { onStop() {} } }, __pmjsBuiltinRequire: require, location: {},
+    nativePlatform: { platform: process.platform, arch: process.arch }, NativeHost: { fs: { readText() { return null; } }, runtime: { isFullscreen: () => false } } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/modules.js'), 'utf8'), context);
   const before = process.hrtime.bigint();
   const start = context.process.hrtime();
