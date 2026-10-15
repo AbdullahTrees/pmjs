@@ -125,6 +125,14 @@
       "modules": [
         "js/pmjs-plugins/greenworks/orange.js"
       ]
+    },
+    {
+      "plugins": [
+        "111_InputForm"
+      ],
+      "modules": [
+        "js/pmjs-plugins/input-form/native-form.js"
+      ]
     }
   ]
 }

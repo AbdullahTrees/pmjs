@@ -138,6 +138,10 @@
 
   function registerStylesheet(cssText, stylesheetPath) {
     if (!cssText || typeof cssText !== 'string') return;
+    if (PMJS.web && typeof PMJS.web.registerStylesheet === 'function') {
+      PMJS.web.registerStylesheet(cssText, stylesheetPath);
+      return;
+    }
     var ruleRegex = /@font-face\s*\{[^}]+\}/gi;
     var match;
     while ((match = ruleRegex.exec(cssText)) !== null) {
@@ -279,7 +283,7 @@
       }
     }
 
-    var gameFontEntry = registeredFamilies.gamefont;
+    var gameFontEntry = registeredFamilies.gamefont || registeredFamilies['rmmz-mainfont'];
     if (!matchedFaces.length && gameFontEntry && ensureFaceReady(gameFontEntry)) {
       matchedFaces.push({ family: gameFontEntry.family, path: gameFontEntry.path });
     }

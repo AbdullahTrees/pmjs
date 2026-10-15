@@ -87,3 +87,24 @@ test('input snapshots reach owned subscribers independently of presentation refr
   assert.deepEqual(snapshots, [input]);
   assert.equal(canvas.getBoundingClientRect().width, 32);
 });
+
+test('native scene canvases expose the presented rectangle for physical pointer coordinates', () => {
+  let window = { width: 80, height: 80 };
+  let geometry = { drawableWidth: 160, drawableHeight: 160,
+    viewportX: 0, viewportY: 20, viewportWidth: 160, viewportHeight: 120 };
+  const context = createHostContext({
+    runtime: { env: () => '', now: () => 0, windowSize: () => window },
+    render: { presentation: () => geometry }, canvas: { create: () => ({ handle: 1 }), release() {} }
+  }, { graphics: false });
+  const canvas = context.document.createElement('canvas');
+  canvas.width = 32; canvas.height = 24; canvas._pmjsNativePresentation = true;
+  let rect = canvas.getBoundingClientRect();
+  assert.deepEqual([canvas.offsetLeft, canvas.offsetTop, rect.width, rect.height], [0, 10, 80, 60]);
+  assert.equal((40 - rect.left) * canvas.width / rect.width, 16);
+  assert.equal((40 - rect.top) * canvas.height / rect.height, 12);
+  window = { width: 160, height: 120 };
+  geometry = { drawableWidth: 160, drawableHeight: 120,
+    viewportX: 0, viewportY: 0, viewportWidth: 160, viewportHeight: 120 };
+  rect = canvas.getBoundingClientRect();
+  assert.deepEqual([canvas.offsetLeft, canvas.offsetTop, rect.width, rect.height], [0, 0, 160, 120]);
+});

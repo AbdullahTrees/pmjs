@@ -199,3 +199,16 @@ test('MV bootstrap executes plugins in order and logs a final summary', () => {
     .map(entry => entry.name), ['First', 'Last']);
   assert.ok(lines.some(line => /guest plugins: 3 manifest, 2 loaded/.test(line)));
 });
+
+test('MZ manifest paths and filename callbacks describe the same loaded plugin', () => {
+  const { loadPmjsRuntime } = require('./helpers/runtime-context.cjs');
+  const context = loadPmjsRuntime({ PMJS_RUNTIME_ENGINE: 'mz' });
+  let called = 0;
+  context.PMJS.plugins.snapshotEffectiveManifest([{ name: 'Folder/Example', status: true }]);
+  context.PMJS.plugins.onLoaded('Example', () => called++);
+  context.PMJS.plugins.execute('Example', () => {});
+  const snapshot = context.PMJS.plugins.dump();
+  assert.equal(called, 1); assert.equal(snapshot.counts.total, 1);
+  assert.equal(snapshot.counts.loaded, 1); assert.equal(snapshot.counts.unloaded, 0);
+  assert.equal(snapshot.guest[0].name, 'Folder/Example');
+});

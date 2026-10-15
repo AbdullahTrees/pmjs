@@ -1,6 +1,6 @@
 var NativeImage = (function() {
 function NativeImage() {
-  EventTarget.call(this);
+  GenericElement.call(this, 'img');
   this.width = 0;
   this.height = 0;
   this.naturalWidth = 0;
@@ -23,7 +23,7 @@ function NativeImage() {
 
 var pendingNativeImageLoads = 0;
 
-NativeImage.prototype = Object.create(EventTarget.prototype);
+NativeImage.prototype = Object.create(GenericElement.prototype);
 NativeImage.prototype.constructor = NativeImage;
 Object.defineProperty(NativeImage.prototype, 'src', {
   get: function() { return this._src; },

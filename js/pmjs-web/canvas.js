@@ -1585,17 +1585,24 @@ CanvasContext2D.prototype.fill = function(rule) {
   rasterPath(this, false, rule);
 };
 CanvasContext2D.prototype.stroke = function() { rasterPath(this, true, 'nonzero'); };
+function CanvasGradient() {
+  this.stops = [];
+}
+CanvasGradient.prototype.addColorStop = function(offset, color) {
+  offset = Number(offset);
+  if (!isFinite(offset) || offset < 0 || offset > 1) throw new RangeError('invalid color stop');
+  if (parseCanvasColor(color) === null) throw new SyntaxError('Invalid color');
+  this.stops.push({ offset: offset, color: color });
+  this.stops.sort(function(left, right) { return left.offset - right.offset; });
+};
+globalThis.CanvasGradient = CanvasGradient;
+
 CanvasContext2D.prototype.createLinearGradient = function() {
   var first = [Number(arguments[0]), Number(arguments[1])];
   var second = [Number(arguments[2]), Number(arguments[3])];
-  return { _pmjsStyle: 'linear-gradient', x0: first[0], y0: first[1],
-    x1: second[0], y1: second[1], stops: [], addColorStop: function(offset, color) {
-      offset = Number(offset);
-      if (!isFinite(offset) || offset < 0 || offset > 1) throw new RangeError('invalid color stop');
-      if (parseCanvasColor(color) === null) throw new SyntaxError('Invalid color');
-      this.stops.push({ offset: offset, color: color });
-      this.stops.sort(function(left, right) { return left.offset - right.offset; });
-    } };
+  if (!first.concat(second).every(Number.isFinite)) throw new TypeError('invalid linear gradient');
+  return Object.assign(new CanvasGradient(), { _pmjsStyle: 'linear-gradient',
+    x0: first[0], y0: first[1], x1: second[0], y1: second[1] });
 };
 CanvasContext2D.prototype.createRadialGradient = function(x0, y0, r0, x1, y1, r1) {
   x0 = Number(x0); y0 = Number(y0); r0 = Number(r0);
@@ -1604,16 +1611,9 @@ CanvasContext2D.prototype.createRadialGradient = function(x0, y0, r0, x1, y1, r1
     throw new TypeError('invalid radial gradient');
   }
   if (r0 < 0 || r1 < 0) throw canvasIndexSizeError('negative radial gradient radius');
-  return { _pmjsStyle: 'radial-gradient', x0: x0, y0: y0, r0: r0,
+  return Object.assign(new CanvasGradient(), { _pmjsStyle: 'radial-gradient', x0: x0, y0: y0, r0: r0,
     x1: x1, y1: y1, r1: r1,
-    nativeConcentric: x0 === x1 && y0 === y1 && r1 > r0,
-    stops: [], addColorStop: function(offset, color) {
-      offset = Number(offset);
-      if (!isFinite(offset) || offset < 0 || offset > 1) throw new RangeError('invalid color stop');
-      if (parseCanvasColor(color) === null) throw new SyntaxError('Invalid color');
-      this.stops.push({ offset: offset, color: color });
-      this.stops.sort(function(left, right) { return left.offset - right.offset; });
-    } };
+    nativeConcentric: x0 === x1 && y0 === y1 && r1 > r0 });
 };
 CanvasContext2D.prototype.createPattern = function(source, repetition) {
   if (source && source._pmjsPrimitiveContent) source._pmjsPrimitiveContent.materialize();

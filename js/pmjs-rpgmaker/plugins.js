@@ -13,7 +13,11 @@
   var optimizationRequirements = [];
 
   function key(name) {
-    return String(name).replace(/\.js$/i, '').toLowerCase();
+    var value = String(name).replace(/\.js$/i, '');
+    // MZ registers script names and parameters by filename even when the
+    // manifest stores a subdirectory. MV retains the complete plugin name.
+    if (globalThis.PMJS_RUNTIME_ENGINE === 'mz') value = value.split('/').pop();
+    return value.toLowerCase();
   }
 
   function copyManifest(records) {

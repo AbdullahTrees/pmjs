@@ -29,6 +29,7 @@ PMJS.methods.wrap({
       if (!PMJS.pixi4.isNativeRenderer(this._renderer)) {
         throw new Error('Graphics._createRenderer must create a PMJS native renderer');
       }
+      if (this._canvas) this._canvas._pmjsNativePresentation = true;
       return result;
     };
   }

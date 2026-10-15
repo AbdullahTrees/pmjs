@@ -402,6 +402,12 @@
       "source": "PMJS",
       "license": "MIT",
       "notice": "LICENSE"
+    },
+    "js/pmjs-plugins/input-form/native-form.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
     }
   },
   "defaults": {

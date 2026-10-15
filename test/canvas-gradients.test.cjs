@@ -56,3 +56,19 @@ test('radial gradients reject negative radii and invalid stops', () => {
   const gradient = drawing.createRadialGradient(0, 0, 0, 0, 0, 1);
   assert.throws(() => gradient.addColorStop(2, '#fff'), /invalid color stop/);
 });
+
+test('linear and radial factories inherit extensions from the shared gradient prototype', () => {
+  const context = vm.createContext({ NativeHost: { runtime: { env: () => '' } } });
+  vm.runInContext(source, context);
+  vm.runInContext(`CanvasGradient.prototype.transparentStops = function() {
+    this.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    this.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  };`, context);
+  const drawing = new context.CanvasContext2D({});
+  for (const gradient of [drawing.createLinearGradient(0, 0, 10, 0), drawing.createRadialGradient(0, 0, 0, 0, 0, 10)]) {
+    assert.ok(gradient instanceof context.CanvasGradient);
+    gradient.transparentStops();
+    assert.deepEqual(Array.from(gradient.stops, stop => stop.offset), [0, 1]);
+    assert.throws(() => gradient.addColorStop(0.5, 'invalid'), /Invalid color/);
+  }
+});

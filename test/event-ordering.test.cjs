@@ -66,6 +66,7 @@ test('warm images become listener-ready before twenty saturated frames', () => {
     globalThis.trackNativeResource=result=>result;
     globalThis.releaseNativeResource=()=>{};
     NativeHost.images.loadAsync=()=>Promise.resolve({width:48,height:32});
+    NativeHost.runtime.runScript(fs.readFileSync(${JSON.stringify(path.resolve(__dirname, '../js/pmjs-web/elements.js'))},'utf8'));
     NativeHost.runtime.runScript(fs.readFileSync(${JSON.stringify(path.resolve(__dirname, '../js/pmjs-web/image-element.js'))},'utf8'));
     let frames=0,ready=0;
     const images=[];

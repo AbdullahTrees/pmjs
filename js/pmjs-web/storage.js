@@ -28,3 +28,17 @@ globalThis.localStorage = {
     }
   }
 };
+
+// Session data belongs to this guest instance and is discarded on restart.
+var sessionValues = Object.create(null);
+globalThis.sessionStorage = {
+  get length() { return Object.keys(sessionValues).length; },
+  key: function(index) { return Object.keys(sessionValues)[Number(index) >>> 0] || null; },
+  getItem: function(key) {
+    key = String(key);
+    return Object.prototype.hasOwnProperty.call(sessionValues, key) ? sessionValues[key] : null;
+  },
+  setItem: function(key, value) { sessionValues[String(key)] = String(value); },
+  removeItem: function(key) { delete sessionValues[String(key)]; },
+  clear: function() { sessionValues = Object.create(null); }
+};

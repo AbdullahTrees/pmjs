@@ -12,7 +12,7 @@
     PluginManager.setup = function(plugins) {
       var pending = [];
       plugins.forEach(function(plugin) {
-        var pluginName = Utils.extractFileName(plugin.name);
+        var pluginName = plugin.name.split('/').pop();
         if (plugin.status && this._scripts.indexOf(pluginName) === -1) {
           this.setParameters(pluginName, plugin.parameters);
           this._scripts.push(pluginName);

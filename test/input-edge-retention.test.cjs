@@ -61,16 +61,8 @@ function setup(observe = true) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/runtime.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/events.js'), 'utf8'), context);
-  vm.runInContext(`
-    function GenericElement() { EventTarget.call(this); this.children = []; }
-    GenericElement.prototype = Object.create(EventTarget.prototype);
-    GenericElement.prototype.appendChild = function(child) {
-      child.parentNode = this; this.children.push(child);
-    };
-    function CanvasElement() {} function NativeImage() {}
-    function VideoElement() {} function CanvasContext2D() {}
-  `, context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/document.js'), 'utf8'), context);
+  context.CanvasContext2D = function() {};
+  vm.runInContext(require('./helpers/web-element-sources.cjs').source, context);
   context.document.addEventListener('keydown', event => context.Input._onKeyDown(event));
   context.document.addEventListener('keyup', event => context.Input._onKeyUp(event));
   context.addEventListener('blur', () => context.Input.clear());

@@ -166,14 +166,25 @@ function exposeNativeGamepads() {
 }
 function dispatchNativeKey(source) {
   if (!globalThis.document || typeof document.dispatchEvent !== 'function') return;
+  var target = document.activeElement || document;
+  if (source.text !== undefined) {
+    if (typeof target._insertText === 'function') target._insertText(source.text);
+    return;
+  }
   var event = { type: source.down ? 'keydown' : 'keyup',
     keyCode: source.keyCode, which: source.keyCode,
     code: source.code || '', key: source.key || '', repeat: !!source.repeat,
     altKey: !!source.alt, ctrlKey: !!source.ctrl, shiftKey: !!source.shift,
     metaKey: !!source.meta,
     getModifierState: function(name) { return name === 'CapsLock' && !!source.capsLock; },
-    preventDefault: function() { this.defaultPrevented = true; } };
-  document.dispatchEvent(event);
+    preventDefault: function() { this.defaultPrevented = true; },
+    stopPropagation: function() { this._pmjsPropagationStopped = true; } };
+  var current = target;
+  while (current && current !== document && !event._pmjsPropagationStopped) {
+    current.dispatchEvent(event); current = current.parentNode;
+  }
+  if (!event._pmjsPropagationStopped) document.dispatchEvent(event);
+  if (!event.defaultPrevented && source.down && typeof target._editKey === 'function') target._editKey(event);
 }
 var nativePointerDownTarget = null;
 function dispatchNativePointer(source) {

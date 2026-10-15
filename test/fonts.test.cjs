@@ -555,3 +555,10 @@ test('Graphics.isFontLoaded keeps PMJS ownership for a registered font that fail
   assert.equal(context.PMJS.fonts.hasFamily('BrokenFace'), true);
   assert.equal(context.Graphics.isFontLoaded('BrokenFace'), false);
 });
+
+test('generic text uses the registered main face when only MZ font families exist', () => {
+  const { context } = createFontSandbox({ existingFiles: ['fonts/main.woff'] });
+  context.PMJS.fonts.registerFace('rmmz-mainfont', 'fonts/main.woff');
+  const result = context.PMJS.fonts.resolveDescriptor('20px sans-serif');
+  assert.equal(result.faces[0].path, 'fonts/main.woff');
+});
