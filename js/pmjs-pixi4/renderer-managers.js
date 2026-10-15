@@ -486,13 +486,15 @@ function NativeTextureGarbageCollector(renderer) {
   this.count = 0;
   this.checkCount = 0;
   this.maxIdle = Number(PIXI.settings && PIXI.settings.GC_MAX_IDLE) || 3600;
-  this.checkCountMax = Number(PIXI.settings && PIXI.settings.GC_MAX_CHECK_COUNT) || 600;
+  this.canvasMaxIdle = 120;
+  this.checkCountMax = Math.min(60,
+    Number(PIXI.settings && PIXI.settings.GC_MAX_CHECK_COUNT) || 600);
   this.mode = PIXI.settings && PIXI.settings.GC_MODE;
 }
 NativeTextureGarbageCollector.prototype.update = function() {
   this.count++;
   if (PIXI.GC_MODES && this.mode === PIXI.GC_MODES.MANUAL) return;
-  if (++this.checkCount > this.checkCountMax) {
+  if (++this.checkCount >= this.checkCountMax) {
     this.checkCount = 0;
     this.run();
   }
@@ -502,8 +504,10 @@ NativeTextureGarbageCollector.prototype.run = function() {
   var textures = manager._managedTextures.slice();
   for (var index = 0; index < textures.length; index++) {
     var texture = textures[index];
+    var maxIdle = texture && texture.source instanceof CanvasElement ?
+      Math.min(this.canvasMaxIdle, this.maxIdle) : this.maxIdle;
     if (texture && !texture._glRenderTargets &&
-        this.count - (Number(texture.touched) || 0) > this.maxIdle) {
+        this.count - (Number(texture.touched) || 0) > maxIdle) {
       manager.destroyTexture(texture, true);
     }
   }

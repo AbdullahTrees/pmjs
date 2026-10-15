@@ -87,6 +87,14 @@
     },
     {
       "plugins": [
+        "SRD_ShakingText"
+      ],
+      "modules": [
+        "js/pmjs-plugins/srd/shaking-text.js"
+      ]
+    },
+    {
+      "plugins": [
         "SRD_MenuBackgrounds"
       ],
       "modules": [

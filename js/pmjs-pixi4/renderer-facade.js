@@ -721,30 +721,41 @@ function createNativePixiRenderer(width, height, options) {
     renderer: renderer,
     gl: renderer.gl,
     _managedTextures: [],
+    _managedTextureSet: new Set(),
 
     bindTexture: function() {},
     getTexture: function() {},
     trackTexture: function(base) {
-      if (base && this._managedTextures.indexOf(base) < 0) {
+      if (!base || !this.renderer) return;
+      if (!this._managedTextureSet.has(base)) {
+        this._managedTextureSet.add(base);
         this._managedTextures.push(base);
       }
-      if (base && typeof base.on === 'function') {
+      if (typeof base.on === 'function') {
         base.__pmjsTextureDisposeListeners =
           base.__pmjsTextureDisposeListeners || {};
-        if (!base.__pmjsTextureDisposeListeners[this.renderer.CONTEXT_UID]) {
+        var contextUid = this.renderer.CONTEXT_UID;
+        if (!base.__pmjsTextureDisposeListeners[contextUid]) {
           var manager = this;
-          var dispose = function() { manager.destroyTexture(base); };
-          base.__pmjsTextureDisposeListeners[this.renderer.CONTEXT_UID] = dispose;
+          var dispose = function() {
+            var listeners = base.__pmjsTextureDisposeListeners;
+            if (manager.renderer && listeners && listeners[contextUid] === dispose) {
+              manager.destroyTexture(base);
+            }
+          };
+          base.__pmjsTextureDisposeListeners[contextUid] = dispose;
           base.on('dispose', dispose);
         }
       }
     },
     updateTexture: function(texture, location) {
+      if (!this.renderer) return;
       var base = texture && (texture.baseTexture || texture);
       this.trackTexture(base);
       return this.renderer.bindTexture(base, location, true);
     },
     destroyTexture: function(texture) {
+      if (!this.renderer) return;
       this.renderer.unbindTexture(texture);
       var base = texture && (texture.baseTexture || texture);
       if (base && base._glTextures) {
@@ -758,12 +769,15 @@ function createNativePixiRenderer(width, height, options) {
       if (listeners) delete listeners[this.renderer.CONTEXT_UID];
       var managedIndex = this._managedTextures.indexOf(base);
       if (managedIndex >= 0) this._managedTextures.splice(managedIndex, 1);
+      this._managedTextureSet.delete(base);
     },
     removeAll: function() {
+      if (!this.renderer) return;
       var textures = this._managedTextures.slice();
       for (var index = 0; index < textures.length; index++) {
         this.destroyTexture(textures[index]);
       }
+      this._managedTextureSet.clear();
       this.renderer.boundTextures.fill(null);
     },
     destroy: function() {
