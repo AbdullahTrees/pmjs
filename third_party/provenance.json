@@ -396,6 +396,12 @@
     },
     "js/pmjs-plugins/yanfly/core-transforms.js": {
       "origin": "original"
+    },
+    "js/pmjs-plugins/greenworks/orange.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
     }
   },
   "defaults": {

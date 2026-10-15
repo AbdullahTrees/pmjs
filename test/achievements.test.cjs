@@ -14,22 +14,28 @@ const steamworksCode = fs.readFileSync(path.join(root, 'js/pmjs-plugins/steamwor
 function harness(initial, catalog) {
   const files = new Map(Object.entries(initial || {}));
   const writes = [];
+  const tasks = [];
   const context = {
-    console,
+    console, Buffer, __pmjsBuiltinRequire: require,
     PMJS_GAME_CONFIG: {
       achievements: { catalog: catalog || [] },
       steam: { provider: 'portable', appId: 42 },
     },
     NativeHost: { storage: {
       readText: name => files.has(name) ? files.get(name) : null,
+      readBytes: name => files.has(name) ? Buffer.from(files.get(name)) : null,
+      readDirectory: directory => [...new Set([...files.keys()].filter(name => name.startsWith(directory + '/')).map(name => name.slice(directory.length + 1).split('/')[0]))],
+      isDirectory: directory => [...files.keys()].some(name => name.startsWith(directory + '/')),
+      remove: name => files.delete(name),
       writeText(name, value) { files.set(name, value); writes.push([name, value]); },
       rename(from, to) { files.set(to, files.get(from)); files.delete(from); },
     } },
   };
-  context.PMJS = { config: context.PMJS_GAME_CONFIG };
+  context.PMJS = { config: context.PMJS_GAME_CONFIG, tasks: { enqueue(fn) { tasks.push(fn); } } };
   vm.createContext(context);
   vm.runInContext(coreCode, context);
-  return { context, files, writes, store: context.pmjsAchievements };
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/pmjs-core/steam.js'), 'utf8'), context);
+  return { context, files, writes, store: context.pmjsAchievements, drain() { while (tasks.length) tasks.shift()(); } };
 }
 
 test('stays inert until initialized, then creates a catalog snapshot', () => {
@@ -84,6 +90,65 @@ test('stages ordinary stats until flush without rewriting on reads', () => {
   assert.equal(h.store.flush(), false);
 });
 
+for (const id of ['__proto__', 'constructor', 'toString']) {
+  for (const configured of [false, true]) {
+    test(`${configured ? 'cataloged' : 'learned'} ${id} survives updates, reloads and resets`, () => {
+      const catalog = configured ? [{ id, progress: { stat: id, target: 10 } }] : [];
+      const h = harness({}, catalog);
+      h.store.initialize();
+      const initialWrites = h.writes.length;
+      h.store.setStat(id, 4);
+      assert.equal(h.store.getStat(id), 4);
+      assert.equal(h.writes.length, initialWrites, 'ordinary stats remain deferred');
+      assert.equal(h.store.setUnlocked(id, true), true);
+      h.store.setStat('other', 1);
+      h.store.flush();
+      const saved = JSON.parse(h.files.get('achievements.json'));
+      assert.equal(saved.schemaVersion, 1);
+      assert.ok(Object.hasOwn(saved.achievements, id));
+      assert.ok(Object.hasOwn(saved.stats, id));
+      assert.equal(saved.stats[id], 4);
+      assert.equal(saved.achievements[id].unlocked, true);
+
+      const reloaded = harness({ 'achievements.json': h.files.get('achievements.json') }, catalog);
+      assert.equal(reloaded.store.getStat(id), 4);
+      assert.equal(reloaded.store.isUnlocked(id), true);
+      assert.ok(Array.from(reloaded.store.names()).includes(id));
+      assert.equal(reloaded.store.initialize().achievements[id].unlockedAt,
+        saved.achievements[id].unlockedAt);
+      assert.equal(reloaded.writes.length, 0, 'valid saved data needs no rewrite');
+      reloaded.store.resetStats(true);
+      assert.equal(reloaded.store.getStat(id), 0);
+      assert.equal(reloaded.store.isUnlocked(id), false);
+      reloaded.store.setStat(id, 10);
+      assert.equal(reloaded.store.isUnlocked(id), configured);
+      reloaded.store.flush();
+      const final = harness({ 'achievements.json': reloaded.files.get('achievements.json') }, catalog);
+      assert.equal(final.store.getStat(id), 10);
+      assert.equal(final.store.isUnlocked(id), configured);
+    });
+  }
+
+  test(`failed writes do not publish ${id} unlocks or threshold updates`, () => {
+    const h = harness({}, [{ id, progress: { stat: id, target: 10 } }]);
+    h.store.initialize();
+    h.store.setStat(id, 4);
+    const writeText = h.context.NativeHost.storage.writeText;
+    h.context.NativeHost.storage.writeText = () => { throw new Error('disk full'); };
+    assert.throws(() => h.store.setStat(id, 10), /disk full/);
+    assert.equal(h.store.getStat(id), 4);
+    assert.equal(h.store.isUnlocked(id), false);
+    assert.throws(() => h.store.setUnlocked(id, true), /disk full/);
+    assert.equal(h.store.isUnlocked(id), false);
+    assert.throws(() => h.store.flush(), /disk full/);
+    h.context.NativeHost.storage.writeText = writeText;
+    assert.equal(h.store.flush(), true, 'failed flush retains dirty state');
+    const saved = JSON.parse(h.files.get('achievements.json'));
+    assert.equal(saved.stats[id], 4);
+    assert.equal(saved.achievements[id].unlocked, false);
+  });
+}
+
 test('preserves corrupt input and rebuilds a valid file', () => {
   const h = harness({ 'achievements.json': '{bad' }, [{ id: 'RECOVERED' }]);
   h.store.initialize();
@@ -101,13 +166,15 @@ test('Greenworks and steamworks.js adapters share the portable store', () => {
   vm.runInContext(greenworksCode, h.context);
   vm.runInContext(steamworksCode, h.context);
   const greenworks = modules.greenworks;
-  assert.equal(greenworks.isSteamRunning(), false);
+  assert.equal(greenworks.isSteamRunning(), true);
   assert.equal(greenworks.initAPI(), true);
-  assert.equal(greenworks.isSteamRunning(), false, 'local initialization is not a Steam client');
+  assert.equal(greenworks.isSteamRunning(), true);
   assert.equal(greenworks.getNumberOfAchievements(), 2);
   let callback = null;
   assert.equal(greenworks.activateAchievement('ONE', value => { callback = value; }), true);
-  assert.equal(callback, true);
+  assert.equal(callback, null);
+  h.drain();
+  assert.equal(callback, undefined);
   const client = modules['steamworks.js'].init();
   assert.equal(client.achievement.isActivated('ONE'), true);
   assert.equal(client.achievement.activate('TWO'), true);
@@ -119,9 +186,9 @@ test('Greenworks and steamworks.js adapters share the portable store', () => {
   assert.equal(JSON.parse(h.files.get('achievements.json')).stats.steps, 7);
 });
 
-test('does not advertise Steam modules without explicit portable policy', () => {
+test('an explicitly disabled provider does not advertise Steam modules', () => {
   const h = harness({}, []);
-  h.context.PMJS_GAME_CONFIG.steam = {};
+  h.context.PMJS_GAME_CONFIG.steam = { provider: 'none' };
   const modules = {};
   h.context.registerCommonJsModule = (names, value) => {
     for (const name of Array.isArray(names) ? names : [names]) modules[name] = value;
@@ -131,6 +198,26 @@ test('does not advertise Steam modules without explicit portable policy', () => 
   assert.equal(modules.greenworks, undefined);
   assert.equal(modules['steamworks.js'], undefined);
   assert.equal(h.files.has('achievements.json'), false);
+});
+
+test('OrangeGreenworks keeps original methods and repairs only the storeStats delegation', () => {
+  const h = harness(), loaded = new Map();
+  const success = () => {}, failure = () => {};
+  let receiver, args;
+  const original = () => 'original';
+  const backend = { storeStats(...values) { receiver = this; args = values; return true; } };
+  const plugin = { isSteamRunning: () => true, activateAchievement: original, greenworks: backend,
+    _storeStatsSuccess: success, _storeStatsError: failure };
+  h.context.Hudell = { OrangeGreenworks: plugin };
+  h.context.PMJS.plugins = { onLoaded(name, owner, callback) { loaded.set(name, callback); } };
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/pmjs-plugins/greenworks/orange.js'), 'utf8'), h.context);
+  loaded.get('OrangeGreenworks')();
+  assert.equal(plugin.activateAchievement, original);
+  assert.equal(plugin.storeStats(), true);
+  assert.equal(receiver, backend);
+  assert.deepEqual(args, [success, failure]);
+  plugin.isSteamRunning = () => false;
+  assert.equal(plugin.storeStats(), false);
 });
 
 test('explicit Greenworks backend preserves exports, receivers, failures and callbacks', () => {
@@ -186,6 +273,7 @@ test('a failed write does not publish an in-memory unlock or call success', () =
   assert.equal(greenworks.activateAchievement('FAIL',
     () => { succeeded = true; }, () => { failed = true; }), false);
   assert.equal(succeeded, false);
+  h.drain();
   assert.equal(failed, true);
   assert.equal(h.store.isUnlocked('FAIL'), false);
 });
@@ -204,9 +292,134 @@ test('a failed stat flush stays dirty and can be retried', () => {
   h.context.NativeHost.storage.writeText = () => { throw new Error('disk full'); };
   let failed = false;
   assert.equal(greenworks.storeStats(null, () => { failed = true; }), false);
+  h.drain();
   assert.equal(failed, true);
   assert.equal(greenworks.getStatInt('retries'), 4);
   h.context.NativeHost.storage.writeText = writeText;
   assert.equal(greenworks.storeStats(), true);
   assert.equal(JSON.parse(h.files.get('achievements.json')).stats.retries, 4);
+});
+
+test('portable initialization retries failed persistence and keeps a stable configurable profile', () => {
+  const h = harness();
+  const original = h.context.NativeHost.storage.writeText;
+  h.context.NativeHost.storage.writeText = () => { throw new Error('read only'); };
+  assert.throws(() => h.context.pmjsSteam.initialize(), /read only/);
+  assert.equal(h.context.pmjsSteam.initialized, false);
+  h.context.NativeHost.storage.writeText = original;
+  assert.equal(h.context.pmjsSteam.initialize(), true);
+  const first = h.context.pmjsSteam.steamId();
+  const restarted = harness(Object.fromEntries(h.files));
+  const second = restarted.context.pmjsSteam.steamId();
+  assert.equal(second.steamId, first.steamId);
+  assert.equal(second.getRawSteamID(), first.steamId);
+  assert.equal(second.getPersonaName(), first.screenName);
+  assert.equal(second.getAccountID(), first.accountId);
+  assert.equal(typeof first.staticAccountId, 'number');
+  assert.equal(second.getStaticAccountKey(), String(BigInt(first.steamId) & ~(0xfffffn << 32n)));
+  assert.equal(second.getSteamLevel(), first.level);
+  restarted.context.PMJS.config.steam.screenName = 'Configured';
+  assert.equal(restarted.context.pmjsSteam.steamId().getPersonaName(), 'Configured');
+});
+
+test('local cloud files persist, enumerate byte sizes, report string quota and respect disable', () => {
+  const h = harness();
+  const cloud = h.context.pmjsSteam.cloud;
+  assert.equal(cloud.enabled(), true);
+  cloud.write('slot/one.txt', 'é');
+  cloud.write('two.txt', 'abc');
+  assert.equal(cloud.read('slot/one.txt'), 'é');
+  assert.deepEqual(JSON.parse(JSON.stringify(cloud.files())), [
+    { name: 'slot/one.txt', size: 2 }, { name: 'two.txt', size: 3 }
+  ]);
+  const quota = cloud.quota();
+  assert.equal(typeof quota[0], 'string');
+  assert.equal(BigInt(quota[0]) - BigInt(quota[1]), 5n);
+  const restarted = harness(Object.fromEntries(h.files));
+  assert.equal(restarted.context.pmjsSteam.cloud.read('two.txt'), 'abc');
+  cloud.remove('two.txt');
+  assert.throws(() => cloud.read('two.txt'), { code: 'ENOENT' });
+  assert.throws(() => cloud.remove('two.txt'), { code: 'ENOENT' });
+  for (const name of ['../escape', '/absolute', 'a/../b', 'a\\..\\b', '']) {
+    assert.throws(() => cloud.write(name, 'bad'), /invalid Steam cloud filename/);
+  }
+  const write = h.context.NativeHost.storage.writeText;
+  h.context.NativeHost.storage.writeText = () => { throw new Error('disk full'); };
+  assert.throws(() => cloud.enable(false), /disk full/);
+  assert.equal(cloud.enabled(), true);
+  h.context.NativeHost.storage.writeText = write;
+  cloud.enable(false);
+  assert.throws(() => cloud.write('disabled', 'bad'), { code: 'ERR_STEAM_UNAVAILABLE' });
+  assert.equal(harness(Object.fromEntries(h.files)).context.pmjsSteam.cloud.enabled(), false);
+});
+
+test('callback shapes and ordering preserve local returns and complete unavailable services', () => {
+  const h = harness();
+  let greenworks;
+  h.context.registerCommonJsModule = (_names, api) => { greenworks = api; };
+  vm.runInContext(greenworksCode, h.context);
+  const calls = [];
+  assert.equal(greenworks.isSteamRunning(), true);
+  greenworks.activateAchievement('A', (...args) => { calls.push(['unlock', ...args]); });
+  assert.equal(greenworks.getAchievement('A', (...args) => calls.push(['query', ...args])), true);
+  greenworks.saveTextToFile('save.txt', 'saved', (...args) => calls.push(['write', ...args]));
+  greenworks.readTextFromFile('save.txt', (...args) => calls.push(['read', ...args]));
+  greenworks.getCloudQuota((...args) => calls.push(['quota', ...args]));
+  greenworks.getNumberOfPlayers(() => assert.fail('online query succeeded'), error => calls.push(['offline', error.code]));
+  assert.deepEqual(calls, []);
+  h.drain();
+  assert.deepEqual(calls.slice(0, 4), [['unlock'], ['query', true], ['write'], ['read', 'saved']]);
+  assert.equal(calls[4].length, 3);
+  assert.equal(typeof calls[4][1], 'string');
+  assert.deepEqual(calls[5], ['offline', 'ERR_STEAM_UNAVAILABLE']);
+  greenworks.indicateAchievementProgress('UNLOCKED_BY_GAME_ONLY', 10, 10);
+  assert.equal(greenworks.getAchievement('UNLOCKED_BY_GAME_ONLY'), false);
+});
+
+test('steamworks.js profile and cloud queries share the Greenworks backend with native value types', () => {
+  const h = harness(), modules = {};
+  h.context.registerCommonJsModule = (names, value) => {
+    for (const name of Array.isArray(names) ? names : [names]) modules[name] = value;
+  };
+  vm.runInContext(greenworksCode, h.context); vm.runInContext(steamworksCode, h.context);
+  const client = modules['steamworks.js'].init();
+  const user = client.localplayer.getSteamId(), green = modules.greenworks.getSteamId();
+  assert.equal(user.steamId64, BigInt(green.steamId)); assert.equal(user.accountId, green.accountId);
+  assert.equal(typeof user.steamId32, 'string');
+  modules.greenworks.saveTextToFile('shared', 'é');
+  assert.equal(client.cloud.readFile('shared'), 'é');
+  assert.equal(client.cloud.listFiles()[0].size, 2n);
+  client.cloud.writeFile('next', 'text'); assert.equal(client.cloud.fileExists('next'), true);
+  client.cloud.deleteFile('next'); assert.equal(client.cloud.fileExists('next'), false);
+});
+
+test('Steam callbacks use the dispatcher and cannot run after session termination', async () => {
+  const h = harness(), modules = {};
+  h.context.performance = require('node:perf_hooks').performance;
+  h.context.registerCommonJsModule = (names, value) => {
+    for (const name of Array.isArray(names) ? names : [names]) modules[name] = value;
+  };
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/pmjs-web/scheduler.js'), 'utf8'), h.context);
+  vm.runInContext(greenworksCode, h.context);
+  let calls = 0;
+  modules.greenworks.activateAchievement('SAVED', () => { calls++; });
+  assert.equal(calls, 0);
+  h.context.PMJS.tasks.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+  assert.equal(h.store.isUnlocked('SAVED'), true);
+  modules.greenworks.getAchievement('SAVED', () => { calls++; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
+
+test('session flush persists direct store use without initializing an unused provider', () => {
+  const h = harness();
+  h.context.pmjsSteam.flush();
+  assert.equal(h.files.size, 0);
+  assert.equal(h.store.initialized, false);
+  h.store.setStat('direct', 9);
+  assert.equal(h.context.pmjsSteam.initialized, false);
+  h.context.pmjsSteam.flush();
+  assert.equal(JSON.parse(h.files.get('achievements.json')).stats.direct, 9);
 });

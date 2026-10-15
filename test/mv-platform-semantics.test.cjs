@@ -313,10 +313,11 @@ test('guest OS identity queries reach Node while filesystem paths remain virtual
 });
 
 test('greenworks compatibility registers its supported module aliases', () => {
-  const modules = {};
+  const modules = {}, tasks = [];
   const context = {
-    console,
-    PMJS: { config: { steam: { provider: 'portable', appId: 123456 } } },
+    console, Buffer, __pmjsBuiltinRequire: require,
+    NativeHost: { storage: { readText() { return null; }, writeText() {} } },
+    PMJS: { config: { steam: { provider: 'portable', appId: 123456 } }, tasks: { enqueue(fn) { tasks.push(fn); } } },
     pmjsAchievements: {
       initialize: () => {},
       names: () => ['test'],
@@ -332,12 +333,13 @@ test('greenworks compatibility registers its supported module aliases', () => {
   };
   vm.createContext(context);
   const compatCode = fs.readFileSync(path.join(jsDir, 'pmjs-plugins/greenworks/compat.js'), 'utf8');
+  vm.runInContext(fs.readFileSync(path.join(jsDir, 'pmjs-core/steam.js'), 'utf8'), context);
   vm.runInContext(compatCode, context);
   const gw = modules.greenworks;
   assert.equal(modules['./greenworks'], gw);
   assert.equal(gw.initAPI(), true);
-  assert.equal(gw.isSteamRunning(), false);
-  assert.equal(gw.getSteamId().isValid, false);
+  assert.equal(gw.isSteamRunning(), true);
+  assert.equal(gw.getSteamId().isValid, true);
   assert.equal(gw.isSubscribedApp(), false);
   assert.equal(gw.isGameOverlayEnabled(), false);
   assert.equal(gw.isDLCInstalled(1), false);
@@ -345,11 +347,13 @@ test('greenworks compatibility registers its supported module aliases', () => {
 
   let achievementResult = null;
   gw.activateAchievement('test', (res) => { achievementResult = res; });
-  assert.equal(achievementResult, true);
+  tasks.shift()();
+  assert.equal(achievementResult, undefined);
 
   let statsResult = null;
   gw.storeStats((res) => { statsResult = res; });
-  assert.equal(statsResult, true);
+  tasks.shift()();
+  assert.equal(statsResult, undefined);
 });
 
 test('one physical host tick executes ticker, audio, video, and scheduled MV update', async () => {

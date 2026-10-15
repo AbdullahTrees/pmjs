@@ -16,6 +16,7 @@
     "js/pmjs-web/fonts.js",
     "js/pmjs-core/achievements.js",
     "js/pmjs-web/modules.js",
+    "js/pmjs-core/steam.js",
     "js/pmjs-plugins/greenworks/compat.js",
     "js/pmjs-plugins/steamworks/compat.js",
     "js/pmjs-web/canvas.js",

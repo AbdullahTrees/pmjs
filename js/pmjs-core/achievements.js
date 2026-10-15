@@ -35,7 +35,9 @@
     var dirty = false;
     if (!storage || typeof storage.readText !== 'function' || typeof storage.writeText !== 'function')
       throw new Error('portable achievements require NativeHost.storage');
-    function empty() { return { schemaVersion: VERSION, achievements: {}, stats: {} }; }
+    function empty() {
+      return { schemaVersion: VERSION, achievements: Object.create(null), stats: Object.create(null) };
+    }
     function mergeCatalog(target) {
       var changed = false;
       catalog.forEach(function(configured) {
@@ -67,7 +69,12 @@
       });
       return result;
     }
-    function clone(value) { return JSON.parse(JSON.stringify(value)); }
+    function clone(value) {
+      var result = JSON.parse(JSON.stringify(value));
+      result.achievements = Object.assign(Object.create(null), result.achievements);
+      result.stats = Object.assign(Object.create(null), result.stats);
+      return result;
+    }
     function persist(value) { storage.writeText(FILE, JSON.stringify(value, null, 2) + '\n'); }
     function initialize() {
       if (state) return state;
@@ -146,7 +153,7 @@
     function resetStats(clearAchievements) {
       initialize();
       var next = clone(state);
-      next.stats = {};
+      next.stats = Object.create(null);
       if (clearAchievements === true) Object.keys(next.achievements).forEach(function(id) {
         next.achievements[id].unlocked = false; next.achievements[id].unlockedAt = null;
       });
@@ -161,7 +168,7 @@
       dirty = false;
       return true;
     }
-    return { initialize: initialize, names: names, isUnlocked: isUnlocked,
+    return { get initialized() { return state !== null; }, initialize: initialize, names: names, isUnlocked: isUnlocked,
       setUnlocked: setUnlocked, getStat: getStat, setStat: setStat,
       resetStats: resetStats, flush: flush };
   }

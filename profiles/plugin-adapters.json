@@ -117,6 +117,14 @@
       "modules": [
         "js/pmjs-plugins/srd/battle-status-gauges.js"
       ]
+    },
+    {
+      "plugins": [
+        "OrangeGreenworks"
+      ],
+      "modules": [
+        "js/pmjs-plugins/greenworks/orange.js"
+      ]
     }
   ]
 }
