@@ -2,6 +2,13 @@
   "version": 1,
   "description": "Exceptional source provenance records. Ordinary PMJS contributions use the defaults; classifications require source review.",
   "files": {
+    "third_party/lz4.LICENSE": {
+      "origin": "permissive",
+      "source": "https://github.com/lz4/lz4/tree/v1.10.0",
+      "revision": "v1.10.0",
+      "license": "BSD-2-Clause",
+      "notice": "third_party/lz4.LICENSE"
+    },
     "js/pmjs-plugins/atlas-loader/image-retention.js": {
       "origin": "compatibility",
       "source": "PMJS",
@@ -397,18 +404,6 @@
     "js/pmjs-plugins/yanfly/core-transforms.js": {
       "origin": "original"
     },
-    "js/pmjs-plugins/greenworks/orange.js": {
-      "origin": "compatibility",
-      "source": "PMJS",
-      "license": "MIT",
-      "notice": "LICENSE"
-    },
-    "js/pmjs-plugins/input-form/native-form.js": {
-      "origin": "compatibility",
-      "source": "PMJS",
-      "license": "MIT",
-      "notice": "LICENSE"
-    },
     "js/pmjs-plugins/yanfly/event-copier.js": {
       "origin": "compatibility",
       "source": "PMJS",
@@ -433,7 +428,7 @@
       "license": "MIT",
       "notice": "LICENSE"
     },
-    "js/pmjs-plugins/yanfly/visual-atb-gauge.js": {
+    "js/pmjs-plugins/greenworks/orange.js": {
       "origin": "compatibility",
       "source": "PMJS",
       "license": "MIT",
@@ -445,7 +440,19 @@
       "license": "MIT",
       "notice": "LICENSE"
     },
+    "js/pmjs-plugins/input-form/native-form.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
+    },
     "js/pmjs-plugins/volume-control/menu.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
+    },
+    "js/pmjs-plugins/yanfly/visual-atb-gauge.js": {
       "origin": "compatibility",
       "source": "PMJS",
       "license": "MIT",
@@ -456,13 +463,6 @@
       "source": "PMJS",
       "license": "MIT",
       "notice": "LICENSE"
-    },
-    "third_party/lz4.LICENSE": {
-      "origin": "permissive",
-      "source": "https://github.com/lz4/lz4/tree/v1.10.0",
-      "revision": "v1.10.0",
-      "license": "BSD-2-Clause",
-      "notice": "third_party/lz4.LICENSE"
     }
   },
   "defaults": {

@@ -120,22 +120,6 @@
     },
     {
       "plugins": [
-        "OrangeGreenworks"
-      ],
-      "modules": [
-        "js/pmjs-plugins/greenworks/orange.js"
-      ]
-    },
-    {
-      "plugins": [
-        "111_InputForm"
-      ],
-      "modules": [
-        "js/pmjs-plugins/input-form/native-form.js"
-      ]
-    },
-    {
-      "plugins": [
         "YEP_EventCopier"
       ],
       "modules": [
@@ -172,6 +156,22 @@
       ],
       "modules": [
         "js/pmjs-plugins/yanfly/visual-atb-gauge.js"
+      ]
+    },
+    {
+      "plugins": [
+        "OrangeGreenworks"
+      ],
+      "modules": [
+        "js/pmjs-plugins/greenworks/orange.js"
+      ]
+    },
+    {
+      "plugins": [
+        "111_InputForm"
+      ],
+      "modules": [
+        "js/pmjs-plugins/input-form/native-form.js"
       ]
     },
     {
