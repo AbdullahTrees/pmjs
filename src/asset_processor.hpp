@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
@@ -37,13 +38,27 @@ struct PreparedAsset {
   int height = 0;
   int halo = 0;
   std::optional<AssetColor> uniform;
+  std::optional<std::array<int, 3>> blockGrid;
   std::vector<PreparedAssetCell> cells;
   std::vector<PreparedAssetPage> pages;
+};
+struct AssetPreparationStats {
+  std::uint64_t sourceDecodes = 0, sourceCacheHits = 0;
+  std::uint64_t pngEncodes = 0, encodedPixels = 0;
+  std::uint64_t lz4Encodes = 0;
+  std::uint64_t temporaryFiles = 0, spillBytesWritten = 0, spillBytesRead = 0;
+  std::size_t workspaceLimitBytes = 0, peakWorkspaceBytes = 0, liveWorkspaceBytes = 0;
+};
+struct AssetPreparationOptions {
+  std::size_t workspaceBytes = 64U * 1024U * 1024U;
+  AssetPreparationStats* statistics = nullptr;
+  bool lz4Pages = false;
 };
 void writePreparedPng(const std::filesystem::path& path, int width, int height,
                       const std::vector<std::uint8_t>& bytes);
 PreparedAsset prepareAssetImage(const std::filesystem::path& source,
                                const std::filesystem::path& staging,
                                const AssetRecipe& recipe = {},
-                               const PreparedAsset* layout = nullptr);
+                               const PreparedAsset* layout = nullptr,
+                               const AssetPreparationOptions& options = {});
 }

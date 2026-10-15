@@ -42,11 +42,34 @@ napi_value initialize(napi_env env, napi_callback_info info) try {
     }
     imageWarmCacheBytes = static_cast<std::size_t>(configured);
   }
+  std::size_t preparedFrameCacheBytes = pmjs::ImageStore::defaultPreparedFrameCacheBytes;
+  if (hasProperty(env, options, "preparedFrameCacheBytes")) {
+    constexpr double maxSafeInteger = 9007199254740991.0;
+    const double maxCacheBytes = std::min(maxSafeInteger,
+      static_cast<double>(std::numeric_limits<std::size_t>::max()));
+    const double configured = asNumber(env, property(env, options,
+      "preparedFrameCacheBytes"));
+    if (!std::isfinite(configured) || configured < 0 ||
+        std::floor(configured) != configured ||
+        configured > maxCacheBytes) {
+      throw std::runtime_error(
+        "preparedFrameCacheBytes must be a non-negative safe integer");
+    }
+    preparedFrameCacheBytes = static_cast<std::size_t>(configured);
+  }
+  const auto imageOption = [&](const char* name) {
+    return !hasProperty(env, options, name) || asBoolean(env, property(env, options, name));
+  };
+  const bool compactSampling = imageOption("preparedCompactSampling");
+  const bool cropUploads = imageOption("preparedCropUploads");
   const auto title = asString(env, property(env, options, "windowTitle"));
   if (title.empty()) throw std::runtime_error("windowTitle must not be empty");
   state = std::make_unique<State>(
     asString(env, property(env, options, "gameRoot")), width, height,
     assetRoot, title, imageWarmCacheBytes);
+  state->images.setPreparedFrameCacheBudget(preparedFrameCacheBytes);
+  state->images.setCompactSamplingEnabled(compactSampling);
+  state->images.setPreparedCropUploadsEnabled(cropUploads);
   return undefined(env);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what());
@@ -193,7 +216,7 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
     (!hasProperty(env, progress, "phase") && completed >= total);
   auto& value = host(env);
   const auto now = std::chrono::steady_clock::now();
-  if (!terminal && now - value.preparationPresentedAt < std::chrono::milliseconds(100))
+  if (!terminal && now - value.preparationPresentedAt < std::chrono::milliseconds(500))
     return undefined(env);
   value.preparationPresentedAt = now;
   value.core.syncDrawableSize();
@@ -216,7 +239,8 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
         fitScale = std::min(static_cast<double>(geometry.viewportWidth) / value.width,
                             static_cast<double>(geometry.viewportHeight) / value.height);
       }
-      const double textScale = std::clamp(std::max(fitScale, 2.0), 1.0, 4.0);
+      // Rasterize for the physical viewport instead of supersampling the logical screen.
+      const double textScale = std::clamp(fitScale, 0.25, 2.0);
       const float scale = static_cast<float>(textScale);
       const int surfaceWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
       const int surfaceHeight = std::max(1, static_cast<int>(std::lround(height * scale)));

@@ -28,21 +28,27 @@ async function preparationFiles(directory, verifyHashes = false) {
     if (!before.isFile()) throw new Error('preparation input is not a regular file');
     const signature = identity(before);
     const cached = previous[file];
-    let checksum = !verifyHashes && (known.get(signature) ||
+    const retained = known.get(signature);
+    let header = retained?.header;
+    let checksum = !verifyHashes && (retained?.hash ||
       cached && cached.identity === signature && HASH.test(cached.hash) && cached.hash);
     const reused = !!checksum;
     if (reused) ++stats.reusedFiles;
     else {
       const hasher = crypto.createHash('sha256');
-      for await (const chunk of fs.createReadStream(file)) hasher.update(chunk);
+      header = Buffer.alloc(0);
+      for await (const chunk of fs.createReadStream(file)) {
+        hasher.update(chunk);
+        if (header.length < 32) header = Buffer.concat([header, chunk.subarray(0, 32 - header.length)]);
+      }
       checksum = hasher.digest('hex');
       ++stats.hashedFiles; stats.hashedBytes += Number(before.size);
+      const after = await fsp.lstat(file, { bigint: true });
+      if (!after.isFile() || identity(after) !== signature) throw new Error('preparation input changed while verifying');
     }
-    const after = await fsp.lstat(file, { bigint: true });
-    if (!after.isFile() || identity(after) !== signature) throw new Error('preparation input changed while verifying');
     files[file] = { identity: signature, hash: checksum };
-    known.set(signature, checksum);
-    return { hash: checksum, reused, size: Number(before.size) };
+    known.set(signature, { hash: checksum, header });
+    return { hash: checksum, reused, size: Number(before.size), header };
   }
   async function hash(file) { return (await inspect(file)).hash; }
   async function validatedJson(file, validate) {

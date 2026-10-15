@@ -17,6 +17,9 @@ function resolveDefaults(input) {
   let width = input.width;
   let height = input.height;
   let assetPreparation = {};
+  let preparedFrameCacheBytes = input.preparedFrameCacheBytes;
+  let preparedCompactSampling = input.preparedCompactSampling;
+  let preparedCropUploads = input.preparedCropUploads;
   let preparationFonts = [];
   let configDirectory = process.cwd();
 
@@ -38,6 +41,9 @@ function resolveDefaults(input) {
     assertDisableOptimizationsShape(cfg.disableOptimizations, configPath);
     configDirectory = path.dirname(configPath);
     if (cfg.assetPreparation !== undefined) assetPreparation = cfg.assetPreparation;
+    if (preparedFrameCacheBytes === undefined) preparedFrameCacheBytes = cfg.preparedFrameCacheBytes;
+    if (preparedCompactSampling === undefined) preparedCompactSampling = cfg.preparedCompactSampling;
+    if (preparedCropUploads === undefined) preparedCropUploads = cfg.preparedCropUploads;
   }
 
   if (input.gameRoot) {
@@ -72,7 +78,7 @@ function resolveDefaults(input) {
   if (!assetPreparation || typeof assetPreparation !== 'object' || Array.isArray(assetPreparation)) {
     throw new Error('assetPreparation must be an object');
   }
-  assetPreparation = { enabled: true, maps: true, verifyHashes: false, ...assetPreparation,
+  assetPreparation = { enabled: true, maps: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 64 * 1024 * 1024, ...assetPreparation,
     ...(typeof input.assetPreparation === 'object' ? input.assetPreparation : {}) };
   if (input.assetPreparation === 'on' || input.assetPreparation === 'off') {
     assetPreparation.enabled = input.assetPreparation === 'on';
@@ -84,7 +90,11 @@ function resolveDefaults(input) {
     assetPreparation.maps = input.mapPreparation === 'on';
   }
   if (typeof assetPreparation.maps !== 'boolean') throw new Error('assetPreparation.maps must be a boolean');
+  if (!['png', 'lz4'].includes(assetPreparation.pageCodec)) throw new Error('assetPreparation.pageCodec must be png or lz4');
   if (typeof assetPreparation.verifyHashes !== 'boolean') throw new Error('assetPreparation.verifyHashes must be a boolean');
+  if (!Number.isSafeInteger(assetPreparation.workspaceBytes) || assetPreparation.workspaceBytes < 0 ||
+      assetPreparation.workspaceBytes > 256 * 1024 * 1024)
+    throw new Error('assetPreparation.workspaceBytes must be an integer from 0 to 268435456');
   if (!assetPreparation.enabled) assetPreparation.maps = false;
   if (input.assetCacheRoot !== undefined) assetPreparation.cacheRoot = path.resolve(input.assetCacheRoot);
   else if (assetPreparation.cacheRoot !== undefined) {
@@ -99,7 +109,8 @@ function resolveDefaults(input) {
     assetPreparation.recipes = JSON.parse(fs.readFileSync(assetPreparation.recipes, 'utf8'));
   }
   assetPreparation.recipes = validRecipes(assetPreparation.recipes || []);
-  return { ...input, width, height, title, assetPreparation, preparationFonts };
+  return { ...input, width, height, title, assetPreparation, preparationFonts,
+    preparedFrameCacheBytes, preparedCompactSampling, preparedCropUploads };
 }
 
 function assertDisableOptimizationsShape(value, configPath) {
@@ -193,6 +204,20 @@ function validate(input) {
       (!Number.isSafeInteger(imageWarmCacheBytes) || imageWarmCacheBytes < 0)) {
     throw new Error('imageWarmCacheBytes must be a non-negative safe integer');
   }
+  const configuredFrameBytes = options.preparedFrameCacheBytes === undefined ?
+    process.env.PMJS_PREPARED_FRAME_CACHE_BYTES : options.preparedFrameCacheBytes;
+  const preparedFrameCacheBytes = configuredFrameBytes === undefined ? 4 * 1024 * 1024 :
+    Number(configuredFrameBytes);
+  if ((configuredFrameBytes !== undefined &&
+       typeof configuredFrameBytes !== 'number' && typeof configuredFrameBytes !== 'string') ||
+      !Number.isSafeInteger(preparedFrameCacheBytes) || preparedFrameCacheBytes < 0) {
+    throw new Error('preparedFrameCacheBytes must be a non-negative safe integer');
+  }
+  for (const name of ['preparedCompactSampling', 'preparedCropUploads']) {
+    if (options[name] !== undefined && typeof options[name] !== 'boolean') {
+      throw new Error(`${name} must be a boolean`);
+    }
+  }
   if (options.greenworksModule !== undefined &&
       (typeof options.greenworksModule !== 'string' || !options.greenworksModule)) {
     throw new Error('greenworksModule must be a nonempty host module path');
@@ -209,6 +234,9 @@ function validate(input) {
     assetPreparation: { ...options.assetPreparation,
       cacheRoot: options.assetPreparation.cacheRoot || path.join(path.resolve(options.saveRoot), 'asset-cache') },
     ...(imageWarmCacheBytes === undefined ? {} : { imageWarmCacheBytes }),
+    preparedFrameCacheBytes,
+    preparedCompactSampling: options.preparedCompactSampling ?? true,
+    preparedCropUploads: options.preparedCropUploads ?? true,
     title: options.title,
   };
 }
@@ -296,7 +324,10 @@ async function run(input) {
   native.initialize({ gameRoot: options.gameRoot, assetRoot: options.assetRoot,
     width: options.width, height: options.height, windowTitle: options.title,
     ...(options.imageWarmCacheBytes === undefined ? {} :
-      { imageWarmCacheBytes: options.imageWarmCacheBytes }) });
+      { imageWarmCacheBytes: options.imageWarmCacheBytes }),
+    preparedFrameCacheBytes: options.preparedFrameCacheBytes,
+    preparedCompactSampling: options.preparedCompactSampling,
+    preparedCropUploads: options.preparedCropUploads });
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidateImages, invalidateMaps;
   let dispatcher;
@@ -332,6 +363,8 @@ async function run(input) {
         if (preparationFailed || (cancelled && !current.terminal) ||
             typeof native.runtime.preparationProgress !== 'function') return;
         const elapsedMs = performance.now() - screenStarted;
+        // Coalesce file notifications before formatting or crossing into native drawing.
+        if (!current.terminal && elapsedMs - screenUpdated < 500) return;
         screenUpdated = elapsedMs;
         const stepped = stageProgress(current, elapsedMs, stageBaseline);
         stageBaseline = stepped.baseline;
@@ -344,7 +377,7 @@ async function run(input) {
         if (cancelled) return;
         try {
           if (!native.pollEvents()) cancelled = true;
-          if (performance.now() - screenStarted - screenUpdated >= 100) showProgress();
+          showProgress();
         } catch (error) { failPreparation(error); }
       }, 16);
       let preparation;
@@ -353,6 +386,8 @@ async function run(input) {
           cacheRoot: options.assetPreparation.cacheRoot, recipes: options.assetPreparation.recipes, native,
           portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
           verifyHashes: options.assetPreparation.verifyHashes,
+          workspaceBytes: options.assetPreparation.workspaceBytes,
+          pageCodec: options.assetPreparation.pageCodec,
           shouldCancel: () => cancelled,
           onProgress: progress => {
             current = progress;

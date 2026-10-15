@@ -10,6 +10,18 @@ const contexts = [false, true].map(enabled => makeBitmapTextHarness(native, enab
 const pixels = bitmap => native.canvas.readPremultipliedPixels(bitmap._canvas._nativeCanvas.handle,
   0, 0, bitmap._canvas.width, bitmap._canvas.height);
 let comparisons = 0;
+const proofBitmap = new contexts[1].Bitmap(64, 32);
+const proofContext = proofBitmap._context;
+proofContext.fillStyle = 'white';
+contexts[1].PMJS.web.canvas.trackMaskFill(proofContext, 0, 0, 64, 32, 'white',
+  () => proofContext.fillRect(0, 0, 64, 32));
+assert.ok(contexts[1].PMJS.web.canvas.unitMaskRect(proofBitmap._canvas));
+const proofRevision = proofBitmap._canvas.__pmjsContentRevision;
+proofBitmap.drawText('A', 0, 0, 64, 32, 'left');
+assert.equal(proofBitmap._canvas.__pmjsContentRevision, proofRevision + 1);
+assert.equal(proofBitmap.dirtyCount, 1);
+assert.equal(contexts[1].PMJS.web.canvas.unitMaskRect(proofBitmap._canvas), null);
+proofBitmap._canvas._releaseNativeCanvas();
 for (const align of ['left', 'center', 'right']) for (const maxWidth of [0, 120, 280]) {
   for (const alpha of [1, 0.25]) for (const italic of [false, true]) for (const realized of [false, true]) {
     const frames = contexts.map(context => {

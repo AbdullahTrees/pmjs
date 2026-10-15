@@ -23,7 +23,7 @@ function native(polls = [true, false]) {
     finishLogicStep() {}, beginFrame() {}, renderFrame() {}, swapFrame() {},
     runtime: { env() { return ''; }, monotonicNow: () => (now += 100), quit() {} },
     fs: { mountWritableOverlay() {}, updateWritableOverlay() {}, readText() { return null; } },
-    render: {}, scene: {}, images: {}, assets: {},
+    render: {}, scene: {}, images: {}, assets: { preparationWorkspaceVersion: 1, preparationLz4Version: 'fixture-lz4-v1' },
     input: { snapshot() { return {}; }, consumePressed() {} }, canvas: {}, media: {} };
 }
 
@@ -36,11 +36,74 @@ function writeAddon(root, polls = [true, false]) {
 test('CLI parses the documented options including --config', () => {
   const value = parse(['--addon','a','--game-root','g','--bootstrap','b','--save-root','s',
     '--config','my-config.json','--width','640','--height','480','--image-warm-cache-bytes','1024',
+    '--prepared-frame-cache-bytes','2097152',
     '--greenworks-module','steam/greenworks.js']);
   assert.equal(value.width, 640); assert.equal(value.height, 480);
   assert.equal(value.config, 'my-config.json');
   assert.equal(value.imageWarmCacheBytes, 1024);
+  assert.equal(value.preparedFrameCacheBytes, 2097152);
   assert.equal(value.greenworksModule, 'steam/greenworks.js');
+});
+test('prepared frame cache validates its budget and resolves configuration and environment', () => {
+  const options = fixture('');
+  const previous = process.env.PMJS_PREPARED_FRAME_CACHE_BYTES;
+  try {
+    delete process.env.PMJS_PREPARED_FRAME_CACHE_BYTES;
+    assert.equal(validate(options).preparedFrameCacheBytes, 4194304);
+    for (const budget of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1,
+      'invalid', null, true, {}]) {
+      assert.throws(() => validate({ ...options, preparedFrameCacheBytes: budget }),
+        /preparedFrameCacheBytes must be a non-negative safe integer/);
+    }
+    process.env.PMJS_PREPARED_FRAME_CACHE_BYTES = '2097152';
+    assert.equal(validate(options).preparedFrameCacheBytes, 2097152);
+    assert.equal(validate({ ...options, preparedFrameCacheBytes: 0 }).preparedFrameCacheBytes, 0);
+    const config = path.join(options.gameRoot, 'config.json');
+    fs.writeFileSync(config, JSON.stringify({ preparedFrameCacheBytes: 4194304 }));
+    assert.equal(validate({ ...options, config }).preparedFrameCacheBytes, 4194304);
+    assert.equal(validate({ ...options, config, preparedFrameCacheBytes: 0 }).preparedFrameCacheBytes, 0);
+    process.env.PMJS_PREPARED_FRAME_CACHE_BYTES = '-1';
+    assert.throws(() => validate(options), /preparedFrameCacheBytes/);
+  } finally {
+    if (previous === undefined) delete process.env.PMJS_PREPARED_FRAME_CACHE_BYTES;
+    else process.env.PMJS_PREPARED_FRAME_CACHE_BYTES = previous;
+  }
+});
+test('runner forwards the prepared frame cache budget to native initialization', async () => {
+  const options = fixture('globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};');
+  options.assetPreparation = 'off';
+  options.preparedFrameCacheBytes = 2097152;
+  const host = require(options.addon);
+  let initialized;
+  host.initialize = value => { initialized = value; };
+  await run(options);
+  assert.equal(initialized.preparedFrameCacheBytes, 2097152);
+  delete options.preparedFrameCacheBytes;
+  await run(options);
+  assert.equal(initialized.preparedFrameCacheBytes, 4194304);
+});
+test('prepared rendering controls are independent and enabled by default', async () => {
+  const options = fixture('globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};');
+  options.assetPreparation = 'off';
+  for (const name of ['preparedCompactSampling', 'preparedCropUploads']) {
+    assert.equal(validate(options)[name], true);
+    for (const value of [null, 0, 'false']) {
+      assert.throws(() => validate({ ...options, [name]: value }), /must be a boolean/);
+    }
+  }
+  const config = path.join(options.gameRoot, 'render-config.json');
+  fs.writeFileSync(config, JSON.stringify({ preparedCompactSampling: false, preparedCropUploads: true }));
+  assert.equal(validate({ ...options, config }).preparedCompactSampling, false);
+  assert.equal(validate({ ...options, config, preparedCompactSampling: true }).preparedCompactSampling, true);
+  const host = require(options.addon);
+  let initialized;
+  host.initialize = value => { initialized = value; };
+  await run({ ...options, preparedCompactSampling: false, preparedCropUploads: true });
+  assert.equal(initialized.preparedCompactSampling, false);
+  assert.equal(initialized.preparedCropUploads, true);
+  await run({ ...options, preparedCompactSampling: true, preparedCropUploads: false });
+  assert.equal(initialized.preparedCompactSampling, true);
+  assert.equal(initialized.preparedCropUploads, false);
 });
 test('validation rejects missing paths and invalid dimensions', () => {
   assert.throws(() => validate({}), /addon is required/);
@@ -402,7 +465,10 @@ for (const failure of ['poll', 'presentation', 'progress callback']) {
       };
       native.runtime.preparationProgress = progress => {
         if (progress.terminal) throw new Error('later progress failed');
-        if (failure === 'progress callback' && progress.phase === 'prepare') throw error;
+        if (failure === 'progress callback' && progress.phase === 'prepare') {
+          setImmediate(finish);
+          throw error;
+        }
         if (failure === 'presentation' && workerStarted) {
           setImmediate(finish);
           throw error;
@@ -413,7 +479,6 @@ for (const failure of ['poll', 'presentation', 'progress callback']) {
         workerStarted = true;
         return new Promise(resolve => {
           finish = () => { native.settled = true; resolve(null); };
-          if (failure === 'progress callback') setImmediate(finish);
         });
       };
       native.assets.installPrepared = () => { throw new Error('failed preparation must not install'); };
@@ -422,12 +487,27 @@ for (const failure of ['poll', 'presentation', 'progress callback']) {
     `);
     const host = require(f.addon);
     await assert.rejects(run(f), error => error === host.error);
-    assert.equal(host.settled, failure !== 'progress callback');
-    assert.equal(host.jobs, failure === 'progress callback' ? 0 : 1);
+    assert.equal(host.settled, true);
+    assert.equal(host.jobs, 1);
     assert.equal(host.closed, true);
     assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/entries')), []);
   });
 }
+
+
+test('preparation workspace accepts bounded byte limits', () => {
+  const options = fixture('');
+  assert.equal(validate(options).assetPreparation.pageCodec, 'lz4');
+  assert.equal(validate({ ...options, assetPreparation: { pageCodec: 'png' } }).assetPreparation.pageCodec, 'png');
+  assert.equal(validate({ ...options, assetPreparation: { pageCodec: 'lz4' } }).assetPreparation.pageCodec, 'lz4');
+  assert.throws(() => validate({ ...options, assetPreparation: { pageCodec: 'lz4hc3' } }), /pageCodec must be png or lz4/);
+  assert.equal(validate(options).assetPreparation.workspaceBytes, 64 * 1024 * 1024);
+  for (const workspaceBytes of [0, 64 * 1024 * 1024, 128 * 1024 * 1024, 256 * 1024 * 1024])
+    assert.equal(validate({ ...options, assetPreparation: { workspaceBytes } }).assetPreparation.workspaceBytes, workspaceBytes);
+  for (const workspaceBytes of [-1, 0.5, 268435457, NaN, '64'])
+    assert.throws(() => validate({ ...options, assetPreparation: { workspaceBytes } }), /workspaceBytes must be an integer/);
+});
+
 test('CLI preserves guest arguments after the separator', () => {
   const options = parse(['--game-root', 'game', '--', 'test', '--custom', 'value']);
   assert.deepEqual(options.guestArguments, ['test', '--custom', 'value']);

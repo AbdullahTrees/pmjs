@@ -16,9 +16,9 @@ const digest = async file => hash(await fsp.readFile(file));
 const HASH = /^[a-f0-9]{64}$/;
 const installedLeases = new WeakMap();
 async function readJson(file) { return JSON.parse(await fsp.readFile(file, 'utf8')); }
-async function publishJson(file, value) {
+async function publishJson(file, value, flush = true) {
   const handle = await fsp.open(file, 'wx');
-  try { await handle.writeFile(JSON.stringify(value)+'\n'); await handle.sync(); }
+  try { await handle.writeFile(JSON.stringify(value)+'\n'); if (flush) await handle.sync(); }
   finally { await handle.close(); }
 }
 function validTileDescriptor(d) {
@@ -58,7 +58,13 @@ async function validateEntry(directory, key, files) {
       const checked = files ? await files.inspect(file) : { hash: await digest(file), reused: false };
       if (checked.hash !== page.hash) return false;
       if (reused && checked.reused) continue;
-      const bytes = await fsp.readFile(path.join(directory, page.path));
+      let bytes = checked.header;
+      if (!bytes) {
+        const handle = await fsp.open(file, 'r');
+        bytes = Buffer.alloc(24);
+        try { if ((await handle.read(bytes, 0, bytes.length, 0)).bytesRead !== bytes.length) return false; }
+        finally { await handle.close(); }
+      }
       const expected = manifest.descriptor.pages.find(p => p.path === page.path);
       if (!expected || bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
           bytes.readUInt32BE(16) !== expected.width || bytes.readUInt32BE(20) !== expected.height) return false;
@@ -198,8 +204,12 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     const contract = await engineContract(game, mz);
     const sharedDependencies = [...contract.dependencies, systemInput.dependency, sheetsInput.dependency];
     const data = game.directory('data').filter(file => /^Map\d+\.json$/i.test(file)).sort();
+    const checkedDependencies = new Map();
     async function validateDependencies(dependencies) {
       for (const dependency of dependencies) {
+        const checked = checkedDependencies.get(dependency.file);
+        if (!verifyHashes && checked && checked.hash === dependency.hash &&
+            checked.logical === dependency.logical && checked.sourceIdentity === dependency.sourceIdentity) continue;
         const before = dependency.logical && native.assets.sourceIdentity(dependency.logical);
         if (dependency.logical && native.assets.sourcePath(dependency.logical) !== dependency.file ||
             await digest(dependency.file) !== dependency.hash)
@@ -210,6 +220,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           // Link-count changes alter stat identity without changing captured content.
           if (current !== dependency.sourceIdentity) { dependency.sourceIdentity=current; ++result.identityRefreshes; }
         }
+        checkedDependencies.set(dependency.file, { ...dependency });
       }
     }
     await fsp.mkdir(path.join(root, 'entries'), { recursive: true });
@@ -325,7 +336,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           keys.push(refusalKey);
           stage = await fsp.mkdtemp(path.join(root,'entries','.stage-'));
           await publishJson(path.join(stage,'manifest.json'), { compiler: COMPILER_VERSION, key: refusalKey,
-            descriptor: null, descriptorHash: identity(null), outputs: [], reason: error.message });
+            descriptor: null, descriptorHash: identity(null), outputs: [], reason: error.message }, false);
           await validateDependencies(dependencies);
           if (shouldCancel()) { result.cancelled=true; break; }
           await fsp.rm(refusalDirectory,{recursive:true,force:true});
@@ -341,16 +352,18 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         row.features = demand.features;
         let inputs = [];
         for (const input of demand.sources) {
-          const file = native.assets.sourcePath(input.source);
-          if (!file) { inputs.push({ ...input, file: null, sourceHash: null }); continue; }
-          const sourceIdentity = native.assets.sourceIdentity(input.source);
           let dependency = sourceDependencies.get(input.source);
-          if (!dependency || dependency.sourceIdentity !== sourceIdentity || dependency.file !== file) {
-            dependency = { logical: input.source, file, sourceIdentity, hash: await digest(file) };
-            sourceDependencies.set(input.source, dependency);
+          if (!dependency || verifyHashes) {
+            const file = native.assets.sourcePath(input.source);
+            if (!file) { inputs.push({ ...input, file: null, sourceHash: null }); continue; }
+            const sourceIdentity = native.assets.sourceIdentity(input.source);
+            if (!dependency || dependency.sourceIdentity !== sourceIdentity || dependency.file !== file) {
+              dependency = { logical: input.source, file, sourceIdentity, hash: await digest(file) };
+              sourceDependencies.set(input.source, dependency);
+            }
+            if (native.assets.sourceIdentity(input.source) !== sourceIdentity) throw new Error('tile source changed while hashing');
           }
-          const sourceHash = dependency.hash;
-          if (native.assets.sourceIdentity(input.source) !== sourceIdentity) throw new Error('tile source changed while hashing');
+          const { file, sourceIdentity, hash: sourceHash } = dependency;
           inputs.push({ ...input, file, sourceHash, sourceIdentity });
         }
         const merged = new Map();
@@ -423,13 +436,13 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           for (const page of descriptor ? descriptor.pages : []) outputs.push({ path: page.path, hash: await digest(path.join(stage, page.path)) });
           manifest = { compiler: COMPILER_VERSION, key, descriptor, descriptorHash: identity(descriptor), outputs,
             reason, estimates: { pageBytes, geometryBytes, metadataBytes, ordinaryBytes, compactBytes } };
-          await publishJson(path.join(stage, 'manifest.json'), manifest);
+          // Disposable entries are validated on reuse; durable publication belongs to the final index/catalog.
+          await publishJson(path.join(stage, 'manifest.json'), manifest, false);
           if (!await validateEntry(stage, key,files)) throw new Error('tile output validation failed');
           if (shouldCancel()) { result.cancelled = true; break; }
           await validateDependencies(dependencies);
           await fsp.rm(directory, { recursive: true, force: true });
           await fsp.rename(stage, directory); stage = null; ++result.generated;
-          for (const page of outputs) await digest(path.join(directory, page.path));
           if (!await validateEntry(directory, key,files)) throw new Error('published tile output validation failed');
         }
         await validateDependencies(dependencies);

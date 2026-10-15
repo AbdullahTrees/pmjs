@@ -74,6 +74,29 @@ test('cache shares encoded snapshots, reuses positive entries, validates corrupt
   f.map.data[1]=2;fs.writeFileSync(path.join(f.gameRoot,'data/Map001.json'),JSON.stringify(f.map));
   assert.equal((await prepareMaps(f)).generated,1);assert.equal(f.jobs,3);
 });
+test('an interrupted disposable map manifest is regenerated without changing the selected map', async t => {
+  const f = fixture(t), first = await prepareMaps(f);
+  fs.writeFileSync(path.join(f.installed[0].directory, 'manifest.json'), '{"key":');
+  const recovered = await prepareMaps(f);
+  assert.equal(recovered.generated, 1);
+  assert.equal(recovered.installed, 1);
+  assert.deepEqual(recovered.index, first.index);
+});
+test('ordinary map preparation reuses shared dependency checks; full verification repeats them', async t => {
+  const f = fixture(t), sourceIdentity = f.native.assets.sourceIdentity;
+  fs.writeFileSync(path.join(f.gameRoot, 'data/Map002.json'), JSON.stringify({ ...f.map, data: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }));
+  let checks = 0;
+  f.native.assets.sourceIdentity = function(source) {
+    if (source === 'img/tilesets/B.png') ++checks;
+    return sourceIdentity(source);
+  };
+  const ordinary = await prepareMaps(f), ordinaryChecks = checks;
+  checks = 0;
+  const verified = await prepareMaps({ ...f, cacheRoot: path.join(f.cacheRoot, 'verified'), verifyHashes: true });
+  assert.deepEqual(verified.index, ordinary.index);
+  assert.equal(verified.installed, 2);
+  assert.ok(checks > ordinaryChecks);
+});
 test('warm compilation preserves descriptors and map contracts; changed and damaged inputs rebuild demand',async t=>{
   const f=fixture(t),cold=await prepareMaps(f);
   const descriptor=structuredClone(f.installed[0].descriptor);

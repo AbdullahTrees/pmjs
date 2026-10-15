@@ -12,6 +12,7 @@ const fixtures = [];
 for (const [name, width, height, grid, backdrop] of [
   ['transparent', 192, 96, [6, 4], [0, 0, 0, 0]],
   ['opaque', 192, 96, [6, 4], [12, 23, 34, 255]],
+  ['opaque-gray', 192, 96, [6, 4], [37, 37, 37, 255]],
   ['power-of-two', 256, 128, [8, 4], [0, 0, 0, 0]],
   ['wide', 8192, 32, [256, 1], [0, 0, 0, 0]],
   ['uniform', 192, 96, [1, 1], [37, 83, 129, 117]],
@@ -23,14 +24,16 @@ for (const [name, width, height, grid, backdrop] of [
   for (let y = 0; y < height; ++y) for (let x = 0; x < width; ++x) {
     const inside = name === 'wide' ? x % cw >= 12 && x % cw < 16 && y % ch >= 12 && y % ch < 16 :
       !uniform && x % cw >= 5 && x % cw < cw - 4 && y % ch >= 3 && y % ch < ch - 3;
-    const color = inside ? [(x % cw * 23) % 256, (y % ch * 19) % 256, (x + y) % 256, 96 + (x % cw * 7) % 160] : backdrop;
+    const gray = (x % cw * 23 + y % ch * 19) % 256;
+    const color = !inside ? backdrop : name === 'opaque-gray' ? [gray, gray, gray, 255] :
+      [(x % cw * 23) % 256, (y % ch * 19) % 256, (x + y) % 256, 96 + (x % cw * 7) % 160];
     pixels.set(color, (y * width + x) * 4);
   }
   const bytes = png(width, height, pixels);
   fs.writeFileSync(path.join(root, name + '.png'), bytes);
   fixtures.push({ name, bytes, width, height, cw, ch, grid, backdrop, uniform });
 }
-native.initialize({ gameRoot: root, assetRoot: '', width: 128, height: 96, windowTitle: 'derived sprite pixels' });
+native.initialize({ gameRoot: root, assetRoot: '', width: 128, height: 96, windowTitle: 'derived sprite pixels', preparedFrameCacheBytes: 0 });
 native.render.setClearColor(0.08, 0.15, 0.2, 1);
 const schema = native.scene.schema;
 // Initialize diagnostic fallback storage before measuring image realization.

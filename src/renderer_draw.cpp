@@ -640,6 +640,9 @@ void Renderer::renderScene() {
     std::array<float, 4> derivedUvTransform{};
     std::array<float, 4> derivedSampleBounds{};
     std::array<float, 2> derivedAtlasOffset{};
+    std::optional<CompactImageRegion> compact{};
+    std::optional<BlockImageRegion> block{};
+    std::array<float, 4> compactBounds{};
     bool sparse = false;
     std::vector<std::array<int, 4>> sparseClips{};
     std::uint64_t sparseFullPixels = 0;
@@ -756,29 +759,57 @@ void Renderer::renderScene() {
       logicalInfo->height > 0 && (logicalInfo->width & (logicalInfo->width - 1)) == 0 &&
       (logicalInfo->height & (logicalInfo->height - 1)) == 0;
     const bool derivedSampling = uniformPrepared || (command.nearest && exactNearestDimensions);
-    const bool derivedEligible = command.primitive == RenderCommand::Primitive::sprite &&
-      derivedSampling &&
+    const bool frameEligible = command.primitive == RenderCommand::Primitive::sprite &&
       !command.repeat && !command.mipmap && !command.clampedTilingSampling &&
-      !command.appliesColorMatrix && !command.appliesSpriteColor &&
+      !command.appliesColorMatrix &&
       !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
       command.blur <= 0 && command.maskImage == 0 && command.textureRotation == 0 &&
       // A constant texture needs no UV remapping in the inline effect sampler.
       (inlineFilterMatrix[commandIndex] == nullptr || uniformPrepared);
-    const auto derived = derivedEligible ? images_.resolveSpriteRegion(command.image,
+    const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
+    const auto block = frameEligible ? images_.resolveBlockRegion(command.image,
+      command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
+      std::optional<BlockImageRegion>{};
+    auto derived = !block && derivedEligible ? images_.resolveSpriteRegion(command.image,
       command.source[0], command.source[1], command.source[2], command.source[3],
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<SpriteImageRegion>{};
-    if (!derived && images_.hasPreparedBacking(command.image)) {
+    const bool compactEligible = logicalInfo && !block && !derived && !command.nearest &&
+      command.primitive == RenderCommand::Primitive::sprite &&
+      command.source[1] == 0 && command.source[3] == logicalInfo->height &&
+      command.source[2] > 0 && localWidth > 0 && localHeight > 0 &&
+      !command.repeat && !command.mipmap && !command.clampedTilingSampling &&
+      !command.appliesColorMatrix && !command.appliesSpriteColor &&
+      !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
+      command.blur <= 0 && command.maskImage == 0 && command.textureRotation == 0 &&
+      inlineFilterMatrix[commandIndex] == nullptr &&
+      sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
+      viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
+      p1[0] > p0[0] && p3[1] > p0[1] && p1[1] == p0[1] && p3[0] == p0[0] &&
+      p2[0] == p1[0] && p2[1] == p3[1];
+    const auto compact = compactEligible ? images_.resolveCompactRegion(command.image,
+      command.source[0], command.source[1], command.source[2], command.source[3]) :
+      std::optional<CompactImageRegion>{};
+    if (!block && !derived && !compact && frameEligible)
+      derived = images_.resolvePreparedFrameRegion(command.image,
+        command.source[0], command.source[1], command.source[2], command.source[3],
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture);
+    if (!block && !derived && !compact && images_.hasPreparedBacking(command.image)) {
       const char* reason = derivedEligible ? "unsupported-crop" :
         command.primitive != RenderCommand::Primitive::sprite ? "non-sprite" :
-        command.mipmap ? "mipmaps" : !derivedSampling ?
-          (command.nearest ? "non-power-of-two-sampling" : "linear-sampling") :
-        command.repeat ? "repetition" :
+        command.mipmap ? "mipmaps" : command.repeat ? "repetition" :
         command.maskImage ? "mask" : command.blur > 0 ? "blur" :
-        command.textureRotation ? "texture-rotation" : "effects-or-sampler";
+        command.textureRotation ? "texture-rotation" :
+        command.appliesColorMatrix || command.appliesSpriteColor ||
+          command.appliesMeshPostTintOverlay || command.standaloneBitmapRegion ||
+          inlineFilterMatrix[commandIndex] ? "effects-or-sampler" :
+        !derivedSampling ? (command.nearest ? "non-power-of-two-sampling" : "linear-sampling") :
+        "unsupported-crop";
       images_.notePreparedFallback(command.image, reason);
     }
-    const auto info = derived ? std::optional<ImageInfo>{derived->image} :
+    const auto info = block ? std::optional<ImageInfo>{block->image} :
+      compact ? std::optional<ImageInfo>{compact->image} :
+      derived ? std::optional<ImageInfo>{derived->image} :
       command.image == 0 ? std::optional<ImageInfo>{} :
       (command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture) ?
         images_.lookupPremultiplied(command.image) : images_.lookup(command.image));
@@ -794,9 +825,9 @@ void Renderer::renderScene() {
         !command.standaloneBitmapRegion && !command.appliesMeshPostTintOverlay) {
       continue;
     }
-    const float textureWidth = derived && logicalInfo ? static_cast<float>(logicalInfo->width) :
+    const float textureWidth = (block || derived || compact) && logicalInfo ? static_cast<float>(logicalInfo->width) :
       info ? static_cast<float>(info->width) : 1.0F;
-    const float textureHeight = derived && logicalInfo ? static_cast<float>(logicalInfo->height) :
+    const float textureHeight = (block || derived || compact) && logicalInfo ? static_cast<float>(logicalInfo->height) :
       info ? static_cast<float>(info->height) : 1.0F;
     std::array<float, 4> derivedUvTransform{}, derivedSampleBounds{};
     std::array<float, 2> derivedAtlasOffset{};
@@ -931,7 +962,7 @@ void Renderer::renderScene() {
         }
       }
     }
-    if (operations.empty() || operations.back().tileLayer != 0 ||
+    if (operations.empty() || block || operations.back().block || compact || operations.back().compact || operations.back().tileLayer != 0 ||
         operations.back().sparse || sparseClips.has_value() ||
         operations.back().derivedImage != derived.has_value() ||
         operations.back().derivedUvTransform != derivedUvTransform ||
@@ -988,6 +1019,18 @@ void Renderer::renderScene() {
       operations.back().derivedUvTransform = derivedUvTransform;
       operations.back().derivedSampleBounds = derivedSampleBounds;
       operations.back().derivedAtlasOffset = derivedAtlasOffset;
+      operations.back().block = block;
+      if (compact) {
+        operations.back().compact = compact;
+        const auto& bounds = compact->contentBounds;
+        const float sx = (p1[0] - p0[0]) / command.source[2];
+        const float sy = (p3[1] - p0[1]) / command.source[3];
+        operations.back().compactBounds = {
+          p0[0] + (bounds[0] - 2 - command.source[0]) * sx,
+          p0[1] + (bounds[1] - 2 - command.source[1]) * sy,
+          p0[0] + (bounds[2] + 2 - command.source[0]) * sx,
+          p0[1] + (bounds[3] + 2 - command.source[1]) * sy};
+      }
       if (sparseClips) {
         operations.back().sparse = true;
         operations.back().sparseClips = std::move(*sparseClips);
@@ -1949,6 +1992,78 @@ void Renderer::renderScene() {
       continue;
     }
 
+    // Pixi render targets project downward in GL; readback reflection cannot
+    // reproduce sampling and edge coverage at exact pixel-center boundaries.
+    const float ySign = targetYDown ? 1.0F : -1.0F;
+    const double sx = 2.0 / std::max(1.0F, rasterFrame[2]);
+    const double sy = ySign * 2.0 / std::max(1.0F, rasterFrame[3]);
+    const auto& transform = sceneProjection_;
+    const std::array<float, 9> projection = {
+      static_cast<float>(sx * transform[0]), static_cast<float>(sy * transform[1]), 0,
+      static_cast<float>(sx * transform[2]), static_cast<float>(sy * transform[3]), 0,
+      static_cast<float>(-1 - rasterFrame[0] * sx + transform[4] * sx),
+      static_cast<float>(-ySign - rasterFrame[1] * sy + transform[5] * sy), 1};
+    if (operation.compact) {
+      const auto& region = *operation.compact;
+      glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, operation.texture);
+      const std::array<std::uint32_t, 4> tables{region.indexX, region.indexY, region.phaseX, region.phaseY};
+      for (std::size_t i = 0; i < tables.size(); ++i) {
+        glActiveTexture(GL_TEXTURE2 + i); glBindTexture(GL_TEXTURE_2D, tables[i]);
+      }
+      glActiveTexture(GL_TEXTURE0);
+      const int targetWidth = static_cast<int>(rasterFrame[2] * rasterResolution);
+      const int targetHeight = static_cast<int>(rasterFrame[3] * rasterResolution);
+      std::array<GLint, 4> previousClip{0, 0, targetWidth, targetHeight};
+      if (scissorActive) glGetIntegerv(GL_SCISSOR_BOX, previousClip.data());
+      const int left = std::max(0, previousClip[0]), bottom = std::max(0, previousClip[1]);
+      const int right = std::min(targetWidth, previousClip[0] + previousClip[2]);
+      const int top = std::min(targetHeight, previousClip[1] + previousClip[3]);
+      const auto& bounds = operation.compactBounds;
+      const float lowY = targetYDown ? bounds[1] - rasterFrame[1] : rasterFrame[1] + rasterFrame[3] - bounds[3];
+      const float highY = targetYDown ? bounds[3] - rasterFrame[1] : rasterFrame[1] + rasterFrame[3] - bounds[1];
+      const auto lower = [](float value, int low, int high) {
+        return static_cast<int>(std::floor(std::clamp(value, float(low), float(high))));
+      };
+      const auto upper = [](float value, int low, int high) {
+        return static_cast<int>(std::ceil(std::clamp(value, float(low), float(high))));
+      };
+      const int x0 = lower((bounds[0] - rasterFrame[0]) * rasterResolution, left, std::max(left, right));
+      const int x1 = upper((bounds[2] - rasterFrame[0]) * rasterResolution, left, std::max(left, right));
+      const int y0 = lower(lowY * rasterResolution, bottom, std::max(bottom, top));
+      const int y1 = upper(highY * rasterResolution, bottom, std::max(bottom, top));
+      const auto setup = [&](const CompactSpriteProgram& program) {
+        glUseProgram(program.program); glBindVertexArray(vertexArray_);
+        projectTarget(program.program);
+        glUniformMatrix3fv(program.projection, 1, GL_FALSE, projection.data());
+        glUniform1i(program.targetYDown, targetYDown);
+        glUniform1i(program.vertices, operation.spriteWorldVertices);
+        glUniform1i(program.packing, operation.pixiSpritePacking);
+        glUniform1i(program.premultiplied, operation.premultipliedSpriteTexture);
+        glUniform2f(program.logicalSize, region.logicalWidth, region.logicalHeight);
+        glUniform2f(program.atlasSize, region.image.width, region.image.height);
+        glUniform2fv(program.atlasOffset, 1, region.atlasOffset.data());
+        glUniform4fv(program.contentBounds, 1, region.contentBounds.data());
+        glUniform4fv(program.fill, 1, region.fill.data());
+      };
+      glEnable(GL_SCISSOR_TEST);
+      std::size_t draws = 0;
+      const auto strip = [&](int l, int b, int r, int t) {
+        if (l >= r || b >= t) return;
+        glScissor(l, b, r - l, t - b);
+        glDrawArrays(GL_TRIANGLES, operation.first, operation.count); ++draws;
+      };
+      // The original quad and UVs stay intact; disjoint scissors preserve opacity.
+      setup(compactFill_);
+      strip(left, bottom, x0, top); strip(x1, bottom, right, top);
+      strip(x0, bottom, x1, y0); strip(x0, y1, x1, top);
+      setup(compactSprite_); strip(x0, y0, x1, y1);
+      if (scissorActive) glScissor(previousClip[0], previousClip[1], previousClip[2], previousClip[3]);
+      else glDisable(GL_SCISSOR_TEST);
+      activeProgram = compactSprite_.program;
+      if (diagnostics_) { stats_.drawCalls += draws; stats_.spriteDrawCalls += draws; stats_.baseSpriteDrawCalls += draws; }
+      continue;
+    }
+
     const bool simpleSprite = operation.blur <= 0 && operation.maskImage == 0 &&
                               !operation.appliesSpriteColor && !operation.standaloneBitmapRegion &&
                               operation.inlineMatrix == nullptr;
@@ -1971,17 +2086,6 @@ void Renderer::renderScene() {
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
                       operation.nearest ? GL_NEAREST : GL_LINEAR);
     }
-    // Pixi render targets project downward in GL; readback reflection cannot
-    // reproduce sampling and edge coverage at exact pixel-center boundaries.
-    const float ySign = targetYDown ? 1.0F : -1.0F;
-    const double sx = 2.0 / std::max(1.0F, rasterFrame[2]);
-    const double sy = ySign * 2.0 / std::max(1.0F, rasterFrame[3]);
-    const auto& transform = sceneProjection_;
-    const std::array<float, 9> projection = {
-      static_cast<float>(sx * transform[0]), static_cast<float>(sy * transform[1]), 0,
-      static_cast<float>(sx * transform[2]), static_cast<float>(sy * transform[3]), 0,
-      static_cast<float>(-1 - rasterFrame[0] * sx + transform[4] * sx),
-      static_cast<float>(-ySign - rasterFrame[1] * sy + transform[5] * sy), 1};
     glUniform1i(simpleSprite ? simpleTargetYDownUniform_ : spriteEffect.targetYDown, targetYDown);
     glUniformMatrix3fv(simpleSprite ? simpleSpriteProjectionUniform_ : spriteEffect.projection, 1, GL_FALSE, projection.data());
     glUniform1i(simpleSprite ? simpleTilingClampUniform_ : spriteEffect.tilingClamp,
@@ -2011,6 +2115,17 @@ void Renderer::renderScene() {
                 operation.pixiSpritePacking ? 1 : 0);
     glUniform1i(simpleSprite ? simpleSpritePremultipliedUniform_ : spriteEffect.premultiplied,
                 operation.premultipliedSpriteTexture ? 1 : 0);
+    const auto& blockUniforms = simpleSprite ? simpleBlock_ : spriteEffect.block;
+    glUniform1i(blockUniforms.enabled, operation.block.has_value());
+    if (operation.block) {
+      const auto& region = *operation.block;
+      glUniform1i(blockUniforms.nearest, operation.nearest);
+      glUniform3iv(blockUniforms.grid, 1, region.blockGrid.data());
+      glUniform1i(blockUniforms.tableWidth, region.tableSize[0]);
+      glActiveTexture(GL_TEXTURE2);
+      glBindTexture(GL_TEXTURE_2D, region.table);
+      glActiveTexture(GL_TEXTURE0);
+    }
     if (!simpleSprite) {
       const auto& frame = operation.spriteFrame;
       glUniform4f(spriteEffect.frame, frame[0], frame[1],
@@ -2027,6 +2142,11 @@ void Renderer::renderScene() {
       }
       glUniform2f(spriteEffect.textureSize, operation.textureWidth,
                   operation.textureHeight);
+      glUniform1i(spriteEffect.derivedImage, operation.derivedImage);
+      if (operation.derivedImage) {
+        glUniform4fv(spriteEffect.derivedUvTransform, 1, operation.derivedUvTransform.data());
+        glUniform2fv(spriteEffect.derivedAtlasOffset, 1, operation.derivedAtlasOffset.data());
+      }
       glUniform1f(spriteEffect.blur, operation.blur);
       glUniform1i(spriteEffect.matrixEnabled,
                   operation.inlineMatrix ? 1 : 0);

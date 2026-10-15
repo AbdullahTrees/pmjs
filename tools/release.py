@@ -58,7 +58,7 @@ def cache_values(build):
     return values
 
 
-NATIVE_TARGET = r'CMakeFiles/(?:pmjs_native|pmjs_runtime|Effekseer|EffekseerRendererGL)\.dir/'
+NATIVE_TARGET = r'CMakeFiles/(?:pmjs_native|pmjs_runtime|pmjs_lz4|Effekseer|EffekseerRendererGL)\.dir/'
 
 
 def compiled_identity(source, build):
@@ -71,6 +71,7 @@ def compiled_identity(source, build):
                  if file.is_file() and file.suffix in ('.h', '.hpp', '.in'))
     files.update(file for file in (source / 'cmake').rglob('*') if file.is_file())
     files.update(source / name for name in ('CMakeLists.txt', 'tools/effekseer.lock.json',
+                                           'tools/lz4.lock.json', 'third_party/lz4.LICENSE',
                                            'third_party/effekseer-mz.patch', 'third_party/effekseer.LICENSE'))
     files.update(Path(line) for line in (build / 'build-inputs.txt').read_text().splitlines() if line)
     values = cache_values(build)

@@ -102,7 +102,7 @@ std::string ImageStore::effectiveTileSet(const ImageFileSource& source, const st
   const auto set = tileSets_.find(identity);
   if (set != tileSets_.end()) for (const auto& entry : set->second->descriptor.sources)
     if (entry.identity == source.key()) return identity;
-  if (set != tileSets_.end()) preparationInvalidations_.fetch_or(2, std::memory_order_relaxed);
+  if (set != tileSets_.end()) preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
   return {};
 }
 bool ImageStore::installTileSet(PreparedTileSet descriptor,
@@ -162,7 +162,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
   for (std::size_t i = 0; i < descriptor.sources.size(); ++i) {
     if (descriptor.sources[i].identity != source.key()) {
       if (descriptor.sources[i].path == source.path())
-        preparationInvalidations_.fetch_or(2, std::memory_order_relaxed);
+        preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
       continue;
     }
     auto load = std::make_shared<TileLoad>();
@@ -173,7 +173,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       for (std::size_t page = 0; page < descriptor.pages.size(); ++page) {
         auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
         if (!file || file->key() != found->second->pageIdentities[page]) {
-          preparationInvalidations_.fetch_or(2, std::memory_order_relaxed);
+          preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           return nullptr;
         }
         prototype->pages.push_back(std::move(file));
@@ -181,7 +181,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       for (std::size_t entry = 0; entry < descriptor.sources.size(); ++entry) {
         auto file = captureTileFile(descriptor.sources[entry].snapshot);
         if (!file || file->key() != found->second->snapshotIdentities[entry]) {
-          preparationInvalidations_.fetch_or(2, std::memory_order_relaxed);
+          preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           return nullptr;
         }
         prototype->snapshots.push_back(std::move(file));
@@ -228,6 +228,8 @@ bool ImageStore::validateTileLoad(TileLoad& load, bool retainCpu) {
 }
 std::optional<ImageInfo> ImageStore::insertTileView(std::shared_ptr<TileBacking> backing,
     int width, int height, const std::string& cacheKey) {
+  auto key = cacheKey;
+  auto sourcePath = backing->prototype->descriptor.sources[backing->source].path;
   std::size_t index = 0;
   while (index < slots_.size() && slots_[index].live) ++index;
   if (index >= tileIndexMask) return std::nullopt;
@@ -236,14 +238,19 @@ std::optional<ImageInfo> ImageStore::insertTileView(std::shared_ptr<TileBacking>
   slot.tiles = std::move(backing); slot.width = width; slot.height = height;
   slot.texture = slot.premultipliedTexture = 0; slot.channels = 4;
   slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
-  slot.cacheKey = cacheKey; slot.sourcePath = slot.tiles->prototype->descriptor.sources[slot.tiles->source].path;
+  slot.cacheKey = std::move(key); slot.sourcePath = std::move(sourcePath);
   slot.gpuOnly = slot.renderTarget = slot.premultiplied = slot.knownAllZero = false;
   slot.retainCpuPixels = false; slot.cachedPixels.reset(); slot.cpuPixelFrames = 0;
   slot.mipmapsReady = slot.premultipliedMipmapsReady = false;
   slot.mipmapBytes = slot.premultipliedMipmapBytes = 0;
   slot.live = true; markUsed(slot); ++liveCount_;
   const auto handle = makeHandle(index, slot.generation);
-  if (!cacheKey.empty()) pathCache_[cacheKey] = handle;
+  try {
+    if (!slot.cacheKey.empty()) pathCache_.emplace(slot.cacheKey, handle);
+  } catch (...) {
+    destroySlot(index);
+    throw;
+  }
   return inspect(handle);
 }
 std::optional<ImageInfo> ImageStore::installTileLoad(std::shared_ptr<TileLoad> load, bool retainCpu) {
@@ -261,6 +268,7 @@ std::optional<ImageInfo> ImageStore::installTileLoad(std::shared_ptr<TileLoad> l
   auto pages = load->cachedPages ? load->cachedPages : load->prototype->pageOwner.lock();
   if (!pages) {
     pages = std::make_shared<TilePages>(); pages->store = this; pages->alive = alive_;
+    pages->images.reserve(load->decoded->pixels.size());
     // Both sampling modes are prewarmed before the image's ready event. Logical
     // views share these allocations; page ownership is independent of display trees.
     for (const auto& pixels : load->decoded->pixels) {

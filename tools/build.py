@@ -38,27 +38,30 @@ def prepare_arm64(jobs, env):
              "llvm-ar-20", "llvm-strip-20"])
     sdk = ROOT / ".cache/linux-arm64/sdk"
     node = ROOT / ".cache/linux-arm64/node"
-    archive = ROOT / ".cache/effekseer/source.tar.gz"
     component = ROOT / ".cache/components/arm64"
     run(sys.executable, ROOT / "tools/linux-arm64/prepare-sdk.py",
         "--sdk", sdk, "--jobs", jobs)
     run(sys.executable, ROOT / "tools/linux-arm64/prepare-node.py", "--output", node)
-    lock = json.loads((ROOT / "tools/effekseer.lock.json").read_text())
-    if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != lock["sha256"]:
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        download = archive.with_suffix(".download")
-        try:
-            with urllib.request.urlopen(lock["url"]) as source, download.open("wb") as target:
-                shutil.copyfileobj(source, target)
-            if hashlib.sha256(download.read_bytes()).hexdigest() != lock["sha256"]:
-                raise ValueError("Downloaded Effekseer archive did not match its pinned SHA-256")
-            download.replace(archive)
-        finally:
-            download.unlink(missing_ok=True)
+    for dependency in ("effekseer", "lz4"):
+        archive = ROOT / f".cache/{dependency}/source.tar.gz"
+        lock = json.loads((ROOT / f"tools/{dependency}.lock.json").read_text())
+        if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != lock["sha256"]:
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            download = archive.with_suffix(".download")
+            try:
+                with urllib.request.urlopen(lock["url"]) as source, download.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+                if hashlib.sha256(download.read_bytes()).hexdigest() != lock["sha256"]:
+                    raise ValueError(f"Downloaded {dependency} archive did not match its pinned SHA-256")
+                download.replace(archive)
+            finally:
+                download.unlink(missing_ok=True)
     run(sys.executable, ROOT / "tools/skia65/build.py", "--arch", "arm64",
         "--sdk", sdk, "--output", component, "--reuse")
     env.update(PMJS_SDK_ROOT=str(sdk), PMJS_NODE_ROOT=str(node),
-               PMJS_EFFEKSEER_ARCHIVE=str(archive), PMJS_SKIA65_COMPONENT_DIR=str(component))
+               PMJS_EFFEKSEER_ARCHIVE=str(ROOT / ".cache/effekseer/source.tar.gz"),
+               PMJS_LZ4_ARCHIVE=str(ROOT / ".cache/lz4/source.tar.gz"),
+               PMJS_SKIA65_COMPONENT_DIR=str(component))
 
 
 def main():

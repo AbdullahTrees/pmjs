@@ -76,6 +76,193 @@ int main() {
   const auto* directory = mkdtemp(temporary.data());
   require(directory,"temporary fixture failed");
   const std::filesystem::path root(directory);
+  {
+    pmjs::ImageStore images;
+    pmjs::PreparedImageDescriptor descriptor;
+    descriptor.width=48; descriptor.height=12;
+    descriptor.pages={{"compact-page-0.png",7,7},{"compact-page-1.png",7,7}};
+    descriptor.cells={
+      {{0,0,16,12},{2,3,2,2},{1,1,2,2},{37,37,37,255},0},
+      {{16,0,16,12},{3,2,3,2},{1,1,3,2},{37,37,37,255},1},
+      {{32,0,16,12},{0,0,0,0},{0,0,0,0},{37,37,37,255},-1}};
+    std::vector<std::uint8_t> original(48*12*4);
+    for(std::size_t i=0;i<original.size();i+=4) {
+      original[i]=original[i+1]=original[i+2]=37; original[i+3]=255;
+    }
+    std::array<std::vector<std::uint8_t>,2> expectedPages;
+    for(std::size_t index=0;index<expectedPages.size();++index) {
+      std::vector<std::uint8_t> page(7*7*4);
+      expectedPages[index].resize(8*8*4);
+      for(std::size_t i=0;i<expectedPages[index].size();i+=4) {
+        expectedPages[index][i]=expectedPages[index][i+1]=expectedPages[index][i+2]=37;
+        expectedPages[index][i+3]=255;
+      }
+      const auto& cell=descriptor.cells[index];
+      for(int y=0;y<cell.crop[3];++y) for(int x=0;x<cell.crop[2];++x) {
+        const auto gray=static_cast<std::uint8_t>(61+x*17+y*23);
+        const auto offset=(static_cast<std::size_t>(cell.atlas[1]+y)*7+cell.atlas[0]+x)*4;
+        page[offset]=page[offset+1]=page[offset+2]=gray; page[offset+3]=255;
+        auto* expected=expectedPages[index].data()+(static_cast<std::size_t>(cell.atlas[1]+y)*8+cell.atlas[0]+x)*4;
+        expected[0]=expected[1]=expected[2]=gray; expected[3]=255;
+        auto* logical=original.data()+
+          (static_cast<std::size_t>(cell.rect[1]+cell.crop[1]+y)*48+cell.rect[0]+cell.crop[0]+x)*4;
+        logical[0]=logical[1]=logical[2]=gray; logical[3]=255;
+      }
+      page[0]=19; page[1]=43;
+      write(root/descriptor.pages[index].path,7,7,page);
+    }
+    write(root/"compact-source.png",48,12,original);
+    require(images.installPrepared(root/"compact-source.png",root,descriptor),"compact preparation failed");
+    auto image=images.loadPng(root/"compact-source.png");
+    require(image.has_value(),"compact image load failed");
+    for(int tick=0;tick<61;++tick) images.update();
+    const auto first=images.resolveCompactRegion(image->handle,0,0,16,12);
+    require(first && first->contentBounds==std::array<float,4>{2,3,4,5} &&
+      first->atlasOffset==std::array<float,2>{-1,-2} && first->logicalWidth==48 && first->logicalHeight==12,
+      "compact logical bounds changed");
+    require(readGpu(first->image)==expectedPages[0],"compact page lost exact crop or fill pixels");
+    const auto creates=images.textureCreates(),uploads=images.textureUploadBytes();
+    require(images.resolveCompactRegion(image->handle,1,1,12,8).has_value() &&
+      images.textureCreates()==creates && images.textureUploadBytes()==uploads && images.preparedPageDecodes()==4,
+      "compact reuse uploaded or decoded again");
+    const auto second=images.resolveCompactRegion(image->handle,16,0,16,12);
+    require(second && second->indexX==first->indexX && second->indexY==first->indexY &&
+      second->phaseX==first->phaseX && second->phaseY==first->phaseY && readGpu(second->image)==expectedPages[1],
+      "compact pages did not share exact lookup tables");
+    require(images.textureCreates()==6 && images.gpuBytes()==608 && images.textureUploadBytes()==608 &&
+      images.preparedRegionReads()==0 && images.preparedMaterializations()==0 && images.inspect(image->handle)->texture==0,
+      "compact realization expanded logical backing or changed accounting");
+    require(!images.resolveCompactRegion(image->handle,32,0,16,12) &&
+      !images.resolveCompactRegion(image->handle,15,0,2,12),"empty or cross-cell compact crop escaped fallback");
+    require(images.readPixelsRegion(image->handle,0,0,48,12)->rgba==original,"compact upload modified CPU content");
+    const std::array<GLuint,6> textures{first->image.texture,second->image.texture,
+      first->indexX,first->indexY,first->phaseX,first->phaseY};
+    require(images.beginUse(image->handle),"compact in-flight use failed");
+    images.release(image->handle); images.setWarmBudgetBytes(0); images.update();
+    for(const auto texture:textures) require(glIsTexture(texture),"compact resources died while in flight");
+    images.endUse(image->handle); images.update();
+    for(const auto texture:textures) require(!glIsTexture(texture),"compact resources outlived owner");
+    require(images.gpuBytes()==0 && images.cpuBytes()==0,"compact ownership accounting leaked");
+    image=images.loadPng(root/"compact-source.png");
+    const auto beforeMutation=images.resolveCompactRegion(image->handle,0,0,16,12);
+    require(beforeMutation.has_value(),"compact reacquisition failed");
+    const std::vector<std::uint8_t> replacement(original.size(),255);
+    require(images.updateRgba(image->handle,replacement.data()) && !images.hasPreparedBacking(image->handle) &&
+      !images.resolveCompactRegion(image->handle,0,0,16,12) && !glIsTexture(beforeMutation->indexX) &&
+      readGpu(*images.lookup(image->handle))==replacement,"compact mutation retained stale resources or pixels");
+    images.release(image->handle); images.update();
+    require(images.gpuBytes()==0 && images.cpuBytes()==0,"compact mutation accounting leaked");
+    descriptor.cells[0].crop[0]=1;
+    require(images.installPrepared(root/"compact-source.png",root,descriptor),"border compact preparation failed");
+    image=images.loadPng(root/"compact-source.png");
+    require(image && !images.resolveCompactRegion(image->handle,0,0,16,12) && images.gpuBytes()==0,
+      "border content escaped compact fallback");
+    images.release(image->handle); images.update();
+  }
+  for (int variant = 0; variant < 6; ++variant) {
+    pmjs::ImageStore images;
+    pmjs::PreparedImageDescriptor descriptor;
+    descriptor.width=24; descriptor.height=8;
+    descriptor.pages={{"crop-page-0.png",7,7},{"crop-page-1.png",7,7}};
+    descriptor.cells={
+      {{0,0,8,8},{2,3,3,3},{1,1,3,3},{37,37,37,255},0},
+      {{8,0,8,8},{1,1,4,2},{1,1,4,2},{37,37,37,255},1},
+      {{16,0,8,8},{0,0,0,0},{0,0,0,0},{37,37,37,255},-1}};
+    std::array<std::vector<std::uint8_t>,2> pages;
+    for (std::size_t index=0;index<pages.size();++index) {
+      auto& page=pages[index]; page.resize(7*7*4);
+      const auto& cell=descriptor.cells[index];
+      for(int y=0;y<cell.crop[3];++y) for(int x=0;x<cell.crop[2];++x) {
+        const auto offset=(static_cast<std::size_t>(cell.atlas[1]+y)*7+cell.atlas[0]+x)*4;
+        page[offset]=page[offset+1]=page[offset+2]=61+x*17+y*23;
+        page[offset+3]=255;
+      }
+      // Padding is outside the logical image and must not affect eligibility.
+      page[0]=19; page[1]=43;
+    }
+    if(variant==1) pages[1][(7+1)*4+1]=99;
+    if(variant==2) pages[1][(7+1)*4+3]=157;
+    if(variant==3) for(auto& cell:descriptor.cells) cell.fill[1]=73;
+    if(variant==4) for(auto& cell:descriptor.cells) cell.fill[3]=157;
+    if(variant==5) descriptor.cells.back().fill={89,89,89,255};
+    for(std::size_t index=0;index<pages.size();++index)
+      write(root/descriptor.pages[index].path,7,7,pages[index]);
+    std::vector<std::uint8_t> original(24*8*4);
+    for(const auto& cell:descriptor.cells)
+      for(int y=0;y<cell.rect[3];++y) for(int x=0;x<cell.rect[2];++x) {
+        auto* pixel=original.data()+(static_cast<std::size_t>(cell.rect[1]+y)*24+cell.rect[0]+x)*4;
+        const int cx=x-cell.crop[0],cy=y-cell.crop[1];
+        if(cx>=0 && cy>=0 && cx<cell.crop[2] && cy<cell.crop[3])
+          std::copy_n(pages[cell.page].data()+
+              (static_cast<std::size_t>(cell.atlas[1]+cy)*7+cell.atlas[0]+cx)*4,4,pixel);
+        else std::copy(cell.fill.begin(),cell.fill.end(),pixel);
+      }
+    write(root/"crop-source.png",24,8,original);
+    require(images.installPrepared(root/"crop-source.png",root,descriptor),"crop preparation failed");
+    auto image=images.loadPng(root/"crop-source.png");
+    require(image.has_value(),"crop source load failed");
+    for(int tick=0;tick<61;++tick) images.update();
+    for(const bool premultiplied:{true,false}) {
+      GLuint target=0,binding=0,buffer=0;
+      if(variant==0) {
+        glGenTextures(1,&binding); glBindTexture(GL_TEXTURE_2D,binding);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,4,4,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+        glGenFramebuffers(1,&target); glBindFramebuffer(GL_FRAMEBUFFER,target);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,binding,0);
+        glGenBuffers(1,&buffer); glBindBuffer(GL_PIXEL_UNPACK_BUFFER,buffer);
+        glBufferData(GL_PIXEL_UNPACK_BUFFER,128,nullptr,GL_STATIC_DRAW);
+        glPixelStorei(GL_UNPACK_ALIGNMENT,8); glPixelStorei(GL_UNPACK_ROW_LENGTH,8);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS,1); glPixelStorei(GL_UNPACK_SKIP_PIXELS,1);
+        if(premultiplied) { glEnable(GL_SCISSOR_TEST); glEnable(GL_DITHER); }
+        else { glDisable(GL_SCISSOR_TEST); glDisable(GL_DITHER); }
+        glScissor(2,2,1,1); glColorMask(GL_FALSE,GL_TRUE,GL_FALSE,GL_TRUE);
+      }
+      const auto full=premultiplied ? images.lookupPremultiplied(image->handle) : images.lookup(image->handle);
+      require(full.has_value(),"crop realization failed");
+      if(variant==0) {
+        GLint state=0; GLboolean mask[4];
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&state); require(state==static_cast<GLint>(target),"crop changed draw framebuffer");
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&state); require(state==static_cast<GLint>(target),"crop changed read framebuffer");
+        glGetIntegerv(GL_TEXTURE_BINDING_2D,&state); require(state==static_cast<GLint>(binding),"crop changed texture binding");
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING,&state); require(state==static_cast<GLint>(buffer),"crop changed unpack buffer");
+        glGetIntegerv(GL_UNPACK_ALIGNMENT,&state); require(state==8,"crop changed unpack alignment");
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH,&state); require(state==8,"crop changed unpack row length");
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS,&state); require(state==1,"crop changed unpack rows");
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS,&state); require(state==1,"crop changed unpack pixels");
+        glGetBooleanv(GL_COLOR_WRITEMASK,mask);
+        require(!mask[0] && mask[1] && !mask[2] && mask[3],"crop changed color mask");
+        require(bool(glIsEnabled(GL_SCISSOR_TEST))==premultiplied &&
+                bool(glIsEnabled(GL_DITHER))==premultiplied,"crop changed clear capabilities");
+        glBindFramebuffer(GL_FRAMEBUFFER,0); glDeleteFramebuffers(1,&target);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0); glDeleteBuffers(1,&buffer);
+        glBindTexture(GL_TEXTURE_2D,0); glDeleteTextures(1,&binding);
+        glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS,0); glPixelStorei(GL_UNPACK_SKIP_PIXELS,0);
+        glDisable(GL_SCISSOR_TEST); glEnable(GL_DITHER); glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+      }
+      auto expected=original;
+      if(premultiplied) for(std::size_t i=0;i<expected.size();i+=4) for(int c=0;c<3;++c)
+        expected[i+c]=(expected[i+c]*expected[i+3]+127)/255;
+      require(readGpu(*full)==expected,"crop realization changed exact RGBA pixels");
+      const auto uploads=images.textureUploadBytes();
+      require((premultiplied ? images.lookupPremultiplied(image->handle) : images.lookup(image->handle)) &&
+              images.textureUploadBytes()==uploads,"resident crop backing uploaded twice");
+    }
+    if(variant==0) {
+      require(images.gpuBytes()==2*24*8 && images.textureUploadBytes()==2*(9+8),"crop allocation or upload accounting failed");
+      require(images.preparedRegionReads()==0 && images.preparedPageDecodes()==4,"crop realization expanded CPU image or repeated page decode");
+      require(images.readPixelsRegion(image->handle,0,0,24,8)->rgba==original,"crop upload changed straight CPU pixels");
+      std::vector<std::uint8_t> replacement(24*8*4);
+      for(std::size_t i=0;i<replacement.size();i+=4) {
+        replacement[i]=19; replacement[i+1]=43; replacement[i+2]=67; replacement[i+3]=157;
+      }
+      require(images.updateRgba(image->handle,replacement.data()),"crop backing mutation failed");
+      require(!images.hasPreparedBacking(image->handle) && readGpu(*images.lookup(image->handle))==replacement,
+              "mutated crop backing retained old pixels or swizzles");
+    }
+    images.release(image->handle); images.setWarmBudgetBytes(0); images.update();
+    require(images.gpuBytes()==0 && images.cpuBytes()==0,"crop backing outlived owner");
+  }
   for (const bool opaque : {false, true}) {
     pmjs::ImageStore images;
     std::vector<std::uint8_t> original(8*4*4),page(10*6*4);
@@ -276,15 +463,16 @@ int main() {
       require(images.pin(pinned)&&images.beginUse(inFlight),"lazy owner capture failed");
       images.release(pinned); images.release(inFlight);
       for(int i=3;i<67;++i) images.release(acquire(images,i));
-      require(images.warmCount()==64&&images.warmBytes()==64*6*6*4&&images.warmFileCount()==64,
-              "validated lazy page or file accounting failed");
+      require(images.warmCount()==64&&images.warmBytes()==0&&images.warmFileCount()==64&&
+              images.cpuBytes()==6*6*4&&images.preparedPageDecodes()==1,
+              "validated shared lazy page or file accounting failed");
       images.update();
       require(images.warmCount()==0&&images.warmFileCount()==0&&files()==before+3,
               "zero-budget lazy cache retained descriptors");
       require(images.inspect(pinned)&&images.inspect(inFlight)&&images.inspect(live),
               "cache eviction released a live owner");
       const auto decodes=images.preparedPageDecodes();
-      require(images.retainCpuPixels(live)&&images.cpuBytes()==2*6*6*4+4*4*4&&
+      require(images.retainCpuPixels(live)&&images.cpuBytes()==6*6*4+4*4*4&&
               images.preparedPageDecodes()==decodes,
               "synchronous CPU retention repeated the decode or kept duplicate pages");
       std::filesystem::remove(root/"lazy-page.png");

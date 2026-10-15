@@ -85,6 +85,7 @@ async function generateAssetIndex({ root, gameRoot, config, output, includeAsset
   try {
     const images = await prepareAssets({ gameRoot, cacheRoot, native,
       recipes: options.assetPreparation.recipes, preparationContext: 'offline',
+      pageCodec: options.assetPreparation.pageCodec, workspaceBytes: options.assetPreparation.workspaceBytes,
       verifyHashes: true, logger, shouldCancel });
     if (images.cancelled) throw new Error('image preparation cancelled');
     if (images.error) warnings.push('[pmjs] image index incomplete: ' + images.error);

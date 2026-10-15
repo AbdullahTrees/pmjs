@@ -1,4 +1,5 @@
 #include "vfs.hpp"
+#include "file_identity.hpp"
 
 #include <chrono>
 #include <filesystem>
@@ -133,6 +134,34 @@ int main() try {
   auto entry = pmjs::Vfs::DerivedFile{"img/a.png", "img/a.png_", "data/System.json", cache,
     pmjs::Vfs::fileIdentity(mediaRoot / "img/a.png_"),
     pmjs::Vfs::fileIdentity(mediaRoot / "data/System.json"), {}};
+  const auto changedField = [](std::string identity, std::size_t fromEnd) {
+    auto end = identity.size();
+    for (std::size_t i = 0; i < fromEnd; ++i) end = identity.rfind(':', end - 1);
+    auto finish = identity.find(':', end + 1);
+    identity.replace(end + 1, finish - end - 1, std::to_string(std::stoull(identity.substr(end + 1, finish - end - 1)) + 1));
+    return identity;
+  };
+  const auto hashed = entry;
+  for (const auto field : {0, 1, 2}) {
+    auto record = hashed;
+    record.sourceHash = "305531dcc50ebca31cf1d5b31e9fc76ed51f66b3b6dd5a030c6539ae6532f979";
+    record.settingsHash = "9b346041bc9a49574eb2665b2ad2a0a3f9f9cce4e42f5d1f26deb8a256b5966a";
+    record.fileHash = "96d62e2abd3e42de5f50330fb8efc4c5599835278077b21e9aa0b33c1df07a1c";
+    record.fileIdentity = pmjs::Vfs::fileIdentity(cache);
+    auto* identity = field == 0 ? &record.sourceIdentity : field == 1 ? &record.settingsIdentity : &record.fileIdentity;
+    *identity = changedField(*identity, 6);
+    media.installDerivedFiles({record}, true);
+    require(media.readText("img/a.png") == "plaintext", "inode-only derived dependency did not verify");
+    require(media.readText("img/a.png") == "plaintext", "verified dependency did not remain reusable");
+    auto wrong = record;
+    (field == 0 ? wrong.sourceHash : field == 1 ? wrong.settingsHash : wrong.fileHash) = std::string(64, '0');
+    media.installDerivedFiles({wrong}, true);
+    require(!media.resolveDerived("img/a.png"), "wrong hash authorized derived inode recovery");
+    require(media.consumeDerivedInvalidation(), "derived rejection did not invalidate its catalog");
+    *identity = changedField(*identity, 5);
+    media.installDerivedFiles({record}, true);
+    require(!media.resolveDerived("img/a.png"), "other metadata change authorized derived recovery");
+  }
   media.installDerivedFiles({entry});
   require(media.readText("IMG/A.PNG") == "plaintext" && media.exists("img/a.png"),
           "validated derived file did not resolve");

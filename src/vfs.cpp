@@ -1,4 +1,5 @@
 #include "vfs.hpp"
+#include "file_identity.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -185,19 +186,28 @@ void Vfs::updateWritableOverlay(const std::vector<std::string>& paths,
 }
 
 std::string Vfs::fileIdentity(const std::filesystem::path& path) {
-  std::error_code error;
-  const auto resolved = std::filesystem::canonical(path, error);
-  struct stat info{};
-  if (error || ::stat(resolved.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) return {};
-  return resolved.generic_string() + ':' + std::to_string(info.st_dev) + ':' +
-    std::to_string(info.st_ino) + ':' + std::to_string(info.st_size) + ':' +
-    std::to_string(info.st_mtim.tv_sec) + ':' + std::to_string(info.st_mtim.tv_nsec) + ':' +
-    std::to_string(info.st_ctim.tv_sec) + ':' + std::to_string(info.st_ctim.tv_nsec);
+  return pmjs::fileIdentity(path);
+}
+
+namespace {
+bool matchesDependency(const std::filesystem::path& path, std::string& expected, const std::string& hash) {
+  const auto actual = pmjs::fileIdentity(path);
+  if (actual.empty()) return false;
+  if (actual == expected) return true;
+  if (!inodeOnlyChange(expected, actual) || !fileContentMatches(path, actual, hash)) return false;
+  expected = actual;
+  return true;
+}
 }
 
 void Vfs::installDerivedFiles(const std::vector<DerivedFile>& files, bool catalog) {
   auto index = std::make_shared<std::unordered_map<std::string, DerivedFile>>();
   for (auto file : files) {
+    file.identityMutex = std::make_shared<std::mutex>();
+    if ((!file.sourceHash.empty() && !validContentHash(file.sourceHash)) ||
+        (!file.settingsHash.empty() && !validContentHash(file.settingsHash)) ||
+        (!file.fileHash.empty() && !validContentHash(file.fileHash)))
+      throw std::runtime_error("invalid derived content hash");
     const auto key = normalize(file.logical);
     const auto source = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.source);
     const auto settings = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.settings);
@@ -208,7 +218,8 @@ void Vfs::installDerivedFiles(const std::vector<DerivedFile>& files, bool catalo
     } else {
       if (!key || !source || !settings || !file.file.is_absolute() ||
           file.sourceIdentity.empty() || file.settingsIdentity.empty() ||
-          fileIdentity(*source) != file.sourceIdentity || fileIdentity(*settings) != file.settingsIdentity) continue;
+          !matchesDependency(*source, file.sourceIdentity, file.sourceHash) ||
+          !matchesDependency(*settings, file.settingsIdentity, file.settingsHash)) continue;
       file.fileIdentity = fileIdentity(file.file);
     }
     if (!file.fileIdentity.empty() && !index->emplace(*key, std::move(file)).second)
@@ -222,7 +233,9 @@ std::string Vfs::derivedIdentity(const std::string& path) const {
   const auto index = std::atomic_load(&derived_);
   if (!key || !index) return {};
   const auto entry = index->find(*key);
-  return entry == index->end() ? std::string{} : entry->second.fileIdentity;
+  if (entry == index->end()) return {};
+  std::lock_guard lock(*entry->second.identityMutex);
+  return entry->second.fileIdentity;
 }
 
 std::optional<std::filesystem::path> Vfs::resolveDerived(const std::string& path) const {
@@ -243,9 +256,11 @@ std::optional<std::filesystem::path> Vfs::resolveDerived(const std::string& path
     }
   }
   const auto& entry = found->second;
+  std::lock_guard lock(*entry.identityMutex);
   const auto source = resolveOriginal(entry.source), settings = resolveOriginal(entry.settings);
-  if (!source || !settings || fileIdentity(*source) != entry.sourceIdentity ||
-      fileIdentity(*settings) != entry.settingsIdentity || fileIdentity(entry.file) != entry.fileIdentity) {
+  if (!source || !settings || !matchesDependency(*source, entry.sourceIdentity, entry.sourceHash) ||
+      !matchesDependency(*settings, entry.settingsIdentity, entry.settingsHash) ||
+      !matchesDependency(entry.file, entry.fileIdentity, entry.fileHash)) {
     derivedInvalidated_->store(true, std::memory_order_relaxed);
     return std::nullopt;
   }

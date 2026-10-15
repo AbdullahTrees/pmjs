@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <memory>
+#include <mutex>
 #include <unordered_set>
 #include <string>
 #include <unordered_map>
@@ -30,7 +31,9 @@ class Vfs {
   struct DerivedFile {
     std::string logical, source, settings;
     std::filesystem::path file;
-    std::string sourceIdentity, settingsIdentity, fileIdentity;
+    mutable std::string sourceIdentity, settingsIdentity, fileIdentity;
+    std::string sourceHash, settingsHash, fileHash;
+    std::shared_ptr<std::mutex> identityMutex = std::make_shared<std::mutex>();
   };
   explicit Vfs(std::filesystem::path root);
 

@@ -486,7 +486,24 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
   napi_set_named_property(env, result, "preparedRegions", number(env, images.preparedRegions()));
   napi_set_named_property(env, result, "preparedMaterializations", number(env, images.preparedMaterializations()));
   napi_set_named_property(env, result, "preparedPageDecodes", number(env, images.preparedPageDecodes()));
+  napi_set_named_property(env, result, "preparedSharedPageHits", number(env, images.preparedSharedPageHits()));
+  napi_set_named_property(env, result, "preparedSharedTextureHits", number(env, images.preparedSharedTextureHits()));
   napi_set_named_property(env, result, "preparedRegionReads", number(env, images.preparedRegionReads()));
+  napi_set_named_property(env, result, "preparedFrameCacheBudget", number(env, images.preparedFrameCacheBudget()));
+  napi_set_named_property(env, result, "preparedFrameCacheBytes", number(env, images.preparedFrameCacheBytes()));
+  napi_set_named_property(env, result, "preparedFrameCacheHits", number(env, images.preparedFrameCacheHits()));
+  napi_set_named_property(env, result, "preparedFrameCacheMisses", number(env, images.preparedFrameCacheMisses()));
+  napi_set_named_property(env, result, "preparedFrameCacheEvictions", number(env, images.preparedFrameCacheEvictions()));
+  napi_set_named_property(env, result, "preparedFrameResidentBytes", number(env, images.preparedFrameResidentBytes()));
+  napi_set_named_property(env, result, "preparedFrameEvictedBytes", number(env, images.preparedFrameEvictedBytes()));
+  napi_set_named_property(env, result, "preparedFramePeakResidentBytes", number(env, images.preparedFramePeakResidentBytes()));
+  napi_set_named_property(env, result, "compactUploadFailures", number(env, images.compactUploadFailures()));
+  napi_set_named_property(env, result, "compactTextureUploads", number(env, images.compactTextureUploads()));
+  napi_set_named_property(env, result, "preparedCropUploads", number(env, images.preparedCropUploads()));
+  napi_set_named_property(env, result, "preparedCropUploadBytes", number(env, images.preparedCropUploadBytes()));
+  napi_set_named_property(env, result, "blockTextureUploads", number(env, images.blockTextureUploads()));
+  napi_set_named_property(env, result, "blockUploadFailures", number(env, images.blockUploadFailures()));
+  napi_set_named_property(env, result, "blockRegions", number(env, images.blockRegions()));
   napi_value preparedFallbacks;
   check(env, napi_create_object(env, &preparedFallbacks), "cannot create prepared fallback counts");
   for (const auto& [reason, count] : images.preparedFallbacks())
@@ -625,6 +642,7 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
     descriptor.height = asInt32(env, property(env, object, "height"));
     if (hasProperty(env, object, "halo")) descriptor.halo = asInt32(env, property(env, object, "halo"));
     if (hasProperty(env, object, "uniform")) descriptor.uniform = preparedColor(env, object, "uniform");
+    if (hasProperty(env, object, "blockGrid")) descriptor.blockGrid = preparedArray<3>(env, object, "blockGrid");
     if (hasProperty(env, object, "pages")) {
       const auto pages = property(env, object, "pages"); std::uint32_t size = 0;
       check(env, napi_get_array_length(env, pages, &size), "invalid prepared pages");
@@ -660,11 +678,24 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
         identities.push_back(asString(env, item));
       }
     }
+    const auto backingHash = hasProperty(env, entry, "backingHash") ?
+      asString(env, property(env, entry, "backingHash")) : std::string{};
+    std::vector<std::string> pageHashes;
+    const bool hashedPages = hasProperty(env, entry, "pageHashes");
+    if (hashedPages) {
+      const auto hashes = property(env, entry, "pageHashes"); std::uint32_t size = 0;
+      check(env, napi_get_array_length(env, hashes, &size), "invalid page hashes");
+      if (size != descriptor.pages.size()) throw std::runtime_error("page hash count mismatch");
+      for (std::uint32_t j = 0; j < size; ++j) {
+        napi_value item; check(env, napi_get_element(env, hashes, j, &item), "invalid page hash");
+        pageHashes.push_back(asString(env, item));
+      }
+    }
     std::vector<std::string> captured;
     std::vector<std::filesystem::path> pagePaths;
     pagePaths.reserve(descriptor.pages.size());
     for (const auto& page : descriptor.pages) pagePaths.push_back(directory / page.path);
-    if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr)) {
+    if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr, backingHash, hashedPages ? &pageHashes : nullptr)) {
       ++installed;
       if (capture) {
         napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");
@@ -724,7 +755,10 @@ napi_value installDecryptedAssetsImpl(napi_env env, napi_callback_info info, boo
       asString(env, property(env, entry, "file")),
       asString(env, property(env, entry, "sourceIdentity")),
       asString(env, property(env, entry, "settingsIdentity")),
-      catalog ? asString(env, property(env, entry, "fileIdentity")) : std::string{}});
+      catalog ? asString(env, property(env, entry, "fileIdentity")) : std::string{},
+      hasProperty(env, entry, "sourceHash") ? asString(env, property(env, entry, "sourceHash")) : std::string{},
+      hasProperty(env, entry, "settingsHash") ? asString(env, property(env, entry, "settingsHash")) : std::string{},
+      hasProperty(env, entry, "fileHash") ? asString(env, property(env, entry, "fileHash")) : std::string{}});
   }
   host(env).vfs.installDerivedFiles(entries, catalog);
   if (capture) for (std::uint32_t i = 0; i < count; ++i) {

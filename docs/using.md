@@ -31,6 +31,12 @@ directory for each resolved game path. Without those environment variables,
 PMJS uses `~/.cache` and `~/.local/share`. Existing save locations and game
 identities still apply. Back up existing saves before trying a new game.
 
+Prepared image pages use lossless LZ4 (`.pml4`) by default. Original game
+files, ordinary images, and prepared map tiles keep their existing formats.
+Set `assetPreparation.pageCodec` to `"png"` in your configuration to select
+PNG image pages. Changing codecs prepares the affected images again on the
+next launch; keep the cache directory so reusable maps can still be used.
+
 The `preserveBitmapReloadPixels` configuration option defaults to `true`;
 it keeps the previous image visible while that image reloads. Set it to
 `false` for the original loading behavior.

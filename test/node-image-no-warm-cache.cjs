@@ -1,9 +1,16 @@
 'use strict';
 
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const native = require(path.resolve(process.argv[2]));
+for (const preparedFrameCacheBytes of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
+  assert.throws(() => native.initialize({ gameRoot: path.resolve(process.argv[3]),
+    width: 640, height: 480, windowTitle: 'invalid prepared frame cache',
+    preparedFrameCacheBytes }), /preparedFrameCacheBytes must be a non-negative safe integer/);
+}
 native.initialize({ gameRoot: path.resolve(process.argv[3]), assetRoot: '',
-  width: 640, height: 480, windowTitle: 'pmjs test', imageWarmCacheBytes: 0 });
+  width: 640, height: 480, windowTitle: 'pmjs test', imageWarmCacheBytes: 0,
+  preparedFrameCacheBytes: 0 });
 
 async function main() {
   const first = await native.images.loadAsync('fixture.png');

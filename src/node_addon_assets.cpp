@@ -79,6 +79,7 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset) {
   set(env, result, "width", number(env, asset.width)); set(env, result, "height", number(env, asset.height));
   set(env, result, "halo", number(env, asset.halo));
   if (asset.uniform) set(env, result, "uniform", arrayValue(env, *asset.uniform));
+  if (asset.blockGrid) set(env, result, "blockGrid", arrayValue(env, *asset.blockGrid));
   napi_value cells, pages;
   check(env, napi_create_array_with_length(env, asset.cells.size(), &cells), "cannot create prepared cells");
   for (std::size_t index = 0; index < asset.cells.size(); ++index) {
@@ -108,6 +109,7 @@ struct AssetWork {
   struct stat snapshot{};
   std::filesystem::path staging;
   AssetRecipe recipe;
+  AssetPreparationOptions options;
   std::optional<PreparedAsset> layout;
   std::optional<PreparedAsset> result;
   std::string error;
@@ -119,7 +121,7 @@ void executeAsset(napi_env, void* opaque) noexcept {
   auto& work = *static_cast<AssetWork*>(opaque);
   try {
     work.result = prepareAssetImage("/proc/self/fd/" + std::to_string(work.sourceFd), work.staging,
-      work.recipe, work.layout ? &*work.layout : nullptr);
+      work.recipe, work.layout ? &*work.layout : nullptr, work.options);
     struct stat current{};
     if (::fstat(work.sourceFd, &current) != 0 || current.st_size != work.snapshot.st_size ||
         current.st_mtim.tv_sec != work.snapshot.st_mtim.tv_sec || current.st_mtim.tv_nsec != work.snapshot.st_mtim.tv_nsec ||
@@ -145,7 +147,7 @@ void completeAsset(napi_env env, napi_status status, void* opaque) {
   napi_delete_async_work(env, work->work);
 }
 napi_value processImage(napi_env env, napi_callback_info info) try {
-  const auto args = arguments(env, info, 5);
+  const auto args = arguments(env, info, 6);
   auto work = std::make_unique<AssetWork>();
   const auto source = args.size() > 3
     ? std::optional<std::filesystem::path>(asString(env, args[3]))
@@ -162,7 +164,9 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
     check(env, napi_typeof(env, args[2], &type), "cannot inspect preparation recipe");
     if (type != napi_undefined && type != napi_null) work->recipe = recipeValue(env, args[2]);
   }
-  if (args.size() > 4) {
+  napi_valuetype layoutType = napi_undefined;
+  if (args.size() > 4) check(env, napi_typeof(env, args[4], &layoutType), "cannot inspect image layout");
+  if (args.size() > 4 && layoutType != napi_undefined && layoutType != napi_null) {
     const auto value = args[4];
     PreparedAsset layout;
     if (integer(env, property(env, value, "version")) != 1)
@@ -172,6 +176,8 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
     layout.halo = integer(env, property(env, value, "halo"));
     if (hasProperty(env, value, "uniform"))
       layout.uniform = color(env, property(env, value, "uniform"));
+    if (hasProperty(env, value, "blockGrid"))
+      layout.blockGrid = integers<3>(env, property(env, value, "blockGrid"));
     const auto cells = property(env, value, "cells");
     for (std::uint32_t i = 0, n = arrayLength(env, cells, 4096); i < n; ++i) {
       const auto item = element(env, cells, i);
@@ -194,6 +200,17 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
       layout.pages.push_back(std::move(page));
     }
     work->layout = std::move(layout);
+  }
+  if (args.size() > 5 && hasProperty(env, args[5], "workspaceBytes")) {
+    const auto bytes = asNumber(env, property(env, args[5], "workspaceBytes"));
+    if (!std::isfinite(bytes) || bytes < 0 || bytes > 256U * 1024U * 1024U || bytes != std::floor(bytes))
+      throw std::runtime_error("workspaceBytes must be an integer from 0 to 268435456");
+    work->options.workspaceBytes = static_cast<std::size_t>(bytes);
+  }
+  if (args.size() > 5 && hasProperty(env, args[5], "pageCodec")) {
+    const auto codec = asString(env, property(env, args[5], "pageCodec"));
+    if (codec != "png" && codec != "lz4") throw std::runtime_error("pageCodec must be png or lz4");
+    work->options.lz4Pages = codec == "lz4";
   }
   napi_value promise;
   check(env, napi_create_promise(env, &work->deferred, &promise), "cannot create asset preparation promise");
@@ -429,9 +446,11 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, property(env, exports, "images"), "tileSlot", tileSlot);
   set(env, assets, "tilePreparationVersion", string(env, "lossless-tile-sets-v3"));
   const auto version = moduleObject(env);
-  set(env, version, "processor", string(env, "lossless-images-v2"));
+  set(env, version, "processor", string(env, "lossless-images-v6"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-v1"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);
+  set(env, assets, "preparationWorkspaceVersion", number(env, 1));
+  set(env, assets, "preparationLz4Version", string(env, "lz4-1.10.0-rgba-v1"));
 }
 }

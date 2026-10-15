@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const test = require('node:test');
-const { prepareAssets } = require('../runner/asset-preparation.cjs');
+const { prepareAssets, validDescriptor } = require('../runner/asset-preparation.cjs');
 const { validate } = require('../runner/index.cjs');
 const { parse } = require('../runner/cli.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
@@ -27,7 +27,7 @@ function fixture() {
   };
   const native = { assets: { processImage, installPrepared(entries) { installs.push(entries); } } };
   const warnings = [];
-  return { root, gameRoot, source, native, cacheRoot: path.join(root, 'cache'),
+  return { root, gameRoot, source, native, pageCodec: 'png', cacheRoot: path.join(root, 'cache'),
     logger: { warn(message) { warnings.push(message); } }, warnings,
     get jobs() { return jobs; }, get installs() { return installs; } };
 }
@@ -78,6 +78,86 @@ test('first preparation installs logical backing; unchanged launch reuses verifi
   assertProgress(warmProgress, second, 'complete');
   assert.equal(warmProgress.some(p => p.phase === 'prepare'), false);
   assert.ok(warmProgress.some(p => p.phase === 'validate' && p.source === f.source && p.completed === 1 && p.hits === 1));
+});
+
+test('workspace limits reach capable processors without invalidating cached output', async () => {
+  const f = fixture(), original = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => {
+    assert.equal(args[4], null);
+    assert.deepEqual(args[5], { workspaceBytes: 0 });
+    return original(...args);
+  };
+  const cold = await prepareAssets({ ...f, workspaceBytes: 0 });
+  assert.equal(cold.generated, 1);
+  const warm = await prepareAssets({ ...f, workspaceBytes: 128 * 1024 * 1024 });
+  assert.equal(warm.generated, 0);
+  assert.equal(warm.hits, 1);
+  for (const workspaceBytes of [-1, 1.5, 268435457, NaN, '64'])
+    await assert.rejects(prepareAssets({ ...f, workspaceBytes }), /workspaceBytes must be an integer/);
+});
+
+test('default LZ4 replaces PNG catalogs, reuses warm pages and permits explicit PNG selection', async () => {
+  const f = fixture(), original = f.native.assets.processImage;
+  const { pageCodec, ...defaults } = f;
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  const png = await prepareAssets(f);
+  const pngFile = manifests(f)[0];
+  const pngKey = JSON.parse(fs.readFileSync(pngFile)).key;
+  assert.equal(png.generated, 1);
+  const unavailable = await prepareAssets(defaults);
+  assert.equal(unavailable.installed, 0);
+  assert.match(f.warnings.at(-1), /LZ4 image preparation is unavailable/);
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.preparationLz4Version = 'lz4-test-v1';
+  f.native.assets.processImage = async (...args) => {
+    assert.equal(args[5].pageCodec, 'lz4');
+    const descriptor = await original(...args);
+    descriptor.pages[0].path = 'page-0.pml4';
+    const header = Buffer.alloc(32);
+    header.write('PML4'); header.writeUInt32LE(1, 4); header.writeUInt32LE(1, 8); header.writeUInt32LE(1, 12);
+    header.writeUInt32LE(4, 16); header.writeUInt32LE(5, 20);
+    fs.writeFileSync(path.join(args[1], 'page-0.pml4'), Buffer.concat([header, Buffer.from([0x40,255,0,0,255])]));
+    fs.unlinkSync(path.join(args[1], 'page-0.png'));
+    return descriptor;
+  };
+  const cold = await prepareAssets(defaults);
+  assert.equal(cold.generated, 1);
+  assert.equal(cold.catalogHit, undefined);
+  assert.equal(cold.entries[0].descriptor.pages[0].path, 'page-0.pml4');
+  const lz4File = manifests(f).find(file => JSON.parse(fs.readFileSync(file)).descriptor.pages[0].path.endsWith('.pml4'));
+  assert.notEqual(JSON.parse(fs.readFileSync(lz4File)).key, pngKey);
+  const manifest = JSON.parse(fs.readFileSync(lz4File));
+  const portablePath = 'assets/images/' + manifest.key + '/page-0.pml4';
+  const portableAssetRoot = path.join(f.root, 'portable');
+  fs.mkdirSync(path.dirname(path.join(portableAssetRoot, portablePath)), { recursive: true });
+  fs.copyFileSync(path.join(path.dirname(lz4File), 'page-0.pml4'), path.join(portableAssetRoot, portablePath));
+  const portableIndex = { images: [{ source: f.source, sourceHash: manifest.sourceHash, recipe: null,
+    encryptionSettingsSha256: null, descriptor: manifest.descriptor,
+    outputs: [{ path: portablePath, hash: manifest.outputs['page-0.pml4'] }] }] };
+  const processImage = f.native.assets.processImage;
+  f.native.assets.processImage = () => { throw new Error('portable copy should bypass compression'); };
+  const copied = await prepareAssets({ ...f, pageCodec: 'lz4', cacheRoot: path.join(f.root, 'copied'), portableIndex, portableAssetRoot });
+  assert.equal(copied.indexedPageCopies, 1);
+  assert.equal(copied.installed, 1);
+  f.native.assets.processImage = processImage;
+  const warm = await prepareAssets({ ...defaults, workspaceBytes: 0 });
+  assert.equal(warm.generated, 0);
+  assert.equal(warm.hits, 1);
+  assert.equal(warm.catalogHit, true);
+  fs.writeFileSync(path.join(path.dirname(lz4File), 'page-0.pml4'), 'damaged');
+  const repaired = await prepareAssets({ ...f, pageCodec: 'lz4', verifyHashes: true });
+  assert.equal(repaired.generated, 1);
+  f.native.assets.preparationLz4Version = 'lz4-test-v2';
+  const upgraded = await prepareAssets({ ...f, pageCodec: 'lz4' });
+  assert.equal(upgraded.generated, 1);
+  f.native.assets.processImage = original;
+  const explicitPng = await prepareAssets({ ...defaults, pageCodec: 'png' });
+  assert.equal(explicitPng.installed, 1);
+  assert.equal(explicitPng.catalogHit, undefined);
+  assert.equal(explicitPng.entries[0].descriptor.pages[0].path, 'page-0.png');
+  await assert.rejects(prepareAssets({ ...f, pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
 });
 
 test('unchanged sources and pages reuse checksums; explicit verification reads them again', async () => {
@@ -519,7 +599,7 @@ test('cancellation during final cleanup never reports assets ready', async () =>
   assert.equal((await prepareAssets(f)).generated, 0, 'completed cache entries remain reusable after cancellation');
 });
 
-test('unwritable cache falls back; source changes during preparation never publish', async () => {
+test('unwritable cache falls back; full verification rejects source changes during preparation', async () => {
   const f = fixture();
   fs.writeFileSync(f.cacheRoot, 'a file blocks the cache directory');
   const progress = [];
@@ -535,7 +615,7 @@ test('unwritable cache falls back; source changes during preparation never publi
     fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed during preparation');
     return descriptor;
   };
-  assert.equal((await prepareAssets(f)).fallback, 1);
+  assert.equal((await prepareAssets({ ...f, verifyHashes: true })).fallback, 1);
   assert.deepEqual(fs.readdirSync(path.join(f.cacheRoot, 'entries')), []);
 });
 
@@ -581,6 +661,34 @@ test('source metadata snapshots accompany install and detect changes during hash
   assert.equal(result.fallback, 1);
   assert.equal(result.entries.length, 0);
   assert.equal(f.jobs, 1);
+});
+
+test('ordinary preparation reads a stable source once and still hashes each generated page', async t => {
+  const f = fixture(), createReadStream = fs.createReadStream;
+  const reads = [];
+  fs.createReadStream = function(file, ...args) {
+    reads.push(String(file));
+    return createReadStream.call(this, file, ...args);
+  };
+  t.after(() => { fs.createReadStream = createReadStream; });
+  const result = await prepareAssets(f);
+  assert.equal(result.installed, 1);
+  assert.equal(reads.filter(file => file === path.join(f.gameRoot, f.source)).length, 1);
+  assert.equal(reads.filter(file => file.endsWith('/page-0.png')).length, 1);
+  assert.equal(result.entries[0].pageHashes[0], crypto.createHash('sha256').update(PNG).digest('hex'));
+});
+
+test('published page edits are rejected even when staged verification was reused', async t => {
+  const f = fixture(), rename = fs.promises.rename;
+  fs.promises.rename = async function(from, to) {
+    await rename.call(this, from, to);
+    if (path.basename(String(from)).startsWith('.stage-'))
+      fs.appendFileSync(path.join(to, 'page-0.png'), 'damaged after staging');
+  };
+  t.after(() => { fs.promises.rename = rename; });
+  const result = await prepareAssets(f);
+  assert.equal(result.installed, 0);
+  assert.ok(f.warnings.some(message => message.includes('published output validation failed')));
 });
 
 test('uniform RGBA descriptors preserve all channels and reuse without PNG pages', async () => {
@@ -898,6 +1006,101 @@ test('automatic character grids retain ordinary and single-character logical lay
   }
 });
 
+test('block-grid descriptors preserve whole block crops and merged fills within authored frames', () => {
+  const cells = [];
+  for (let row=0;row<2;++row) for (let column=0;column<4;++column)
+    cells.push({ rect:[column*64,row*64,64,64], crop:[0,0,64,64], fill:[0,0,0,0],
+      page:0, atlas:[column*66+1,row*66+1,64,64] });
+  const descriptor = { version:1, width:256, height:128, halo:1, blockGrid:[64,128,128],
+    pages:[{path:'page-0.png',width:264,height:132}], cells };
+  assert.equal(validDescriptor(descriptor),true);
+  const merged={...descriptor,pages:[],cells:[
+    {rect:[0,0,128,128],crop:[0,0,0,0],fill:[255,255,255,0],page:-1,atlas:[0,0,0,0]},
+    {rect:[128,0,128,128],crop:[0,0,0,0],fill:[255,255,255,0],page:-1,atlas:[0,0,0,0]}
+  ]};
+  assert.equal(validDescriptor(merged),true);
+  for (const change of [
+    d=>{d.blockGrid=[32,128,128];},
+    d=>{d.blockGrid=[64,127,128];},
+    d=>{d.blockGrid=[64,128];},
+    d=>{d.cells[0].rect[0]=1;},
+    d=>{d.cells[0].crop=[1,0,63,64];},
+    d=>{d.cells[0].rect[2]=128;},
+    d=>{d.uniform=[0,0,0,0];}
+  ]) {
+    const invalid=structuredClone(descriptor);change(invalid);
+    assert.equal(validDescriptor(invalid),false);
+  }
+  assert.equal(validDescriptor({...merged,width:256*65537,blockGrid:[64,128,128]}),false);
+  assert.equal(validDescriptor({...merged,cells:[{...merged.cells[0],rect:[0,0,256,128]}]}),false);
+});
+
+test('prepared block-grid metadata survives verified cache reuse', async () => {
+  const f=fixture();
+  f.native.assets.processImage=async ()=>({version:1,width:128,height:64,halo:1,blockGrid:[64,64,64],
+    pages:[],cells:[
+      {rect:[0,0,64,64],crop:[0,0,0,0],fill:[255,255,255,0],page:-1,atlas:[0,0,0,0]},
+      {rect:[64,0,64,64],crop:[0,0,0,0],fill:[255,255,255,0],page:-1,atlas:[0,0,0,0]}
+    ]});
+  const cold=await prepareAssets(f);
+  assert.deepEqual(cold.entries[0].descriptor.blockGrid,[64,64,64]);
+  const warm=await prepareAssets(f);
+  assert.equal(warm.generated,0);
+  assert.deepEqual(warm.entries[0].descriptor.blockGrid,[64,64,64]);
+});
+
+test('filename grids preserve divisible animation frames and reject invalid or unrelated suffixes', async () => {
+  for (const [name, width, height, expected] of [
+    ['animation[2x2].png', 1632, 2708, [2, 2]],
+    ['animation[3X1].PNG', 2448, 624, [3, 1]],
+    ['animation[64x64].png', 64, 64, [64, 64]],
+    ['animation[2x2].png', 5, 8, undefined],
+    ['animation[2x2].png', 0, 8, undefined],
+    ['animation[0x2].png', 8, 8, undefined],
+    ['animation[65x64].png', 65, 64, undefined],
+    ['animation[9007199254740992x1].png', 8, 8, undefined],
+    ['animation[2x2]copy.png', 8, 8, undefined],
+    ['animation[Japanese].png', 8, 8, undefined]
+  ]) {
+    const f = fixture();
+    fs.unlinkSync(path.join(f.gameRoot, f.source));
+    const png = Buffer.from(PNG); png.writeUInt32BE(width, 16); png.writeUInt32BE(height, 20);
+    fs.writeFileSync(path.join(f.gameRoot, 'img/pictures', name), png);
+    let observed;
+    f.native.assets.processImage = async (_source, _output, recipe) => { observed = recipe?.grid; return null; };
+    await prepareAssets(f);
+    assert.deepEqual(observed, expected, name);
+  }
+});
+
+test('explicit recipes override filename grids', async () => {
+  const f = fixture();
+  const source = 'img/pictures/animation[2x2].png';
+  fs.renameSync(path.join(f.gameRoot, f.source), path.join(f.gameRoot, source));
+  const png = Buffer.from(PNG); png.writeUInt32BE(8, 16); png.writeUInt32BE(8, 20);
+  fs.writeFileSync(path.join(f.gameRoot, source), png);
+  const sourceHash = crypto.createHash('sha256').update(png).digest('hex');
+  let observed;
+  f.native.assets.processImage = async (_source, _output, recipe) => { observed = recipe.grid; return null; };
+  await prepareAssets({ ...f, recipes: [{ source, sourceHash, grid: [4, 1] }] });
+  assert.deepEqual(observed, [4, 1]);
+});
+
+for (const engine of ['MV', 'MZ']) {
+  test(engine + ': filename grids are recognized after image decryption', async () => {
+    const f = encryptedFixture(engine);
+    const source = 'img/pictures/animation[2x2].' + (engine === 'MV' ? 'rpgmvp' : 'png_');
+    fs.renameSync(path.join(f.gameRoot, f.encryptedImage), path.join(f.gameRoot, source));
+    const png = Buffer.from(PNG); png.writeUInt32BE(8, 16); png.writeUInt32BE(8, 20);
+    fs.writeFileSync(path.join(f.gameRoot, source), f.encrypt(png));
+    let observed;
+    f.native.assets.processImage = async (_source, _output, recipe) => { observed = recipe.grid; return null; };
+    const result = await prepareAssets(f);
+    assert.deepEqual(observed, [2, 2]);
+    assert.equal(result.decrypted, 2);
+  });
+}
+
 test('torn positive and negative cache manifests regenerate without changing sources', async () => {
   for (const negative of [false, true]) {
     const f = fixture();
@@ -974,6 +1177,42 @@ test('observed stale image catalogs regenerate on the following preparation run'
   const next = await prepareAssets(f);
   assert.equal(next.catalogHit, true, 'a repaired catalog returns to the fast path');
   for (const result of [cold, warm, refreshed, next]) result.releaseCacheLease();
+});
+
+test('legacy catalogs acquire content hashes without regenerating prepared assets', async () => {
+  const f = fixture();
+  f.native.assets.sourceIdentity = () => 'source-identity';
+  f.native.assets.installPrepared = entries => {
+    for (const entry of entries) entry.pageIdentities = ['page-identity'];
+    return entries.length;
+  };
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  const cold = await prepareAssets(f);
+  cold.releaseCacheLease();
+  const file = path.join(f.cacheRoot, fs.readdirSync(f.cacheRoot).find(name => name.startsWith('catalog-')));
+  const catalog = JSON.parse(fs.readFileSync(file));
+  const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+  catalog.binding = hash(JSON.stringify({ gameRoot: f.gameRoot, cacheRoot: f.cacheRoot,
+    processorIdentity: { processor: 'lossless-images-v6', decoder: 'png-rgba-v1', pageSize: 2048 }, recipes: [] }));
+  const payload = JSON.parse(catalog.payload);
+  delete payload.entries[0].backingHash;
+  delete payload.entries[0].pageHashes;
+  catalog.payload = JSON.stringify(payload);
+  catalog.checksum = hash(catalog.payload);
+  fs.writeFileSync(file, JSON.stringify(catalog));
+  const upgraded = await prepareAssets(f);
+  assert.equal(upgraded.catalogHit, undefined);
+  assert.equal(upgraded.generated, 0);
+  assert.equal(upgraded.hits, 1);
+  assert.equal(f.jobs, 1);
+  assert.equal(upgraded.entries[0].backingHash, hash(PNG));
+  assert.deepEqual(upgraded.entries[0].pageHashes, [hash(PNG)]);
+  upgraded.releaseCacheLease();
+  const warm = await prepareAssets(f);
+  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.entries[0].backingHash, hash(PNG));
+  warm.releaseCacheLease();
 });
 
 test('damaged or rejected catalogs rebuild and release failed installation leases', async () => {

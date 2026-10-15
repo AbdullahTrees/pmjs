@@ -1063,6 +1063,38 @@ constexpr const char* nearestTileFragmentSource = R"(#version 300 es
     outputColor.rgb *= texturePremultiplied ? color.a : outputColor.a;
   }
 )";
+constexpr const char* blockSpriteSamplingSource = R"(
+  uniform bool blockImage, blockNearest;
+  uniform highp usampler2D blockTable;
+  uniform highp ivec3 blockGrid;
+  uniform highp int blockTableWidth;
+  highp vec4 sampleBlockImage(highp vec2 coordinate) {
+    highp vec2 position = clamp(coordinate, vec2(0.5), imageDimensions - vec2(0.5));
+    highp ivec2 pixel = ivec2(floor(position));
+    highp ivec2 frame = pixel / blockGrid.yz;
+    highp ivec2 local = pixel - frame * blockGrid.yz;
+    highp ivec2 blocks = (blockGrid.yz + ivec2(blockGrid.x - 1)) / blockGrid.x;
+    highp ivec2 cell = local / blockGrid.x;
+    highp int frameIndex = frame.y * int(imageDimensions.x) / blockGrid.y + frame.x;
+    highp int index = frameIndex * blocks.x * blocks.y + cell.y * blocks.x + cell.x;
+    highp uvec2 entry = texelFetch(blockTable,
+      ivec2(index % blockTableWidth, index / blockTableWidth), 0).rg;
+    if ((entry.x & 32768u) != 0u) {
+      highp float gray = float(entry.x & 255u) / 255.0;
+      return vec4(vec3(gray), float(entry.y) / 255.0);
+    }
+    highp ivec2 origin = frame * blockGrid.yz + cell * blockGrid.x;
+    if (blockNearest) return texelFetch(image, ivec2(entry) + pixel - origin, 0);
+    return texture(image, (vec2(entry) + position - vec2(origin)) / vec2(textureSize(image, 0)));
+  }
+)";
+inline std::string withBlockSpriteSampling(std::string source) {
+  const std::string declaration = "  highp vec4 sampleBlockImage(highp vec2 coordinate);";
+  const auto at = source.find(declaration);
+  if (at != std::string::npos) source.replace(at, declaration.size(), blockSpriteSamplingSource);
+  return source;
+}
+
 constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
@@ -1083,6 +1115,7 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   in highp vec4 vertexColor;
   in vec4 vertexUvClamp;
   out highp vec4 outputColor;
+  highp vec4 sampleBlockImage(highp vec2 coordinate);
   void main() {
     highp vec2 coord = vertexUv;
     if (clampedTilingSampling) {
@@ -1095,7 +1128,8 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
       } else coord = clamp(coord, margin, vec2(1.0) - margin);
     }
     highp vec4 sampleColor;
-    if (derivedImage) {
+    if (blockImage) sampleColor = sampleBlockImage(coord * imageDimensions);
+    else if (derivedImage) {
       bool outside = any(lessThan(coord, derivedSampleBounds.xy)) ||
                      any(greaterThan(coord, derivedSampleBounds.zw));
       if (outside) sampleColor = vec4(0.0);
@@ -1110,6 +1144,43 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
     }
     outputColor = sampleColor * vertexColor;
     outputColor.rgb *= pixiSpritePacking ? (texturePremultiplied ? 1.0 : sampleColor.a) : (texturePremultiplied ? vertexColor.a : outputColor.a);
+  }
+)";
+constexpr const char* compactSpriteFragmentSource = R"(#version 300 es
+  precision mediump float;
+  uniform highp sampler2D image, indexX, indexY, phaseX, phaseY;
+  uniform bool pixiSpritePacking, texturePremultiplied;
+  uniform highp vec2 logicalSize, atlasSize, atlasOffset;
+  uniform highp vec4 contentBounds, fillColor;
+  in highp vec2 vertexUv;
+  in highp vec4 vertexColor;
+  out highp vec4 outputColor;
+  highp float indexAt(highp sampler2D table, highp vec2 uv) {
+    highp vec2 bytes = round(texture(table, uv).rg * 255.0);
+    return bytes.x + 256.0 * bytes.y;
+  }
+  highp vec2 decodePhase(highp float n, highp vec2 basis) {
+    highp float parity = mod(n, 2.0), block = mod(floor(n / 2.0), 2.0);
+    highp float delta = parity == 0.0 ? basis.x : 1.0 - basis.x;
+    bool left = parity == 0.0 ? basis.y != block : basis.y == block;
+    return left ? vec2(n - 1.0, 1.0 - delta) : vec2(n, delta);
+  }
+  void main() {
+    highp vec4 sampleColor = fillColor;
+#ifndef PMJS_COMPACT_FILL
+    highp vec2 x = decodePhase(indexAt(indexX, vec2(vertexUv.x, 0.5)),
+      texture(phaseX, vec2(vertexUv.x, 0.5)).rg);
+    highp vec2 y = decodePhase(indexAt(indexY, vec2(0.5, vertexUv.y)),
+      texture(phaseY, vec2(0.5, vertexUv.y)).rg);
+    highp vec2 pixel = vec2(x.x, y.x);
+    highp vec2 phase = roundEven(vec2(x.y, y.y) * 256.0) / 256.0;
+    bool outside = any(lessThan(pixel + vec2(1.0), contentBounds.xy)) ||
+      any(greaterThanEqual(pixel, contentBounds.zw));
+    if (!outside) sampleColor = texture(image, (pixel + atlasOffset + phase + vec2(0.5)) / atlasSize);
+#endif
+    outputColor = sampleColor * vertexColor;
+    outputColor.rgb *= pixiSpritePacking ? (texturePremultiplied ? 1.0 : sampleColor.a) :
+      (texturePremultiplied ? vertexColor.a : outputColor.a);
   }
 )";
 constexpr const char* generatedTextureFragmentSource = R"(#version 300 es
@@ -1213,6 +1284,9 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   uniform bool standaloneBitmapRegion;
   uniform highp vec4 spriteFrame;
   uniform highp vec2 imageDimensions;
+  uniform bool derivedImage;
+  uniform highp vec4 derivedUvTransform;
+  uniform highp vec2 derivedAtlasOffset;
   uniform float blurRadius;
   uniform sampler2D maskImage;
   uniform bool maskEnabled;
@@ -1230,8 +1304,16 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   in highp vec4 vertexColor;
   in vec4 vertexUvClamp;
   out highp vec4 outputColor;
+  highp vec4 sampleBlockImage(highp vec2 coordinate);
   highp vec4 spriteTexel(highp vec2 pixel) {
-    highp vec4 texel = texelFetch(image, ivec2(clamp(pixel, spriteFrame.xy, spriteFrame.zw)), 0);
+    highp vec2 address = clamp(pixel, spriteFrame.xy, spriteFrame.zw);
+    if (derivedImage) {
+      address += derivedAtlasOffset;
+      if (any(lessThan(address, vec2(0.0))) ||
+          any(greaterThanEqual(address, vec2(textureSize(image, 0))))) return vec4(0.0);
+    }
+    highp vec4 texel = blockImage ? sampleBlockImage(address + vec2(0.5)) :
+      texelFetch(image, ivec2(address), 0);
     highp vec3 premultiplied = texturePremultiplied ? texel.rgb : texel.rgb * texel.a;
     if (!spriteColorEnabled || spriteBlendColor.a <= 0.0) return vec4(premultiplied, texel.a);
     ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
@@ -1291,7 +1373,11 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
             tilingAtlasBounds.xy, tilingAtlasBounds.zw);
         } else coord = clamp(coord, margin, vec2(1.0) - margin);
       }
-      sampleColor = texture(image, coord);
+      if (derivedImage) coord = coord * derivedUvTransform.xy + derivedUvTransform.zw;
+      bool outside = derivedImage && (any(lessThan(coord, vec2(0.0))) ||
+        any(greaterThan(coord, vec2(1.0))));
+      sampleColor = outside ? vec4(0.0) : blockImage ?
+        sampleBlockImage(coord * imageDimensions) : texture(image, coord);
       }
     } else {
       highp vec2 coord = standaloneBitmapRegion ?

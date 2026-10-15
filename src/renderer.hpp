@@ -518,11 +518,23 @@ class Renderer {
   bool filterBoundsEnabled_ = true;
   std::uint32_t program_ = 0;
   std::uint32_t simpleProgram_ = 0;
+  struct CompactSpriteProgram {
+    std::uint32_t program = 0;
+    int projection = -1, targetYDown = -1, vertices = -1;
+    int packing = -1, premultiplied = -1;
+    int logicalSize = -1, atlasSize = -1, atlasOffset = -1;
+    int contentBounds = -1, fill = -1;
+  };
+  CompactSpriteProgram compactSprite_, compactFill_;
   int simpleDerivedImageUniform_ = -1;
   int simpleDerivedNearestUniform_ = -1;
   int simpleDerivedAtlasOffsetUniform_ = -1;
   int simpleDerivedUvTransformUniform_ = -1;
   int simpleDerivedSampleBoundsUniform_ = -1;
+  struct BlockSpriteUniforms {
+    int enabled = -1, nearest = -1, grid = -1, tableWidth = -1;
+  };
+  BlockSpriteUniforms simpleBlock_;
   struct SpriteEffectProgram {
     std::uint32_t program = 0;
     int targetYDown = -1;
@@ -539,6 +551,10 @@ class Renderer {
     int tilingBounds = -1;
     int nearest = -1;
     int textureSize = -1;
+    int derivedImage = -1;
+    int derivedUvTransform = -1;
+    int derivedAtlasOffset = -1;
+    BlockSpriteUniforms block;
     int blur = -1;
     int maskEnabled = -1;
     int maskImage = -1;

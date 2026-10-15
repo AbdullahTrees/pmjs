@@ -14,7 +14,7 @@ const imageSource = 'img/characters/!$actor.' + (engine === 'MV' ? 'rpgmvp' : 'p
 const audioExtension = engine === 'MV' ? '.rpgmvo' : '.ogg_';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pmjs-prepared-media-'));
 const gameRoot = path.join(root, 'game');
-for (const directory of ['data', 'img/characters', 'img/sv_actors', 'audio/bgm', 'audio/se']) {
+for (const directory of ['data', 'img/characters', 'img/pictures', 'audio/bgm', 'audio/se']) {
   fs.mkdirSync(path.join(gameRoot, directory), { recursive: true });
 }
 const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
@@ -39,7 +39,7 @@ const dense = Buffer.alloc(90 * 60 * 4);
 for (let y = 0; y < 60; ++y) for (let x = 0; x < 90; ++x) {
   dense.set([x * 13 % 256, y * 17 % 256, (x + y) % 256, 255], (y * 90 + x) * 4);
 }
-fs.writeFileSync(path.join(gameRoot, 'img/sv_actors/dense.png'), png(90, 60, dense));
+fs.writeFileSync(path.join(gameRoot, 'img/pictures/dense.png'), png(90, 60, dense));
 const wav = Buffer.alloc(44 + 480 * 4);
 wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(2, 22);
@@ -52,9 +52,18 @@ for (const folder of ['bgm', 'se']) {
 native.initialize({ gameRoot, assetRoot: '', width: 128, height: 128, windowTitle: 'prepared media' });
 
 async function main() {
-  const options = { gameRoot, cacheRoot: path.join(root, 'cache'), native };
-  const cold = await prepareAssets(options);
-  assert.equal(native.assets.preparationVersion.processor, 'lossless-images-v2');
+  const pageCodec = process.argv[4] || 'png';
+  const options = { gameRoot, cacheRoot: path.join(root, 'cache'), native, pageCodec };
+  assert.match(native.assets.preparationLz4Version, /^lz4-1\.10\.0-rgba-v1$/);
+  assert.equal(native.assets.preparationWorkspaceVersion, 1);
+  for (const workspaceBytes of [-1, 0.5, 268435457])
+    assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-workspace'), null,
+      path.join(gameRoot, imageSource), null, { workspaceBytes }), /workspaceBytes must be an integer/);
+  const cold = await prepareAssets({ ...options, workspaceBytes: engine === 'MV' ? 0 : 64 * 1024 * 1024 });
+  assert.ok(cold.entries[0].descriptor.pages.every(page => page.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')));
+  assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-codec'), null,
+    path.join(gameRoot, imageSource), null, { pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
+  assert.equal(native.assets.preparationVersion.processor, 'lossless-images-v6');
   assert.equal(cold.decrypted, 3);
   assert.equal(cold.installed, 1);
   assert.equal(cold.fallback, 1, 'larger prepared representation keeps ordinary loading');
@@ -83,12 +92,24 @@ async function main() {
   assert.ok(music.duration > 0);
   assert.equal(native.media.playAudio(music.handle, true, 0), true);
   assert.equal(native.media.playAudio(effect.handle, false, 0), true);
-  const warm = await prepareAssets(options);
+  const warm = await prepareAssets({ ...options, workspaceBytes: 128 * 1024 * 1024 });
   assert.equal(warm.catalogHit, true);
   assert.equal(warm.generated, 0);
   assert.equal(warm.hits, 4);
   assert.equal(warm.negativeHits, 1);
   assert.equal(warm.decrypted, 3);
+  const drifted = warm.decryptedEntries.map(entry => {
+    const drift = identity => { const parts = identity.split(':'); parts[parts.length - 6] = String(BigInt(parts[parts.length - 6]) + 1n); return parts.join(':'); };
+    return { ...entry, sourceIdentity: drift(entry.sourceIdentity), settingsIdentity: drift(entry.settingsIdentity), fileIdentity: drift(entry.fileIdentity) };
+  });
+  native.assets.installDerivedCatalog(drifted);
+  assert.deepEqual(Buffer.from(native.fs.readBytes('audio/bgm/tone.ogg')), wav,
+    'encrypted source/settings/output inode drift must retain verified plaintext');
+  const failed = drifted.map(entry => ({ ...entry, fileHash: '0'.repeat(64) }));
+  native.assets.installDerivedCatalog(failed);
+  assert.equal(native.assets.hasDecrypted('audio/bgm/tone.ogg'), false, 'wrong decrypted content hash must refuse inode recovery');
+  native.assets.installDerivedCatalog(warm.decryptedEntries);
+  native.assets.consumePreparationInvalidations();
   native.fs = createGameFilesystem(native.fs, path.join(root, 'writable'));
   const replacementPixels = Buffer.alloc(16, 255);
   native.fs.writeBytes('img/characters/!$actor.png', png(2, 2, replacementPixels));

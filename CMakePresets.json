@@ -55,6 +55,7 @@
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/linux-arm64.cmake",
         "PMJS_OFFLINE": "ON",
         "PMJS_EFFEKSEER_ARCHIVE": "$env{PMJS_EFFEKSEER_ARCHIVE}",
+        "PMJS_LZ4_ARCHIVE": "$env{PMJS_LZ4_ARCHIVE}",
         "PMJS_NODE_ROOT": "$env{PMJS_NODE_ROOT}",
         "PMJS_BUNDLE_DEPENDENCIES": "ON"
       }

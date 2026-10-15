@@ -66,8 +66,13 @@ On an x86-64 Linux host:
 
 The installation goes to `dist/pmjs-arm64`. The command also builds the local
 host installation used to make game bundles. It prepares the pinned ARM64 SDK,
-Node, Effekseer, and Skia component, then builds and stages the runtime.
+Node, Effekseer, LZ4, and Skia component, then builds and stages the runtime.
 Later builds reuse their checked caches.
+
+LZ4 1.10.0 is built statically from the archive pinned in `tools/lz4.lock.json`.
+Only the standard block codec is compiled. For offline CMake builds, set
+`PMJS_LZ4_ARCHIVE` to the matching archive; `build.sh --target arm64` prepares it
+automatically. Local online builds can fetch the pinned archive during configuration.
 
 The host also needs curl, Make, `dpkg-deb`, `readelf`, and Clang/LLVM 20.1.2:
 `clang-20`, `clang++-20`, `llvm-ar-20`, and `llvm-strip-20`.

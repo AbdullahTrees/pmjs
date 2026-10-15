@@ -57,6 +57,7 @@ struct PreparedImageDescriptor {
   std::optional<std::array<std::uint8_t, 4>> uniform;
   std::vector<PreparedImageCell> cells;
   std::vector<PreparedImagePage> pages;
+  std::optional<std::array<int, 3>> blockGrid;
 };
 
 struct PreparedTileRegion {
@@ -81,6 +82,22 @@ struct SpriteImageRegion {
   ImageInfo image;
   std::array<float, 4> source{}, atlas{};
   int logicalWidth = 0, logicalHeight = 0, halo = 0;
+};
+
+struct CompactImageRegion {
+  ImageInfo image;
+  std::array<float, 4> contentBounds{}, fill{};
+  std::array<float, 2> atlasOffset{};
+  int logicalWidth = 0, logicalHeight = 0;
+  std::uint32_t indexX = 0, indexY = 0, phaseX = 0, phaseY = 0;
+};
+
+struct BlockImageRegion {
+  ImageInfo image;
+  std::uint32_t table = 0;
+  std::array<int, 3> blockGrid{};
+  std::array<int, 2> tableSize{};
+  int logicalWidth = 0, logicalHeight = 0;
 };
 
 struct ImageMemoryEntry {
@@ -120,6 +137,7 @@ class ImageFileSource {
 class ImageStore {
  public:
   static constexpr std::size_t defaultWarmBudgetBytes = 4U * 1024U * 1024U;
+  static constexpr std::size_t defaultPreparedFrameCacheBytes = 4U * 1024U * 1024U;
   static constexpr std::size_t warmEntryLimit = 256;
   static constexpr std::size_t warmFileLimit = 128;
 
@@ -133,6 +151,7 @@ class ImageStore {
   // cannot redirect an in-flight load to a different inode.
   static std::unique_ptr<ImageFileSource> openFile(const std::filesystem::path& path);
   static std::size_t decodedStorageBytes(const ImagePixels& pixels);
+  static std::optional<std::vector<std::uint8_t>> readCapturedBytes(const ImageFileSource& source);
   static std::optional<ImagePixels> decodeFile(const ImageFileSource& source,
       std::size_t maxDecodedBytes = 128U*1024U*1024U);
   static std::optional<ImagePixels> decodeMemory(const void* data, std::size_t size);
@@ -155,14 +174,16 @@ class ImageStore {
   const std::unordered_map<std::string, std::uint64_t>& tileFallbacks() const { return tileFallbacks_; }
   std::size_t tileMetadataBytes() const { return tileMetadataBytes_->load(std::memory_order_relaxed); }
   void noteTileLoadFallback() { if (tileDiagnostics_) ++tileFallbacks_["page-validation"]; }
-  unsigned consumePreparationInvalidations() { return preparationInvalidations_.exchange(0, std::memory_order_relaxed); }
+  unsigned consumePreparationInvalidations() { return preparationInvalidations_->exchange(0, std::memory_order_relaxed); }
   void clearPreparedIndex() { preparedSources_.clear(); }
   bool installPrepared(const std::filesystem::path& sourcePath,
                        const std::filesystem::path& directory,
                        PreparedImageDescriptor descriptor,
                        const std::string& expectedSourceIdentity = {},
                        const std::vector<std::string>* pageIdentities = nullptr,
-                       std::vector<std::string>* capturedPages = nullptr);
+                       std::vector<std::string>* capturedPages = nullptr,
+                       const std::string& backingHash = {},
+                       const std::vector<std::string>* pageHashes = nullptr);
   std::optional<ImageInfo> acquirePrepared(const ImageFileSource& source,
                                           bool retainCpuPixels = false);
   struct PreparedLoad;
@@ -178,6 +199,33 @@ class ImageStore {
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
       bool premultiplied = true);
+  // Frame textures use ordinary sampling with approximate filtering.
+  std::optional<SpriteImageRegion> resolvePreparedFrameRegion(
+      ImageHandle handle, float x, float y, float width, float height,
+      bool premultiplied = true);
+  void setPreparedFrameCacheBudget(std::size_t bytes);
+  std::size_t preparedFrameCacheBudget() const { return preparedFrameBudgetBytes_; }
+  std::size_t preparedFrameCacheBytes() const { return preparedFrameBytes_; }
+  std::size_t preparedFrameResidentBytes() const { return preparedFrameResidentBytes_; }
+  std::size_t preparedFrameEvictedBytes() const { return preparedFrameResidentBytes_ - preparedFrameBytes_; }
+  std::size_t preparedFramePeakResidentBytes() const { return preparedFramePeakResidentBytes_; }
+  void setCompactSamplingEnabled(bool enabled) { compactSamplingEnabled_ = enabled; }
+  void setPreparedCropUploadsEnabled(bool enabled) { preparedCropUploadsEnabled_ = enabled; }
+  std::uint64_t compactUploadFailures() const { return compactUploadFailures_; }
+  std::uint64_t compactTextureUploads() const { return compactTextureUploads_; }
+  std::uint64_t preparedCropUploads() const { return preparedCropUploads_; }
+  std::uint64_t preparedCropUploadBytes() const { return preparedCropUploadBytes_; }
+  std::uint64_t blockTextureUploads() const { return blockTextureUploads_; }
+  std::uint64_t blockUploadFailures() const { return blockUploadFailures_; }
+  std::uint64_t blockRegions() const { return blockRegions_; }
+  std::optional<BlockImageRegion> resolveBlockRegion(ImageHandle handle,
+      bool premultiplied = true);
+
+  std::uint64_t preparedFrameCacheHits() const { return preparedFrameHits_; }
+  std::uint64_t preparedFrameCacheMisses() const { return preparedFrameMisses_; }
+  std::uint64_t preparedFrameCacheEvictions() const { return preparedFrameEvictions_; }
+  std::optional<CompactImageRegion> resolveCompactRegion(
+      ImageHandle handle, float x, float y, float width, float height);
   std::optional<ImagePixels> readPixelsRegion(ImageHandle handle,
                                             int x, int y, int width, int height) const;
   std::optional<ImageInfo> acquireCached(const ImageFileSource& source, const std::string& tileSet = {});
@@ -243,6 +291,8 @@ class ImageStore {
   std::uint64_t preparedRegions() const { return preparedRegions_; }
   std::uint64_t preparedMaterializations() const { return preparedMaterializations_; }
   std::uint64_t preparedPageDecodes() const { return preparedPageDecodes_->load(std::memory_order_relaxed); }
+  std::uint64_t preparedSharedPageHits() const;
+  std::uint64_t preparedSharedTextureHits() const { return preparedSharedTextureHits_; }
   std::uint64_t preparedRegionReads() const { return preparedRegionReads_; }
   const std::unordered_map<std::string, std::uint64_t>& preparedFallbacks() const { return preparedFallbacks_; }
   void notePreparedFallback(ImageHandle handle, const std::string& reason);
@@ -252,7 +302,39 @@ class ImageStore {
 
  private:
   std::unordered_map<ImageHandle, std::vector<std::weak_ptr<ImagePixelSnapshot>>> pixelReads_;
+  struct SharedPreparedPage;
+  struct PreparedPool;
+  struct SharedTexture;
   struct PreparedBacking;
+  std::shared_ptr<PreparedPool> preparedPool_;
+  std::unordered_map<std::string, std::weak_ptr<SharedTexture>> preparedTextures_;
+  std::shared_ptr<SharedTexture> shareTexture(const std::string& key, std::uint32_t texture,
+      std::size_t bytes, int channels);
+  std::string preparedTextureKey(PreparedBacking& backing, bool premultiplied);
+
+  struct PreparedFrame {
+    const PreparedBacking* owner;
+    std::array<int, 4> source;
+    std::array<int, 4> storage;
+    ImageHandle image;
+    bool premultiplied;
+    std::size_t bytes;
+    std::uint64_t lastUsed;
+  };
+  std::vector<PreparedFrame> preparedFrames_;
+  // Keep evicted textures alive until all queued draws from this frame finish.
+  std::vector<ImageHandle> activePreparedFrames_;
+  std::size_t preparedFrameBudgetBytes_ = defaultPreparedFrameCacheBytes;
+  std::size_t preparedFrameBytes_ = 0;
+  std::size_t preparedFrameResidentBytes_ = 0, preparedFramePeakResidentBytes_ = 0;
+  bool compactSamplingEnabled_ = true, preparedCropUploadsEnabled_ = true;
+  std::uint64_t compactUploadFailures_ = 0, compactTextureUploads_ = 0;
+  std::uint64_t preparedCropUploads_ = 0, preparedCropUploadBytes_ = 0;
+  std::uint64_t blockTextureUploads_ = 0, blockUploadFailures_ = 0, blockRegions_ = 0;
+  std::uint64_t preparedFrameClock_ = 0, preparedFrameHits_ = 0;
+  std::uint64_t preparedFrameMisses_ = 0, preparedFrameEvictions_ = 0;
+  void clearPreparedFrames(const PreparedBacking* owner);
+  void trimPreparedFrames(std::size_t targetBytes);
   struct TilePrototype;
   struct TileCatalog;
   struct TilePages;
@@ -264,6 +346,8 @@ class ImageStore {
     std::uint64_t opacityRevision = 0;
     bool opaque = false;
     std::uint32_t texture = 0;
+    std::shared_ptr<SharedTexture> sharedTexture, sharedPremultipliedTexture;
+    std::size_t preparedFrameBytes = 0;
     std::shared_ptr<PreparedBacking> prepared;
     std::shared_ptr<TileBacking> tiles;
     int width = 0;
@@ -319,6 +403,7 @@ class ImageStore {
   void clearPrepared(Slot& slot);
   void trimPreparedPages();
   bool materialize(Slot& slot, bool premultiplied);
+  std::optional<std::size_t> uploadPreparedCrops(Slot& slot, std::uint32_t& texture);
   static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page);
   static std::optional<ImagePixels> readPreparedRegion(PreparedBacking& backing,
       int x, int y, int width, int height);
@@ -332,10 +417,11 @@ class ImageStore {
   std::optional<ImageInfo> createDecoded(const ImagePixels& pixels);
   std::optional<ImageInfo> createImage(int width, int height, const void* pixels,
                                      bool premultiplied, int channels);
+  bool detachSharedTexture(Slot& slot);
   bool promoteToRgba(Slot& slot, const void* replacement = nullptr);
   std::deque<Slot> slots_;
   std::unordered_map<std::string, ImageHandle> pathCache_;
-  mutable std::atomic<unsigned> preparationInvalidations_{0};
+  std::shared_ptr<std::atomic<unsigned>> preparationInvalidations_ = std::make_shared<std::atomic<unsigned>>(0);
   std::unordered_map<std::string, std::shared_ptr<PreparedBacking>> preparedSources_;
   std::size_t liveCount_ = 0;
   std::size_t gpuBytes_ = 0;
@@ -352,6 +438,7 @@ class ImageStore {
   std::uint64_t preparedHits_ = 0, preparedRegions_ = 0, preparedMaterializations_ = 0;
   std::shared_ptr<std::atomic<std::uint64_t>> preparedPageDecodes_ =
       std::make_shared<std::atomic<std::uint64_t>>(0);
+  std::uint64_t preparedSharedTextureHits_ = 0;
   mutable std::uint64_t preparedRegionReads_ = 0;
   std::unordered_map<std::string, std::uint64_t> preparedFallbacks_;
   ImageHandle fallbackHandle_ = 0;

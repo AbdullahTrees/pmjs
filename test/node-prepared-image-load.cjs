@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -80,6 +81,10 @@ function assertPixels(image, expected) {
 }
 
 async function main() {
+  const inodeScenarios = ['source', 'page', 'source-hash', 'page-hash', 'metadata', 'legacy', 'held'];
+  const inodeFixtures = new Map(inodeScenarios.map(scenario => [scenario, fixture('inode:' + scenario)]));
+  const coldRecovery = fixture('cold-inode');
+  const rehydrationFixtures = [fixture('legacy-rehydration'), fixture('hashed-rehydration')];
   const lazy = fixture('lazy');
   const retainedFixtures = [fixture('cpu'), fixture('coalesced-cpu')];
   const cached = fixture('cached-cpu');
@@ -133,7 +138,7 @@ async function main() {
   for (const lateRequest of [false, true]) {
     const retained = retainedFixtures[Number(lateRequest)];
     install(retained);
-    const decodes = native.images.memory().preparedPageDecodes;
+    const decodeStats = native.images.memory();
     let owner, cpuOwner;
     await withBlockedWorker(async () => {
       owner = native.images.loadAsync(retained.source, !lateRequest);
@@ -146,8 +151,12 @@ async function main() {
     assert.equal(a.handle, b.handle);
     assert.equal(entry(a).cpuBytes, retained.pixels.length);
     assert.equal(entry(a).gpuBytes, 0);
-    assert.equal(native.images.memory().preparedPageDecodes - decodes, 1,
-      'explicit CPU reconstruction repeated the validation decode');
+    const reconstructed = native.images.memory();
+    const pageDecodes = reconstructed.preparedPageDecodes - decodeStats.preparedPageDecodes;
+    const sharedPageHits = reconstructed.preparedSharedPageHits - decodeStats.preparedSharedPageHits;
+    assert.ok(pageDecodes <= 1, 'explicit CPU reconstruction repeated the validation decode');
+    assert.equal(pageDecodes + sharedPageHits, 1,
+      'CPU reconstruction must decode once or reuse an earlier decoded page');
     for (let frame = 0; frame < 61; ++frame) native.beginFrame();
     assert.equal(entry(a).cpuBytes, retained.pixels.length, 'explicit CPU retention expired');
     assertPixels(a, retained.pixels);
@@ -219,6 +228,73 @@ async function main() {
     assert.ok(entry(image).gpuBytes > 0, 'stale catalog should use original decoding');
     assert.equal(native.assets.consumePreparationInvalidations() & 1, 1, 'observed stale images request catalog regeneration');
     assert.equal(native.assets.consumePreparationInvalidations(), 0, 'signals are consumed once');
+    native.images.release(image.handle);
+  }
+  const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const changedField = (identity, fromEnd) => {
+    const fields = identity.split(':');
+    fields[fields.length - fromEnd] = String(BigInt(fields[fields.length - fromEnd]) + 1n);
+    return fields.join(':');
+  };
+  for (const [index, prepared] of rehydrationFixtures.entries()) {
+    const record = { ...prepared, sourceIdentity: native.assets.sourceIdentity(prepared.source) };
+    if (index) {
+      record.backingHash = hashFile(path.join(root, prepared.source));
+      record.pageHashes = [hashFile(path.join(prepared.directory, 'page-0.png'))];
+    }
+    assert.equal(native.assets.installPrepared([record], true), 1);
+    native.assets.consumePreparationInvalidations();
+    const image = await native.images.loadAsync(prepared.source);
+    const withPixels = await native.images.loadAsync(prepared.source, true);
+    assertPixels(withPixels, prepared.pixels);
+    assert.equal(entry(withPixels).gpuBytes, 0, 'cached CPU rehydration retains prepared backing');
+    assert.equal(native.assets.consumePreparationInvalidations(), 0, 'unchanged cached backing stays valid');
+    native.images.release(image.handle);
+    native.images.release(withPixels.handle);
+  }
+  const coldRecord = { ...coldRecovery, sourceIdentity: changedField(native.assets.sourceIdentity(coldRecovery.source), 6),
+    backingHash: hashFile(path.join(root, coldRecovery.source)),
+    pageHashes: [hashFile(path.join(coldRecovery.directory, 'page-0.png'))] };
+  assert.equal(native.assets.installPrepared([coldRecord], true), 1, 'cold installation tolerates verified inode drift');
+  const recovered = await native.images.loadAsync(coldRecovery.source);
+  assertPixels(recovered, coldRecovery.pixels);
+  assert.equal(entry(recovered).gpuBytes, 0);
+  native.images.release(recovered.handle);
+  for (const scenario of inodeScenarios) {
+    const prepared = inodeFixtures.get(scenario);
+    const pagePath = path.join(prepared.directory, 'page-0.png');
+    const record = { ...prepared, sourceIdentity: native.assets.sourceIdentity(prepared.source),
+      backingHash: hashFile(path.join(root, prepared.source)), pageHashes: [hashFile(pagePath)] };
+    assert.equal(native.assets.installPrepared([record], true), 1);
+    if (scenario !== 'page' && scenario !== 'page-hash')
+      record.sourceIdentity = changedField(record.sourceIdentity, scenario === 'metadata' ? 5 : 6);
+    if (scenario === 'page' || scenario === 'page-hash' || scenario === 'held')
+      record.pageIdentities[0] = changedField(record.pageIdentities[0], 6);
+    if (scenario === 'source-hash') record.backingHash = '0'.repeat(64);
+    if (scenario === 'page-hash') record.pageHashes[0] = '0'.repeat(64);
+    if (scenario === 'legacy') { delete record.backingHash; delete record.pageHashes; }
+    assert.equal(native.assets.installPreparedCatalog([record]), 1);
+    native.assets.consumePreparationInvalidations();
+    let promise;
+    if (scenario === 'held') {
+      await withBlockedWorker(async () => {
+        promise = native.images.loadAsync(prepared.source);
+        await remainsPending(promise);
+        const replacement = path.join(root, 'inode-replacement.png');
+        fs.writeFileSync(replacement, png(4, 4, Buffer.alloc(4 * 4 * 4, 255)));
+        fs.renameSync(replacement, path.join(root, prepared.source));
+        fs.writeFileSync(replacement, png(6, 6, Buffer.alloc(6 * 6 * 4, 255)));
+        fs.renameSync(replacement, pagePath);
+        native.assets.installPrepared([]);
+      });
+    } else promise = native.images.loadAsync(prepared.source);
+    const image = await promise;
+    assertPixels(image, prepared.pixels);
+    const accepted = ['source', 'page', 'held'].includes(scenario);
+    assert.equal(entry(image).gpuBytes === 0, accepted,
+      scenario + ': inode-only recovery must verify captured content before prepared readiness');
+    assert.equal(native.assets.consumePreparationInvalidations() & 1, Number(!accepted),
+      scenario + ': rejected identities or content must invalidate the catalog');
     native.images.release(image.handle);
   }
   console.log('[pmjs-prepared-image-load] worker loading, snapshots, coalescing, CPU retention and fallback passed');

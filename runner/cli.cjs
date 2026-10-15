@@ -12,6 +12,7 @@ function parse(argv) {
     ['--config', 'config'],
     ['--greenworks-module', 'greenworksModule'],
     ['--image-warm-cache-bytes', 'imageWarmCacheBytes'],
+    ['--prepared-frame-cache-bytes', 'preparedFrameCacheBytes'],
     ['--asset-preparation', 'assetPreparation'], ['--asset-cache-root', 'assetCacheRoot'],
     ['--asset-recipes', 'assetRecipes'], ['--map-preparation', 'mapPreparation'],
   ]);
@@ -25,6 +26,9 @@ function parse(argv) {
   if (result.height !== undefined) result.height = Number(result.height);
   if (result.imageWarmCacheBytes !== undefined) {
     result.imageWarmCacheBytes = Number(result.imageWarmCacheBytes);
+  }
+  if (result.preparedFrameCacheBytes !== undefined) {
+    result.preparedFrameCacheBytes = Number(result.preparedFrameCacheBytes);
   }
   return result;
 }

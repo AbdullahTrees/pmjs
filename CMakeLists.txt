@@ -86,6 +86,7 @@ set(PMJS_PLATFORM_LIBS PkgConfig::SDL2 PkgConfig::EGL PkgConfig::GLES ${CMAKE_DL
 set(PMJS_MEDIA_LIBS PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL PkgConfig::SWRESAMPLE PkgConfig::SWSCALE)
 include(cmake/Effekseer.cmake)
 include(cmake/Skia65.cmake)
+include(cmake/Lz4.cmake)
 set(PMJS_RUNTIME_SOURCES
   src/runtime_core.cpp
   src/platform.cpp
@@ -100,6 +101,7 @@ set(PMJS_RUNTIME_SOURCES
   src/psd_decoder.cpp
   src/resources_tiles.cpp
   src/asset_processor.cpp
+  src/prepared_page.cpp
   src/tile_assets.cpp
   src/canvas.cpp
   src/canvas_composite.cpp
@@ -107,6 +109,7 @@ set(PMJS_RUNTIME_SOURCES
   src/text_backend.cpp
   src/text_layout.cpp
   src/vfs.cpp
+  src/file_identity.cpp
   src/media_decoder.cpp
   src/media_service.cpp
   src/effects.cpp)
@@ -122,7 +125,7 @@ endif()
 add_library(pmjs_runtime STATIC ${PMJS_RUNTIME_SOURCES})
 target_include_directories(pmjs_runtime PUBLIC src)
 target_compile_options(pmjs_runtime PRIVATE ${PMJS_BASE_COMPILE_OPTIONS})
-target_link_libraries(pmjs_runtime PUBLIC ${PMJS_PLATFORM_LIBS} PkgConfig::PNG PkgConfig::WEBP PkgConfig::ZLIB
+target_link_libraries(pmjs_runtime PUBLIC ${PMJS_PLATFORM_LIBS} PkgConfig::PNG PkgConfig::WEBP PkgConfig::ZLIB pmjs_lz4
   PkgConfig::JPEG PkgConfig::FREETYPE PkgConfig::HARFBUZZ ${PMJS_MEDIA_LIBS} EffekseerRendererGL m dl pthread)
 if(PMJS_ENABLE_SKIA65)
   target_compile_definitions(pmjs_runtime PRIVATE PMJS_HAS_SKIA65)
@@ -180,9 +183,13 @@ if(BUILD_TESTING)
     add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TARGET}>)
   endfunction()
 
-  pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp src/vfs.cpp)
+  pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp src/vfs.cpp src/file_identity.cpp)
+  target_link_libraries(pmjs-vfs-test PRIVATE PkgConfig::AVUTIL)
   pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp src/asset_processor.cpp)
-  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG)
+  pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp src/prepared_page.cpp)
+  target_link_libraries(pmjs-prepared-page-test PRIVATE pmjs_lz4 PkgConfig::ZLIB)
+  target_sources(pmjs-asset-processor-test PRIVATE src/prepared_page.cpp)
+  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB pmjs_lz4 pthread)
   pmjs_add_cpp_test(pmjs-tile-assets-test native-tile-assets test/tile-assets.cpp)
   target_link_libraries(pmjs-tile-assets-test PRIVATE pmjs_runtime)
   add_test(NAME node-prepared-tiles COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
@@ -194,6 +201,13 @@ if(BUILD_TESTING)
   target_link_libraries(pmjs-derived-images-test PRIVATE pmjs_runtime)
   add_test(NAME native-derived-images COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-derived-images-test>)
   set_tests_properties(native-derived-images PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_executable(pmjs-shared-prepared-pages-test test/shared-prepared-pages.cpp)
+  target_link_libraries(pmjs-shared-prepared-pages-test PRIVATE pmjs_runtime)
+  add_test(NAME native-shared-prepared-pages COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-shared-prepared-pages-test>)
+  set_tests_properties(native-shared-prepared-pages PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-shared-prepared-pages COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-shared-prepared-pages.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-shared-prepared-pages PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_executable(pmjs-grayscale-images-test test/grayscale-images.cpp)
   target_compile_options(pmjs-grayscale-images-test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(pmjs-grayscale-images-test PRIVATE pmjs_runtime)
@@ -207,6 +221,12 @@ if(BUILD_TESTING)
   add_test(NAME native-tile-lifetime COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-tile-lifetime-test>)
   set_tests_properties(native-tile-lifetime PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(pmjs-compact-allocation-failure-test test/compact-allocation-failure.cpp)
+    target_link_libraries(pmjs-compact-allocation-failure-test PRIVATE pmjs_runtime)
+    target_link_options(pmjs-compact-allocation-failure-test PRIVATE
+      "-Wl,--wrap=glTexImage2D" "-Wl,--wrap=glGetError")
+    add_test(NAME native-compact-allocation-failure COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-compact-allocation-failure-test>)
+    set_tests_properties(native-compact-allocation-failure PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
     add_executable(pmjs-tile-allocation-failure-test test/tile-allocation-failure.cpp)
     target_link_libraries(pmjs-tile-allocation-failure-test PRIVATE pmjs_runtime)
     target_link_options(pmjs-tile-allocation-failure-test PRIVATE
@@ -328,7 +348,7 @@ if(BUILD_TESTING)
   target_link_libraries(pmjs-canvas-upload-test PRIVATE pmjs_runtime)
   target_compile_options(pmjs-canvas-upload-test PRIVATE -UNDEBUG)
   add_test(NAME native-canvas-upload COMMAND pmjs-canvas-upload-test)
-  foreach(PMJS_NODE_TEST IN ITEMS node-desktop node-filter-intermediate-cache node-identity-filter-shader node-nearest-tile-shader node-scene node-sprite-byte-precision node-pixi4-clear node-window-layer-clears node-mask-pixels node-renderer-stats node-empty-sprite node-preparation-progress node-derived-sprite node-uniform-inline-matrix node-filter-coordinates node-filter-input node-bitmap-region-batching node-bitmap-region-flash node-mv-bitmap-filtering node-tile-edge-filtering node-four-texture-tiles node-yed-retained-tiles node-presentation-byte-precision node-render-to-image node-render-to-canvas node-render-target-filters node-image-coalesce node-image-retention node-image-warm-cache node-image-no-warm-cache node-image-fallback node-image-bytes node-audio-bytes node-video-texture node-video-color node-canvas-deferred node-canvas-pixels node-canvas-webp node-canvas-radial-gradient node-primitive-surface node-filter-bounds node-tone-boundary-pixels node-mz-color-pixels node-pixi5-zoom-pixels node-pixi5-tiling-pixels node-pixi5-sprite-rounding-pixels node-mz-host-contracts node-mz-canvas-pixels node-mz-sampling-pixels node-mesh-post-tint-overlay node-glyph-cache node-text-layout node-text-layout-cache node-text-upload node-freetype-facade node-primitive-canvas)
+  foreach(PMJS_NODE_TEST IN ITEMS node-desktop node-filter-intermediate-cache node-identity-filter-shader node-nearest-tile-shader node-scene node-sprite-byte-precision node-pixi4-clear node-window-layer-clears node-mask-pixels node-renderer-stats node-empty-sprite node-preparation-progress node-derived-sprite node-compact-sprite node-uniform-inline-matrix node-filter-coordinates node-filter-input node-bitmap-region-batching node-bitmap-region-flash node-mv-bitmap-filtering node-tile-edge-filtering node-four-texture-tiles node-yed-retained-tiles node-presentation-byte-precision node-render-to-image node-render-to-canvas node-render-target-filters node-image-coalesce node-image-retention node-image-warm-cache node-image-no-warm-cache node-image-fallback node-image-bytes node-audio-bytes node-video-texture node-video-color node-canvas-deferred node-canvas-pixels node-canvas-webp node-canvas-radial-gradient node-primitive-surface node-filter-bounds node-tone-boundary-pixels node-mz-color-pixels node-pixi5-zoom-pixels node-pixi5-tiling-pixels node-pixi5-sprite-rounding-pixels node-mz-host-contracts node-mz-canvas-pixels node-mz-sampling-pixels node-mesh-post-tint-overlay node-glyph-cache node-text-layout node-text-layout-cache node-text-upload node-freetype-facade node-primitive-canvas)
     if(NOT PMJS_ENABLE_SKIA65 AND PMJS_NODE_TEST STREQUAL "node-mz-canvas-pixels")
       continue()
     endif()
@@ -336,6 +356,34 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/${PMJS_NODE_TEST}.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
     set_tests_properties(${PMJS_NODE_TEST} PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   endforeach()
+  add_test(NAME node-prepared-frame-cache COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-cache.cjs" $<TARGET_FILE:pmjs_native>
+    "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  add_test(NAME node-prepared-frame-cache-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-cache.cjs" $<TARGET_FILE:pmjs_native>
+    "${CMAKE_CURRENT_BINARY_DIR}/test-assets" --disabled)
+  add_test(NAME node-prepared-frame-cache-default COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-cache.cjs" $<TARGET_FILE:pmjs_native>
+    "${CMAKE_CURRENT_BINARY_DIR}/test-assets" --default)
+  set_tests_properties(node-prepared-frame-cache node-prepared-frame-cache-disabled
+    node-prepared-frame-cache-default
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-prepared-frame-effects COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-effects.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-prepared-frame-effects
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-large-prepared-frame COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-large-prepared-frame.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-large-prepared-frame
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-block-sprite COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-block-sprite
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-block-sprite-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --disabled)
+  set_tests_properties(node-block-sprite-disabled
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-identity-filter-shader-full-resolution COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-identity-filter-shader.cjs" $<TARGET_FILE:pmjs_native>
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets" 816x624)
@@ -343,7 +391,7 @@ if(BUILD_TESTING)
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   set_tests_properties(node-presentation-byte-precision PROPERTIES ENVIRONMENT
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
-  set_tests_properties(node-derived-sprite node-uniform-inline-matrix PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  set_tests_properties(node-derived-sprite node-compact-sprite node-uniform-inline-matrix PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   set_tests_properties(node-audio-bytes PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-pixi4-tiling-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-pixi4-tiling-pixels.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
@@ -367,6 +415,11 @@ if(BUILD_TESTING)
   add_test(NAME node-prepared-media-mv COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-media.cjs" $<TARGET_FILE:pmjs_native> MV)
   set_tests_properties(node-prepared-media-mv PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  foreach(engine IN ITEMS MV MZ)
+    add_test(NAME node-prepared-media-lz4-${engine} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-media.cjs" $<TARGET_FILE:pmjs_native> ${engine} lz4)
+    set_tests_properties(node-prepared-media-lz4-${engine} PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  endforeach()
   add_test(NAME node-prepared-image-load COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-image-load.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-prepared-image-load PROPERTIES ENVIRONMENT

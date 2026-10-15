@@ -456,6 +456,13 @@
       "source": "PMJS",
       "license": "MIT",
       "notice": "LICENSE"
+    },
+    "third_party/lz4.LICENSE": {
+      "origin": "permissive",
+      "source": "https://github.com/lz4/lz4/tree/v1.10.0",
+      "revision": "v1.10.0",
+      "license": "BSD-2-Clause",
+      "notice": "third_party/lz4.LICENSE"
     }
   },
   "defaults": {

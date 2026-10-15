@@ -148,8 +148,8 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     glGetUniformLocation(presentationProgram_, "videoPremultiplied");
   presentationUpperCanvasPremultipliedUniform_ =
     glGetUniformLocation(presentationProgram_, "upperCanvasPremultiplied");
-  spriteEffect_.program = linkProgram(vertexSource, spriteEffectFragmentSource);
-  bitmapRegion_.program = linkProgram(bitmapRegionVertexSource().c_str(), bitmapRegionFragmentSource().c_str());
+  spriteEffect_.program = linkProgram(vertexSource, withBlockSpriteSampling(spriteEffectFragmentSource).c_str());
+  bitmapRegion_.program = linkProgram(bitmapRegionVertexSource().c_str(), withBlockSpriteSampling(bitmapRegionFragmentSource()).c_str());
   for (auto* entry : {&spriteEffect_, &bitmapRegion_}) {
     auto& effect = *entry;
     effect.targetYDown = glGetUniformLocation(effect.program, "targetYDown");
@@ -167,6 +167,15 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.nearest = glGetUniformLocation(effect.program, "nearestSampling");
     effect.textureSize =
       glGetUniformLocation(effect.program, "imageDimensions");
+    effect.derivedImage = glGetUniformLocation(effect.program, "derivedImage");
+    effect.derivedUvTransform = glGetUniformLocation(effect.program, "derivedUvTransform");
+    effect.derivedAtlasOffset = glGetUniformLocation(effect.program, "derivedAtlasOffset");
+    effect.block.enabled = glGetUniformLocation(effect.program, "blockImage");
+    effect.block.nearest = glGetUniformLocation(effect.program, "blockNearest");
+    effect.block.grid = glGetUniformLocation(effect.program, "blockGrid");
+    effect.block.tableWidth = glGetUniformLocation(effect.program, "blockTableWidth");
+    glUseProgram(effect.program);
+    glUniform1i(glGetUniformLocation(effect.program, "blockTable"), 2);
     effect.blur =
       glGetUniformLocation(effect.program, "blurRadius");
     effect.maskEnabled =
@@ -329,11 +338,12 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   targetProjectionLocations_.clear();
   using namespace renderer_shaders;
   const auto linkPixiProgram = [&precision](const char* vertex, const char* fragment) {
-    const auto source = pixiFragmentSourceWithPrecision(fragment, precision);
+    const auto source = withBlockSpriteSampling(pixiFragmentSourceWithPrecision(fragment, precision));
     return linkProgram(vertex, source.c_str());
   };
   GLuint filter = 0;
   GLuint simple = 0;
+  GLuint compact = 0, compactFill = 0;
   GLuint tile = 0, fourTile = 0;
   GLuint nearestTile = 0, nearestFourTile = 0;
   GLuint meshOverlay = 0;
@@ -341,6 +351,10 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   try {
     filter = linkPixiProgram(vertexSource, fragmentSource);
     simple = linkPixiProgram(vertexSource, simpleFragmentSource);
+    compact = linkPixiProgram(vertexSource, compactSpriteFragmentSource);
+    std::string fillSource(compactSpriteFragmentSource);
+    fillSource.insert(fillSource.find('\n') + 1, "#define PMJS_COMPACT_FILL\n");
+    compactFill = linkPixiProgram(vertexSource, fillSource.c_str());
     tile = linkPixiProgram(tileVertexSource, tileFragmentSource);
     if (fourTileTextures_) {
       std::string vertex(tileVertexSource), fragment(tileFragmentSource);
@@ -373,6 +387,8 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   } catch (...) {
     if (filter) glDeleteProgram(filter);
     if (simple) glDeleteProgram(simple);
+    if (compact) glDeleteProgram(compact);
+    if (compactFill) glDeleteProgram(compactFill);
     if (tile) glDeleteProgram(tile);
     if (fourTile) glDeleteProgram(fourTile);
     if (nearestTile) glDeleteProgram(nearestTile);
@@ -383,6 +399,8 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   }
   if (program_) glDeleteProgram(program_);
   if (simpleProgram_) glDeleteProgram(simpleProgram_);
+  if (compactSprite_.program) glDeleteProgram(compactSprite_.program);
+  if (compactFill_.program) glDeleteProgram(compactFill_.program);
   if (tileProgram_) glDeleteProgram(tileProgram_);
   if (fourTileProgram_) glDeleteProgram(fourTileProgram_);
   if (nearestTileProgram_) glDeleteProgram(nearestTileProgram_);
@@ -391,6 +409,28 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   if (canvasTriangleBitmapProgram_) glDeleteProgram(canvasTriangleBitmapProgram_);
   program_ = filter;
   simpleProgram_ = simple;
+  const auto compactUniforms = [](GLuint program) {
+    CompactSpriteProgram result;
+    result.program = program;
+    result.projection = glGetUniformLocation(program, "spriteProjection");
+    result.targetYDown = glGetUniformLocation(program, "targetYDown");
+    result.vertices = glGetUniformLocation(program, "spriteWorldVertices");
+    result.packing = glGetUniformLocation(program, "pixiSpritePacking");
+    result.premultiplied = glGetUniformLocation(program, "texturePremultiplied");
+    result.logicalSize = glGetUniformLocation(program, "logicalSize");
+    result.atlasSize = glGetUniformLocation(program, "atlasSize");
+    result.atlasOffset = glGetUniformLocation(program, "atlasOffset");
+    result.contentBounds = glGetUniformLocation(program, "contentBounds");
+    result.fill = glGetUniformLocation(program, "fillColor");
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "image"), 0);
+    for (const auto& [name, unit] : std::array<std::pair<const char*, int>, 4>{
+        {{"indexX", 2}, {"indexY", 3}, {"phaseX", 4}, {"phaseY", 5}}})
+      glUniform1i(glGetUniformLocation(program, name), unit);
+    return result;
+  };
+  compactSprite_ = compactUniforms(compact);
+  compactFill_ = compactUniforms(compactFill);
   filterTargetYDownUniform_ = glGetUniformLocation(program_, "targetYDown");
   filterImageYDownUniform_ = glGetUniformLocation(program_, "imageYDown");
   simpleTargetYDownUniform_ = glGetUniformLocation(simpleProgram_, "targetYDown");
@@ -409,6 +449,12 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   simpleDerivedAtlasOffsetUniform_ = glGetUniformLocation(simpleProgram_, "derivedAtlasOffset");
   simpleDerivedUvTransformUniform_ = glGetUniformLocation(simpleProgram_, "derivedUvTransform");
   simpleDerivedSampleBoundsUniform_ = glGetUniformLocation(simpleProgram_, "derivedSampleBounds");
+  simpleBlock_.enabled = glGetUniformLocation(simpleProgram_, "blockImage");
+  simpleBlock_.nearest = glGetUniformLocation(simpleProgram_, "blockNearest");
+  simpleBlock_.grid = glGetUniformLocation(simpleProgram_, "blockGrid");
+  simpleBlock_.tableWidth = glGetUniformLocation(simpleProgram_, "blockTableWidth");
+  glUseProgram(simpleProgram_);
+  glUniform1i(glGetUniformLocation(simpleProgram_, "blockTable"), 2);
   tileProgram_ = tile;
   fourTileProgram_ = fourTile;
   nearestTileProgram_ = nearestTile;
@@ -648,6 +694,8 @@ Renderer::~Renderer() {
   if (vertexArray_) glDeleteVertexArrays(1, &vertexArray_);
   if (program_) glDeleteProgram(program_);
   if (simpleProgram_) glDeleteProgram(simpleProgram_);
+  if (compactSprite_.program) glDeleteProgram(compactSprite_.program);
+  if (compactFill_.program) glDeleteProgram(compactFill_.program);
   if (generatedTextureProgram_) glDeleteProgram(generatedTextureProgram_);
   if (presentationProgram_) glDeleteProgram(presentationProgram_);
   if (spriteEffect_.program) glDeleteProgram(spriteEffect_.program);
