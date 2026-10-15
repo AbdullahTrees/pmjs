@@ -70,6 +70,13 @@ jobs:
       - name: Build runtime
         run: ./build.sh --target arm64 --jobs 2
 
+      - name: Archive FFmpeg source and build materials
+        run: |
+          source_archive="pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz"
+          python3 tools/release.py separate-sources --stage dist/pmjs-arm64 \
+            --output "dist/$source_archive" \
+            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$PMJS_BUILD_ID/$source_archive"
+
       - name: Verify host graphics and ARM64 package
         run: |
           python3 tools/release.py verify --stage dist/pmjs \
@@ -82,15 +89,15 @@ jobs:
         run: |
           python3 tools/release.py archive --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json \
-            --output dist/pmjs-linux-arm64-development.tar.gz --development
+            --output "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" --development
 
       - name: Save build files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pmjs-linux-arm64
           path: |
-            dist/pmjs-linux-arm64-development.tar.gz
-            dist/pmjs-linux-arm64-development.tar.gz.sha256
+            dist/pmjs-linux-arm64-*.tar.gz
+            dist/pmjs-ffmpeg-sources-*.tar.gz
             dist/static-arm64.json
             dist/verification-local.json
           if-no-files-found: error
@@ -116,8 +123,8 @@ jobs:
           BUILD_ID: ${{ needs.build.outputs.build-id }}
         run: |
           release_url=$(gh release create "$BUILD_ID" \
-            dist/pmjs-linux-arm64-development.tar.gz \
-            dist/pmjs-linux-arm64-development.tar.gz.sha256 \
+            "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" \
+            "dist/pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "PMJS $BUILD_ID" \
             --notes "" --prerelease --latest=false)

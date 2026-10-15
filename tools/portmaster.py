@@ -313,8 +313,10 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
                 licenses.write(f'===== {notice.relative_to(stage)} =====\n\n{notice.read_text().rstrip()}\n\n')
             for notice in extra_notices:
                 licenses.write(f'===== {notice.name} =====\n\n{notice.read_text().rstrip()}\n\n')
+            if info.get('dependencySources'):
+                licenses.write('FFmpeg source and build materials: ' + info['dependencySources']['url'] + '\n')
         # Only the bundled LGPL media libraries require matching source here.
-        if any(file.name.startswith('libav') for file in copied):
+        if any(file.name.startswith('libav') for file in copied) and not info.get('dependencySources'):
             sources = stage / 'share/pmjs/sources'
             record = sources / 'build-records/ffmpeg.json'
             recipe = json.loads(record.read_text())['recipe']['source']

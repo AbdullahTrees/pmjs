@@ -154,13 +154,11 @@ def sources(sdk, output):
     spec = json.loads((ROOT / 'tools/linux-arm64/sdk-recipes.json').read_text())
     cache = Path(os.environ.get('PMJS_DOWNLOAD_CACHE', ROOT / '.cache/linux-arm64/downloads'))
     output.mkdir(parents=True, exist_ok=True)
-    for name, source in spec['sources'].items():
-        if name == 'zig':
-            continue
-        archive = cache / source['url'].rsplit('/', 1)[-1]
-        if not archive.is_file() or digest(archive) != source['sha256']:
-            raise ValueError('Missing verified dependency source archive: ' + str(archive))
-        shutil.copyfile(archive, output / (name + '-' + archive.name))
+    source = spec['sources']['ffmpeg']
+    archive = cache / source['url'].rsplit('/', 1)[-1]
+    if not archive.is_file() or digest(archive) != source['sha256']:
+        raise ValueError('Missing verified dependency source archive: ' + str(archive))
+    shutil.copyfile(archive, output / ('ffmpeg-' + archive.name))
     for name in ['sdk-recipes.json', 'sdk-packages.json', 'prepare-sdk.py']:
         relative = Path('tools/linux-arm64') / name
         destination = output / relative
@@ -173,7 +171,26 @@ def sources(sdk, output):
     shutil.copytree(sdk / 'records', output / 'build-records', dirs_exist_ok=True)
 
 
-def manifest(stage, build, source):
+def strip_binaries(stage, tool):
+    for directory in ('bin', 'lib'):
+        for file in sorted((stage / directory).iterdir()):
+            if not file.is_file():
+                continue
+            with file.open('rb') as stream:
+                if stream.read(4) != b'\x7fELF':
+                    continue
+            symbols = subprocess.check_output(['readelf', '--dyn-syms', '--wide', file])
+            dynamic = subprocess.check_output(['readelf', '-d', '--wide', file])
+            subprocess.run([tool, '--strip-unneeded', file], check=True)
+            if (symbols != subprocess.check_output(['readelf', '--dyn-syms', '--wide', file]) or
+                    dynamic != subprocess.check_output(['readelf', '-d', '--wide', file])):
+                raise ValueError('Stripping changed dynamic symbols or loader information: ' + file.name)
+            sections = subprocess.check_output(['readelf', '-S', '--wide', file], text=True)
+            if re.search(r'\.(?:debug\w*|zdebug\w*|symtab)\b', sections):
+                raise ValueError('Strip tool left debug information: ' + file.name)
+
+
+def manifest(stage, build, source, strip=None):
     build_id = os.environ.get('PMJS_BUILD_ID') or None
     if build_id is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', build_id):
         raise ValueError('PMJS_BUILD_ID must use letters, numbers, dots, underscores or hyphens and start with a letter or number')
@@ -189,6 +206,8 @@ def manifest(stage, build, source):
                 compiled['dependencies'] != compiled_dependencies(build) or
                 compiled['addonSha256'] != digest(build / 'pmjs_native.node')):
             raise ValueError('Native inputs or binary changed since compilation; build again before installation')
+    if strip:
+        strip_binaries(stage, strip)
     info = {**config, 'schema': 1, 'buildId': build_id, 'source': identity,
             'compiledProvenance': qualified,
             'configuration': {key: value for key, value in values.items()
@@ -214,6 +233,41 @@ def checked_manifest(stage):
         raise ValueError('Installed package files differ from build-info.json')
     static_audit(stage, info)
     return info
+
+
+def separate_sources(stage, output, url):
+    info = checked_manifest(stage)
+    package_hash = digest(stage / 'build-info.json')
+    if output.is_relative_to(stage):
+        raise ValueError('Source archive output must be outside the installed runtime')
+    source_directory = stage / 'share/pmjs/sources'
+    recipe = json.loads((source_directory / 'build-records/ffmpeg.json').read_text())['recipe']['source']
+    source_archive = source_directory / ('ffmpeg-' + recipe['url'].rsplit('/', 1)[-1])
+    if digest(source_archive) != recipe['sha256']:
+        raise ValueError('Matching FFmpeg source archive is required')
+    epoch = info['source']['sourceDateEpoch']
+
+    def normalized(entry):
+        entry.uid = entry.gid = 0
+        entry.uname = entry.gname = ''
+        entry.mtime = epoch
+        return entry
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + '.tmp')
+    with temporary.open('wb') as stream, gzip.GzipFile(filename='', mode='wb', fileobj=stream, mtime=epoch) as compressed:
+        with tarfile.open(fileobj=compressed, mode='w', format=tarfile.GNU_FORMAT) as bundle:
+            bundle.add(source_directory, arcname='pmjs-ffmpeg-sources', filter=normalized)
+            bundle.add(stage / 'build-info.json', arcname='pmjs-ffmpeg-sources/build-info.json', filter=normalized)
+    if inventory(stage) != info['files'] or digest(stage / 'build-info.json') != package_hash:
+        temporary.unlink()
+        raise ValueError('Package changed while archiving sources')
+    temporary.replace(output)
+    shutil.rmtree(source_directory)
+    info['dependencySources'] = {'filename': output.name, 'sha256': digest(output), 'url': url}
+    info['files'] = inventory(stage)
+    write_json(stage / 'build-info.json', info)
+    print('FFmpeg source and build materials:', output)
 
 
 def checked_smoke(info, package_hash, smoke):
@@ -312,7 +366,6 @@ def archive(stage, report, output, development=False):
         temporary.unlink()
         raise ValueError('Package changed while archiving')
     temporary.replace(output)
-    output.with_name(output.name + '.sha256').write_text(digest(output) + '  ' + output.name + '\n')
     print('Development archive:' if development else 'Verified release archive:', output)
 
 
@@ -332,9 +385,14 @@ def main():
     command = commands.add_parser('manifest')
     for name in ['stage', 'build', 'source']:
         command.add_argument('--' + name, type=Path, required=True)
+    command.add_argument('--strip', help='Strip installed binaries with this target-capable executable')
     command = commands.add_parser('stage')
     command.add_argument('--build', type=Path, required=True)
     command.add_argument('--output', type=Path, required=True)
+    command = commands.add_parser('separate-sources')
+    command.add_argument('--stage', type=Path, required=True)
+    command.add_argument('--output', type=Path, required=True)
+    command.add_argument('--url', required=True, help='Permanent download URL for the source archive')
     command = commands.add_parser('verify')
     command.add_argument('--stage', type=Path, required=True)
     command.add_argument('--report', type=Path, required=True)
@@ -361,7 +419,9 @@ def main():
         elif args.command == 'sources':
             sources(args.sdk.resolve(), args.output.resolve())
         elif args.command == 'manifest':
-            manifest(args.stage.resolve(), args.build.resolve(), args.source.resolve())
+            manifest(args.stage.resolve(), args.build.resolve(), args.source.resolve(), args.strip)
+        elif args.command == 'separate-sources':
+            separate_sources(args.stage.resolve(), args.output.resolve(), args.url)
         elif args.command == 'stage':
             if args.output.exists() and any(args.output.iterdir()):
                 raise ValueError('Use an empty staging directory to avoid carrying old release files')

@@ -60,7 +60,7 @@ if(PMJS_BUNDLE_DEPENDENCIES)
       DESTINATION share/pmjs/notices/compiler RENAME "${runtime}.LICENSE")
   endforeach()
   install(FILES "${PMJS_SDK_ROOT}/zig/LICENSE" DESTINATION share/pmjs/notices/compiler RENAME Zig.LICENSE)
-  # Ship the verified source archives, patches and executable recipes together.
+  # Ship the matching media source archive, patches and executable recipes together.
   install(CODE "execute_process(COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_CURRENT_SOURCE_DIR}/tools/release.py\"
     sources --sdk \"${PMJS_SDK_ROOT}\" --output \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/share/pmjs/sources\"
     COMMAND_ERROR_IS_FATAL ANY)")
@@ -101,6 +101,15 @@ if(PMJS_RELEASE_PROVENANCE)
       --source "${CMAKE_CURRENT_SOURCE_DIR}" --build "${CMAKE_CURRENT_BINARY_DIR}"
       --addon "$<TARGET_FILE:pmjs_native>" VERBATIM)
 endif()
-install(CODE "execute_process(COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_CURRENT_SOURCE_DIR}/tools/release.py\"
+if(PMJS_LINUX_ARM64_BUILD)
+  find_program(pmjs_strip_tool NAMES llvm-strip-20 REQUIRED)
+else()
+  set(pmjs_strip_tool "${CMAKE_STRIP}")
+endif()
+install(CODE "set(pmjs_strip_args)
+  if(CMAKE_INSTALL_CONFIG_NAME MATCHES \"^(Release|MinSizeRel)$\")
+    set(pmjs_strip_args --strip \"${pmjs_strip_tool}\")
+  endif()
+  execute_process(COMMAND \"${Python3_EXECUTABLE}\" \"${CMAKE_CURRENT_SOURCE_DIR}/tools/release.py\"
   manifest --stage \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}\" --build \"${CMAKE_CURRENT_BINARY_DIR}\"
-  --source \"${CMAKE_CURRENT_SOURCE_DIR}\" COMMAND_ERROR_IS_FATAL ANY)")
+  --source \"${CMAKE_CURRENT_SOURCE_DIR}\" \${pmjs_strip_args} COMMAND_ERROR_IS_FATAL ANY)")

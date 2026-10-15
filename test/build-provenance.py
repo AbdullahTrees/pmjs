@@ -1,18 +1,25 @@
 """Incremental native builds and installation provenance using a compiled fixture."""
+import ctypes
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / 'tools'))
+import release
 
 
 class BuildProvenance(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='pmjs build provenance ')
+        temporary_root = ROOT / '.cache/tests'
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix='pmjs build provenance ', dir=temporary_root)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         for directory in ('src', 'cmake', 'tools', 'third_party', 'docs', 'js', 'runner', 'profiles', 'bin', 'test', 'dependencies'):
@@ -45,9 +52,10 @@ add_library(EffekseerRendererGL STATIC EXCLUDE_FROM_ALL src/runtime.cpp)
 add_library(pmjs_native MODULE src/addon.cpp)
 target_include_directories(pmjs_native PRIVATE dependencies)
 target_link_libraries(pmjs_native PRIVATE pmjs_runtime "${CMAKE_SOURCE_DIR}/dependencies/libprovider.so")
-set_target_properties(pmjs_native PROPERTIES PREFIX "" SUFFIX ".node")
+set_target_properties(pmjs_native PROPERTIES PREFIX "" SUFFIX ".node" INSTALL_RPATH "$ORIGIN")
 set(PNG_LINK_LIBRARIES "${CMAKE_SOURCE_DIR}/dependencies/libprovider.so")
 set(PMJS_RELEASE_PROVENANCE ON CACHE BOOL "")
+install(FILES dependencies/libprovider.so DESTINATION lib)
 include(cmake/Install.cmake)
 ''')
         self.command('git', 'init', '-q', str(self.root))
@@ -134,6 +142,154 @@ include(cmake/Install.cmake)
             result = self.command('cmake', '--install', str(self.build), '--prefix', str(self.root / 'dist/invalid'),
                                   env={**os.environ, 'PMJS_BUILD_ID': build_id}, success=False)
             self.assertIn('PMJS_BUILD_ID must use', result.stdout + result.stderr)
+
+    def test_release_strips_installed_binaries_before_verification(self):
+        node = self.root / 'dependencies/node'
+        (node / 'bin').mkdir(parents=True)
+        (node / 'LICENSE').write_text('fixture license')
+        subprocess.run(['cc', '-g', '-x', 'c', '-', '-o', node / 'bin/node'],
+                       input='int main(void) { return 0; }', text=True, check=True)
+        self.command('cmake', '-S', str(self.root), '-B', str(self.build),
+                     '-DCMAKE_CXX_FLAGS=-g', '-DPMJS_NODE_ROOT=' + str(node))
+        self.compile()
+        originals = [self.build / 'pmjs_native.node', node / 'bin/node',
+                     self.root / 'dependencies/libprovider.so']
+        before = [file.read_bytes() for file in originals]
+        self.assertIn('.debug_info', self.command('readelf', '-S', '--wide', str(originals[0])).stdout)
+        stage, _ = self.install('stripped')
+        for source, relative in zip(originals, ('lib/pmjs_native.node', 'bin/node', 'lib/libprovider.so')):
+            target = stage / relative
+            sections = self.command('readelf', '-S', '--wide', str(target)).stdout
+            self.assertNotIn('.debug', sections)
+            self.assertNotIn('.symtab', sections)
+            self.assertEqual(self.command('readelf', '--dyn-syms', '--wide', str(source)).stdout,
+                             self.command('readelf', '--dyn-syms', '--wide', str(target)).stdout)
+        self.assertEqual([file.read_bytes() for file in originals], before)
+        self.assertEqual(ctypes.CDLL(str(stage / 'lib/pmjs_native.node')).value(), 31)
+        self.command(str(stage / 'bin/node'))
+        info = release.checked_manifest(stage)
+        report = self.root / 'verification.json'
+        release.verify(stage, report, static=True)
+        output = self.root / 'archives/pmjs-linux-x64-1234567.tar.gz'
+        release.archive(stage, report, output, development=True)
+        self.assertEqual(list(output.parent.iterdir()), [output])
+        with tarfile.open(output) as archive:
+            self.assertEqual(archive.extractfile('pmjs-linux-x64/lib/pmjs_native.node').read(),
+                             (stage / 'lib/pmjs_native.node').read_bytes())
+        self.assertEqual(info['files'], release.inventory(stage))
+
+    def test_debug_installation_keeps_symbols(self):
+        self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-DCMAKE_BUILD_TYPE=Debug')
+        self.compile()
+        stage, _ = self.install('debug')
+        self.assertIn('.debug_info', self.command('readelf', '-S', '--wide',
+                                                 str(stage / 'lib/pmjs_native.node')).stdout)
+
+    def test_installation_rejects_strip_tool_that_leaves_symbols(self):
+        self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-DCMAKE_STRIP=/bin/true')
+        self.compile()
+        _, result = self.install('not-stripped', success=False)
+        self.assertIn('Strip tool left debug information', result.stdout + result.stderr)
+
+    def test_separate_sources_preserves_runtime_and_matching_build_materials(self):
+        stage, _ = self.install('with-sources')
+        sources = stage / 'share/pmjs/sources'
+        (sources / 'build-records').mkdir(parents=True)
+        source_archive = sources / 'ffmpeg-fixture.tar.xz'
+        source_archive.write_bytes(b'original matching media source')
+        release.write_json(sources / 'build-records/ffmpeg.json',
+                           {'recipe': {'source': {'url': 'https://example.invalid/fixture.tar.xz',
+                                                  'sha256': release.digest(source_archive)}}})
+        for name in ('tools/linux-arm64/prepare-sdk.py', 'cmake/toolchains/portable-arm64.cmake'):
+            file = sources / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('matching build material\n')
+        info = json.loads((stage / 'build-info.json').read_text())
+        info['files'] = release.inventory(stage)
+        release.write_json(stage / 'build-info.json', info)
+        before = {str(file.relative_to(sources)): file.read_bytes()
+                  for file in sources.rglob('*') if file.is_file()}
+        package = self.root / 'archives/pmjs-ffmpeg-sources-1234567.tar.gz'
+        url = 'https://example.invalid/releases/download/build-fixture/' + package.name
+        self.command(sys.executable, str(self.root / 'tools/release.py'), 'separate-sources',
+                     '--stage', str(stage), '--output', str(stage / 'sources.tar.gz'), '--url', url, success=False)
+        self.assertEqual(release.checked_manifest(stage), info)
+        self.command(sys.executable, str(self.root / 'tools/release.py'), 'separate-sources',
+                     '--stage', str(stage), '--output', str(package), '--url', url)
+        self.assertFalse(sources.exists())
+        runtime = release.checked_manifest(stage)
+        self.assertEqual(runtime['files'], {name: entry for name, entry in info['files'].items()
+                                           if not name.startswith('share/pmjs/sources/')})
+        self.assertEqual(runtime['compiledInputs'], info['compiledInputs'])
+        self.assertEqual(runtime['dependencySources'],
+                         {'filename': package.name, 'sha256': release.digest(package), 'url': url})
+        with tarfile.open(package) as bundle:
+            prefix = 'pmjs-ffmpeg-sources/'
+            members = {member.name.removeprefix(prefix): member for member in bundle if member.isfile()}
+            self.assertEqual(set(members), {*before, 'build-info.json'})
+            for name in before:
+                self.assertEqual(bundle.extractfile(members[name]).read(), before[name])
+            self.assertEqual(json.load(bundle.extractfile(members['build-info.json'])), info)
+        report = self.root / 'static.json'
+        release.verify(stage, report, static=True)
+        release.archive(stage, report, self.root / 'archives/runtime.tar.gz', development=True)
+
+
+class DependencySources(unittest.TestCase):
+    def setUp(self):
+        temporary_root = ROOT / '.cache/tests'
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix='pmjs dependency sources ', dir=temporary_root)
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for name in ('tools/release.py', 'tools/linux-arm64/sdk-recipes.json',
+                     'tools/linux-arm64/sdk-packages.json', 'tools/linux-arm64/prepare-sdk.py',
+                     'cmake/toolchains/portable-arm64.cmake'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / name, target)
+        self.cache = self.root / 'downloads'
+        self.cache.mkdir()
+        spec_file = self.root / 'tools/linux-arm64/sdk-recipes.json'
+        spec = json.loads(spec_file.read_text())
+        self.archive = self.cache / spec['sources']['ffmpeg']['url'].rsplit('/', 1)[-1]
+        self.archive.write_bytes(b'matching media source archive')
+        spec['sources']['ffmpeg']['sha256'] = release.digest(self.archive)
+        release.write_json(spec_file, spec)
+        self.sdk = self.root / 'sdk'
+        (self.sdk / 'records').mkdir(parents=True)
+        for component in ('ffmpeg', 'toolchain', 'sysroot'):
+            release.write_json(self.sdk / 'records' / (component + '.json'), {'component': component})
+        self.output = self.root / 'installed sources'
+
+    def sources(self):
+        return subprocess.run([sys.executable, self.root / 'tools/release.py', 'sources',
+                               '--sdk', self.sdk, '--output', self.output], text=True, capture_output=True,
+                              env={**os.environ, 'PMJS_DOWNLOAD_CACHE': str(self.cache)})
+
+    def test_only_media_sources_are_shipped_with_rebuild_materials(self):
+        result = self.sources()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({str(file.relative_to(self.output)) for file in self.output.rglob('*') if file.is_file()},
+                         {'ffmpeg-' + self.archive.name,
+                          'tools/linux-arm64/sdk-recipes.json', 'tools/linux-arm64/sdk-packages.json',
+                          'tools/linux-arm64/prepare-sdk.py', 'cmake/toolchains/portable-arm64.cmake',
+                          'build-records/ffmpeg.json', 'build-records/toolchain.json', 'build-records/sysroot.json'})
+        self.assertEqual((self.output / ('ffmpeg-' + self.archive.name)).read_bytes(), self.archive.read_bytes())
+        self.assertEqual((self.output / 'cmake/toolchains/portable-arm64.cmake').read_bytes(),
+                         (ROOT / 'cmake/toolchains/portable-arm64.cmake').read_bytes())
+
+    def test_missing_or_changed_media_sources_are_rejected(self):
+        for content in (b'changed source archive', None):
+            with self.subTest(content=content):
+                if content is None:
+                    self.archive.unlink()
+                else:
+                    self.archive.write_bytes(content)
+                result = self.sources()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Missing verified dependency source archive', result.stderr)
+                self.assertFalse((self.output / ('ffmpeg-' + self.archive.name)).exists())
 
 
 if __name__ == '__main__':

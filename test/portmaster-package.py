@@ -21,7 +21,9 @@ import portmaster
 
 class PortMasterPackage(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix='pmjs package with spaces ')
+        temporary_root = ROOT / '.cache/tests'
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix='pmjs package with spaces ', dir=temporary_root)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.stage = self.root / 'runtime'
@@ -130,6 +132,25 @@ class PortMasterPackage(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             portmaster.portmaster(self.stage, self.game, self.output, strip='/bin/false')
         self.assertEqual(self.output.read_bytes(), b'existing package')
+
+    def test_separate_media_source_download_is_preserved(self):
+        shutil.copy2(self.stage / 'lib/librequired.so.1', self.stage / 'lib/libavutil.so.58')
+        subprocess.run(['cc', '-shared', '-fPIC', '-x', 'c', '-', '-o', self.stage / 'lib/pmjs_native.node',
+                        '-L' + str(self.stage / 'lib'), '-l:libavutil.so.58', '-Wl,-rpath,$ORIGIN'],
+                       input='extern int required(void); int example(void) { return required(); }',
+                       text=True, check=True)
+        self.refresh_manifest()
+        info = json.loads((self.stage / 'build-info.json').read_text())
+        info['dependencySources'] = {'filename': 'pmjs-ffmpeg-sources-1234567.tar.gz', 'sha256': 'a' * 64,
+                                    'url': 'https://example.invalid/releases/download/build/source.tar.gz'}
+        release.write_json(self.stage / 'build-info.json', info)
+        portmaster.portmaster(self.stage, self.game, self.output)
+        with zipfile.ZipFile(self.output) as package:
+            packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertEqual(packaged_info['dependencySources'], info['dependencySources'])
+            self.assertIn(info['dependencySources']['url'], package.read('minimal-game/runtime/LICENSES.txt').decode())
+            self.assertIn('minimal-game/runtime/lib/libavutil.so.58', package.namelist())
+            self.assertFalse(any('/sources/' in name for name in package.namelist()))
 
     def test_bundle_rejects_extra_files_and_carries_declared_generated_pages(self):
         bundle = self.root / 'portable bundle'
