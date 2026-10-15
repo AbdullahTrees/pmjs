@@ -84,6 +84,7 @@ test('diagnostics inspect methods after plugins without replacing setup', () => 
   };
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
+  run(context, 'pmjs-core/methods.js');
   run(context, 'pmjs-mv/diagnostics.js');
   assert.equal(sandbox.PluginManager.setup, setup);
   hooks.afterPlugins();
