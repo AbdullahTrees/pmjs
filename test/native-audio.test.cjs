@@ -56,6 +56,21 @@ test('audio capability owns voices without leaking the constructor', () => {
   assert.equal(voice.error, false);
 });
 
+test('a decoder failure reports once and delivers the ordinary stopped transition', () => {
+  const context = contextFor();
+  const warnings = [];
+  context.console = { warn(message) { warnings.push(message); } };
+  const voice = context.PMJS.rpgmaker.audio.createVoice();
+  voice.loadPath('audio/bgm/theme.ogg');
+  voice.play(true, 0);
+  context.NativeHost.media.audioIsPlaying = () => false;
+  context.NativeHost.media.audioError = () => 'audio loop produced no samples after restart';
+  assert.equal(voice.pollNative(), 'stopped');
+  assert.equal(voice.pollNative(), 'idle');
+  assert.equal(voice.error, false, 'playback failure must not turn into a loading retry');
+  assert.deepEqual(warnings, ['[pmjs-audio] playback failed: audio loop produced no samples after restart']);
+});
+
 test('loadPath installs the native handle and autoplays when requested', () => {
   const context = contextFor();
   const voice = context.PMJS.rpgmaker.audio.createVoice();

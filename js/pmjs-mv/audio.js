@@ -22,11 +22,7 @@ function MvNativeWebAudio(url, intent) {
       if (self._pendingFadeIn !== null) self.fadeIn(self._pendingFadeIn);
       else self.setValueAtTime(self._volume);
     }
-    var listeners = self._loadListeners.splice(0);
-    for (var index = 0; index < listeners.length; index++) {
-      try { listeners[index](); }
-      catch (error) { pmjsReportEventError(error); }
-    }
+    self._onLoad();
   };
 
   if (typeof ResourceHandler !== 'undefined' && typeof ResourceHandler.createLoader === 'function') {
@@ -185,7 +181,7 @@ MvNativeWebAudio.prototype.fadeOut = function(duration) {
 
 MvNativeWebAudio.prototype.addLoadListener = function(listener) {
   if (typeof listener !== 'function') return;
-  if (this.isReady()) listener();
+  if (this.isReady() && !this._dispatchingLoad) listener();
   else if (!this._voice.error) this._loadListeners.push(listener);
 };
 
@@ -193,9 +189,25 @@ MvNativeWebAudio.prototype.addStopListener = function(listener) {
   if (typeof listener === 'function') this._stopListeners.push(listener);
 };
 
+MvNativeWebAudio.prototype._onLoad = function() {
+  var dispatching = this._dispatchingLoad;
+  this._dispatchingLoad = true;
+  try {
+    while (this._loadListeners.length) {
+      var listener = this._loadListeners.shift();
+      try { listener(); }
+      catch (error) { pmjsReportEventError(error); }
+    }
+  } finally {
+    this._dispatchingLoad = dispatching;
+  }
+};
+
 MvNativeWebAudio.prototype._drainStop = function() {
-  var listeners = this._stopListeners.splice(0);
-  for (var index = 0; index < listeners.length; index++) listeners[index]();
+  while (this._stopListeners.length) {
+    var listener = this._stopListeners.shift();
+    listener();
+  }
 };
 
 MvNativeWebAudio.prototype._poll = function() {

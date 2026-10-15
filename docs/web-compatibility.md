@@ -28,3 +28,9 @@ its text field, submit button and controller character grid as engine windows.
 It preserves the form's variable result and forced-close handling, and releases
 its interpreter wait and input ownership when it closes. Session storage is
 private to the current guest process and is discarded on reload.
+
+Reviewed alternate audio implementations retain authored buffer routing while
+using native voice startup. The extended audio integration supports ordinary
+playback and linear stereo balance. Convolution, dynamic filtering and custom
+loop regions remain explicit unsupported graph operations; they do not silently
+fall back to ordinary audio.

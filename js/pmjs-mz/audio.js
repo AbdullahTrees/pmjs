@@ -20,8 +20,7 @@ function MzNativeWebAudio(url, intent) {
 MzNativeWebAudio.prototype._startSource = function() {
   var self = this;
   this._voice.onInstalled = function() {
-    var listeners = self._loadListeners.splice(0);
-    for (var index = 0; index < listeners.length; index++) listeners[index]();
+    self._onLoad();
   };
 
   this._voice.loadSource(this._url, function(path) {
@@ -39,6 +38,11 @@ MzNativeWebAudio.prototype._startSource = function() {
 };
 
 Object.defineProperties(MzNativeWebAudio.prototype, {
+  _volume: {
+    get: function() { return this._voice.volume; },
+    set: function(value) { this._voice.volume = Number(value); },
+    configurable: true
+  },
   url: {
     get: function() { return this._url; },
     configurable: true
@@ -98,6 +102,11 @@ MzNativeWebAudio.prototype.play = function(loop, offset) {
   ++this._playGeneration;
   this._loop = !!loop;
   this._isPlaying = true;
+  // Effective property hooks can maintain their own representation. Resolve
+  // their public values before passing playback parameters to the native voice.
+  this._voice.volume = Number(this.volume);
+  this._voice.pitch = Number(this.pitch);
+  this._voice.pan = Number(this.pan);
   this._voice.absoluteGain = this._voice.volume;
   this._voice.play(this._loop, Math.max(0, Number(offset) || 0));
   pmjsAudio.track(this);
@@ -158,8 +167,17 @@ MzNativeWebAudio.prototype.addStopListener = function(listener) {
 };
 
 MzNativeWebAudio.prototype._drainStop = function() {
-  var listeners = this._stopListeners.splice(0);
-  for (var index = 0; index < listeners.length; index++) listeners[index]();
+  while (this._stopListeners.length) {
+    var listener = this._stopListeners.shift();
+    listener();
+  }
+};
+
+MzNativeWebAudio.prototype._onLoad = function() {
+  while (this._loadListeners.length) {
+    var listener = this._loadListeners.shift();
+    listener();
+  }
 };
 
 MzNativeWebAudio.prototype._poll = function() {
@@ -180,6 +198,7 @@ MzNativeWebAudio.prototype._poll = function() {
 MzNativeWebAudio._currentTime = function() {
   return pmjsAudio.now();
 };
+MzNativeWebAudio._context = pmjsAudio.clock;
 Object.defineProperty(MzNativeWebAudio, '_masterVolume', {
   get: function() { return pmjsAudio.masterVolume; },
   set: function(value) { pmjsAudio.setMasterVolume(value); },

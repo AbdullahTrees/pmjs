@@ -59,11 +59,13 @@ class MediaService {
   bool setParameters(std::uint32_t handle, float volume, float pitch, float pan);
   bool setStereoGains(std::uint32_t handle, float left, float right);
   bool setEqualPowerPan(std::uint32_t handle, float pan);
+  bool setStereoBalance(std::uint32_t handle, float pan);
   bool fade(std::uint32_t handle, float from, float to, double duration,
             bool stopWhenFinished, bool absolute = false);
   void setMasterVolume(float volume);
   float masterVolume() const;
   bool isPlaying(std::uint32_t handle) const;
+  std::string audioError(std::uint32_t handle) const;
   double position(std::uint32_t handle) const;
   double duration(std::uint32_t handle) const;
   int sourceChannels(std::uint32_t handle) const;

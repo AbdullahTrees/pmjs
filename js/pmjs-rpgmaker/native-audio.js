@@ -210,8 +210,9 @@ NativeAudioVoice.prototype.applyParameters = function() {
   if (this.handle && NativeHost.media) {
     NativeHost.media.setAudioParameters(
       this.handle, this.absoluteGain === null ? this.volume : 1, this.pitch,
-      this.equalPowerPan ? 0 : this.pan);
-    if (this.equalPowerPan) NativeHost.media.setAudioEqualPowerPan(this.handle, this.pan);
+      this.equalPowerPan || this.stereoBalance ? 0 : this.pan);
+    if (this.stereoBalance) NativeHost.media.setAudioStereoBalance(this.handle, this.pan);
+    else if (this.equalPowerPan) NativeHost.media.setAudioEqualPowerPan(this.handle, this.pan);
   }
 };
 
@@ -325,6 +326,10 @@ NativeAudioVoice.prototype.pollNative = function() {
   var playing = this.nativePlaying();
   if (this.wasPlaying && !playing) {
     this.wasPlaying = false;
+    if (this.handle && typeof NativeHost.media.audioError === 'function') {
+      var error = NativeHost.media.audioError(this.handle);
+      if (error) console.warn('[pmjs-audio] playback failed: ' + error);
+    }
     return 'stopped';
   }
   this.wasPlaying = playing;

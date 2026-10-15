@@ -37,6 +37,12 @@ struct VoiceMixState {
   double duration = 0;
 };
 
+inline std::array<float, 4> stereoBalanceMatrix(int channels, float position) {
+  const float pan = std::clamp(position, -1.0F, 1.0F);
+  const float amplitude = channels == 1 ? std::sqrt(2.0F) : 1.0F;
+  return {amplitude * (1 - pan) / 2, 0, 0, amplitude * (1 + pan) / 2};
+}
+
 inline std::array<float, 4> equalPowerPanMatrix(int channels, float position) {
   position = std::clamp(position, -1.0F, 1.0F);
   const float halfPi = std::numbers::pi_v<float> / 2;

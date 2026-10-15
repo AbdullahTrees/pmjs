@@ -391,3 +391,73 @@ test('MZ repeated clear resets parameters without releasing an independent voice
   second.pitch = 1.2;
   assert.equal(context.NativeHost.media.calls.plays, 3, 'a changed pitch restarts active playback');
 });
+
+
+test('MZ load hooks drain live callbacks and honor reentrant cancellation', async () => {
+  const context = contextFor();
+  const events = [];
+  const original = context.WebAudio.prototype._onLoad;
+  context.WebAudio.prototype._onLoad = function() {
+    events.push('hook');
+    return original.apply(this, arguments);
+  };
+  const url = context.URL.createObjectURL(new Blob([Uint8Array.from([1, 2])]));
+  const audio = new context.WebAudio(url);
+  audio.addLoadListener(() => { events.push('first'); audio.clear(); });
+  audio.addLoadListener(() => events.push('obsolete'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['hook', 'first']);
+
+  events.length = 0;
+  const next = new context.WebAudio(url);
+  next.addLoadListener(() => {
+    events.push('first');
+    next.addLoadListener(() => events.push('appended'));
+  });
+  next.addLoadListener(() => events.push('second'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['hook', 'first', 'second', 'appended']);
+  next.clear();
+  context.URL.revokeObjectURL(url);
+});
+
+test('MZ stop callbacks appended during dispatch run in the same stop', () => {
+  const context = contextFor();
+  context.NativeHost.media.loadAudio = () => ({ handle: 1, duration: 1 });
+  const audio = new context.WebAudio('audio/se/test.ogg');
+  const events = [];
+  audio.addStopListener(() => {
+    events.push('first');
+    audio.addStopListener(() => events.push('appended'));
+  });
+  audio.addStopListener(() => events.push('second'));
+  audio.stop();
+  assert.deepEqual(events, ['first', 'second', 'appended']);
+  audio.clear();
+});
+
+test('MZ guest volume and pan wrappers use the engine clock and effective playback parameters', () => {
+  const context = contextFor();
+  const prototype = context.WebAudio.prototype;
+  Object.defineProperty(prototype, 'volume', { configurable: true,
+    get() { return this._volume; }, set(value) {
+      this._volume = value;
+      this._gainNode.gain.setValueAtTime(value, context.WebAudio._context.currentTime);
+    } });
+  Object.defineProperty(prototype, 'pan', { configurable: true,
+    get() { return this.guestPan * 2 - 1; }, set(value) { this.guestPan = (value + 1) / 2; } });
+  const audio = context.AudioManager.createBuffer('se/', 'Cursor');
+  audio.volume = 0.3; audio.pan = -0.5; audio.play(false);
+  assert.equal(audio._voice.volume, 0.3);
+  assert.equal(audio._voice.pan, -0.5);
+  assert.equal(context.NativeHost.media.calls.fades.at(-1)[2], 0.3);
+});
+
+test('native voice stereo balance uses the effective pan and leaves the ordinary panner inactive', () => {
+  const context = contextFor(); const balances = [];
+  context.NativeHost.media.setAudioStereoBalance = (...args) => balances.push(args);
+  const audio = context.AudioManager.createBuffer('se/', 'Cursor');
+  audio._voice.stereoBalance = true; audio.pan = 0.6;
+  assert.equal(balances.at(-1)[1], 0.6);
+  assert.deepEqual(context.NativeHost.media.calls.parameters.at(-1).slice(1), [1, 1, 0]);
+});

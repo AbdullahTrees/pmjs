@@ -50,6 +50,19 @@ void testVolumeAndMaster() {
         "master volume scales mixed samples");
 }
 
+void testStereoBalance() {
+  for (int channels : {1, 2}) for (float pan : {-1.0F, -0.5F, 0.0F, 0.5F, 1.0F}) {
+    const float left = channels == 1 ? 0.5F / std::sqrt(2.0F) : 0.25F;
+    const float right = channels == 1 ? left : 0.5F;
+    auto voice = constantVoice(8, left, right);
+    voice.panMatrix = pmjs::stereoBalanceMatrix(channels, pan);
+    std::vector<float> output(2);
+    pmjs::mixVoiceInto(voice, output.data(), 1, 1);
+    CHECK(near(output[0], (channels == 1 ? 0.5F : left) * (1 - pan) / 2) &&
+      near(output[1], 0.5F * (1 + pan) / 2), "split-channel balance retains mono amplitude and stereo separation");
+  }
+}
+
 void testMzEqualPowerPan() {
   for (int channels : {1, 2}) for (float pan : {-1.0F, -0.5F, 0.0F, 0.5F, 1.0F}) {
     // The decoder duplicates mono into two channels with a -3 dB gain.
@@ -567,6 +580,7 @@ int main(int argc, char** argv) {
   testVolumeAndMaster();
   testPanLaw();
   testMzEqualPowerPan();
+  testStereoBalance();
   testSpatialEffects();
   testPitchAdvancement();
   testFadeCompletionAndStopAfterFade();

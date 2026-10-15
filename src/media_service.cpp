@@ -7,6 +7,8 @@
 #include <cmath>
 #include <deque>
 #include <iostream>
+#include <exception>
+#include <stdexcept>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -66,7 +68,8 @@ struct MediaService::Impl {
     bool contextOwned = false;
     std::uint64_t producerFrame = 0, generation = 0;
     std::optional<double> requestedSeek;
-    bool decoding = false;
+    bool decoding = false, emptyLoopRestart = false;
+    std::exception_ptr failure;
   };
 
   explicit Impl(std::filesystem::path mediaRoot) : root(std::move(mediaRoot)) {
@@ -86,7 +89,19 @@ struct MediaService::Impl {
       if (!device) std::cout << " error=\"" << SDL_GetError() << '\"';
       std::cout << std::endl;
     }
-    worker = std::thread([this] { decodeLoop(); });
+    try {
+      worker = std::thread([this] {
+        try { decodeLoop(); }
+        catch (...) {
+          std::lock_guard lock(mutex);
+          serviceFailure = std::current_exception();
+          serviceFailed = true;
+        }
+      });
+    } catch (...) {
+      if (device) SDL_CloseAudioDevice(device);
+      throw;
+    }
     if (device) SDL_PauseAudioDevice(device, 0);
   }
   ~Impl() {
@@ -114,22 +129,31 @@ struct MediaService::Impl {
     auto* output = reinterpret_cast<float*>(bytes);
     const int frames = byteCount / static_cast<int>(sizeof(float) * 2);
     std::fill(output, output + frames * 2, 0.0F);
-    const bool suspended = self.contextSuspended.load(std::memory_order_acquire);
-    const auto contextFrame = self.contextFrames.load(std::memory_order_relaxed);
-    const float master = self.masterVolume.load(std::memory_order_relaxed);
-    for (const auto& voice : self.snapshot()) {
-      std::lock_guard lock(voice->mutex);
-      if (suspended && voice->contextOwned) continue;
-      if (voice->automation) {
-        std::lock_guard automationLock(voice->automation->mutex);
-        voice->mix.automation = &voice->automation->timeline;
-        mixVoiceInto(voice->mix, output, frames, master, contextFrame);
-        voice->mix.automation = nullptr;
-      } else mixVoiceInto(voice->mix, output, frames, master, contextFrame);
+    if (self.serviceFailed) return;
+    try {
+      const bool suspended = self.contextSuspended.load(std::memory_order_acquire);
+      const auto contextFrame = self.contextFrames.load(std::memory_order_relaxed);
+      const float master = self.masterVolume.load(std::memory_order_relaxed);
+      for (const auto& voice : self.snapshot()) {
+        std::lock_guard lock(voice->mutex);
+        if (suspended && voice->contextOwned) continue;
+        if (voice->automation) {
+          std::lock_guard automationLock(voice->automation->mutex);
+          voice->mix.automation = &voice->automation->timeline;
+          mixVoiceInto(voice->mix, output, frames, master, contextFrame);
+          voice->mix.automation = nullptr;
+        } else mixVoiceInto(voice->mix, output, frames, master, contextFrame);
+      }
+      clampStereoMix(output, frames);
+      if (!suspended) self.contextFrames.fetch_add(frames, std::memory_order_release);
+    } catch (...) {
+      std::fill(output, output + frames * 2, 0.0F);
+      std::lock_guard lock(self.mutex);
+      self.serviceFailure = std::current_exception();
+      self.serviceFailed = true;
     }
-    clampStereoMix(output, frames);
-    if (!suspended) self.contextFrames.fetch_add(frames, std::memory_order_release);
   }
+
   void fill(const std::shared_ptr<Voice>& voice) {
     if (!voice->decoder) return;
     std::optional<double> seek;
@@ -137,53 +161,65 @@ struct MediaService::Impl {
     std::size_t wanted;
     {
       std::lock_guard lock(voice->mutex);
-      if (!voice->mix.playing || voice->decoding ||
+      if (!voice->mix.playing || voice->mix.eof || voice->decoding ||
           voice->mix.samples.size() / 2 >= bufferFrames) return;
       voice->decoding = true; generation = voice->generation;
       seek = voice->requestedSeek; voice->requestedSeek.reset();
       wanted = std::min(decodeFrames, bufferFrames - voice->mix.samples.size() / 2);
     }
     std::string error;
-    const bool seeked = !seek || voice->decoder->seek(*seek, &error);
-    const auto decodeStarted = diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const auto cpuStarted = diagnostics ? audioThreadMicros() : 0;
-    auto decoded = seeked ? voice->decoder->read(wanted, &error) : std::vector<float>{};
-    if (diagnostics) {
-      workerCpuUs.fetch_add(audioThreadMicros() - cpuStarted, std::memory_order_relaxed);
-      workerDecodeCalls.fetch_add(1, std::memory_order_relaxed);
-      workerDecodeUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - decodeStarted).count(), std::memory_order_relaxed);
-    }
-    {
+    try {
+      const bool seeked = !seek || voice->decoder->seek(*seek, &error);
+      const auto decodeStarted = diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      const auto cpuStarted = diagnostics ? audioThreadMicros() : 0;
+      auto decoded = seeked ? voice->decoder->read(wanted, &error) : std::vector<float>{};
+      if (diagnostics) {
+        workerCpuUs.fetch_add(audioThreadMicros() - cpuStarted, std::memory_order_relaxed);
+        workerDecodeCalls.fetch_add(1, std::memory_order_relaxed);
+        workerDecodeUs.fetch_add(std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - decodeStarted).count(), std::memory_order_relaxed);
+      }
+      {
+        std::lock_guard lock(voice->mutex);
+        voice->decoding = false;
+        if (generation != voice->generation || !voice->mix.playing) return;
+        if (!seeked || !error.empty()) throw std::runtime_error(
+          error.empty() ? "audio seek failed" : error);
+        std::size_t count = decoded.size() / 2;
+        if (voice->mix.loop && voice->mix.loopEnd > voice->mix.loopStart &&
+            voice->producerFrame < voice->mix.loopEnd) {
+          count = std::min<std::size_t>(count, voice->mix.loopEnd - voice->producerFrame);
+          decoded.resize(count * 2);
+        }
+        voice->mix.samples.insert(voice->mix.samples.end(), decoded.begin(), decoded.end());
+        voice->producerFrame += count;
+        const bool boundary = voice->mix.loop && voice->mix.loopEnd > voice->mix.loopStart &&
+                              voice->producerFrame >= voice->mix.loopEnd;
+        if (count) voice->emptyLoopRestart = false;
+        if (decoded.empty() && voice->mix.loop && voice->emptyLoopRestart)
+          throw std::runtime_error("audio loop produced no samples after restart");
+        if (boundary || (decoded.empty() && voice->mix.loop)) {
+          voice->emptyLoopRestart = !count;
+          voice->requestedSeek = static_cast<double>(voice->mix.loopStart) / 48000;
+          voice->producerFrame = voice->mix.loopStart;
+        } else if (decoded.empty()) {
+          voice->mix.eof = true;
+        }
+      }
+    } catch (...) {
+      const auto failure = std::current_exception();
       std::lock_guard lock(voice->mutex);
       voice->decoding = false;
-      if (generation != voice->generation || !voice->mix.playing) return;
-      if (!seeked) {
-        std::cerr << "[pmjs-media] audio decoder error: " << error << '\n';
-        voice->mix.eof = true; return;
-      }
-      std::size_t count = decoded.size() / 2;
-      if (voice->mix.loop && voice->mix.loopEnd > voice->mix.loopStart &&
-          voice->producerFrame < voice->mix.loopEnd) {
-        count = std::min<std::size_t>(count, voice->mix.loopEnd - voice->producerFrame);
-        decoded.resize(count * 2);
-      }
-      voice->mix.samples.insert(voice->mix.samples.end(), decoded.begin(), decoded.end());
-      voice->producerFrame += count;
-      const bool boundary = voice->mix.loop && voice->mix.loopEnd > voice->mix.loopStart &&
-                            voice->producerFrame >= voice->mix.loopEnd;
-      if (boundary || (decoded.empty() && voice->mix.loop)) {
-        voice->requestedSeek = static_cast<double>(voice->mix.loopStart) / 48000;
-        voice->producerFrame = voice->mix.loopStart;
-      } else if (decoded.empty()) {
-        if (!error.empty()) std::cerr << "[pmjs-media] audio decoder error: "
-                                      << error << '\n';
-        voice->mix.eof = true;
-      }
+      if (generation != voice->generation) return;
+      voice->failure = failure;
+      voice->mix.playing = false;
+      voice->mix.eof = true;
+      voice->mix.samples.clear();
+      voice->requestedSeek.reset();
     }
   }
   void decodeLoop() {
-    while (!shuttingDown) {
+    while (!shuttingDown && !serviceFailed) {
       for (const auto& voice : snapshot(true)) fill(voice);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
@@ -313,7 +349,8 @@ struct MediaService::Impl {
   mutable std::mutex mutex;
   std::unordered_map<std::uint32_t, std::shared_ptr<Voice>> voices;
   std::uint32_t nextHandle = 1;
-  std::atomic<bool> shuttingDown{false};
+  std::atomic<bool> shuttingDown{false}, serviceFailed{false};
+  std::exception_ptr serviceFailure;
   std::atomic<float> masterVolume{1.0F};
   std::thread worker;
 };
@@ -399,6 +436,8 @@ bool MediaService::play(std::uint32_t handle, bool loop, double offset) {
   auto voice = impl_->voice(handle);
   if (!voice || !std::isfinite(offset)) return false;
   std::lock_guard lock(voice->mutex);
+  if (voice->failure || impl_->serviceFailed) return false;
+  voice->emptyLoopRestart = false;
   if (voice->mix.duration > 0) {
     if (loop && voice->mix.loopEnd > voice->mix.loopStart) {
       const double loopStartSec = static_cast<double>(voice->mix.loopStart) / 48000.0;
@@ -464,6 +503,15 @@ bool MediaService::setStereoGains(std::uint32_t handle, float left, float right)
   voice->mix.rightGain = right;
   return true;
 }
+bool MediaService::setStereoBalance(std::uint32_t handle, float pan) {
+  if (!std::isfinite(pan)) return false;
+  auto voice = impl_->voice(handle); if (!voice) return false;
+  std::lock_guard lock(voice->mutex);
+  voice->mix.pan = 0;
+  voice->mix.leftGain = voice->mix.rightGain = 1;
+  voice->mix.panMatrix = stereoBalanceMatrix(voice->sourceChannels, pan);
+  return true;
+}
 bool MediaService::fade(std::uint32_t handle, float from, float to,
                         double duration, bool stopWhenFinished, bool absolute) {
   if (!std::isfinite(from) || !std::isfinite(to) || !std::isfinite(duration) || duration < 0) return false;
@@ -481,7 +529,23 @@ bool MediaService::fade(std::uint32_t handle, float from, float to,
 }
 bool MediaService::isPlaying(std::uint32_t handle) const {
   auto voice = impl_->voice(handle); if (!voice) return false;
-  std::lock_guard lock(voice->mutex); return voice->mix.playing;
+  std::lock_guard lock(voice->mutex);
+  return voice->mix.playing && !impl_->serviceFailed;
+}
+std::string MediaService::audioError(std::uint32_t handle) const {
+  std::exception_ptr failure;
+  {
+    std::lock_guard lock(impl_->mutex);
+    failure = impl_->serviceFailure;
+  }
+  if (auto voice = impl_->voice(handle)) {
+    std::lock_guard lock(voice->mutex);
+    if (voice->failure) failure = voice->failure;
+  }
+  if (!failure) return {};
+  try { std::rethrow_exception(failure); }
+  catch (const std::exception& error) { return error.what(); }
+  catch (...) { return "audio decoder failed"; }
 }
 double MediaService::position(std::uint32_t handle) const {
   auto voice = impl_->voice(handle); if (!voice) return 0;

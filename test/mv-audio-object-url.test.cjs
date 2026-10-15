@@ -736,3 +736,47 @@ test('MV empty paths and an absent media host finish preparation without waiting
   assert.equal(silent.isReady(), true);
   assert.equal(silent._poll(), false);
 });
+
+
+test('MV load hooks drain live callbacks and honor reentrant cancellation', async () => {
+  const context = contextFor();
+  const events = [];
+  const original = context.WebAudio.prototype._onLoad;
+  context.WebAudio.prototype._onLoad = function() {
+    events.push('hook');
+    return original.apply(this, arguments);
+  };
+  const url = context.URL.createObjectURL(new Blob([Uint8Array.from([1, 2])]));
+  const audio = new context.WebAudio(url);
+  audio.addLoadListener(() => { events.push('first'); audio.clear(); });
+  audio.addLoadListener(() => events.push('obsolete'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['hook', 'first']);
+
+  events.length = 0;
+  const next = new context.WebAudio(url);
+  next.addLoadListener(() => {
+    events.push('first');
+    next.addLoadListener(() => events.push('appended'));
+  });
+  next.addLoadListener(() => events.push('second'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['hook', 'first', 'second', 'appended']);
+  next.clear();
+  context.URL.revokeObjectURL(url);
+});
+
+test('MV stop callbacks appended during dispatch run in the same stop', () => {
+  const context = contextFor();
+  context.NativeHost.media.loadAudio = () => ({ handle: 1, duration: 1 });
+  const audio = new context.WebAudio('audio/se/test.ogg');
+  const events = [];
+  audio.addStopListener(() => {
+    events.push('first');
+    audio.addStopListener(() => events.push('appended'));
+  });
+  audio.addStopListener(() => events.push('second'));
+  audio.stop();
+  assert.deepEqual(events, ['first', 'second', 'appended']);
+  audio.clear();
+});
