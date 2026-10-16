@@ -2,6 +2,12 @@
   "version": 1,
   "description": "Exceptional source provenance records. Ordinary PMJS contributions use the defaults; classifications require source review.",
   "files": {
+    "js/pmjs-plugins/dreamx/damage-popup-retirement.js": {
+      "origin": "compatibility",
+      "source": "PMJS",
+      "license": "MIT",
+      "notice": "LICENSE"
+    },
     "third_party/lz4.LICENSE": {
       "origin": "permissive",
       "source": "https://github.com/lz4/lz4/tree/v1.10.0",

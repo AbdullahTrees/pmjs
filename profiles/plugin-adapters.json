@@ -2,6 +2,14 @@
   "adapters": [
     {
       "plugins": [
+        "DreamX_Ext_VE_DamagePopup"
+      ],
+      "modules": [
+        "js/pmjs-plugins/dreamx/damage-popup-retirement.js"
+      ]
+    },
+    {
+      "plugins": [
         "YEP_CoreEngine"
       ],
       "modules": [
