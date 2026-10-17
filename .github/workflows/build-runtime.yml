@@ -104,7 +104,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-  prerelease:
+  release:
     name: Publish build download
     needs: build
     runs-on: ubuntu-24.04
@@ -117,16 +117,31 @@ jobs:
           name: pmjs-linux-arm64
           path: dist
 
-      - name: Publish prerelease with build files
+      - name: Publish release with build files
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ needs.build.outputs.build-id }}
         run: |
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
+            --limit 1 --json tagName --jq '.[0].tagName // empty')
+          if [ -n "$previous" ]; then
+            changes=$(gh api "repos/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_SHA" \
+              --jq '.commits[] | "- " + (.commit.message | split("\n")[0])')
+            changelog="https://github.com/$GITHUB_REPOSITORY/compare/$previous...$BUILD_ID"
+          else
+            changes=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=$GITHUB_SHA&per_page=100" \
+              --jq '.[] | "- " + (.commit.message | split("\n")[0])')
+            changelog="https://github.com/$GITHUB_REPOSITORY/commits/$GITHUB_SHA"
+          fi
+          {
+            printf '%s\n' "$changes"
+            printf '\n**Full Changelog**: %s\n' "$changelog"
+          } > release-notes.md
           release_url=$(gh release create "$BUILD_ID" \
             "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" \
             "dist/pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "PMJS $BUILD_ID" \
-            --notes "" --prerelease --latest=false)
+            --notes-file release-notes.md --latest)
           printf 'Build download: %s\n\nRelease assets have no automatic expiration.\n' \
             "$release_url" >> "$GITHUB_STEP_SUMMARY"
