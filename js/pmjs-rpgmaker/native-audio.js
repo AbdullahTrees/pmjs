@@ -1,9 +1,15 @@
 'use strict';
 
 (function() {
+['setAudioContextSuspended', 'bindAudioContext', 'audioContextTime'].forEach(function(name) {
+  if (!NativeHost.media || typeof NativeHost.media[name] !== 'function') {
+    throw new Error('incompatible native audio add-on: missing media.' + name +
+      '; install the matching native add-on');
+  }
+});
+
 function pmjsResolveAudioPath(url) {
-  var encodedPath = String(url || '').split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
-  var decoded = decodeURIComponent(encodedPath);
+  var decoded = decodeResourceUrlPath(String(url || ''));
   var clean = decoded.replace(/^file:\/\/\/game\//, '').replace(/^file:\/\//, '');
   var path = typeof gamePath === 'function'
     ? gamePath(clean)
@@ -17,11 +23,8 @@ function pmjsIsAudioObjectUrl(url) {
 }
 
 var trackedAudioBuffers = [];
-// Handles do not retain guest buffers; finalization removes their registrations.
-var contextAudioHandles = new Set();
 var nativeAudioFinalizer = typeof FinalizationRegistry === 'function'
   ? new FinalizationRegistry(function(handle) {
-      contextAudioHandles.delete(handle);
       try { NativeHost.media.releaseAudio(handle); } catch (_) {}
     }) : null;
 
@@ -61,17 +64,12 @@ NativeAudioVoice.prototype.install = function(loaded, generation) {
   }
   if (this.handle) {
     if (nativeAudioFinalizer) nativeAudioFinalizer.unregister(this);
-    contextAudioHandles.delete(this.handle);
     NativeHost.media.releaseAudio(this.handle);
   }
   this.handle = loaded.handle;
-  if (NativeHost.media.bindAudioContext) NativeHost.media.bindAudioContext(this.handle);
+  NativeHost.media.bindAudioContext(this.handle);
   if (this.gainAutomation && this.gainAutomation.handle) {
     NativeHost.media.bindAudioGain(this.handle, this.gainAutomation.handle);
-  }
-  contextAudioHandles.add(this.handle);
-  if (NativeAudioVoice.clock.state === 'suspended' && !NativeHost.media.setAudioContextSuspended) {
-    NativeHost.media.setAudioSuspended(this.handle, true);
   }
   this.duration = loaded.duration;
   this.loading = false;
@@ -265,7 +263,6 @@ NativeAudioVoice.prototype.release = function() {
   if (this.handle) {
     var handle = this.handle;
     this.handle = 0;
-    contextAudioHandles.delete(handle);
     if (nativeAudioFinalizer) {
       try { nativeAudioFinalizer.unregister(this); } catch (_) {}
     }
@@ -339,27 +336,18 @@ NativeAudioVoice.prototype.pollNative = function() {
 NativeAudioVoice.clock = {
   state: 'running',
   get currentTime() {
-    return NativeHost.media && typeof NativeHost.media.audioContextTime === 'function'
-      ? NativeHost.media.audioContextTime() : 0;
+    return NativeHost.media.audioContextTime();
   },
   resume: function() {
     if (this.state === 'suspended') {
-      if (NativeHost.media && NativeHost.media.setAudioContextSuspended) {
-        NativeHost.media.setAudioContextSuspended(false);
-      } else contextAudioHandles.forEach(function(handle) {
-        NativeHost.media.setAudioSuspended(handle, false);
-      });
+      NativeHost.media.setAudioContextSuspended(false);
       this.state = 'running';
     }
     return Promise.resolve();
   },
   suspend: function() {
     if (this.state !== 'suspended') {
-      if (NativeHost.media && NativeHost.media.setAudioContextSuspended) {
-        NativeHost.media.setAudioContextSuspended(true);
-      } else contextAudioHandles.forEach(function(handle) {
-        NativeHost.media.setAudioSuspended(handle, true);
-      });
+      NativeHost.media.setAudioContextSuspended(true);
       this.state = 'suspended';
     }
     return Promise.resolve();

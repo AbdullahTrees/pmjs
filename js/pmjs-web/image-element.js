@@ -66,8 +66,7 @@ Object.defineProperty(NativeImage.prototype, 'src', {
             return NativeHost.images.loadBytesAsync(buffer, PMJS.images.shouldRetainPixels(source));
           });
         }
-        var encodedPath = source.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
-        var path = decodeURIComponent(encodedPath)
+        var path = decodeResourceUrlPath(source)
           .replace(/^file:\/\/\/game\//, '')
           .replace(/^\.\//, '');
         var prefix = 'generated-assets:/';

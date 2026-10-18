@@ -9,15 +9,18 @@ const vm = require('node:vm');
 const audioSource = fs.readFileSync(
   path.resolve(__dirname, '../js/pmjs-rpgmaker/native-audio.js'), 'utf8');
 
-function contextFor() {
-  const calls = { plays: [], releases: [], fades: [], params: [], pans: [], master: [] };
+function contextFor(prepare) {
+  const calls = { plays: [], releases: [], fades: [], params: [], pans: [], master: [], suspensions: [], bindings: [] };
   let nextHandle = 1;
   const context = {
-    console,
+    console, __pmjsBuiltinRequire: require,
     Date,
     gamePath: function(value) { return value; },
     NativeHost: {
       media: {
+        setAudioContextSuspended(value) { calls.suspensions.push(value); },
+        bindAudioContext(handle) { calls.bindings.push(handle); },
+        audioContextTime() { return 2.5; },
         loadAudio: function() { return { handle: nextHandle++, duration: 2 }; },
         loadAudioBytes: function() { return { handle: nextHandle++, duration: 1 }; },
         playAudio: function(handle, loop, offset) {
@@ -39,7 +42,9 @@ function contextFor() {
       }
     }
   };
+  if (prepare) prepare(context);
   vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
   vm.runInContext(audioSource, context, { filename: 'pmjs-rpgmaker/native-audio.js' });
   context.calls = calls;
   return context;
@@ -258,4 +263,64 @@ test('clear cancels deferred failure callbacks while retaining an independent vo
   retained.play(true, 0);
   assert.deepEqual(context.calls.plays, [[1, true, 0]]);
   assert.deepEqual(context.calls.releases, []);
+});
+
+for (const api of ['setAudioContextSuspended', 'bindAudioContext', 'audioContextTime']) {
+  test('missing ' + api + ' rejects the add-on before audio initialization', () => {
+    assert.throws(() => contextFor(context => { delete context.NativeHost.media[api]; }),
+      new RegExp('missing media.' + api + '; install the matching native add-on'));
+  });
+}
+
+test('context suspension is idempotent and new voices bind while suspended', async () => {
+  const context = contextFor(), audio = context.PMJS.rpgmaker.audio;
+  await audio.clock.suspend(); await audio.clock.suspend();
+  const voice = audio.createVoice();
+  voice.loadPath('audio/se/one.ogg');
+  voice.loadPath('audio/se/two.ogg');
+  assert.deepEqual(context.calls.bindings, [1, 2]);
+  assert.deepEqual(context.calls.releases, [1]);
+  assert.deepEqual(context.calls.suspensions, [true]);
+  assert.equal(audio.clock.currentTime, 2.5);
+  assert.equal(audio.clock.state, 'suspended');
+  await audio.clock.resume(); await audio.clock.resume();
+  assert.deepEqual(context.calls.suspensions, [true, false]);
+  assert.equal(audio.clock.state, 'running');
+  voice.release();
+  assert.deepEqual(context.calls.releases, [1, 2]);
+});
+
+test('replacement and explicit release unregister finalization while abandoned voices release their handle', () => {
+  let finalize;
+  const registrations = new Map();
+  const context = contextFor(context => {
+    context.FinalizationRegistry = class {
+      constructor(callback) { if (!finalize) finalize = callback; }
+      register(target, handle) { registrations.set(target, handle); }
+      unregister(target) { registrations.delete(target); }
+    };
+  });
+  const voice = context.PMJS.rpgmaker.audio.createVoice();
+  voice.loadPath('audio/se/one.ogg');
+  voice.loadPath('audio/se/two.ogg');
+  assert.equal(registrations.get(voice), 2);
+  assert.deepEqual(context.calls.releases, [1]);
+  voice.release();
+  assert.equal(registrations.size, 0);
+  assert.deepEqual(context.calls.releases, [1, 2]);
+  const abandoned = context.PMJS.rpgmaker.audio.createVoice();
+  abandoned.loadPath('audio/se/three.ogg');
+  finalize(registrations.get(abandoned));
+  assert.deepEqual(context.calls.releases, [1, 2, 3]);
+});
+
+test('audio path policy remains outside the shared URL decoder', () => {
+  const context = contextFor(), paths = [];
+  context.NativeHost.media.loadAudio = path => { paths.push(path); return { handle: paths.length, duration: 1 }; };
+  const voice = context.PMJS.rpgmaker.audio.createVoice();
+  voice.loadSource('file%3A%2F%2F%2Fgame%2Faudio%2Fname%2520.ogg?ignored');
+  voice.loadSource('./audio/100%.ogg');
+  assert.deepEqual(paths, ['audio/name%20.ogg', 'audio/100%.ogg']);
+  assert.throws(() => voice.loadSource('audio/%FF.ogg'), /URI malformed/);
+  assert.equal(paths.length, 2);
 });

@@ -4,6 +4,10 @@ function normalizePath(path) {
 }
 function dirname(path) { return posixPath.dirname(path); }
 
+function decodeResourceUrlPath(url) {
+  return decodeURIComponent(url.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25'));
+}
+
 function gamePath(path) {
   var normalized = normalizePath(path);
   if (normalized === '/game') return '.';

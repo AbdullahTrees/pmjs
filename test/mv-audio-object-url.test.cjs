@@ -25,7 +25,7 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
   const context = {
     Blob,
     URL: function URL() {},
-    console,
+    console, __pmjsBuiltinRequire: require,
     Date: clock,
     AudioManager: { _path: 'audio/', audioFileExt: function() { return '.ogg'; } },
     SceneManager: {},
@@ -34,6 +34,7 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
     gamePath: function(value) { return value; },
     NativeHost: {
       media: {
+        setAudioContextSuspended() {}, bindAudioContext() {},
         createAudioGain: () => 1,
         scheduleAudioGain: (handle, linear, value, time) => {
           gainEvents.push([handle, linear, value, time]);
@@ -66,6 +67,7 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
   context.NativeHost.media.audioContextTime = () => 0;
   vm.createContext(context);
   vm.runInContext(objectUrlSource, context);
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
   vm.runInContext(audioSource, context);
   vm.runInContext(mvAudioSource, context);
   if (streaming) {

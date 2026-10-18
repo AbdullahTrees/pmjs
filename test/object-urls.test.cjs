@@ -37,6 +37,7 @@ function imageContext(loadBytesAsync, loadAsync) {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.resolve(__dirname,
     '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
   vm.runInContext(eventsSource, context);
   vm.runInContext(canvasSource, context);
   vm.runInContext(source, context);

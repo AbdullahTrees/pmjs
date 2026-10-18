@@ -20,9 +20,9 @@ function makeHost(bulkClear) {
     } },
     PMJS: { optimizations: { register() {}, isEnabled: id =>
       (id === 'scene.record-bulk-clear' ? bulkClear : true) } },
-    NativeHost: { scene: { packetVersion: 1,
-      schema: { version: 1, metadataStride: 7,
-      valueStride: 41, transactionalSubmit: true } }, render: {} }
+    NativeHost: { scene: { packetVersion: 30,
+      schema: { version: 30, metadataStride: 7,
+      valueStride: 41, transactionalSubmit: true, preparedWorldState: true } }, render: {} }
   };
   context.globalThis = context;
   vm.createContext(context);

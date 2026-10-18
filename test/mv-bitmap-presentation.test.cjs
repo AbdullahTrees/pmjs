@@ -66,7 +66,7 @@ function setup() {
     }
   });
   const observations = [];
-  const context = vm.createContext({ Bitmap, Sprite, PMJS: { config: {},
+  const context = vm.createContext({ __pmjsBuiltinRequire: require, Bitmap, Sprite, PMJS: { config: {},
     compat: { observed: (...args) => observations.push(args) },
     optimizations: { register() {}, isEnabled() { return false; } } },
     NativeHost: { runtime: { loadScript() {} }, images: {
@@ -76,6 +76,7 @@ function setup() {
     trackNativeResource: value => value,
     releaseNativeResource() { releases++; },
     Graphics: function() {}, Input: function() {} });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-mv/bitmap.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-pixi4/bitmap-presentation.js'), 'utf8'), context);
   const old = new Bitmap('sheet.png', true);
@@ -183,7 +184,7 @@ test('mutation, failure and destruction release presentation ownership once', ()
 
 test('unverifiable image URLs follow the original assignment without cache acquisition', () => {
   for (const url of ['blob:123', 'data:image/png;base64,AA', 'https://example.test/image.png',
-    '/absolute.png', '../image.png', 'bad-%FF.png']) {
+    '/absolute.png', '../image.png', '%2Fabsolute.png', '%2e%2e/image.png', 'bad-%FF.png']) {
     const { Bitmap, sprite, old, context, presentation } = setup();
     old._url = url;
     let acquisitions = 0;
@@ -207,4 +208,17 @@ test('a cache lookup failure cannot delay or prevent the original Bitmap assignm
   assert.equal(sprite.bitmap, incoming);
   assert.equal(presentation.get(sprite), null);
   assert.deepEqual(observations, [['render.bitmap-presentation-miss', 'cache source unavailable']]);
+});
+
+test('presentation decodes before applying its file prefix and traversal policies', () => {
+  const { Bitmap, sprite, old, context, presentation } = setup(), paths = [];
+  const url = 'file%3A%2F%2F%2Fgame%2Fimg%2Fsheet%2520.png?v=1';
+  old._url = url;
+  context.NativeHost.images.acquireCached = path => {
+    paths.push(path);
+    return { handle: 7, width: 576, height: 768 };
+  };
+  sprite.bitmap = new Bitmap(url);
+  assert.ok(presentation.get(sprite));
+  assert.deepEqual(paths, ['img/sheet%20.png']);
 });

@@ -22,7 +22,7 @@ PMJS.pixi4.bitmapPresentation = (function() {
     var url = replacement._url;
     if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !/^file:\/\/\/game\//.test(url)) return null;
     var path;
-    try { path = decodeURIComponent(url.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25')); }
+    try { path = decodeResourceUrlPath(url); }
     catch (_) { return null; }
     path = path.replace(/^file:\/\/\/game\//, '').replace(/^\.\//, '');
     if (/^\/|(?:^|\/)\.\.(?:\/|$)/.test(path)) return null;

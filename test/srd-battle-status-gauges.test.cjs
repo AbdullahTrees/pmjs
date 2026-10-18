@@ -8,7 +8,7 @@ const test = require('node:test');
 const source = fs.readFileSync(require.resolve('../js/pmjs-plugins/srd/battle-status-gauges.js'), 'utf8');
 
 function fixture({ disabled = false, unknown = false, composed = false } = {}) {
-  const loaded = new Map(), phases = new Map(), refusals = [], calls = { full: 0, gauge: 0 };
+  const loaded = new Map(), phases = new Map(), refusals = [], calls = { full: 0, gauge: 0, paint: 0 };
   const config = JSON.parse(source.match(/var knownConfig = ([\s\S]*?);/)[1]);
   config.texts = [];
   config.gauges = JSON.parse(source.match(/var knownGauges = ([\s\S]*?);/)[1]);
@@ -44,16 +44,18 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
     drawAllGauges() {
       this.drawBasicGauge('', 0, 132, 160, 23, this._actor.hp, this._actor.mhp, '', '', '', true);
       this._checkForRefresh.push([this._actor.hp, 'actor.hp']);
-      this.drawBasicGauge('', 0, 132, 160, 10, this._actor._atbSpeed, 5000, '', '', '', false);
+      this.drawBasicGauge('', 0, 132, 160, 10, this._actor._atbSpeed,
+        Math.max(5000, (calls.highestAgi || 40) * 100), '#393939', '#818181', '#000000', false);
       this._checkForRefresh.push([this._actor._atbSpeed, 'actor._atbSpeed']);
     }
     drawBasicGauge(...args) {
       calls.gauge++; calls.lastArgs = args;
       this.contents.fontFace = 'Gamefont'; this.contents.fontSize = 18; this.contents.textColor = '#ffffff';
-      this.drawGaugeUpgrade();
+      this.drawGaugeUpgrade(args[1], args[2], args[3], args[4], args[5] / args[6], args[7], args[8], args[9]);
+      if (calls.afterGauge) calls.afterGauge(this);
       if (calls.throwGauge) throw new Error('gauge failure');
     }
-    drawGaugeUpgrade() { this.contents._canvas.__pmjsContentRevision++; }
+    drawGaugeUpgrade() { calls.paint++; this.contents._canvas.__pmjsContentRevision++; }
     drawIcons() { this._checkForRefresh.push([this._actor.allIcons(), 'actor.allIcons()']); }
     updateRefreshes() {
       for (const check of this._checkForRefresh) {
@@ -110,6 +112,87 @@ test('ATB decreases, zero and full use one authored gauge draw and preserve styl
   }
   assert.equal(h.calls.gauge, 8);
   assert.equal(w.refresh(), 'full');
+  assert.equal(h.calls.full, 2);
+});
+
+test('ATB changes within one drawn pixel retain gauge helper work without repainting', () => {
+  const h = fixture(), w = h.window();
+  const revision = w.contents._canvas.__pmjsContentRevision;
+  for (const value of [501, 520, 531]) {
+    h.actor._atbSpeed = value;
+    w.updateRefreshes();
+    assert.equal(w._checkForRefresh[1][0], value);
+    assert.equal(h.calls.full, 1);
+    assert.equal(h.calls.paint, 2);
+    assert.equal(w.contents._canvas.__pmjsContentRevision, revision);
+    assert.equal(h.calls.lastArgs[5], value);
+  }
+  assert.equal(h.calls.gauge, 5);
+  h.actor._atbSpeed = 532;
+  w.updateRefreshes();
+  assert.equal(h.calls.paint, 3);
+  assert.equal(w.contents._canvas.__pmjsContentRevision, revision + 1);
+  h.actor._atbSpeed = 533;
+  w.updateRefreshes();
+  assert.equal(h.calls.paint, 3);
+});
+
+test('zero fill and denominator changes compare the actual painted width', () => {
+  const h = fixture(), w = h.window();
+  h.actor._atbSpeed = 0; w.updateRefreshes();
+  const emptyPaints = h.calls.paint;
+  for (const value of [1, 31, 0]) {
+    h.actor._atbSpeed = value; w.updateRefreshes();
+    assert.equal(h.calls.paint, emptyPaints);
+    assert.equal(w._checkForRefresh[1][0], value);
+  }
+  h.actor._atbSpeed = 32; w.updateRefreshes();
+  assert.equal(h.calls.paint, emptyPaints + 1);
+  h.actor._atbSpeed = 500; w.updateRefreshes();
+  const before = h.calls.paint;
+  h.calls.highestAgi = 50.01;
+  h.actor._atbSpeed = 501; w.updateRefreshes();
+  assert.equal(h.calls.paint, before);
+  h.calls.highestAgi = 80;
+  h.actor._atbSpeed = 502; w.updateRefreshes();
+  assert.equal(h.calls.paint, before + 1);
+  assert.equal(h.calls.full, 1);
+});
+
+test('same-pixel reuse never bypasses HP, icon, style or contents invalidation', () => {
+  for (const change of ['hp', 'mhp', 'icons', 'font', 'contents', 'master']) {
+    const h = fixture(), w = h.window();
+    if (change === 'hp') h.actor.hp--;
+    if (change === 'mhp') h.actor.mhp++;
+    if (change === 'icons') h.actor.icons.push(7);
+    if (change === 'font') w.contents.fontFace = 'other';
+    if (change === 'contents') w.contents.clear();
+    if (change === 'master') w._statusWindow.contents.clear();
+    h.actor._atbSpeed = 501; w.updateRefreshes();
+    assert.equal(h.calls.full, 2, change);
+    assert.equal(h.calls.paint, 4, change);
+  }
+});
+
+test('same-pixel paint suppression ends before later helper drawing', () => {
+  const h = fixture(), w = h.window();
+  h.calls.afterGauge = window => window.drawGaugeUpgrade(20, 20, 10, 10, 0.5, 'a', 'b', 'c');
+  h.actor._atbSpeed = 501; w.updateRefreshes();
+  assert.equal(h.calls.gauge, 3);
+  assert.equal(h.calls.paint, 3);
+  assert.equal(w._checkForRefresh[1][0], 501);
+});
+
+test('a failed same-pixel helper restores normal painting and forces a full baseline', () => {
+  const h = fixture(), w = h.window();
+  h.calls.throwGauge = true;
+  h.actor._atbSpeed = 501;
+  assert.throws(() => w.updateRefreshes(), /gauge failure/);
+  h.calls.throwGauge = false;
+  const before = h.calls.paint;
+  w.drawGaugeUpgrade();
+  assert.equal(h.calls.paint, before + 1);
+  h.actor._atbSpeed = 502; w.updateRefreshes();
   assert.equal(h.calls.full, 2);
 });
 

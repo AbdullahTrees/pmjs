@@ -73,28 +73,9 @@ async function acquireLock(cacheRoot, cancelled, onWait, assets, waitMillisecond
   for (;;) {
     if (cancelled()) return null;
     const token = assets.tryAcquirePreparationLock(cacheRoot);
-    let foreign = false;
-    if (token) {
-      let retained = false;
-      try {
-        // Respect a live legacy preparer, but never remove its directory: stale
-        // directory deletion can race with a replacement owner.
-        const legacy = path.join(cacheRoot, '.prepare-lock');
-        const owner = await readJson(path.join(legacy, 'owner.json'));
-        const exists = owner || fs.existsSync(legacy);
-        if (!exists || (owner && owner.hostname === os.hostname() &&
-            Number.isInteger(owner.pid) && owner.pid > 0 && !ownerAlive(owner))) {
-          retained = true;
-          return () => assets.releasePreparationLock(token);
-        }
-        foreign = owner && typeof owner.hostname === 'string' && owner.hostname !== os.hostname();
-      } finally {
-        if (!retained) assets.releasePreparationLock(token);
-      }
-    }
+    if (token) return () => assets.releasePreparationLock(token);
     if (performance.now() - started >= waitMilliseconds)
-      throw new Error(foreign ? 'preparation cache is locked by another host'
-        : 'preparation cache lock wait timed out');
+      throw new Error('preparation cache lock wait timed out');
     onWait();
     await new Promise(resolve => setTimeout(resolve, 100));
   }

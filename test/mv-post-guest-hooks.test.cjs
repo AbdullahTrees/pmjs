@@ -221,12 +221,13 @@ test('recognized MV decryptor uses prepared images and falls back on cache error
   Bitmap.prototype._onError = function() { this.failed = true; };
   const decrypter = { extToEncryptExt: url => url, decryptArrayBuffer: value => value,
     createBlobUrl: () => 'blob:ordinary', _xhrOk: 400 };
-  const context = loadPmjsRuntime({ Bitmap, NativeImage, Decrypter: decrypter,
+  const context = loadPmjsRuntime({ __pmjsBuiltinRequire: require, Bitmap, NativeImage, Decrypter: decrypter,
     NativeHost: { assets: { hasDecrypted: () => true } },
     XMLHttpRequest: function() { this.open = () => {}; this.send = () => requests.push(this); }
   });
   vm.runInContext(fs.readFileSync(path.join(root, 'js/pmjs-web/events.js'), 'utf8'), context);
   NativeImage.prototype = Object.create(context.EventTarget.prototype);
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/pmjs-web/filesystem.js'), 'utf8'), context);
   decrypter.decryptImg = vm.runInContext('('+decryptImg.toString()+')', context);
   vm.runInContext(slice(fs.readFileSync(path.join(root, 'js/pmjs-mv/images.js'), 'utf8'),
     'function pmjsBitmapRequestImageWrap', '\nPMJS.methods.wrap({'), context);

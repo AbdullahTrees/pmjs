@@ -44,7 +44,8 @@ function loadScenePrimitives({ disableOptimizations = [], env = {}, pixi4 } = {}
     PMJS_GAME_CONFIG: { disableOptimizations },
     NativeHost: {
       runtime: { env(name) { return env[name]; } },
-      scene: null,
+      scene: { packetVersion: 30, schema: { version: 30, metadataStride: 7,
+        valueStride: 41, transactionalSubmit: true, preparedWorldState: true } },
       render: {
         createTileLayer(points) {
           calls.createTileLayer++;

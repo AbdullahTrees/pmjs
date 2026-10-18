@@ -124,8 +124,7 @@ PMJS.mv.bitmap.requestImageFile = pmjsBitmapRequestImageWrap()(Bitmap.prototype.
       }
       if (reviewedSource(guestDecrypt) !== reviewedSource(reviewedDecrypt)) return guestDecrypt;
       return function(url, bitmap) {
-        var encodedPath = url.split('?')[0].replace(/%(?![0-9a-f]{2})/gi, '%25');
-        var path = decodeURIComponent(encodedPath)
+        var path = decodeResourceUrlPath(url)
           .replace(/^file:\/\/\/game\//, '').replace(/^\.\//, '');
         if (!NativeHost.assets || typeof NativeHost.assets.hasDecrypted !== 'function' ||
             !NativeHost.assets.hasDecrypted(path)) return guestDecrypt.apply(this, arguments);

@@ -2681,3 +2681,41 @@ for (const filters of [undefined, null, []]) {
     });
   }
 }
+
+test('incompatible scene protocols fail before any submission', () => {
+  const changes = [
+    host => { host.scene.packetVersion = 29; },
+    host => { host.scene.schema.version = 29; },
+    host => { host.scene.schema.metadataStride = 6; },
+    host => { host.scene.schema.valueStride = 40; },
+    host => { host.scene.schema.transactionalSubmit = false; },
+    host => { host.scene.schema.preparedWorldState = false; },
+    host => { delete host.scene.schema; },
+    host => { delete host.scene; }
+  ];
+  for (const change of changes) {
+    let submissions = 0;
+    assert.throws(() => makeHarness({ beforeWriter(sandbox) {
+      sandbox.NativeHost.scene.submit = () => { submissions++; };
+      change(sandbox.NativeHost);
+    } }), /incompatible native scene add-on:.*matching native add-on/);
+    assert.equal(submissions, 0);
+  }
+});
+
+test('prepared Pixi world records preserve singular parents and root projection without inversion', () => {
+  const h = makeHarness(), { sandbox, sprite } = h;
+  const stage = new sandbox.PIXI.Container(), parent = sprite(), child = sprite();
+  stage.addChild(parent); parent.addChild(child);
+  for (const node of [stage, parent, child]) node.worldTransform = node.transform.worldTransform;
+  Object.assign(parent.worldTransform, { a: 0, d: 0, tx: 20, ty: 30 });
+  Object.assign(child.worldTransform, { a: 0, d: 0, tx: 20, ty: 30 });
+  stage.worldAlpha = 1; parent.worldAlpha = 0.5; child.worldAlpha = 0.25;
+  sandbox.renderNativeStage(stage, { a: 1, b: 0, c: 0, d: 1, tx: 10, ty: 20 },
+    1, false, true, null, { worldState: 'pixi' });
+  const packet = h.submitted.at(-1);
+  assert.equal(packet.version, 30);
+  assert.deepEqual(packet.values.slice(41, 48), [0, 0, 0, 0, 30, 50, 0.5]);
+  assert.deepEqual(packet.values.slice(82, 89), [0, 0, 0, 0, 30, 50, 0.25]);
+  assert.ok(packet.metadata[7 + 5] & 524288);
+});

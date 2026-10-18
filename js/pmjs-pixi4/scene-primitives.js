@@ -486,16 +486,15 @@ function nativeIsRectTileLayer(node) {
 }
 
 var nativeSceneSchema = NativeHost.scene && NativeHost.scene.schema;
-var nativeSceneMetadataStride = nativeSceneSchema ? nativeSceneSchema.metadataStride : 7;
-var nativeSceneValueStride = nativeSceneSchema ? nativeSceneSchema.valueStride : 41;
-var nativeScenePacketVersion = NativeHost.scene ? NativeHost.scene.packetVersion : 0;
-if (NativeHost.scene && nativeSceneSchema &&
-    (nativeSceneSchema.version !== nativeScenePacketVersion ||
-     nativeSceneSchema.metadataStride !== 7 ||
-     nativeSceneSchema.valueStride !== 41 ||
-     !nativeSceneSchema.transactionalSubmit)) {
-  throw new Error('native scene schema does not provide transactional submission');
+var nativeScenePacketVersion = NativeHost.scene && NativeHost.scene.packetVersion;
+if (!nativeSceneSchema || nativeScenePacketVersion !== 30 || nativeSceneSchema.version !== 30 ||
+    nativeSceneSchema.metadataStride !== 7 || nativeSceneSchema.valueStride !== 41 ||
+    !nativeSceneSchema.transactionalSubmit || !nativeSceneSchema.preparedWorldState) {
+  throw new Error('incompatible native scene add-on: expected protocol 30 with strides 7/41, ' +
+    'transactional submission and prepared world state; install the matching native add-on');
 }
+var nativeSceneMetadataStride = nativeSceneSchema.metadataStride;
+var nativeSceneValueStride = nativeSceneSchema.valueStride;
 var nativeSceneCapacity = 512;
 var nativeSceneMetadata = new Uint32Array(
   nativeSceneCapacity * nativeSceneMetadataStride);

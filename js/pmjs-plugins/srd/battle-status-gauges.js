@@ -124,6 +124,7 @@
       return;
     }
     var cached = new WeakMap(), updating = new WeakSet();
+    var paintedGauges = new WeakMap(), unchangedGauges = new WeakSet();
     var helpers = {};
     ['drawActorFace', 'drawFace', 'drawActorIconsScale', 'drawActorIconsTurns',
       'drawIconScale', 'drawText', 'drawCurrentAndMax', 'systemColor', 'normalColor', 'textColor', 'hpGaugeColor2',
@@ -173,23 +174,28 @@
         var max = Math.max(5000, BattleManager.highestBaseAgi() * 100);
         var current = actor._atbSpeed;
         if (Number.isFinite(current) && Number.isFinite(max) && max > 0 && current >= 0 && current <= max) {
+          var fillWidth = Math.floor(bitmap.width * (current / max));
           var saved = styles.map(function(key) { return bitmap[key]; });
+          if (fillWidth === previous.fillWidth) unchangedGauges.add(this);
           try {
             // Opaque backing overwrites the previous fill. Use the original gradient
             // at its current width, preserving clipping and rasterizer dithering.
             methods.drawBasicGauge.call(this, '', 0, bitmap.height - 32, bitmap.width, 10,
               current, max, '#393939', '#818181', '#000000', false);
           } finally {
+            unchangedGauges.delete(this);
             styles.forEach(function(key, index) { bitmap[key] = saved[index]; });
             cached.delete(this);
           }
           dependency[0] = current;
+          previous.fillWidth = fillWidth;
           previous.revision = bitmap._canvas.__pmjsContentRevision;
           cached.set(this, previous);
           return;
         }
       }
       cached.delete(this);
+      paintedGauges.delete(this);
       var result = methods.refresh.apply(this, arguments);
       remember(this);
       return result;
@@ -204,7 +210,25 @@
         matches(config, knownConfig) && matches(config.gauges[1], knownGauges[1]) &&
         matches(config.gauges[5], knownGauges[5]) && !config.gauges[1].absorb && !config.gauges[5].absorb &&
         Object.keys(helpers).every(function(name) { return window[name] === helpers[name]; }) &&
-        Object.keys(methods).every(function(name) { return window[name] === (name === 'refresh' ? optimizedRefresh : methods[name]); });
+        Object.keys(methods).every(function(name) {
+          return window[name] === (name === 'refresh' ? optimizedRefresh :
+            name === 'drawGaugeUpgrade' ? optimizedGauge : methods[name]);
+        });
+    }
+    function optimizedGauge(x, y, width, height, rate, color1, color2, colorBack) {
+      // Keep the caller's text and font work even when these gauge pixels match.
+      if (unchangedGauges.has(this)) {
+        unchangedGauges.delete(this);
+        return;
+      }
+      var result = methods.drawGaugeUpgrade.apply(this, arguments);
+      var bitmap = this.contents;
+      if (bitmap && x === 0 && y === bitmap.height - 32 && width === bitmap.width && height === 10 &&
+          color1 === '#393939' && color2 === '#818181' && colorBack === '#000000' &&
+          Number.isFinite(rate) && rate >= 0 && rate <= 1) {
+        paintedGauges.set(this, Math.floor(width * rate));
+      }
+      return result;
     }
     function remember(window) {
       var bitmap = window.contents;
@@ -218,6 +242,7 @@
       var masterCanvas = window._isMaster && window._statusWindow.contents._canvas;
       cached.set(window, { actor: window._actor, bitmap: bitmap, skin: window.windowskin,
         revision: bitmap._canvas.__pmjsContentRevision, width: bitmap.width, height: bitmap.height,
+        fillWidth: paintedGauges.get(window),
         masterCanvas: masterCanvas, masterRevision: masterCanvas && masterCanvas.__pmjsContentRevision,
         style: styles.map(function(key) { return bitmap[key]; }), state: snapshot });
     }
@@ -227,6 +252,7 @@
       finally { updating.delete(this); }
     }
     prototype.refresh = optimizedRefresh;
+    prototype.drawGaugeUpgrade = optimizedGauge;
     prototype.updateRefreshes = optimizedUpdate;
   }
 

@@ -189,6 +189,8 @@ function pixi4TextureFromVideo(video) {
 
 function loadRenderer(context) {
   const { sandbox } = require('./helpers/scene-encoder-harness.cjs').makeHarness();
+  context.NativeHost.scene = { packetVersion: sandbox.NativeHost.scene.packetVersion,
+    schema: sandbox.NativeHost.scene.schema };
   context.PIXI = sandbox.PIXI;
   context.PIXI.RENDERER_TYPE = { WEBGL: 1 };
   context.PIXI.Texture = { EMPTY: { baseTexture: {} } };

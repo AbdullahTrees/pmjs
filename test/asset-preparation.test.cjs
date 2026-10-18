@@ -525,63 +525,52 @@ test('concurrent preparers serialize and reuse completed output', async () => {
   progress.forEach((events, i) => assertProgress(events, results[i], 'complete'));
 });
 
-test('a live preparation owner cannot cause an unbounded wait or lose its lock', async () => {
+test('a native preparation owner cannot cause an unbounded wait or lose its lock', async () => {
   const f = fixture();
-  const lock = path.join(f.cacheRoot, '.prepare-lock');
-  fs.mkdirSync(lock, { recursive: true });
-  const owner = JSON.stringify({ pid: process.pid, hostname: require('node:os').hostname() });
-  fs.writeFileSync(path.join(lock, 'owner.json'), owner);
-  let waits = 0;
-  await assert.rejects(acquireLock(f.cacheRoot, () => false, () => { waits++; }, f.native.assets, 20),
-    /preparation cache lock wait timed out/);
-  assert.ok(waits > 0);
-  assert.equal(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'), owner);
-  assert.equal(f.jobs, 0);
+  const token = f.native.assets.tryAcquirePreparationLock(f.cacheRoot);
+  assert.ok(token);
+  try {
+    let waits = 0;
+    await assert.rejects(acquireLock(f.cacheRoot, () => false, () => { waits++; }, f.native.assets, 20),
+      /preparation cache lock wait timed out/);
+    assert.ok(waits > 0);
+    assert.equal(f.native.assets.tryAcquirePreparationLock(f.cacheRoot), null);
+    assert.equal(f.jobs, 0);
+  } finally { f.native.assets.releasePreparationLock(token); }
 });
 
 test('lock-wait cancellation reports remaining sources and leaves the active lock intact', async () => {
   const f = fixture();
-  const lock = path.join(f.cacheRoot, '.prepare-lock');
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, hostname: require('node:os').hostname() }));
-  const progress = [];
-  let cancel = false;
-  const result = await prepareAssets({ ...f, shouldCancel: () => cancel, onProgress(value) {
-    progress.push(value);
-    if (value.phase === 'wait') cancel = true;
-  } });
-  assertProgress(progress, result, 'cancelled');
-  assert.equal(progress.at(-1).remaining, 1);
-  assert.equal(f.jobs, 0);
-  assert.equal(f.installs.length, 0);
-  assert.equal(fs.existsSync(lock), true);
+  const token = f.native.assets.tryAcquirePreparationLock(f.cacheRoot);
+  assert.ok(token);
+  try {
+    const progress = [];
+    let cancel = false;
+    const result = await prepareAssets({ ...f, shouldCancel: () => cancel, onProgress(value) {
+      progress.push(value);
+      if (value.phase === 'wait') cancel = true;
+    } });
+    assertProgress(progress, result, 'cancelled');
+    assert.equal(progress.at(-1).remaining, 1);
+    assert.equal(f.jobs, 0);
+    assert.equal(f.installs.length, 0);
+    assert.equal(f.native.assets.tryAcquirePreparationLock(f.cacheRoot), null);
+  } finally { f.native.assets.releasePreparationLock(token); }
 });
 
-test('dead legacy owners do not block preparation or staging cleanup', async () => {
+test('obsolete preparation directory does not block the native lock or staging cleanup', async () => {
   const f = fixture();
-  fs.mkdirSync(path.join(f.cacheRoot, '.prepare-lock'), { recursive: true });
-  fs.writeFileSync(path.join(f.cacheRoot, '.prepare-lock/owner.json'), JSON.stringify({ pid: 2147483647, hostname: require('node:os').hostname() }));
+  const legacy = path.join(f.cacheRoot, '.prepare-lock');
+  fs.mkdirSync(legacy, { recursive: true });
+  const owner = JSON.stringify({ pid: process.pid, hostname: require('node:os').hostname() });
+  fs.writeFileSync(path.join(legacy, 'owner.json'), owner);
   fs.mkdirSync(path.join(f.cacheRoot, 'entries/.stage-abandoned'), { recursive: true });
-  assert.equal((await prepareAssets(f)).generated, 1);
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, '.prepare-lock')), true);
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, 'entries/.stage-abandoned')), false);
-});
-
-test('an aged foreign-host lock remains intact and falls back after a bounded wait', async () => {
-  const f = fixture();
-  const lock = path.join(f.cacheRoot, '.prepare-lock');
-  fs.mkdirSync(lock, { recursive: true });
-  const owner = JSON.stringify({ pid: 1234, hostname: require('node:os').hostname() + '-other' });
-  fs.writeFileSync(path.join(lock, 'owner.json'), owner);
-  const old = new Date(Date.now() - 120000);
-  fs.utimesSync(lock, old, old);
-  const started = performance.now();
   const result = await prepareAssets(f);
-  assert.ok(performance.now() - started < 20000, 'foreign lock wait exceeded its bound');
-  assert.equal(result.fallback, 1);
-  assert.equal(f.jobs, 0);
-  assert.equal(fs.readFileSync(path.join(lock, 'owner.json'), 'utf8'), owner);
-  assert.ok(f.warnings.some(message => message.includes('locked by another host')));
+  assert.equal(result.generated, 1);
+  assert.equal(f.jobs, 1);
+  assert.equal(fs.readFileSync(path.join(legacy, 'owner.json'), 'utf8'), owner);
+  assert.equal(fs.existsSync(path.join(f.cacheRoot, 'entries/.stage-abandoned')), false);
+  result.releaseCacheLease();
 });
 
 test('cancellation waits for current processor, discards its output and prevents install', async () => {

@@ -201,24 +201,8 @@ function nativePackSpriteColor(node, nodeIndex, tint) {
   nativeSceneMetadata[offset + 5] |= 2048;
 }
 
-function nativeSpriteLocalTransform(node, local) {
-  if (NativeHost.scene.schema.preparedWorldState) return local;
-  if (!nativeSceneUsePixiWorldState ||
-      !node.parent || !node.parent.worldTransform) return local;
-  // Leaf Sprites send their final quad; only parents need a local transform.
-  if (node instanceof PIXI.Sprite && !(node.children && node.children.length) && typeof node.calculateVertices === 'function') return local;
-  var parent = node.parent.worldTransform, world = node.worldTransform;
-  var determinant = parent.a * parent.d - parent.b * parent.c;
-  if (!determinant) return local;
-  var inverse = { a: parent.d / determinant, b: -parent.b / determinant,
-    c: -parent.c / determinant, d: parent.a / determinant,
-    tx: (parent.c * parent.ty - parent.d * parent.tx) / determinant,
-    ty: (parent.b * parent.tx - parent.a * parent.ty) / determinant };
-  return nativeComposeTransform(inverse, world);
-}
-
 function nativePreparedWorldRecord(node, nodeIndex, forcedAlpha) {
-  if (!nativeSceneUsePixiWorldState || !NativeHost.scene.schema.preparedWorldState ||
+  if (!nativeSceneUsePixiWorldState ||
       !node.worldTransform) return;
   var world = node.worldTransform;
   if (nativeSceneRootTransform !== nativeIdentityTransform) world = nativeComposeTransform(nativeSceneRootTransform, world);
@@ -287,7 +271,7 @@ function writeNativePlainSpriteSegment(bindings, parentIndex) {
     if (!nativeSceneTransformsPrepared && transform && typeof transform.updateLocalTransform === 'function') {
       transform.updateLocalTransform();
     }
-    var local = nativeSpriteLocalTransform(node, transform && transform.localTransform || nativeIdentityTransform);
+    var local = transform && transform.localTransform || nativeIdentityTransform;
     var frame = binding.frame;
     var localX = binding.localX;
     var localY = binding.localY;
@@ -437,9 +421,6 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     local = transform && (parentIndex === 0xffffffff &&
       nativeSceneRootUsesWorldTransform ? transform.worldTransform :
       transform.localTransform) || nativeIdentityTransform;
-  }
-  if (!particleValues && !(parentIndex === 0xffffffff && nativeSceneRootUsesWorldTransform)) {
-    local = nativeSpriteLocalTransform(node, local);
   }
   if (parentIndex === 0xffffffff && nativeSceneRootTransform !== nativeIdentityTransform) {
     local = nativeComposeTransform(nativeSceneRootTransform, local);

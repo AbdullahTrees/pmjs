@@ -192,9 +192,9 @@ function makeHarness(options = {}) {
       compatObserved.push([kind, String(detail)]);
     },
     NativeHost: { plugins: { mpp: { createBitmapMesh() { return nextHandle++; } } }, mv: { createBitmapMesh() { return nextHandle++; } },
-      scene: { schema: { version: 1, metadataStride: 7, valueStride: 41,
-          transactionalSubmit: true, clampedTilingSampling: true },
-        packetVersion: 1,
+      scene: { schema: { version: 30, metadataStride: 7, valueStride: 41,
+          transactionalSubmit: true, preparedWorldState: true, clampedTilingSampling: true },
+        packetVersion: 30,
         submit(version, metadata, values, count) {
           submitted.push({ version, count,
             metadata: Array.from(metadata.slice(0, count * 7)),
