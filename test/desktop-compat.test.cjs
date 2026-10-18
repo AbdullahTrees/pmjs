@@ -22,6 +22,7 @@ function desktop(engine) {
     } },
     NativeHost: { storage: save, fs: game, runtime: {
       env() { return ''; }, now: () => 0, windowState() { return { ...state }; }, isFullscreen: () => state.fullscreen,
+      setFullscreen(value) { state.fullscreen = value; },
       arguments: ['test', 'flag'], quit() { quits++; }, reload() { reloads++; },
       windowSize: () => ({ width: state.width, height: state.height }),
       windowCommand(name, x, y) {
@@ -127,6 +128,28 @@ test('window state, subscriptions, close interception, menus and clipboard have 
   menu.append(item); assert.equal(menu.items[0], item); menu.remove(item); assert.equal(menu.items.length, 0);
   assert.throws(() => c.nw.Window.open('editor.html'), { code: 'ERR_NW_UNSUPPORTED_WINDOW' });
   c.location.reload(); c.chrome.runtime.reload(); win.reload(); assert.equal(h.reloads, 3);
+});
+
+test('NW fullscreen methods change native state without entering DOM fullscreen', () => {
+  const h = desktop(), c = h.context, win = c.nw.Window.get();
+  c.setNativeFullscreen = () => assert.fail('NW window command entered DOM fullscreen');
+  const events = [];
+  win.on('enter-fullscreen', () => events.push('enter'));
+  win.on('leave-fullscreen', () => events.push('leave'));
+  win.enterFullscreen();
+  assert.equal(win.isFullscreen, true);
+  c.__pmjsDispatchWindowEvents([]);
+  c.__pmjsDispatchWindowEvents([]);
+  win.leaveFullscreen();
+  assert.equal(win.isFullscreen, false);
+  c.__pmjsDispatchWindowEvents([]);
+  win.toggleFullscreen();
+  assert.equal(win.isFullscreen, true);
+  c.__pmjsDispatchWindowEvents([]);
+  win.toggleFullscreen();
+  assert.equal(win.isFullscreen, false);
+  c.__pmjsDispatchWindowEvents([]);
+  assert.deepEqual(events, ['enter', 'leave', 'enter', 'leave']);
 });
 
 test('capture waits for presentation, returns requested formats, releases resources and drops terminated callbacks', () => {

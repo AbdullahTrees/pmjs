@@ -41,6 +41,8 @@ function mediaStub() {
 function contextFor(options) {
   const opts = options || {};
   const pendingRequests = [];
+  const tasks = [], eventErrors = [];
+  let stopped = false;
   function Request() {
     this.status = opts.requestStatus || 200;
     this.response = new ArrayBuffer(8);
@@ -50,6 +52,13 @@ function contextFor(options) {
   Request.prototype.send = function() {};
   const context = {
     console, __pmjsBuiltinRequire: require,
+    PMJS: { tasks: {
+      enqueue(callback, options) {
+        if (stopped) { options.discard(); return false; }
+        tasks.push({ callback, options });
+        return true;
+      }
+    } },
     Date,
     Blob,
     URL: function URL() {},
@@ -80,10 +89,25 @@ function contextFor(options) {
   vm.runInContext(audioSource, context, { filename: 'pmjs-rpgmaker/native-audio.js' });
   vm.runInContext(mzAudioSource, context, { filename: 'pmjs-mz/audio.js' });
   context.pendingRequests = pendingRequests;
+  context.eventErrors = eventErrors;
+  context.flushLoads = function() {
+    while (tasks.length) {
+      const { callback, options } = tasks.shift();
+      try { callback(); } catch (error) {
+        if (options.errorMode !== 'event') throw error;
+        eventErrors.push(error);
+      }
+    }
+  };
+  context.stopLoads = function() {
+    stopped = true;
+    tasks.splice(0).forEach(task => task.options.discard());
+  };
   context.playSe = function(se) {
     const buffer = context.AudioManager.createBuffer('se/', se.name);
     context.AudioManager.updateSeParameters(buffer, se);
     buffer.play(false);
+    context.flushLoads();
     return buffer;
   };
   context.cleanupSe = function(buffers) {
@@ -117,6 +141,8 @@ test('MZ plaintext audio overrides encrypted loading without masking missing fil
   context.NativeHost.fs = { exists: value => value === 'audio/se/plain.ogg' };
   context.NativeHost.media.loadAudio = value => { paths.push(value); return { handle: 81, duration: 1 }; };
   const plain = context.AudioManager.createBuffer('se/', 'plain');
+  assert.equal(plain.isReady(), false);
+  context.flushLoads();
   assert.equal(plain.isReady(), true);
   assert.deepEqual(paths, ['audio/se/plain.ogg']);
   assert.equal(context.pendingRequests.length, 0);
@@ -124,6 +150,7 @@ test('MZ plaintext audio overrides encrypted loading without masking missing fil
   assert.equal(encrypted.isReady(), false);
   assert.equal(context.pendingRequests[0].path, 'audio/se/encrypted.ogg_');
   context.pendingRequests[0].onload();
+  context.flushLoads();
   assert.equal(encrypted.isReady(), true);
   plain.destroy(); encrypted.destroy();
 });
@@ -135,6 +162,123 @@ test('MZ play-before-load reports logical playback immediately', () => {
   assert.equal(context.NativeHost.media.calls.plays, 0);
 });
 
+for (const encrypted of [false, true]) {
+  test(`MZ ${encrypted ? 'encrypted' : 'plaintext'} readiness preserves listener and playback order`, () => {
+    const context = contextFor({ encrypted });
+    const events = [];
+    context.NativeHost.media.playAudio = (_handle, loop, offset) => {
+      events.push(['play', loop, offset]); return true;
+    };
+    const audio = new context.WebAudio('audio/bgs/room.ogg');
+    events.push(['constructed', audio.isReady()]);
+    audio.addLoadListener(() => events.push(['first', audio.isReady()]));
+    audio.play(true, 0.75);
+    audio.addLoadListener(() => events.push(['last']));
+    assert.equal(audio.isPlaying(), true);
+    if (encrypted) context.pendingRequests[0].onload();
+    assert.deepEqual(events, [['constructed', false]]);
+    context.flushLoads();
+    assert.deepEqual(events, [['constructed', false], ['first', true], ['play', true, 0.75], ['last']]);
+    audio.addLoadListener(() => events.push(['late']));
+    context.flushLoads();
+    assert.equal(events.length, 4, 'stock MZ does not immediately invoke late listeners');
+    audio.clear();
+  });
+}
+
+test('MZ stop before notification clears playback and listeners but retains loaded audio', () => {
+  const context = contextFor();
+  const audio = new context.WebAudio('audio/se/tone.ogg');
+  audio.addLoadListener(() => assert.fail('stopped listener'));
+  audio.play(false);
+  audio.stop();
+  context.flushLoads();
+  assert.equal(audio.isReady(), true);
+  assert.equal(audio.isPlaying(), false);
+  assert.equal(context.NativeHost.media.calls.plays, 0);
+  audio.play(false);
+  assert.equal(context.NativeHost.media.calls.plays, 1);
+  audio.clear();
+});
+
+test('MZ clear and destroy cancel queued notifications and release only their own handles', () => {
+  const context = contextFor();
+  let handle = 1;
+  context.NativeHost.media.loadAudio = () => ({ handle: handle++, duration: 1 });
+  for (const method of ['clear', 'destroy']) {
+    const audio = new context.WebAudio('audio/se/tone.ogg');
+    audio.addLoadListener(() => assert.fail('obsolete listener'));
+    audio.play(false);
+    audio[method]();
+    context.flushLoads();
+    assert.equal(audio.isReady(), false);
+    assert.equal(audio.isPlaying(), false);
+  }
+  assert.deepEqual(context.NativeHost.media.calls.releases, [1, 2]);
+  assert.equal(context.NativeHost.media.calls.plays, 0);
+});
+
+test('MZ retry supersedes a queued notification without replaying the released handle', () => {
+  const context = contextFor();
+  let handle = 1;
+  const events = [];
+  context.NativeHost.media.loadAudio = () => ({ handle: handle++, duration: 1 });
+  context.NativeHost.media.playAudio = value => { events.push(['play', value]); return true; };
+  const audio = new context.WebAudio('audio/se/tone.ogg');
+  audio.addLoadListener(() => events.push(['loaded']));
+  audio.retry();
+  audio.play(false);
+  context.flushLoads();
+  assert.deepEqual(events, [['loaded'], ['play', 2]]);
+  assert.deepEqual(context.NativeHost.media.calls.releases, [1]);
+  audio.clear();
+});
+
+test('MZ a load listener can retry without draining listeners against the superseded source', () => {
+  const context = contextFor();
+  const audio = new context.WebAudio('audio/se/tone.ogg');
+  const events = [];
+  audio.addLoadListener(() => { events.push(['first', audio.isReady()]); audio.retry(); });
+  audio.addLoadListener(() => events.push(['replacement', audio.isReady()]));
+  context.flushLoads();
+  assert.deepEqual(events, [['first', true], ['replacement', true]]);
+  audio.clear();
+});
+
+test('MZ load listener errors remain event errors rather than decode failures', () => {
+  const context = contextFor();
+  const audio = new context.WebAudio('audio/se/tone.ogg');
+  const error = new Error('guest callback');
+  audio.addLoadListener(() => { throw error; });
+  context.flushLoads();
+  assert.equal(audio.isReady(), true);
+  assert.equal(audio.isError(), false);
+  assert.deepEqual(context.eventErrors, [error]);
+  audio.clear();
+});
+
+test('MZ shutdown discards pending notifications and late installations without guest callbacks', async () => {
+  const context = contextFor();
+  const plain = new context.WebAudio('audio/se/tone.ogg');
+  const url = context.URL.createObjectURL(new Blob([Uint8Array.of(1)]));
+  const blob = new context.WebAudio(url);
+  for (const audio of [plain, blob]) {
+    audio.addLoadListener(() => assert.fail('callback after shutdown'));
+    audio.addStopListener(() => assert.fail('stop callback after shutdown'));
+    audio.play(false);
+  }
+  context.stopLoads();
+  await new Promise(resolve => setImmediate(resolve));
+  context.flushLoads();
+  for (const audio of [plain, blob]) {
+    assert.equal(audio.isReady(), false);
+    assert.equal(audio.isPlaying(), false);
+  }
+  assert.deepEqual(context.NativeHost.media.calls.releases, [17, 29]);
+  assert.equal(context.NativeHost.media.calls.plays, 0);
+  context.URL.revokeObjectURL(url);
+});
+
 test('MZ encrypted SE survives cleanupSe and plays after decryption', () => {
   const context = contextFor({ encrypted: true });
   const buffer = context.playSe({ name: 'Hit', volume: 90, pitch: 100, pan: 0 });
@@ -143,6 +287,7 @@ test('MZ encrypted SE survives cleanupSe and plays after decryption', () => {
   assert.equal(survivors[0], buffer);
   assert.equal(context.pendingRequests.length, 1);
   context.pendingRequests[0].onload();
+  context.flushLoads();
   assert.equal(buffer.isPlaying(), true);
   assert.equal(context.NativeHost.media.calls.plays, 1);
 });
@@ -176,6 +321,7 @@ test('MZ stop-before-load prevents later playback', () => {
   assert.equal(buffer.isPlaying(), false);
   assert.equal(stops, 1);
   context.pendingRequests[0].onload();
+  context.flushLoads();
   assert.equal(context.NativeHost.media.calls.plays, 0);
   assert.equal(buffer.isPlaying(), false);
 });
@@ -201,9 +347,10 @@ test('MZ failed load keeps logical playback across poll and retry', () => {
   assert.equal(buffer.isPlaying(), true);
   buffer.retry();
   context.pendingRequests[1].onload();
+  context.flushLoads();
   assert.equal(buffer.isError(), false);
   assert.equal(buffer.isPlaying(), true);
-  assert.equal(context.NativeHost.media.calls.plays, 1);
+  assert.equal(context.NativeHost.media.calls.plays, 2, 'stock retry queues another play listener');
 });
 
 test('MZ faded voice fires its stop listener at natural end', () => {
@@ -229,6 +376,7 @@ test('MZ retry releases the stale handle before reloading', () => {
   context.NativeHost.media.loadAudio = () => ({ handle: nextHandle++, duration: 1 });
   const buffer = context.playSe({ name: 'Hit', volume: 90, pitch: 100, pan: 0 });
   buffer.retry();
+  context.flushLoads();
   assert.deepEqual(context.NativeHost.media.calls.releases, [1000]);
   assert.equal(buffer.isPlaying(), true);
   assert.equal(context.NativeHost.media.calls.plays, 2);
@@ -299,7 +447,7 @@ test('MZ fadeIn targets logical volume and replay recreates authored gain', () =
 });
 
 
-test('MZ object URLs bypass encryption and notify listeners after queued playback', async () => {
+test('MZ object URLs bypass encryption and preserve listener and playback order', async () => {
   const context = contextFor({ encrypted: true });
   const events = [], loads = [];
   context.NativeHost.media.loadAudioBytes = (bytes, options) => {
@@ -314,8 +462,9 @@ test('MZ object URLs bypass encryption and notify listeners after queued playbac
   assert.equal(audio.isPlaying(), true);
   assert.equal(audio.isReady(), false);
   await new Promise(resolve => setImmediate(resolve));
+  context.flushLoads();
   assert.deepEqual(loads, [[[1, 2, 3], url]]);
-  assert.deepEqual(events, [['play', 77, true, 0.5], ['loaded']]);
+  assert.deepEqual(events, [['loaded'], ['play', 77, true, 0.5]]);
   assert.equal(context.pendingRequests.length, 0);
   context.URL.revokeObjectURL(url);
   assert.equal(audio.isReady(), true);
@@ -361,9 +510,10 @@ test('MZ retry ignores superseded encrypted loads and clear invalidates the repl
   assert.equal(audio.isReady(), false);
   assert.deepEqual(loads, []);
   context.pendingRequests[1].onload();
+  context.flushLoads();
   assert.deepEqual(loads, ['audio/se/Town Bell.ogg_']);
   assert.deepEqual(events, ['loaded']);
-  assert.equal(context.NativeHost.media.calls.plays, 1);
+  assert.equal(context.NativeHost.media.calls.plays, 2, 'stock retry queues another play listener');
   audio.retry();
   audio.clear();
   context.pendingRequests[2].onload();
@@ -408,6 +558,7 @@ test('MZ load hooks drain live callbacks and honor reentrant cancellation', asyn
   audio.addLoadListener(() => { events.push('first'); audio.clear(); });
   audio.addLoadListener(() => events.push('obsolete'));
   await new Promise(resolve => setImmediate(resolve));
+  context.flushLoads();
   assert.deepEqual(events, ['hook', 'first']);
 
   events.length = 0;
@@ -418,6 +569,7 @@ test('MZ load hooks drain live callbacks and honor reentrant cancellation', asyn
   });
   next.addLoadListener(() => events.push('second'));
   await new Promise(resolve => setImmediate(resolve));
+  context.flushLoads();
   assert.deepEqual(events, ['hook', 'first', 'second', 'appended']);
   next.clear();
   context.URL.revokeObjectURL(url);
@@ -450,6 +602,7 @@ test('MZ guest volume and pan wrappers use the engine clock and effective playba
     get() { return this.guestPan * 2 - 1; }, set(value) { this.guestPan = (value + 1) / 2; } });
   const audio = context.AudioManager.createBuffer('se/', 'Cursor');
   audio.volume = 0.3; audio.pan = -0.5; audio.play(false);
+  context.flushLoads();
   assert.equal(audio._voice.volume, 0.3);
   assert.equal(audio._voice.pan, -0.5);
   assert.equal(context.NativeHost.media.calls.fades.at(-1)[2], 0.3);

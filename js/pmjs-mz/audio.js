@@ -6,6 +6,7 @@ function MzNativeWebAudio(url, intent) {
   this._loadListeners = [];
   this._stopListeners = [];
   this._playGeneration = 0;
+  this._isReady = false;
   this._isPlaying = false;
   this._loop = false;
   this.name = '';
@@ -19,8 +20,22 @@ function MzNativeWebAudio(url, intent) {
 
 MzNativeWebAudio.prototype._startSource = function() {
   var self = this;
+  this._isReady = false;
   this._voice.onInstalled = function() {
-    self._onLoad();
+    // Native decoding may finish synchronously; MZ publishes readiness in a later task.
+    var generation = self._voice.loadGeneration;
+    PMJS.tasks.enqueue(function() {
+      if (generation !== self._voice.loadGeneration) return;
+      self._isReady = true;
+      self._onLoad();
+    }, { errorMode: 'event', discard: function() {
+      if (generation !== self._voice.loadGeneration) return;
+      self._voice.release();
+      self._isReady = false;
+      self._isPlaying = false;
+      self._loadListeners.length = 0;
+      self._stopListeners.length = 0;
+    } });
   };
 
   this._voice.loadSource(this._url, function(path) {
@@ -87,7 +102,7 @@ MzNativeWebAudio.prototype.linearRampToValueAtTime = function(value, endTime) {
 };
 
 MzNativeWebAudio.prototype.isReady = function() {
-  return !!this._voice.handle;
+  return this._isReady;
 };
 
 MzNativeWebAudio.prototype.isError = function() {
@@ -102,6 +117,12 @@ MzNativeWebAudio.prototype.play = function(loop, offset) {
   ++this._playGeneration;
   this._loop = !!loop;
   this._isPlaying = true;
+  if (!this.isReady()) {
+    var self = this;
+    this.addLoadListener(function() { self.play(loop, offset); });
+    pmjsAudio.track(this);
+    return;
+  }
   // Effective property hooks can maintain their own representation. Resolve
   // their public values before passing playback parameters to the native voice.
   this._voice.volume = Number(this.volume);
@@ -126,6 +147,7 @@ MzNativeWebAudio.prototype.destroy = function() {
 MzNativeWebAudio.prototype.clear = function() {
   this.stop();
   this._voice.resetForClear({ absoluteGain: 1 });
+  this._isReady = false;
   this._isPlaying = false;
   this._loop = false;
   this._loadListeners.length = 0;
@@ -133,8 +155,10 @@ MzNativeWebAudio.prototype.clear = function() {
 };
 
 MzNativeWebAudio.prototype.retry = function() {
+  this._voice.cancelPending();
   this._voice.resetForReload();
   this._startSource();
+  if (this._isPlaying) this.play(this._loop, 0);
 };
 
 MzNativeWebAudio.prototype.seek = function() {
@@ -174,7 +198,8 @@ MzNativeWebAudio.prototype._drainStop = function() {
 };
 
 MzNativeWebAudio.prototype._onLoad = function() {
-  while (this._loadListeners.length) {
+  var generation = this._voice.loadGeneration;
+  while (this._loadListeners.length && generation === this._voice.loadGeneration) {
     var listener = this._loadListeners.shift();
     listener();
   }
