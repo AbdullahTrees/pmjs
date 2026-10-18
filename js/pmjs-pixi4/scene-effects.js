@@ -76,6 +76,8 @@ function resolveNativeAdvancedEffects(node, particleContext, activeFilters,
       spriteMaskFilter = new nativeSpriteMaskConstructor(nodeMask);
       nativeSpriteMaskFilters.set(nodeMask, spriteMaskFilter);
     }
+    spriteMaskFilter.resolution = nativeSceneRenderer && nativeSceneRenderer.resolution ||
+      nativeSceneFilterResolution;
     spriteMaskGroup = nativeCustomFilterGroup(spriteMaskFilter, node);
     if (!spriteMaskGroup) {
       PMJS.compat.hit('render.mask', 'sprite mask filter could not be encoded');

@@ -43,14 +43,16 @@ function NativePreparePlugin() {
   this.queue = [];
   this.completes = [];
   this.ticking = false;
-  this.limiter = new NativePrepareCountLimiter(4);
   this._activeUploads = 0;
+  this._uploads = new Set();
+  this._destroyed = false;
 }
 NativePreparePlugin.prototype.add = function(item) {
-  if (item) this.queue.push(item);
+  if (item && !this._destroyed) this.queue.push(item);
   return this;
 };
 NativePreparePlugin.prototype.upload = function(item, done) {
+  if (this._destroyed) return this;
   if (typeof item === 'function') {
     done = item;
     item = null;
@@ -59,44 +61,63 @@ NativePreparePlugin.prototype.upload = function(item, done) {
   var queued = this.queue.splice(0);
   var sources = [];
   var sourceSet = new Set();
+  var seen = new Set();
   for (var index = 0; index < queued.length; index++) {
-    nativePrepareSources(queued[index], sources, new Set(), sourceSet);
+    nativePrepareSources(queued[index], sources, seen, sourceSet);
   }
   var plugin = this;
-  var remaining = 0;
   var complete = typeof done === 'function' ? done : function() {};
+  var pending = sources.filter(function(source) { return source.complete === false; });
+  var remaining = pending.length;
+  var record = { active: true, listeners: [] };
+  plugin._uploads.add(record);
   plugin.completes.push(complete);
   plugin._activeUploads++;
   plugin.ticking = true;
-  function finishOne() {
-    if (--remaining > 0) return;
+  record.cancel = function() {
+    record.active = false;
+    record.listeners.forEach(function(entry) {
+      entry.source.removeEventListener('load', entry.loaded);
+      entry.source.removeEventListener('error', entry.loaded);
+    });
+    record.listeners.length = 0;
+  };
+  function finish() {
+    if (!record.active || remaining > 0) return;
+    record.cancel();
+    plugin._uploads.delete(record);
     var completeIndex = plugin.completes.indexOf(complete);
     if (completeIndex >= 0) plugin.completes.splice(completeIndex, 1);
     plugin._activeUploads--;
     plugin.ticking = plugin._activeUploads > 0;
-    PMJS.tasks.enqueue(complete, { errorMode: 'event' });
+    PMJS.tasks.enqueue(function() {
+      if (!plugin._destroyed) complete();
+    }, { errorMode: 'event' });
   }
-  for (index = 0; index < sources.length; index++) {
-    var source = sources[index];
-    if (source.complete !== false) continue;
-    remaining++;
+  for (index = 0; index < pending.length; index++) {
     (function(pendingSource) {
+      var settled = false;
       function loaded() {
+        if (settled || !record.active) return;
+        settled = true;
         pendingSource.removeEventListener('load', loaded);
         pendingSource.removeEventListener('error', loaded);
-        finishOne();
+        remaining--;
+        finish();
       }
+      record.listeners.push({ source: pendingSource, loaded: loaded });
       pendingSource.addEventListener('load', loaded);
       pendingSource.addEventListener('error', loaded);
-    })(source);
+    })(pending[index]);
   }
-  if (!remaining) {
-    remaining = 1;
-    finishOne();
-  }
+  finish();
   return this;
 };
 NativePreparePlugin.prototype.destroy = function() {
+  this._destroyed = true;
+  this._uploads.forEach(function(record) { record.cancel(); });
+  this._uploads.clear();
+  this._activeUploads = 0;
   this.queue.length = 0;
   this.completes.length = 0;
   this.ticking = false;
@@ -216,47 +237,27 @@ NativeFilterManager.prototype.popFilter = function() {
   return entry;
 };
 NativeFilterManager.prototype.getRenderTarget = function(clear, resolution) {
-  resolution = Math.max(0.000001, Number(resolution) || this.renderer.resolution);
-  var state = this.currentState();
-  var frame = state && state.sourceFrame || this.renderer.screen;
-  var width = Math.max(1, Number(frame.width) || 1);
-  var height = Math.max(1, Number(frame.height) || 1);
-  var key = width + 'x' + height + '@' + resolution;
-  var targets = this.pool[key];
-  var target = targets && targets.length ? targets.pop() :
-    PIXI.RenderTexture.create(width, height, PIXI.SCALE_MODES.LINEAR, resolution);
-  if (clear) this.renderer.clearRenderTexture(target);
-  return target;
+  PMJS.compat.hit('renderer.filter-manager', 'getRenderTarget');
+  throw new Error('unsupported native capability: renderer.filter-manager: getRenderTarget');
 };
 NativeFilterManager.prototype.returnRenderTarget = function(target) {
-  if (!target || !target.baseTexture) return;
-  var resolution = Number(target.baseTexture.resolution) || 1;
-  var key = target.width + 'x' + target.height + '@' + resolution;
-  var pool = this.pool[key];
-  if (!pool) {
-    pool = [];
-    this.pool[key] = pool;
-  }
-  pool.push(target);
+  PMJS.compat.hit('renderer.filter-manager', 'returnRenderTarget');
+  throw new Error('unsupported native capability: renderer.filter-manager: returnRenderTarget');
 };
 NativeFilterManager.prototype.applyFilter = function(filter) {
   PMJS.compat.hit('renderer.filter-manager',
     filter && filter.constructor && filter.constructor.name || 'Filter');
+  throw new Error('unsupported native capability: renderer.filter-manager: applyFilter');
 };
 NativeFilterManager.prototype.syncUniforms = function(shader, filter) {
   PMJS.compat.hit('renderer.filter-uniforms',
     filter && filter.constructor && filter.constructor.name || 'Filter');
+  throw new Error('unsupported native capability: renderer.filter-uniforms: syncUniforms');
 };
 NativeFilterManager.prototype.getPotRenderTarget = function(gl, width, height,
     resolution) {
-  resolution = Math.max(0.000001, Number(resolution) || this.renderer.resolution);
-  width = Math.max(1, Number(width) || 1);
-  height = Math.max(1, Number(height) || 1);
-  var key = width + 'x' + height + '@' + resolution;
-  var targets = this.pool[key];
-  if (targets && targets.length) return targets.pop();
-  return PIXI.RenderTexture.create(width, height,
-    PIXI.SCALE_MODES.LINEAR, resolution);
+  PMJS.compat.hit('renderer.filter-manager', 'getPotRenderTarget');
+  throw new Error('unsupported native capability: renderer.filter-manager: getPotRenderTarget');
 };
 NativeFilterManager.prototype.freePotRenderTarget = function(target) {
   this.returnRenderTarget(target);

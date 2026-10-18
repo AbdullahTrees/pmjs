@@ -137,6 +137,27 @@ test('declared bitmap producer follows live cache, visibility and attachment sta
   assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheMode, 'declared');
 });
 
+test('invalidating a declaration discovers a producer added after admission', () => {
+  const { sandbox, sprite } = makeHarness();
+  const root = new sandbox.PIXI.Container(), declared = root.addChild(new sandbox.PIXI.Container());
+  let valid = true;
+  const built = [];
+  function configure(node, name) {
+    node._cacheAsBitmap = true; node._cacheData = { sprite: null };
+    node._initCachedDisplayObject = () => { built.push(name); node._cacheData.sprite = sprite(); };
+  }
+  configure(declared, 'declared');
+  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local',
+    bitmapCacheProducers: { nodes: [declared], valid: () => valid } });
+  const policy = sandbox.PMJS.pixi4.getStageRenderOptions(root).bitmapCacheProducers;
+  sandbox.prepareNativeBitmapCaches(root, {}, null, policy);
+  configure(root.addChild(new sandbox.PIXI.Container()), 'new');
+  valid = false;
+  sandbox.prepareNativeBitmapCaches(root, {}, null, policy);
+  assert.deepEqual(built, ['declared', 'new']);
+  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheMode, 'full');
+});
+
 test('undeclared hidden bitmap producers retain ordinary census and multiple caches retain postorder', () => {
   const { sandbox, sprite } = makeHarness();
   const root = new sandbox.PIXI.Container(), outer = root.addChild(new sandbox.PIXI.Container());

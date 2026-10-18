@@ -1,4 +1,5 @@
 var nativeSceneEmission = null;
+var nativeSceneEncodingDepth = 0;
 
 function writeNativeSceneRectTileLayer(node, parentIndex) {
   var layerHandle = ensureNativeRectTileLayer(node);
@@ -74,8 +75,7 @@ function nativeSceneNodeRejected(node, particleContext) {
   if (particleContext) return false;
   return (!node.visible || !node.renderable) ||
     node.alpha <= 0 ||
-    typeof node._openness === 'number' && node._openness <= 0 ||
-    !!(node.scale && (node.scale.x === 0 || node.scale.y === 0));
+    typeof node._openness === 'number' && node._openness <= 0;
 }
 
 function nativeParticleFrameContext(container) {
@@ -94,12 +94,15 @@ function nativeParticleFrameContext(container) {
   var dirtyFollowing = false;
   var batchCount = Math.ceil(Math.min(container.children.length,
     Math.max(0, Number(container._maxSize) || 0)) / batchSize);
+  var legacy = !container._bufferUpdateIDs;
   for (var index = 0; index < batchCount; index++) {
-    var requested = container._bufferUpdateIDs[index] || 0;
-    dirtyFollowing = dirtyFollowing || (revisions[index] || 0) < requested;
+    var requested = legacy ? 0 : container._bufferUpdateIDs[index] || 0;
+    dirtyFollowing = legacy ? index >= container._bufferToUpdate :
+      dirtyFollowing || (revisions[index] || 0) < requested;
     dirty[index] = dirtyFollowing;
     if (dirtyFollowing) revisions[index] = container._updateID || requested;
   }
+  if (legacy && batchCount) container._bufferToUpdate = batchCount;
   var first = container.children[0];
   var firstTexture = first && (first.texture || first._texture);
   return { container: container, properties: properties, dirty: dirty,
@@ -227,11 +230,12 @@ function nativePlainSpriteBinding(node) {
       node._cacheAsBitmap || PMJS.pixi4.bitmapPresentation && PMJS.pixi4.bitmapPresentation.has(node) ||
       node.shader || node.mask ||
       nativeNodeRenderType(node) !== 'sprite' || nativeScenePictureBlend(node) >= 0 ||
-      PMJS.pixi4.scenePreparation.forNode(node) || pmjsPixiRenderPreflight.unsupportedMethod(node)) {
+      PMJS.pixi4.scenePreparation.forNode(node) || pmjsPixiRenderPreflight.unsupportedMethod(node) ||
+      !nativeSceneDirectFilters(node)) {
     return null;
   }
-  var filters = nativeSceneFilters(node);
-  if (filters && filters.some(function(filter) {
+  var filters = node._filters;
+  if (Array.isArray(filters) && filters.some(function(filter) {
     return filter && filter.enabled !== false;
   })) return null;
   var blendMode = nativeSceneBlendMode(node);
@@ -264,8 +268,13 @@ function nativePlainSpriteBinding(node) {
 }
 
 function writeNativePlainSpriteSegment(bindings, parentIndex) {
+  var boundBases = new Set();
   for (var bindingIndex = 0; bindingIndex < bindings.length; bindingIndex++) {
     var binding = bindings[bindingIndex];
+    if (nativeSceneRenderer && !boundBases.has(binding.base)) {
+      nativeSceneRenderer.bindTexture(binding.base);
+      boundBases.add(binding.base);
+    }
     var node = binding.node;
     var transform = node.transform;
     if (!nativeSceneTransformsPrepared && transform && typeof transform.updateLocalTransform === 'function') {
@@ -368,10 +377,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   }
   var nodeFilters = null;
   if (!particleContext) {
-    if (node._filters || node.__pmjsNativeDirectFilters === false ||
-        node.__pmjsNativeDirectFilters === undefined) {
-      nodeFilters = nativeSceneFilters(node);
-    }
+    nodeFilters = nativeSceneFilters(node);
   }
   var activeFilters = Array.isArray(nodeFilters) ? nodeFilters : nativeSceneNoFilters;
   var enabledFilterCount = 0;
@@ -472,11 +478,10 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   var windowTargetFrame = windowLayer && filterGroups.length && filterGroups[0].frame ||
     windowLayer && node.filterArea || null;
   if (nativeSceneFilterDepth + filterGroups.length > 4) {
-    var appliedGroups = Math.max(0, 4 - nativeSceneFilterDepth);
-    PMJS.compat.hit('render.filter-depth',
-      (node.constructor && node.constructor.name || 'node') + ':filter-depth' +
-      ':original=' + filterGroups.length + ':applied=' + appliedGroups);
-    filterGroups = filterGroups.slice(0, appliedGroups);
+    var detail = (node.constructor && node.constructor.name || 'node') + ':filter-depth=' +
+      (nativeSceneFilterDepth + filterGroups.length) + ':maximum=4';
+    PMJS.compat.hit('render.filter-depth', detail);
+    throw new Error('unsupported native capability: render.filter-depth: ' + detail);
   }
 
   for (var filterIndex = filterGroups.length - 1; filterIndex >= 0; filterIndex--) {
@@ -707,7 +712,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   var particleFrame = particleContainer ? nativeParticleFrameContext(node) : null;
   for (var index = 0; index < childLimit; index++) {
     if (nativeSceneTraversesChild(kind, node, node.children[index])) {
-      if (nativeScenePlainSpriteSegments && !particleFrame &&
+      if (nativeScenePlainSpriteSegments && !particleFrame && childLimit - index >= 4 &&
           PMJS.optimizations.isEnabled('scene.plain-sprite-segment')) {
         var segment = [];
         var segmentIndex = index;
@@ -818,17 +823,43 @@ function prepareNativeBitmapCaches(node, renderer, root, policy) {
 }
 
 function encodeNativeScene(stage, backgroundColor = null) {
-  nativeCustomFilterPlans = [];
-  resetNativeSceneRecords();
-  nativeSceneFilterDepth = 0;
-  if (backgroundColor !== null) {
-    nativeSceneRecord(0xffffffff, 3, 0, backgroundColor,
-      0, nativeIdentityTransform, 1, null, 0, null);
+  var previous = nativeSceneEncodingDepth ? {
+    metadata: nativeSceneMetadata, values: nativeSceneValues, capacity: nativeSceneCapacity,
+    count: nativeSceneCount, bulkClear: nativeSceneBulkClear, filterDepth: nativeSceneFilterDepth,
+    emission: nativeSceneEmission, plans: nativeCustomFilterPlans
+  } : null;
+  if (previous) {
+    nativeSceneMetadata = new Uint32Array(nativeSceneCapacity * nativeSceneMetadataStride);
+    nativeSceneValues = new Float32Array(nativeSceneCapacity * nativeSceneValueStride);
+    nativeSceneCount = 0;
+    nativeSceneEmission = null;
   }
-  writeNativeSceneNode(stage, 0xffffffff);
-  return { version: nativeScenePacketVersion,
-    metadata: nativeSceneMetadata, values: nativeSceneValues,
-    count: nativeSceneCount, customFilterPlans: nativeCustomFilterPlans };
+  nativeSceneEncodingDepth++;
+  try {
+    nativeCustomFilterPlans = [];
+    resetNativeSceneRecords();
+    nativeSceneFilterDepth = 0;
+    if (backgroundColor !== null) {
+      nativeSceneRecord(0xffffffff, 3, 0, backgroundColor,
+        0, nativeIdentityTransform, 1, null, 0, null);
+    }
+    writeNativeSceneNode(stage, 0xffffffff);
+    return { version: nativeScenePacketVersion,
+      metadata: nativeSceneMetadata, values: nativeSceneValues,
+      count: nativeSceneCount, customFilterPlans: nativeCustomFilterPlans };
+  } finally {
+    nativeSceneEncodingDepth--;
+    if (previous) {
+      nativeSceneMetadata = previous.metadata;
+      nativeSceneValues = previous.values;
+      nativeSceneCapacity = previous.capacity;
+      nativeSceneCount = previous.count;
+      nativeSceneBulkClear = previous.bulkClear;
+      nativeSceneFilterDepth = previous.filterDepth;
+      nativeSceneEmission = previous.emission;
+      nativeCustomFilterPlans = previous.plans;
+    }
+  }
 }
 
 function submitNativeScene(stage, backgroundColor = null) {
@@ -880,6 +911,9 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   var parentWorld = nativeTransformParent.transform.worldTransform;
   var previousParentWorld = { a: parentWorld.a, b: parentWorld.b, c: parentWorld.c,
     d: parentWorld.d, tx: parentWorld.tx, ty: parentWorld.ty };
+  var enclosingOverlays = nativeSceneEncodingDepth ? nativeScreenOverlays : null;
+  var enclosingTileRects = nativeTileRects;
+  if (enclosingOverlays) nativeScreenOverlays = [];
   nativeScreenOverlays.length = 0;
   nativeTileRects = 0;
   var localTransforms = !skipUpdateTransform && options.worldState === 'local';
@@ -946,6 +980,10 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     nativeSceneRoundPixels = previousContext.roundPixels;
     nativeScenePlainSpriteSegments = previousContext.plainSpriteSegments;
     nativeSceneRenderer = previousContext.renderer;
+    if (enclosingOverlays) {
+      nativeScreenOverlays = enclosingOverlays;
+      nativeTileRects = enclosingTileRects;
+    }
     if (parentWorld.a !== previousParentWorld.a || parentWorld.b !== previousParentWorld.b ||
         parentWorld.c !== previousParentWorld.c || parentWorld.d !== previousParentWorld.d ||
         parentWorld.tx !== previousParentWorld.tx || parentWorld.ty !== previousParentWorld.ty) {

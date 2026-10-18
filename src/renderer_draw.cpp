@@ -469,8 +469,12 @@ void Renderer::renderScene() {
 
     vertices_.clear();
     vertices_.reserve(frame_.commands.size() * 72);
-    if (filterBoundsEnabled_ || std::any_of(frame_.commands.begin(), frame_.commands.end(),
-        [](const auto& command) { return command.filterKind == scene_packet::FilterKind::custom; })) {
+    const bool hasFilterGroups = std::any_of(frame_.commands.begin(), frame_.commands.end(),
+        [](const auto& command) { return command.action == RenderCommand::Action::filterBegin; });
+    if (hasFilterGroups && (filterBoundsEnabled_ ||
+        std::any_of(frame_.commands.begin(), frame_.commands.end(), [](const auto& command) {
+          return command.filterKind == scene_packet::FilterKind::custom;
+        }))) {
       computeFilterContentBounds();
     } else {
       filterBounds_.clear();

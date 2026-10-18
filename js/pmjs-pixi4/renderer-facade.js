@@ -276,8 +276,8 @@ function createNativePixiRenderer(width, height, options) {
       if (this.textureManager) this.textureManager.trackTexture(base);
       if (!forceLocation) {
         var existing = this.boundTextures.indexOf(base);
-        if (existing >= 0) return existing;
-        if (location === undefined || location === null) {
+        if (existing >= 0) location = existing;
+        else if (location === undefined || location === null) {
           this._nextTextureLocation++;
           this._nextTextureLocation %= this.boundTextures.length;
           location = this.boundTextures.length - this._nextTextureLocation - 1;
@@ -332,76 +332,93 @@ function createNativePixiRenderer(width, height, options) {
     },
     render: function(stage, renderTexture, clear, transform,
         skipUpdateTransform) {
-      if (!this._pmjsPreparingBitmapCache) {
-        this._pmjsPreparingBitmapCache = true;
-        try {
-          var stageOptions = PMJS.pixi4.getStageRenderOptions(stage);
-          prepareNativeBitmapCaches(stage, this, null,
-            renderTexture ? false : stageOptions && stageOptions.bitmapCacheProducers);
-        } finally {
-          this._pmjsPreparingBitmapCache = false;
+      var enclosingRenderer = typeof nativeSceneEncodingDepth !== 'undefined' &&
+        nativeSceneEncodingDepth && nativeSceneRenderer;
+      var enclosingTarget = enclosingRenderer && enclosingRenderer._activeRenderTarget;
+      var enclosingTransform = enclosingTarget && enclosingTarget.transform;
+      try {
+        if (!this._pmjsPreparingBitmapCache) {
+          this._pmjsPreparingBitmapCache = true;
+          try {
+            var stageOptions = PMJS.pixi4.getStageRenderOptions(stage);
+            prepareNativeBitmapCaches(stage, this, null,
+              renderTexture ? false : stageOptions && stageOptions.bitmapCacheProducers);
+          } finally {
+            this._pmjsPreparingBitmapCache = false;
+          }
         }
-      }
-      this.stage = stage;
-      this._lastObjectRendered = stage;
-      this.renderingToScreen = !renderTexture;
-      this._nextTextureLocation = 0;
-      if (typeof this.emit === 'function') this.emit('prerender');
-      var renderOwner = this;
-      if (renderTexture) {
-        var base = renderTexture.baseTexture;
-        if (!base || base.width <= 0 || base.height <= 0) {
-          throw new Error('native RenderTexture has invalid dimensions');
+        this.stage = stage;
+        this._lastObjectRendered = stage;
+        this.renderingToScreen = !renderTexture;
+        this._nextTextureLocation = 0;
+        if (typeof this.emit === 'function') this.emit('prerender');
+        var renderOwner = this;
+        if (renderTexture) {
+          var base = renderTexture.baseTexture;
+          if (!base || base.width <= 0 || base.height <= 0) {
+            throw new Error('native RenderTexture has invalid dimensions');
+          }
+          var resolution = Math.max(0.000001, Number(base.resolution) || 1);
+          var targetWidth = Math.ceil(base.width * resolution);
+          var targetHeight = Math.ceil(base.height * resolution);
+          var target = base.__pmjsRenderCanvas;
+          if (!target) {
+            target = new CanvasElement();
+            target.width = targetWidth;
+            target.height = targetHeight;
+            base.__pmjsRenderCanvas = target;
+            base.source = target;
+          } else if (target.width !== targetWidth || target.height !== targetHeight) {
+            target.width = targetWidth;
+            target.height = targetHeight;
+          }
+          var resolutionTransform = { a: resolution, b: 0, c: 0,
+            d: resolution, tx: 0, ty: 0 };
+          renderNativeStage(stage, transform ?
+            nativeComposeTransform(resolutionTransform, transform) :
+            resolutionTransform, resolution, this.roundPixels,
+            skipUpdateTransform, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage),
+              { renderer: this }), function() {
+              renderOwner.renderTexture.bind(renderTexture);
+              renderOwner._activeRenderTarget.transform = transform || null;
+              NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
+              if (clear === false) {
+                NativeHost.render.image(target._ensureNativeCanvas().handle,
+                  1, 0, 0, 1, 0, 0, 0, 0, targetWidth, targetHeight,
+                  1, 0xffffff, 0);
+              }
+            });
+          NativeHost.render.renderToCanvas(target._ensureNativeCanvas().handle);
+          target._pmjsContentChanged();
+          this.textureGC.update();
+          if (typeof this.emit === 'function') this.emit('postrender');
+          return;
         }
-        var resolution = Math.max(0.000001, Number(base.resolution) || 1);
-        var targetWidth = Math.ceil(base.width * resolution);
-        var targetHeight = Math.ceil(base.height * resolution);
-        var target = base.__pmjsRenderCanvas;
-        if (!target) {
-          target = new CanvasElement();
-          target.width = targetWidth;
-          target.height = targetHeight;
-          base.__pmjsRenderCanvas = target;
-          base.source = target;
-        } else if (target.width !== targetWidth || target.height !== targetHeight) {
-          target.width = targetWidth;
-          target.height = targetHeight;
-        }
-        var resolutionTransform = { a: resolution, b: 0, c: 0,
-          d: resolution, tx: 0, ty: 0 };
+        var screenWidth = this.width;
+        var screenHeight = this.height;
+        var screenTransform = { a: this.resolution, b: 0, c: 0,
+          d: this.resolution, tx: 0, ty: 0 };
         renderNativeStage(stage, transform ?
-          nativeComposeTransform(resolutionTransform, transform) :
-          resolutionTransform, resolution, this.roundPixels,
-          skipUpdateTransform, null, Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage),
-            { renderer: this }), function() {
-            renderOwner.renderTexture.bind(renderTexture);
-            NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
-            if (clear === false) {
-              NativeHost.render.image(target._ensureNativeCanvas().handle,
-                1, 0, 0, 1, 0, 0, 0, 0, targetWidth, targetHeight,
-                1, 0xffffff, 0);
-            }
-          });
-        NativeHost.render.renderToCanvas(target._ensureNativeCanvas().handle);
-        target._pmjsContentChanged();
+          nativeComposeTransform(screenTransform, transform) : screenTransform,
+        this.resolution, this.roundPixels, skipUpdateTransform,
+        this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
+        Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this }), function() {
+          renderOwner.renderTexture.bind(null);
+          renderOwner._activeRenderTarget.transform = transform || null;
+          NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
+        });
         this.textureGC.update();
         if (typeof this.emit === 'function') this.emit('postrender');
-        return;
+      } finally {
+        if (enclosingTarget) {
+          enclosingTarget.transform = enclosingTransform;
+          enclosingRenderer._activeRenderTarget = enclosingTarget;
+          var enclosingWidth = Math.ceil(enclosingTarget.size.width * enclosingTarget.resolution);
+          var enclosingHeight = Math.ceil(enclosingTarget.size.height * enclosingTarget.resolution);
+          if (enclosingTarget.root) NativeHost.render.setScreenRenderSize(enclosingWidth, enclosingHeight);
+          else NativeHost.render.setRenderTargetSize(enclosingWidth, enclosingHeight);
+        }
       }
-      var screenWidth = this.width;
-      var screenHeight = this.height;
-      var screenTransform = { a: this.resolution, b: 0, c: 0,
-        d: this.resolution, tx: 0, ty: 0 };
-      renderNativeStage(stage, transform ?
-        nativeComposeTransform(screenTransform, transform) : screenTransform,
-      this.resolution, this.roundPixels, skipUpdateTransform,
-      this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
-      Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this }), function() {
-        renderOwner.renderTexture.bind(null);
-        NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
-      });
-      this.textureGC.update();
-      if (typeof this.emit === 'function') this.emit('postrender');
     },
     _pmjsSyncPresentation: function() {
       var canvasOpacity = nativeElementOpacity(Graphics._canvas, 1);

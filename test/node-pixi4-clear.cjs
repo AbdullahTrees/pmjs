@@ -94,7 +94,10 @@ try {
 
   c.prepareNativeBitmapCaches = function() {};
   c.PMJS.pixi4.getStageRenderOptions = function() { return {}; };
-  c.renderNativeStage = function() { native.render.quad(0, 0, 8, 6, 1, 0, 0, 1); };
+  c.renderNativeStage = function(...args) {
+    args[7]();
+    native.render.quad(0, 0, 8, 6, 1, 0, 0, 1);
+  };
   native.beginFrame();
   renderer.render({}, texture);
   assert.equal(renderer._activeRenderTarget._pmjsBaseTexture, texture.baseTexture);

@@ -46,7 +46,7 @@ for (const host of [native.fs, createStorage(directory)]) {
 
 function imageFixture(t) {
   const released = [], starts = [], byteStarts = [];
-  const context = vm.createContext({ PMJS: {}, console, performance, Blob,
+  const context = vm.createContext({ PMJS: {}, console, performance, Blob, __pmjsBuiltinRequire: require,
     NativeHost: { images: { ...native.images,
       loadAsync(...args) { starts.push(args[0]); return native.images.loadAsync(...args); },
       loadBytesAsync(...args) { byteStarts.push(args[0]); return native.images.loadBytesAsync(...args); } },
@@ -54,7 +54,8 @@ function imageFixture(t) {
     trackNativeResource: resource => resource,
     releaseNativeResource(resource) { if (resource) { released.push(resource.handle); native.images.release(resource.handle); } }
   });
-  for (const module of ['pmjs-web/scheduler', 'pmjs-web/events', 'pmjs-web/object-urls', 'pmjs-web/images', 'pmjs-web/image-element']) {
+  for (const module of ['pmjs-web/filesystem', 'pmjs-web/scheduler', 'pmjs-web/events', 'pmjs-web/elements',
+    'pmjs-web/object-urls', 'pmjs-web/images', 'pmjs-web/image-element']) {
     const filename = path.resolve(__dirname, '../js', module + '.js');
     vm.runInContext(fs.readFileSync(filename, 'utf8'), context);
   }

@@ -57,6 +57,12 @@ function frame(image, source, transform, nearest, offset = [0,0], animation = [0
   const result = Buffer.from(native.canvas.captureSceneRawPremultiplied());
   native.render.releaseTileLayer(layer); return result;
 }
+function assertPixelBytes(actual, expected, label) {
+  assert.equal(actual.length, expected.length, label + ' byte length');
+  const first = actual.findIndex((value, index) => value !== expected[index]);
+  assert.equal(first, -1, `${label}: first different byte ${first}; ` +
+    `${Array.from(actual.subarray(first, first + 4))} versus ${Array.from(expected.subarray(first, first + 4))}`);
+}
 async function main() {
   const rectangles = [[0,0,32,32],[32,0,32,32],[64,0,32,32],[480,480,32,32],[0,0,16,16],[16,16,16,16]];
   const directory = path.join(root,'set'); fs.mkdirSync(directory);
@@ -110,11 +116,22 @@ async function main() {
   assert.deepEqual([slot.width,slot.height],[1024,1024]);
   const ordinarySlot = native.canvas.create(1024,1024);
   native.canvas.drawImage(ordinarySlot.handle,original.handle,0,0,512,512,0,0,512,512,1);
+  function compareSlotCrop() {
+    const actual = native.canvas.create(16,16), expected = native.canvas.create(16,16);
+    native.canvas.drawImage(actual.handle,slot.handle,0,0,16,16,0,0,16,16,1);
+    native.canvas.drawImage(expected.handle,original.handle,0,0,16,16,0,0,16,16,1);
+    assertPixelBytes(native.canvas.readPixels(actual.handle,0,0,16,16),
+      native.canvas.readPixels(expected.handle,0,0,16,16), 'logical slot crop');
+    native.canvas.release(actual.handle); native.canvas.release(expected.handle);
+  }
+  compareSlotCrop();
   assert.deepEqual(frame(slot,[0,0,32,32],transforms[2],true),frame(ordinarySlot,[0,0,32,32],transforms[2],true),'logical MZ slot render must match Canvas snapshot quantization');
   const snapshot = native.canvas.create(1024,1024);
   native.canvas.drawImage(snapshot.handle,slot.handle,0,0,1024,1024,0,0,1024,1024,1);
-  assert.deepEqual(Buffer.from(native.canvas.readPixels(snapshot.handle,0,0,1024,1024)),
-    Buffer.from(native.canvas.readPixels(ordinarySlot.handle,0,0,1024,1024)));
+  const snapshotPixels = Buffer.from(native.canvas.readPixels(snapshot.handle,0,0,1024,1024));
+  const ordinaryPixels = Buffer.from(native.canvas.readPixels(ordinarySlot.handle,0,0,1024,1024));
+  assertPixelBytes(snapshotPixels, ordinaryPixels, 'logical slot snapshot');
+  compareSlotCrop();
   // Unknown regions and authored linear sampling retain ordinary source pixels.
   for (const [source,nearest] of [[[250,250,32,32],true],[[0,0,32,32],false]]) {
     assert.deepEqual(frame(view,source,transforms[2],nearest),frame(original,source,transforms[2],nearest)); comparisons++;

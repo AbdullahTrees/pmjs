@@ -1,5 +1,6 @@
 #include "resources.hpp"
 #include "checked_bounds.hpp"
+#include "canvas_pixels.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,12 @@ std::string tileKey(const std::string& source, const std::string& identity) {
 bool inside(const std::array<int, 4>& r, int width, int height) {
   return r[0] >= 0 && r[1] >= 0 && r[2] > 0 && r[3] > 0 &&
     r[0] <= width-r[2] && r[1] <= height-r[3];
+}
+void encodeTileSlotPixels(ImagePixels& pixels, bool premultiplied) {
+  if (!premultiplied) return;
+  for (std::size_t offset = 0; offset < pixels.rgba.size(); offset += 4)
+    convertPixel(pixels.rgba.data() + offset, PixelEncoding::StraightRGBA8,
+      pixels.rgba.data() + offset, PixelEncoding::PremultipliedRGBA8);
 }
 }
 namespace {
@@ -307,12 +314,16 @@ std::optional<ImagePixels> ImageStore::readTileRegion(const Slot& slot, int x, i
   if (!slot.cachedPixels) {
     for (const auto& region : source.regions) {
       const auto& r = region.rect;
-      if (x >= r[0] && y >= r[1] && x+width <= r[0]+r[2] && y+height <= r[1]+r[3])
-        return readPixelsRegion(backing.pages->images[region.page],
+      if (x >= r[0] && y >= r[1] && x+width <= r[0]+r[2] && y+height <= r[1]+r[3]) {
+        auto pixels = readPixelsRegion(backing.pages->images[region.page],
           region.atlas[0]+x-r[0], region.atlas[1]+y-r[1], width, height);
+        if (pixels) encodeTileSlotPixels(*pixels, slot.premultiplied);
+        return pixels;
+      }
     }
     auto ordinary = decodeFile(*backing.prototype->snapshots[backing.source]);
     if (!ordinary || ordinary->width != source.width || ordinary->height != source.height) return std::nullopt;
+    encodeTileSlotPixels(*ordinary, slot.premultiplied);
     if (ordinary->width != slot.width || ordinary->height != slot.height) {
       ImagePixels padded{slot.width, slot.height,
         std::vector<std::uint8_t>(static_cast<std::size_t>(slot.width)*slot.height*4)};

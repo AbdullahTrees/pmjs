@@ -8,7 +8,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { makeHarness } = require('./helpers/scene-encoder-harness.cjs');
 
-function createRenderers(count = 1) {
+function createRenderers(count = 1, configure) {
   const { sandbox: context } = makeHarness();
   context.PIXI.RENDERER_TYPE = { WEBGL: 1 };
   context.PIXI.Texture.EMPTY = { baseTexture: {} };
@@ -26,6 +26,7 @@ function createRenderers(count = 1) {
     const filename = path.resolve(__dirname, '../js/pmjs-pixi4', name + '.js');
     vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   }
+  if (configure) configure(context);
   return Array.from({ length: count }, () => context.createNativePixiRenderer({
     width: 32, height: 24, view: { style: {} },
   }));
@@ -82,6 +83,53 @@ test('texture disposal removes bindings and preserves order when re-tracked', ()
   renderer.bindTexture(middle);
   assert.deepEqual(Array.from(textures), [first, last, middle]);
   assert.equal(middle.listenerCount('dispose'), 1);
+  renderer.destroy();
+});
+
+test('reusing a bound texture refreshes its age and backing before automatic collection', () => {
+  const [renderer] = createRenderers();
+  const base = createBaseTexture();
+  const location = renderer.bindTexture(base);
+  const backing = base._glTextures[renderer.CONTEXT_UID];
+  renderer.textureGC.maxIdle = 1;
+  renderer.textureGC.checkCountMax = 0;
+  for (let frame = 0; frame < 8; frame++) {
+    renderer.textureGC.update();
+    base.source = { _nativeImage: { handle: 43 + frame } };
+    assert.equal(renderer.bindTexture(base), location);
+    assert.equal(base.touched, renderer.textureGC.count);
+    assert.equal(backing.touched, renderer.textureGC.count);
+    assert.equal(backing.texture.handle, 43 + frame);
+    assert.equal(base._glTextures[renderer.CONTEXT_UID], backing);
+  }
+  renderer.destroy();
+});
+
+test('direct filter target and GL application APIs reject unsupported calls', () => {
+  const [renderer] = createRenderers();
+  for (const name of ['getRenderTarget', 'getPotRenderTarget', 'returnRenderTarget',
+    'freePotRenderTarget', 'applyFilter', 'syncUniforms']) {
+    assert.throws(() => renderer.filterManager[name](), /unsupported native capability/);
+  }
+  renderer.destroy();
+});
+
+test('a failed nested screen render restores the enclosing target transform', () => {
+  let context;
+  const [renderer] = createRenderers(1, selected => { context = selected; });
+  const outerTransform = { a: 1, b: 0, c: 0, d: 1, tx: 7, ty: 3 };
+  renderer.rootRenderTarget.transform = outerTransform;
+  context.nativeSceneEncodingDepth = 1;
+  context.nativeSceneRenderer = renderer;
+  context.prepareNativeBitmapCaches = () => {};
+  context.renderNativeStage = (...args) => {
+    args[7]();
+    throw new Error('nested drawing failed');
+  };
+  assert.throws(() => renderer.render({}, null, true, { ...outerTransform, tx: -2 }),
+    /nested drawing failed/);
+  assert.equal(renderer._activeRenderTarget, renderer.rootRenderTarget);
+  assert.equal(renderer.rootRenderTarget.transform, outerTransform);
   renderer.destroy();
 });
 
@@ -153,11 +201,11 @@ test('destroyed managers ignore stale events without affecting another context o
   second.destroy();
 });
 
-test('preparation revisits text for each root and deduplicates shared sources in encounter order', () => {
+test('preparation visits overlapping roots once and deduplicates shared sources in encounter order', () => {
   const [renderer] = createRenderers();
   const subscriptions = [], visits = [];
   function source(name) {
-    return { complete: false, addEventListener(event) { subscriptions.push(name + ':' + event); } };
+    return { complete: false, addEventListener(event) { subscriptions.push(name + ':' + event); }, removeEventListener() {} };
   }
   const first = source('first'), second = source('second');
   const child = { baseTexture: { source: second }, children: [] };
@@ -165,7 +213,7 @@ test('preparation revisits text for each root and deduplicates shared sources in
     updateText(force) { visits.push(force); } };
   child.children.push(root);
   renderer.plugins.prepare.add(root).add(root).upload();
-  assert.deepEqual(visits, [true, true]);
+  assert.deepEqual(visits, [true]);
   assert.deepEqual(subscriptions, ['first:load', 'first:error', 'second:load', 'second:error']);
   renderer.destroy();
 });

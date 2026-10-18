@@ -181,9 +181,9 @@ function pmjsReleaseNativeGeometry(owner, kind) {
 // objects and shared textures remain intact for the engine's normal teardown.
 function pmjsReleaseSceneResources(root, seen) {
   if (!root) return 0;
-  seen = seen || [];
-  if (seen.indexOf(root) >= 0) return 0;
-  seen.push(root);
+  seen = seen || new WeakSet();
+  if (seen.has(root)) return 0;
+  seen.add(root);
   var released = 0;
   if (root._pmjsNativeLayer) {
     pmjsReleaseNativeGeometry(root, 'tile');
@@ -513,7 +513,8 @@ var nativeSceneFilterDepth = 0;
 function nativeRenderHitCount() {
   return PMJS.compat.count('render.');
 }
-var nativeSceneFilterAccessCache = new WeakMap();
+var nativeSceneStockFilters = PIXI.DisplayObject &&
+  Object.getOwnPropertyDescriptor(PIXI.DisplayObject.prototype, 'filters');
 var nativeSceneNoFilters = Object.freeze([]);
 var nativeSceneNoFilterPlan = Object.freeze({ blur: 0,
   groups: nativeSceneNoFilters, unsupported: false });
@@ -544,34 +545,21 @@ function resetNativeSceneRecords() {
   nativeSceneCount = 0;
 }
 
-function nativeSceneFilters(node) {
-  if (node.__pmjsNativeDirectFilters === true) return node._filters;
-  if (node.__pmjsNativeDirectFilters === false) return node.filters;
-  var prototype = Object.getPrototypeOf(node);
-  var direct = nativeSceneFilterAccessCache.get(prototype);
-  if (direct === undefined) {
-    direct = true;
-    var cursor = prototype;
-    var pixiDescriptor = PIXI.DisplayObject &&
-      Object.getOwnPropertyDescriptor(PIXI.DisplayObject.prototype, 'filters');
-    while (cursor) {
-      var descriptor = Object.getOwnPropertyDescriptor(cursor, 'filters');
-      if (descriptor) {
-        direct = !!pixiDescriptor && descriptor.get === pixiDescriptor.get &&
-          descriptor.set === pixiDescriptor.set;
-        break;
-      }
-      cursor = Object.getPrototypeOf(cursor);
+function nativeSceneDirectFilters(node) {
+  var cursor = node;
+  while (cursor) {
+    var descriptor = Object.getOwnPropertyDescriptor(cursor, 'filters');
+    if (descriptor) {
+      return !!nativeSceneStockFilters && descriptor.get === nativeSceneStockFilters.get &&
+        descriptor.set === nativeSceneStockFilters.set;
     }
-    nativeSceneFilterAccessCache.set(prototype, direct);
+    cursor = Object.getPrototypeOf(cursor);
   }
-  try {
-    Object.defineProperty(node, '__pmjsNativeDirectFilters', {
-      value: direct,
-      configurable: true
-    });
-  } catch (_) {}
-  return direct ? node._filters : node.filters;
+  return true;
+}
+
+function nativeSceneFilters(node) {
+  return nativeSceneDirectFilters(node) ? node._filters : node.filters;
 }
 
 

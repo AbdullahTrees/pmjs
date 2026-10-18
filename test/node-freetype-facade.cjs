@@ -28,10 +28,13 @@ for (const realized of [false, true]) for (const baseline of ['alphabetic', 'top
   drawing.strokeText('AV ffi', 83.75, 30.6);
   const expected = native.canvas.create(160, 80);
   const measured = native.canvas.measureText('text-shaping.ttf', 'AV ffi', 25);
-  const y = 30.6 + (baseline === 'top' ? 25 : baseline === 'middle' ? 12.5 : 0);
+  const metrics = native.canvas.measureTextMetrics('text-shaping.ttf', 'AV ffi', 25);
+  const ascent = Math.round(metrics.fontBoundingBoxAscent), descent = Math.round(metrics.fontBoundingBoxDescent);
+  const y = 30.6 + (baseline === 'top' ? ascent : baseline === 'middle' ?
+    Math.floor((ascent + descent) / 2) - descent : 0);
   native.canvas.drawText(expected.handle, 'text-shaping.ttf', 'AV ffi', Math.round(83.75 - measured / 2), Math.round(y), 25, 0xffffffff, 3);
   assert.deepEqual(snapshot(value), Buffer.from(native.canvas.readPixels(expected.handle, 0, 0, 160, 80)),
-    'Ordinary Canvas preserves legacy font/position/stroke quantization: ' + baseline);
+    'Ordinary Canvas preserves measured baselines and FreeType quantization: ' + baseline);
   value._releaseNativeCanvas(); native.canvas.release(expected.handle);
 }
 // Exercise the production MV shortcut, including its independently authored baseline.

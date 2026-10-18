@@ -116,8 +116,9 @@
   function check(node) {
     var method = unsupportedMethod(node);
     if (method) {
-      PMJS.compat.hit('render.render-method',
-        (node.constructor && node.constructor.name || 'node') + '.' + method);
+      var detail = (node.constructor && node.constructor.name || 'node') + '.' + method;
+      PMJS.compat.hit('render.render-method', detail);
+      throw new Error('unsupported native capability: render.render-method: ' + detail);
     }
   }
 

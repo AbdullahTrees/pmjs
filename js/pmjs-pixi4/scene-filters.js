@@ -7,7 +7,7 @@ var nativeCustomFilterDefaultVertex = 'attribute vec2 aVertexPosition;\n' +
 
 var nativeCustomFilterShaderCache = Object.create(null);
 function nativeResolveFilterProgram(filter) {
-  var renderer = globalThis.Graphics && Graphics._renderer;
+  var renderer = nativeSceneRenderer || globalThis.Graphics && Graphics._renderer;
   var context = renderer && renderer.CONTEXT_UID || 0;
   var cache = renderer && renderer.filterManager && renderer.filterManager.shaderCache ||
     nativeCustomFilterShaderCache;
@@ -48,15 +48,21 @@ function nativeRecordCustomFilter(filter, node, filters) {
     y: (bounds.y * resolution | 0) / resolution,
     width: (bounds.width * resolution | 0) / resolution,
     height: (bounds.height * resolution | 0) / resolution };
-  var screenWidth = Number(globalThis.Graphics && (Graphics.width || Graphics._width)) || 816;
-  var screenHeight = Number(globalThis.Graphics && (Graphics.height || Graphics._height)) || 624;
+  var renderer = nativeSceneRenderer || globalThis.Graphics && Graphics._renderer;
+  var screenWidth = Number(renderer && renderer.screen && renderer.screen.width ||
+    globalThis.Graphics && (Graphics.width || Graphics._width)) || 816;
+  var screenHeight = Number(renderer && renderer.screen && renderer.screen.height ||
+    globalThis.Graphics && (Graphics.height || Graphics._height)) || 624;
+  var activeTarget = renderer && renderer._activeRenderTarget;
+  var targetFrame = activeTarget && activeTarget.size ||
+    { x: 0, y: 0, width: screenWidth, height: screenHeight };
   var fullScreen = Number(String(PIXI.VERSION || '4.5').split('.')[1]) >= 8 &&
     node.filterArea && bounds.x === 0 && bounds.y === 0 &&
     bounds.width === screenWidth && bounds.height === screenHeight;
-  if (!fullScreen && filter.autoFit !== false) {
-    var right = Math.min(screenWidth, frame.x + frame.width);
-    var bottom = Math.min(screenHeight, frame.y + frame.height);
-    frame.x = Math.max(0, frame.x); frame.y = Math.max(0, frame.y);
+  if (!fullScreen && filter.autoFit !== false && !(activeTarget && activeTarget.transform)) {
+    var right = Math.min(targetFrame.x + targetFrame.width, frame.x + frame.width);
+    var bottom = Math.min(targetFrame.y + targetFrame.height, frame.y + frame.height);
+    frame.x = Math.max(targetFrame.x, frame.x); frame.y = Math.max(targetFrame.y, frame.y);
     frame.width = Math.max(0, right - frame.x); frame.height = Math.max(0, bottom - frame.y);
   }
   if (!fullScreen) {
@@ -81,7 +87,7 @@ function nativeRecordCustomFilter(filter, node, filters) {
     renderTarget: input, resolution: resolution, target: node, filters: [filter] };
   var manager = {
     filterData: { index: 1, stack: [null, state] },
-    renderer: globalThis.Graphics && Graphics._renderer ||
+    renderer: renderer ||
       { resolution: 1, width: screenWidth, height: screenHeight, screen: { x: 0, y: 0, width: screenWidth, height: screenHeight } },
     currentState: function() { return state; },
     getRenderTarget: function(clear, requestedResolution) {
@@ -176,7 +182,10 @@ function nativeRecordCustomFilter(filter, node, filters) {
   var projection = nativeSceneRootTransform;
   if (projection !== nativeIdentityTransform && projection.b === 0 &&
       projection.c === 0 && projection.a > 0 && projection.a === projection.d &&
-      filters.every(nativeFilterCopiesPixels)) {
+      filters.every(function(current) {
+        return nativeFilterCopiesPixels(current) ||
+          current.constructor === nativeSpriteMaskConstructor;
+      })) {
     // Preserve the physical sampling grid when projecting logical filter frames.
     var scale = projection.a;
     plan.frame = [frame.x * scale + projection.tx, frame.y * scale + projection.ty,
