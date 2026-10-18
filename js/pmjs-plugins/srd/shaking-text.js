@@ -7,10 +7,7 @@
   });
 
   function matches(fn, expected) {
-    if (typeof fn !== 'function') return false;
-    var source = Function.prototype.toString.call(fn);
-    var body = source.slice(source.indexOf('{') + 1, source.lastIndexOf('}')).replace(/\s+/g, '');
-    return __pmjsBuiltinRequire('crypto').createHash('sha256').update(body).digest('hex') === expected;
+    return PMJS.methods.matchesSource(fn, expected);
   }
 
   PMJS.plugins.onLoaded('SRD_ShakingText', 'pmjs.adapter.srd-shaking-text', function() {
@@ -19,8 +16,11 @@
       var prototype = typeof Window_Message !== 'undefined' && Window_Message.prototype;
       var create = prototype && prototype.createShakingCharacter;
       var remove = prototype && prototype.removeShakingSprites;
-      var expectedCreate = 'eea3a24a0548d6685df41899917ec89ace2c758e4e47ca5e2d03931aa06055ef';
-      var expectedRemove = '4afd4d215da6f2aa4a4bbbcd170a81f3cd42da2d02d34ad59c6fd4f8c6c7e0fc';
+      // SRD_ShakingText 1.12 private-glyph creation and removal.
+      var expectedCreate = ['8c8baddd075649d60683efcb87848b4983539f340ae0616ee7cbf6a787837985',
+      '326d0cf7893b98b6dacfe7f882cd8162245325d03d1e8ee1d9fc7e9ba848a7f5'];
+      var expectedRemove = ['c1d68a9049ad96d0ca7ecdba03e4ac1aa09517b7ae3ec81604e410caf30cc2ae',
+      'd11378ae6e5bd6e5094c96bd1ea1d6700c900c63c459c7ed0c9a67f64b954794'];
       if (!matches(create, expectedCreate) || !matches(remove, expectedRemove)) {
         PMJS.optimizations.refuse(id, 'unrecognized shaking glyph creation or page removal');
         return;

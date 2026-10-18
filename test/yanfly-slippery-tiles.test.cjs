@@ -1,6 +1,6 @@
 'use strict';
 
-const { pinBodyFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
+const { pinSourceFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const vm = require('node:vm');
@@ -96,7 +96,8 @@ function makeHost({
   );
   context.Array = vm.runInContext('Array', context);
 
-  vm.runInContext(pinBodyFingerprint(moduleSource, 'KNOWN_SLIPPERY_QUERY',
+  vm.runInContext(pinSourceFingerprint(pinSourceFingerprint(moduleSource, 'KNOWN_CONTAINS',
+    context.Array.prototype.contains), 'KNOWN_SLIPPERY_QUERY',
     vm.runInNewContext('(' + SLIPPERY_QUERY_SHAPE + ')')), context, { filename: 'slippery-tiles.js' });
   if (autoActivate) {
     context.PMJS.plugins.execute('YEP_SlipperyTiles', function() {});

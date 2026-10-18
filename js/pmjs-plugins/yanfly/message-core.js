@@ -17,15 +17,11 @@ PMJS.plugins.registerOptimization('YEP_MessageCore', {
     PMJS.phases.on('afterGuestPlugins', 'pmjs.yanfly.message-core', function() {
       if (!PMJS.optimizations.isEnabled(id)) return;
       var measure = windowProto && windowProto.textWidthExCheck;
-      var measureSource = typeof measure === 'function'
-        ? Function.prototype.toString.call(measure).replace(/\s+/g, '') : '';
-      var expectedBody = '5589e1927afd0452c8f047fcb0348523a9b28a2c3b2709fb48ba1b6e6bc271fb';
-      var measureBody = measureSource.slice(measureSource.indexOf('{') + 1,
-        measureSource.lastIndexOf('}'));
-      var digest = globalThis.__pmjsBuiltinRequire &&
-        globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
-          .update(measureBody).digest('hex');
-      if (digest !== expectedBody ||
+      // Reviewed YEP_MessageCore 1.19 measurement path.
+      var expectedBody = ['7cd834749c5ba4a66d6ae196316e4c7a443f92ba7cbe55b1ab391b24febf7df2',
+      '804a24c50bf504ffbd22f3ace97615df230de185b62142f81724943769ced5e5',
+      'e3261a21d77d5bc56ec8f2f6c72ba7a7a6323aadd57cb025904111bb4aa7dda5'];
+      if (!PMJS.methods.matchesSource(measure, expectedBody) ||
           typeof outline !== 'function' || typeof body !== 'function' ||
           bitmapProto._drawTextOutline !== outline ||
           bitmapProto._drawTextBody !== body) {

@@ -20,19 +20,8 @@
     });
   }
 
-  function fnBody(fn) {
-    var str = Function.prototype.toString.call(fn);
-    var start = str.indexOf('{');
-    var end = str.lastIndexOf('}');
-    var body = start < 0 || end < 0 ? str : str.slice(start + 1, end);
-    return body
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1 ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  var KNOWN_BODY = '08d98040c0f49d840e9e84f1b7d2dd0fa42f5382e4a357af160d1aed7c10a335';
+  // Reviewed YEP_EventMiniLabel 1.12 constructor path.
+  var KNOWN_BODY = ['4886f405db38cab6ea5d26fe71570958ee508727837a9211637356519451fe43'];
 
   function defaultPageHasMiniLabel(character) {
     if (!character || !character._eventId || typeof character.list !== 'function') {
@@ -79,12 +68,6 @@
     }
   }
 
-  function fingerprint(fn) {
-    if (!globalThis.__pmjsBuiltinRequire) return null;
-    return globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
-      .update(fnBody(fn)).digest('hex');
-  }
-
   function install() {
     if (!PMJS.optimizations.isEnabled('plugins.yanfly.event-mini-label')) return false;
 
@@ -96,7 +79,7 @@
       return false;
     }
     if (spriteProto.__pmjsMiniLabelCache) return true;
-    if (fingerprint(spriteProto.setupMiniLabel) !== KNOWN_BODY) {
+    if (!PMJS.methods.matchesSource(spriteProto.setupMiniLabel, KNOWN_BODY)) {
       PMJS.optimizations.refuse('plugins.yanfly.event-mini-label',
         'unrecognized Yanfly setupMiniLabel method composition');
       return false;

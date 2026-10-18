@@ -10,25 +10,12 @@ if (typeof PMJS !== 'undefined' && PMJS.plugins &&
 }
 
 (function() {
-  function fnBody(fn) {
-    var str = Function.prototype.toString.call(fn);
-    var start = str.indexOf('{');
-    var end = str.lastIndexOf('}');
-    var body = start < 0 || end < 0 ? str : str.slice(start + 1, end);
-    return body
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1 ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
 
-  var KNOWN_SLIPPERY_QUERY = 'd06e176669197657614662215af1deb67bdae5c7a595914f7d82cf39e4e3f8b2';
-
-  function fingerprint(fn) {
-    if (!globalThis.__pmjsBuiltinRequire) return null;
-    return globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
-      .update(fnBody(fn)).digest('hex');
-  }
+  // MV 1.6.1 membership and YEP_SlipperyTiles 1.05 query.
+  var KNOWN_CONTAINS = ['2b4ef5ac511af2a98109ab4d0b75cc66af8e533adf8d852d82f751941a7d68e1',
+    '0a14e5f3f0be233bf31d33eeecb6d55d5c34aca2a60a567f65891cbf7dc7e3f5'];
+  var KNOWN_SLIPPERY_QUERY = ['a36c9d35d257710fabbc1270f2ab8d0f715a855815b352766d9c2e17aa50c606',
+      '425386319071765fdcb4f7874c65eb031dbe13f651098a84b1e1ff633505ccbe'];
 
   function install() {
     if (!PMJS.optimizations.isEnabled('plugins.yanfly.slippery-tiles')) {
@@ -44,7 +31,7 @@ if (typeof PMJS !== 'undefined' && PMJS.plugins &&
     }
     if (mapProto.__pmjsSlipperyTilesGuard) return true;
 
-    if (fingerprint(mapProto.isSlippery) !== KNOWN_SLIPPERY_QUERY) {
+    if (!PMJS.methods.matchesSource(mapProto.isSlippery, KNOWN_SLIPPERY_QUERY)) {
       PMJS.optimizations.refuse('plugins.yanfly.slippery-tiles',
         'unrecognized Yanfly isSlippery method composition');
       return false;
@@ -54,7 +41,7 @@ if (typeof PMJS !== 'undefined' && PMJS.plugins &&
     var stockContains = Array.prototype.contains;
     var nativeIndexOf = Array.prototype.indexOf;
     var knownContains = typeof stockContains === 'function' &&
-      fnBody(stockContains) === 'return this.indexOf(element) >= 0;' &&
+      PMJS.methods.matchesSource(stockContains, KNOWN_CONTAINS) &&
       /\[native code\]/.test(Function.prototype.toString.call(nativeIndexOf));
     if (!knownContains || typeof Yanfly === 'undefined' || !Yanfly.Param ||
         Yanfly.Param.SlipRegion !== 0) {

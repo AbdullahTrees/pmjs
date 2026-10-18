@@ -1,6 +1,6 @@
 'use strict';
 
-const { pinBodyFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
+const { pinSourceFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const vm = require('node:vm');
@@ -69,7 +69,7 @@ function makeHost({
     `Sprite_Character.prototype.setupMiniLabel = (${shape});`,
     context, { filename: 'minilabel-shape.js' });
 
-  vm.runInContext(pinBodyFingerprint(moduleSource, 'KNOWN_BODY',
+  vm.runInContext(pinSourceFingerprint(moduleSource, 'KNOWN_BODY',
     vm.runInNewContext('(' + YEP_SHAPE + ')')), context, { filename: 'event-mini-label.js' });
   context.PMJS.plugins.execute('YEP_EventMiniLabel', function() {});
   context.PMJS.phases.emit('afterGuestPlugins');

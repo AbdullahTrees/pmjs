@@ -225,3 +225,46 @@ test('dump reports owner, state, and mutation attribution', () => {
   }]);
   assert.equal(target.update(), 'changed');
 });
+
+test('source matching retains literal whitespace, comments, parameters and line endings', () => {
+  const { createHash } = require('node:crypto');
+  const ctx = context({ __pmjsBuiltinRequire: require });
+  const compile = source => vm.runInNewContext('(' + source + ')');
+  const hash = fn => createHash('sha256').update(Function.prototype.toString.call(fn)).digest('hex');
+  const matches = ctx.PMJS.methods.matchesSource;
+  for (const [source, changed] of [
+    ["function() { return 'a b'; }", "function() { return 'ab'; }"],
+    ["function() { return 'a/*b*/c'; }", "function() { return 'ac'; }"],
+    ['function() { return /a b/; }', 'function() { return /ab/; }'],
+    ['function(value) { return value; }', 'function(other) { return value; }'],
+    ['function() {\r\n return 1;\r\n}', 'function() {\n return 1;\n}']
+  ]) {
+    const original = compile(source), replacement = compile(changed);
+    assert.equal(matches(original, hash(original)), true);
+    assert.equal(matches(replacement, hash(original)), false);
+    assert.equal(matches(replacement, [hash(original), hash(replacement)]), true);
+  }
+  const original = compile('function() { return 1; }');
+  vm.runInContext('Function.prototype.toString = function() { return "spoofed"; };', ctx);
+  assert.equal(matches(original, hash(original)), true);
+  assert.equal(matches(null, null), false);
+  delete ctx.__pmjsBuiltinRequire;
+  assert.equal(matches(original, hash(original)), false);
+});
+
+test('unrecognized source leaves the effective guest method as the original fallback', () => {
+  const { createHash } = require('node:crypto');
+  const reviewed = function() { return 'reviewed'; };
+  const expected = createHash('sha256').update(reviewed.toString()).digest('hex');
+  for (const original of [reviewed, function() { return 'guest replacement'; }]) {
+    const target = { update: original };
+    const ctx = context({ __pmjsBuiltinRequire: require });
+    ctx.PMJS.methods.own({ key: 'Target.update', id: 'test.source', method: 'update',
+      getTarget: () => target,
+      replace: guest => ctx.PMJS.methods.matchesSource(guest, expected) ? () => 'optimized' : guest
+    });
+    ctx.PMJS.methods.install();
+    assert.equal(target.update(), original === reviewed ? 'optimized' : 'guest replacement');
+    if (original !== reviewed) assert.equal(target.update, original);
+  }
+});

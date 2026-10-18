@@ -31,25 +31,30 @@
   var classNames = Object.keys(knownClasses);
 
   var baselineMethods = {};
+  // Reviewed Pixi 4.8.9 / MV 1.6.1 transforms; LF and CRLF are pinned separately.
   var reviewedTransforms = {
-    '9b72717c412d296ece91ea0cc7fab4b4fb6e4616acd1695f341e65c38577bdf6': 'container',
-    'f73a944d5eaf648b2bc889563092d8453183be562e30e64d1ba4218d57614677': 'leaf',
-    'cb1dd91963c974a21bdaa4d31b75bc8aa5883c0f7f9ef52873fcd028f33771ae': 'Window',
-    'd3ad6a2cb5ce923b424a85a4397e81df1cfa310ee441831aafb18443faee4668': 'Tilemap',
-    'a7412bdc5b39ba5fc985062655147982aa5f03502f0995cc08f8b622144ccb39': 'ShaderTilemap',
-    '5e32e41b3f0bc2145bafdc719d2f913aca029c89c09b4bfeecd93b874b2eddbe': 'MVTilingSprite',
-    '6d1393221107188f680e8137675a6665f39d061935185d51d1579d073250c9b5': 'tileLeaf'
+    '1a091756d85883232da57aa53141f43968c21abfc58b6b231a46c0faa9014861': 'container',
+    'f611889101e9659a0c13ef6cdfa1b6a0be5edb374a52ad864169ddf6976d9a8e': 'leaf',
+    '82e01e278fa992ea039746f47f6a00d322d7d4eb4de96042ab43a243f90abfb5': 'Window',
+    'cfcbeacef1f4ca9ed869519fdba23e734e6e70e75bce5b05bb75718e6fea548a': 'Window',
+    '157efc2a1a0d853d5b1a73253fb03d8e341262a186b777058e2477f94d38699e': 'Tilemap',
+    '2169c8e4be4708d97d9be182006b653aa0fcdb74dd7c1cf1270b1dd4f3963e48': 'Tilemap',
+    'b7a7a370946ce0ae21b0627c85c55abd0efd8db9eef430a0afcb92f37637f236': 'ShaderTilemap',
+    '0b7ff0daca0957e3b83d04114304eb6263ab76da0275136f9361ad02b06bbde6': 'ShaderTilemap',
+    '4f9a4db6586f0c4e6ea136575dfbfee6777ab55ee74cc963ee45a2d6f33274b0': 'MVTilingSprite',
+    '387766129c695c855bf5a624b0dd29893b5188d97f812d310ff6a7aa41979f8a': 'MVTilingSprite',
+    'abd83186c0164ab387381fbfd697391e57686aa3c68696fa1256d6cc0cd64b55': 'tileLeaf',
+    '0938d1a3fcf18a6628689547f09640615c0b7a096e445b869559d2e3a6ecaa4f': 'tileLeaf'
   };
   var containerClass = PIXI.Container;
   var displayObjectTransform = PIXI.DisplayObject && PIXI.DisplayObject.prototype.updateTransform;
   var containerTransform = PIXI.Container && PIXI.Container.prototype.updateTransform;
   var tilingTransform = globalThis.TilingSprite && TilingSprite.prototype.updateTransformTS;
   function reviewedTransform(method) {
-    if (typeof method !== 'function' || !globalThis.__pmjsBuiltinRequire) return null;
-    var source = Function.prototype.toString.call(method)
-      .replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
-      .replace(/^function(?:\s+[\w$]+)?\s*\(/, 'function(').replace(/\s/g, '');
-    return reviewedTransforms[__pmjsBuiltinRequire('crypto').createHash('sha256').update(source).digest('hex')];
+    var digest = Object.keys(reviewedTransforms).find(function(expected) {
+      return PMJS.methods.matchesSource(method, expected);
+    });
+    return reviewedTransforms[digest];
   }
   var transformEquivalents = new Map();
   var renderTransformChecks = [];

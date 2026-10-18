@@ -1,12 +1,12 @@
 'use strict';
 
-const { pinBodyFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
+const { pinSourceFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const source = fs.readFileSync(path.join(__dirname,
+const source = fs.readFileSync(require.resolve('../js/pmjs-core/methods.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname,
   '../js/pmjs-plugins/yanfly/message-core.js'), 'utf8');
 
 function install({ enabled = true, changedCharacter = false, changedBody = false, changedMeasure = false,
@@ -62,8 +62,8 @@ function install({ enabled = true, changedCharacter = false, changedBody = false
       finally { this._checkWordWrapMode = previous; }
     };
   `, context);
-  vm.runInContext(pinBodyFingerprint(source, 'expectedBody',
-    context.Window_Base.prototype.textWidthExCheck, true), context);
+  vm.runInContext(pinSourceFingerprint(source, 'expectedBody',
+    context.Window_Base.prototype.textWidthExCheck), context);
   if (fontWrapper) vm.runInContext(`
     var drawText = Bitmap.prototype.drawText;
     Bitmap.prototype.drawText = function() {

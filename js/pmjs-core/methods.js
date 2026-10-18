@@ -1,6 +1,7 @@
 'use strict';
 
 (function() {
+  var sourceOf = Function.prototype.call.bind(Function.prototype.toString);
   var methods = Object.create(null);
   var order = [];
   var installed = false;
@@ -91,6 +92,14 @@
 
   globalThis.PMJS = globalThis.PMJS || {};
   PMJS.methods = {
+    // Source identity only; callers must also guard mutable dependencies.
+    matchesSource: function(fn, expected) {
+      if (typeof fn !== 'function' || typeof globalThis.__pmjsBuiltinRequire !== 'function') return false;
+      var digest = __pmjsBuiltinRequire('crypto').createHash('sha256')
+        .update(sourceOf(fn)).digest('hex');
+      return Array.isArray(expected) ? expected.includes(digest) : expected === digest;
+    },
+
     wrap: function(definition) { return register(definition, 'wrap'); },
     own: function(definition) { return register(definition, 'own'); },
 

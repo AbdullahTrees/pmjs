@@ -7,7 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const { makeBitmapTextHarness } = require('./helpers/bitmap-text-harness.cjs');
-const { pinBodyFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
+const { pinSourceFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
 const adapter = fs.readFileSync(require.resolve('../js/pmjs-plugins/yanfly/core-text.js'), 'utf8');
 const optimization = 'plugins.yanfly.core-native-text';
 
@@ -68,8 +68,8 @@ function harness({ native = mockNative(), disabled = false, beforeInstall, stock
     onLoaded(name, _owner, callback) { loaded.set(name, callback); }
   };
   if (beforeInstall) beforeInstall(context);
-  let source = pinBodyFingerprint(adapter, 'stockFontHash', originalFont, true);
-  source = pinBodyFingerprint(source, 'boldFontHash', boldFont, true);
+  let source = pinSourceFingerprint(adapter, 'stockFontHash', originalFont);
+  source = pinSourceFingerprint(source, 'boldFontHash', boldFont);
   vm.runInContext(source, context);
   return { context, native, original, originalFont, finalMethod,
     install() { loaded.get('YEP_CoreEngine')(); context.PMJS.phases.emit('afterGuestPlugins'); },

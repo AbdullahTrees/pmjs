@@ -8,7 +8,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
-const source = fs.readFileSync(path.join(__dirname,
+const source = fs.readFileSync(require.resolve('../js/pmjs-core/methods.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname,
   '../js/pmjs-pixi4/render-preflight.js'), 'utf8');
 
 test('Pixi preflight reports plugin registrations and changed render hooks', () => {

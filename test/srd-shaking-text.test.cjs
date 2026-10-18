@@ -5,8 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
-const { pinBodyFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
-const source = fs.readFileSync(require.resolve('../js/pmjs-plugins/srd/shaking-text.js'), 'utf8');
+const { pinSourceFingerprint } = require('./helpers/reviewed-function-fixture.cjs');
+const source = fs.readFileSync(require.resolve('../js/pmjs-core/methods.js'), 'utf8') + '\n' + fs.readFileSync(require.resolve('../js/pmjs-plugins/srd/shaking-text.js'), 'utf8');
 
 function fixture({ disabled = false, unknownCreate = false, unknownRemove = false, canvasContext } = {}) {
   const loaded = new Map(), phases = new Map(), refusals = [], retained = [];
@@ -81,8 +81,8 @@ function fixture({ disabled = false, unknownCreate = false, unknownRemove = fals
   }
   const originalCreate = Message.prototype.createShakingCharacter;
   const originalRemove = Message.prototype.removeShakingSprites;
-  let patched = pinBodyFingerprint(source, 'expectedCreate', originalCreate, true);
-  patched = pinBodyFingerprint(patched, 'expectedRemove', originalRemove, true);
+  let patched = pinSourceFingerprint(source, 'expectedCreate', originalCreate);
+  patched = pinSourceFingerprint(patched, 'expectedRemove', originalRemove);
   if (unknownCreate) Message.prototype.createShakingCharacter = function() {};
   if (unknownRemove) Message.prototype.removeShakingSprites = function() {};
   const context = { __pmjsBuiltinRequire: require, Window_Message: Message,

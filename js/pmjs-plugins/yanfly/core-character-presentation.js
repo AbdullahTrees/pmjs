@@ -7,9 +7,10 @@ PMJS.phases.on('afterGuestPlugins', 'pmjs.plugins.yanfly.core-character-presenta
   var method = Sprite_Character.prototype.updateHalfBodySprites;
   var predecessor = Yanfly.Core.Sprite_Character_updateHalfBodySprites;
   if (typeof method !== 'function') return;
-  var source = Function.prototype.toString.call(method).replace(/\s/g, '');
-  var digest = __pmjsBuiltinRequire('crypto').createHash('sha256').update(source).digest('hex');
-  if (digest !== 'e552fd05edff096b4868f5e1d6b05076d947dba3e2ab07b5a753d4010b45fa0b') return;
+  // Reviewed YEP_CoreEngine 1.31 wrapper.
+  var reviewedHalfBody = ['d303b43f44e422103027d3d55ea6d388b5ed6bc37b0ba65749228e216e127071',
+      'dc65b8c8604adc6a5d1af43015c944195f69dfb3e24e39cb19ee2a766a15a9a4'];
+  if (!PMJS.methods.matchesSource(method, reviewedHalfBody)) return;
   // Yanfly changes the bush sprites, not the main character frame.
   presentation.registerHalfBodyEquivalent(method, predecessor, function() {
     return Yanfly.Core.Sprite_Character_updateHalfBodySprites === predecessor;
