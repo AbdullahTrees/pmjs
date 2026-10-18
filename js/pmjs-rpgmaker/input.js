@@ -12,6 +12,15 @@
       for (var code in mapper) copy[code] = mapper[code];
       return copy;
     }
+    function mapperChanged(previous, current) {
+      for (var code in previous) {
+        if (previous[code] !== current[code]) return true;
+      }
+      for (var code in current) {
+        if (previous[code] !== current[code]) return true;
+      }
+      return false;
+    }
     function actionHeld(input, action, keys) {
       if (keys.some(function(key) { return input.keyMapper[key] === action; })) return true;
       return (input._gamepadStates || []).some(function(buttons) {
@@ -44,7 +53,11 @@
       };
     }
     function nativeInputUpdate() {
-      if (globalThis.__pmjsInputSnapshot && this.keyMapper && this.gamepadMapper) {
+      // Reconcile changes in the existing order; stable maps reuse their snapshots.
+      if (globalThis.__pmjsInputSnapshot && this.keyMapper && this.gamepadMapper &&
+          (!previousKeys || !previousButtons ||
+           mapperChanged(previousKeys, this.keyMapper) ||
+           mapperChanged(previousButtons, this.gamepadMapper))) {
         var keys = (globalThis.__pmjsInputSnapshot.keysDown || []).concat(
           globalThis.__pmjsInputSnapshot.keysPressed || []);
         if (previousKeys) {

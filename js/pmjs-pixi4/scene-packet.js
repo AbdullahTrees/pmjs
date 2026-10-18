@@ -727,7 +727,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   var particleFrame = particleContainer ? nativeParticleFrameContext(node) : null;
   for (var index = 0; index < childLimit; index++) {
     if (nativeSceneTraversesChild(kind, node, node.children[index])) {
-      if (!particleFrame &&
+      if (nativeScenePlainSpriteSegments && !particleFrame &&
           PMJS.optimizations.isEnabled('scene.plain-sprite-segment')) {
         var segment = [];
         var segmentIndex = index;
@@ -847,7 +847,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     worldState: nativeSceneUsePixiWorldState, prepared: nativeSceneTransformsPrepared,
     root: nativeSceneRootTransform, usesWorld: nativeSceneRootUsesWorldTransform,
     resolution: nativeSceneFilterResolution, roundPixels: nativeSceneRoundPixels,
-    renderer: nativeSceneRenderer
+    renderer: nativeSceneRenderer, plainSpriteSegments: nativeScenePlainSpriteSegments
   };
   var parentWorld = nativeTransformParent.transform.worldTransform;
   var previousParentWorld = { a: parentWorld.a, b: parentWorld.b, c: parentWorld.c,
@@ -866,6 +866,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   nativeSceneFilterResolution = Math.max(0.000001,
     Number(filterResolution) || 1);
   nativeSceneRoundPixels = !!roundPixels;
+  nativeScenePlainSpriteSegments = options.plainSpriteSegments !== false;
   nativeSceneRenderer = options.renderer || null;
   if (parentWorld.a !== 1 || parentWorld.b !== 0 || parentWorld.c !== 0 ||
       parentWorld.d !== 1 || parentWorld.tx !== 0 || parentWorld.ty !== 0) {
@@ -910,6 +911,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     nativeSceneRootUsesWorldTransform = previousContext.usesWorld;
     nativeSceneFilterResolution = previousContext.resolution;
     nativeSceneRoundPixels = previousContext.roundPixels;
+    nativeScenePlainSpriteSegments = previousContext.plainSpriteSegments;
     nativeSceneRenderer = previousContext.renderer;
     if (parentWorld.a !== previousParentWorld.a || parentWorld.b !== previousParentWorld.b ||
         parentWorld.c !== previousParentWorld.c || parentWorld.d !== previousParentWorld.d ||

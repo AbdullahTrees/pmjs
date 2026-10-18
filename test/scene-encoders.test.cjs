@@ -1847,6 +1847,81 @@ test('registry disable selects ordinary sprite encoding with the same packet', (
   assert.deepEqual(ordinary, optimized);
 });
 
+test('stage sprite-segment policy preserves packets and respects the registry', () => {
+  const harness = makeHarness();
+  const { sandbox, sprite } = harness;
+  const root = new sandbox.PIXI.Container();
+  for (let index = 0; index < 6; index++) root.addChild(sprite(16 + index, 24 + index));
+  let probes = 0;
+  const binding = sandbox.nativePlainSpriteBinding;
+  sandbox.nativePlainSpriteBinding = function(node) { probes++; return binding(node); };
+  function render(options) {
+    sandbox.PMJS.pixi4.setStageRenderOptions(root, options);
+    probes = 0;
+    sandbox.renderNativeStage(root, undefined, 1, false, false, null,
+      sandbox.PMJS.pixi4.getStageRenderOptions(root));
+    return harness.submitted.at(-1);
+  }
+  const baseline = render();
+  assert.ok(probes > 0, 'unspecified policy retains sprite segments');
+  assert.deepEqual(render({ worldState: 'native', plainSpriteSegments: false }), baseline);
+  assert.equal(probes, 0, 'stage opt-out skips segment lookahead entirely');
+  assert.equal(sandbox.nativeScenePlainSpriteSegments, true);
+  assert.deepEqual(render({ worldState: 'native', plainSpriteSegments: true }), baseline);
+  assert.ok(probes > 0);
+  sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.plain-sprite-segment';
+  assert.deepEqual(render({ worldState: 'native', plainSpriteSegments: true }), baseline);
+  assert.equal(probes, 0, 'stage opt-in does not override registry disable');
+  assert.throws(() => render({ plainSpriteSegments: false }), /worldState/);
+  assert.throws(() => render({ worldState: 'native', plainSpriteSegments: 'false' }), /plainSpriteSegments/);
+});
+
+test('nested stage rendering restores the outer sprite-segment policy', () => {
+  const harness = preparedHarness();
+  const { sandbox, sprite } = harness;
+  const outer = new sandbox.PIXI.Container(), inner = new sandbox.PIXI.Container();
+  for (let index = 0; index < 6; index++) { outer.addChild(sprite()); inner.addChild(sprite()); }
+  const probes = [];
+  const binding = sandbox.nativePlainSpriteBinding;
+  sandbox.nativePlainSpriteBinding = function(node) {
+    probes.push(node.parent === inner ? 'inner' : 'outer');
+    return binding(node);
+  };
+  let innerEnabled = true;
+  const prepare = outer.children[0].updateTransform;
+  outer.children[0].updateTransform = function() {
+    prepare.call(this);
+    sandbox.renderNativeStage(inner, undefined, 1, false, false, null,
+      { plainSpriteSegments: innerEnabled });
+  };
+  sandbox.renderNativeStage(outer, undefined, 1, false, false, null,
+    { plainSpriteSegments: false });
+  assert.deepEqual(probes, Array(6).fill('inner'));
+  probes.length = 0;
+  innerEnabled = false;
+  sandbox.renderNativeStage(outer, undefined, 1, false, false, null,
+    { plainSpriteSegments: true });
+  assert.deepEqual(probes, Array(6).fill('outer'));
+  assert.equal(sandbox.nativeScenePlainSpriteSegments, true);
+});
+
+test('stage sprite-segment opt-out preserves strict hook rejection and failure cleanup', () => {
+  const harness = makeHarness();
+  const { sandbox, sprite } = harness;
+  sandbox.NativeHost.runtime.env = name => name === 'PMJS_STRICT_COMPAT' ? '1' : undefined;
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..',
+    'js/pmjs-core/compatibility.js'), 'utf8'), sandbox);
+  const parent = new sandbox.PIXI.Container();
+  const root = parent.addChild(new sandbox.PIXI.Container());
+  for (let index = 0; index < 6; index++) root.addChild(sprite());
+  root.children[3]._renderWebGL = function() {};
+  assert.throws(() => sandbox.renderNativeStage(root, undefined, 1, false, false, null,
+    { plainSpriteSegments: false }), /unsupported native capability: render\.render-method/);
+  assert.equal(harness.submitted.length, 0);
+  assert.equal(root.parent, parent);
+  assert.equal(sandbox.nativeScenePlainSpriteSegments, true);
+});
+
 test('sprite segments preserve Text preparation and later text changes', () => {
   const harness = makeHarness();
   const { sandbox, sprite, makeTexture } = harness;

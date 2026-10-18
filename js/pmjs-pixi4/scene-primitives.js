@@ -42,6 +42,7 @@ PMJS.pixi4 = PMJS.pixi4 || {};
 Object.assign(PMJS.pixi4, {
   setStageRenderOptions: function(stage, options) {
     if (options && options.worldState !== 'pixi' && options.worldState !== 'native') throw new TypeError('worldState must be pixi or native');
+    if (options && options.plainSpriteSegments !== undefined && typeof options.plainSpriteSegments !== 'boolean') throw new TypeError('plainSpriteSegments must be a boolean');
     var previous = nativeStageRenderOptions.get(stage);
     if (options) nativeStageRenderOptions.set(stage, Object.assign({}, options));
     else nativeStageRenderOptions.delete(stage);
@@ -600,6 +601,7 @@ var nativeSceneUsePixiWorldState = false;
 var nativeSceneTransformsPrepared = false;
 var nativeSceneFilterResolution = 1;
 var nativeSceneRoundPixels = false;
+var nativeScenePlainSpriteSegments = true;
 var nativeSceneRenderer = null;
 
 function nativeComposeTransform(parent, local) {
