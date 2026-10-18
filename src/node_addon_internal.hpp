@@ -41,6 +41,9 @@ struct State {
   pmjs::Vfs& vfs;
   std::unique_ptr<pmjs::Vfs> assets;
   std::int64_t reportedExternalBytes = 0;
+  double frameUploadMs = 0;
+  double frameDrawMs = 0;
+  double frameMemoryMs = 0;
   std::chrono::steady_clock::time_point preparationPresentedAt{};
   bool preparationFontsResolved = false;
   std::vector<std::filesystem::path> preparationFonts;

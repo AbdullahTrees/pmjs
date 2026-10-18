@@ -20,6 +20,9 @@ native.beginFrame();
 native.render.quad(0, 0, 32, 32, 0.2, 0.3, 0.4, 1);
 native.renderFrame();
 const ordinaryPresentationStats = native.render.stats();
+for (const value of Object.values(ordinaryPresentationStats.frameCosts)) {
+  assert.ok(Number.isFinite(value) && value >= 0);
+}
 if (!diagnostics) {
   assert.equal(ordinaryPresentationStats.diagnostics, false);
   for (const [name, value] of Object.entries(ordinaryPresentationStats)) {

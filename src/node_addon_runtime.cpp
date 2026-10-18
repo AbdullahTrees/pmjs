@@ -295,10 +295,17 @@ napi_value preparationProgress(napi_env env, napi_callback_info info) try {
 
 napi_value renderFrame(napi_env env, napi_callback_info) try {
   State& value = host(env);
+  const auto start = std::chrono::steady_clock::now();
   value.canvases.uploadDirty();
+  const auto uploaded = std::chrono::steady_clock::now();
   value.core.syncDrawableSize();
   value.renderer.render();
+  const auto drawn = std::chrono::steady_clock::now();
   syncExternalMemory(env);
+  const auto accounted = std::chrono::steady_clock::now();
+  value.frameUploadMs = std::chrono::duration<double, std::milli>(uploaded - start).count();
+  value.frameDrawMs = std::chrono::duration<double, std::milli>(drawn - uploaded).count();
+  value.frameMemoryMs = std::chrono::duration<double, std::milli>(accounted - drawn).count();
   return undefined(env);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what());
@@ -339,6 +346,15 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
   const auto& stats = host(env).renderer.stats();
   napi_value result;
   check(env, napi_create_object(env, &result), "cannot create renderer stats");
+  napi_value frameCosts;
+  check(env, napi_create_object(env, &frameCosts), "cannot create frame costs");
+  check(env, napi_set_named_property(env, frameCosts, "uploadMs",
+    number(env, host(env).frameUploadMs)), "cannot set frame upload time");
+  check(env, napi_set_named_property(env, frameCosts, "drawMs",
+    number(env, host(env).frameDrawMs)), "cannot set frame draw time");
+  check(env, napi_set_named_property(env, frameCosts, "memoryMs",
+    number(env, host(env).frameMemoryMs)), "cannot set frame memory time");
+  check(env, napi_set_named_property(env, result, "frameCosts", frameCosts), "cannot set frame costs");
   check(env, napi_set_named_property(env, result, "diagnostics",
     boolean(env, host(env).renderer.diagnosticsEnabled())), "cannot set renderer diagnostics state");
   check(env, napi_set_named_property(env, result, "frames",
