@@ -9,14 +9,14 @@
     ['_drawNormalTile', '_drawAutotile', '_drawTableEdge', '_isTableTile'];
   var reviewed = producers.map(function(name) { return [Tilemap.prototype, name, Tilemap.prototype[name]]; });
   var producerContract = crypto.createHash('sha256').update(JSON.stringify(producers.map(function(name) {
-    return String(Tilemap.prototype[name]);
+    return typeof Tilemap.prototype[name] === 'function' ? methods.sourceOf(Tilemap.prototype[name]) : null;
   }))).digest('hex');
   var reviewedProducerContract = mz ? producerContract === '68c2143a9a120a448e3cb88e95aeb981ee3d1afca128a9eef04f30d36412115b' :
     producerContract === '7b711e244ab4120a34c90994cc9752f36d72b8fc94a0d428f3bd33936a817fff';
   if (!mz) {
     var shaderProducers = ['_drawNormalTile', '_drawAutotile', '_drawTableEdge'];
     var shaderContract = crypto.createHash('sha256').update(JSON.stringify(shaderProducers.map(function(name) {
-      return String(ShaderTilemap.prototype[name]);
+      return typeof ShaderTilemap.prototype[name] === 'function' ? methods.sourceOf(ShaderTilemap.prototype[name]) : null;
     }))).digest('hex');
     reviewedProducerContract = reviewedProducerContract && shaderContract === '2829c68a0d2b1dff64ac1afca9b47ab01c8a0f13ef9aed1276435daf4c00b02f';
     shaderProducers.forEach(function(name) { reviewed.push([ShaderTilemap.prototype, name, ShaderTilemap.prototype[name]]); });

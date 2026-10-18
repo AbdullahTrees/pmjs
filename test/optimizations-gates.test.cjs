@@ -45,7 +45,8 @@ function loadScenePrimitives({ disableOptimizations = [], env = {}, pixi4 } = {}
     NativeHost: {
       runtime: { env(name) { return env[name]; } },
       scene: { packetVersion: 30, schema: { version: 30, metadataStride: 7,
-        valueStride: 41, transactionalSubmit: true, preparedWorldState: true } },
+        valueStride: 41, atlasTilingSampling: true, floatSpriteUv: true, repeatSpriteSampling: true,
+          filterCompositeBlend: true, isolatedClearRect: true, transactionalSubmit: true, preparedWorldState: true, clampedTilingSampling: true } },
       render: {
         createTileLayer(points) {
           calls.createTileLayer++;

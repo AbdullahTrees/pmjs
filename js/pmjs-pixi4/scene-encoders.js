@@ -78,7 +78,7 @@ function writeNativeSceneScreenSprite(node, type, particleContext,
 }
 
 function writeNativeSceneTilingSprite(node, type, particleContext,
-    particleValues, scratch, schema) {
+    particleValues, scratch) {
   var texture = node.texture;
   var matrix = node.tileTransform && node.tileTransform.localTransform;
   var finiteSampling = matrix && ['a', 'b', 'c', 'd', 'tx', 'ty'].every(function(key) {
@@ -103,18 +103,13 @@ function writeNativeSceneTilingSprite(node, type, particleContext,
     return;
   }
   scratch.tilingSimple = !!texture && nativeSimpleTilingTexture(texture, nativeSceneRenderer);
-  if (texture && !scratch.tilingSimple && !schema.clampedTilingSampling) {
-    PMJS.compat.hit('render.tiling-clamp', 'host lacks clamped tiling sampling');
-    scratch.aborted = true;
-    return;
-  }
   var tilingRotation = ((Number(texture && texture.rotate) || 0) % 16 + 16) % 16;
   if (tilingRotation % 2) {
     PMJS.compat.hit('render.texture-rotation', String(tilingRotation));
     scratch.aborted = true;
     return;
   }
-  scratch.tilingAtlas = !!schema.atlasTilingSampling && !!nativeDirectTilingAtlas(texture);
+  scratch.tilingAtlas = !!nativeDirectTilingAtlas(texture);
   var tilingTexture = ensureNativeTilingTexture(texture, scratch.tilingAtlas);
   if (tilingTexture && Number(node.width) !== 0 && Number(node.height) !== 0 &&
       Number.isFinite(Math.fround(node.width)) && Number.isFinite(Math.fround(node.height))) {
@@ -175,10 +170,10 @@ nativeSceneEncoders[PMJS_SCENE_KIND.TILING_SPRITE] = writeNativeSceneTilingSprit
 nativeSceneEncoders[PMJS_SCENE_KIND.GRAPHICS] = writeNativeSceneGraphics;
 nativeSceneEncoders[PMJS_SCENE_KIND.MESH] = writeNativeSceneMesh;
 
-function encode(kind, node, type, particleContext, particleValues, scratch, tint, schema) {
+function encode(kind, node, type, particleContext, particleValues, scratch, tint) {
   resetEmission(scratch, tint);
   if (kind !== PMJS_SCENE_KIND.CONTAINER) {
-    nativeSceneEncoders[kind](node, type, particleContext, particleValues, scratch, schema);
+    nativeSceneEncoders[kind](node, type, particleContext, particleValues, scratch);
   }
 }
 return { createEmission: createEmission, encode: encode };

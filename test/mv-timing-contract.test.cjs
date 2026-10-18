@@ -9,7 +9,7 @@ const path = require('node:path');
 function loadTiming(extra) {
   const code = fs.readFileSync(path.join(__dirname, '../js/pmjs-mv/timing.js'), 'utf8');
   const context = {
-    console, performance, Math, Number,
+    console, performance, Math, Number, __pmjsBuiltinRequire: require,
     globalThis: null, SceneManager: undefined,
     Utils: { isMobileSafari() { return false; } },
   };
@@ -24,30 +24,31 @@ function loadTiming(extra) {
     '../js/pmjs-core/config.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname,
     '../js/pmjs-core/optimizations.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-core/methods.js'), 'utf8'), context);
   vm.runInContext(code, context);
   return context;
 }
 
 const stockUpdateMainSource = `function() {
     if (Utils.isMobileSafari()) {
-      this.changeScene();
-      this.updateScene();
-    } else {
-      var newTime = this._getTimeInMsWithoutMobileSafari();
-      var fTime = (newTime - this._currentTime) / 1000;
-      if (fTime > 0.25) fTime = 0.25;
-      this._currentTime = newTime;
-      this._accumulator += fTime;
-      while (this._accumulator >= this._deltaTime) {
-        this.updateInputData();
         this.changeScene();
         this.updateScene();
-        this._accumulator -= this._deltaTime;
-      }
+    } else {
+        var newTime = this._getTimeInMsWithoutMobileSafari();
+        var fTime = (newTime - this._currentTime) / 1000;
+        if (fTime > 0.25) fTime = 0.25;
+        this._currentTime = newTime;
+        this._accumulator += fTime;
+        while (this._accumulator >= this._deltaTime) {
+            this.updateInputData();
+            this.changeScene();
+            this.updateScene();
+            this._accumulator -= this._deltaTime;
+        }
     }
     this.renderScene();
     this.requestUpdate();
-  }`;
+}`;
 
 function stockShapedScene() {
   return {
@@ -418,3 +419,30 @@ test('standalone installation ignores raw host timing policy', () => {
   assert.equal(step(2000 / 30), 2);
   assert.equal(step(2500 / 30), 2);
 });
+
+
+test('reviewed timing accepts explicit CRLF source and refuses unreviewed formatting', () => {
+  const ctx = loadTiming(context => { context.SceneManager = stockShapedScene(); });
+  ctx.SceneManager.updateMain = vm.runInContext('(' + stockUpdateMainSource.replace(/\n/g, '\r\n') + ')', ctx);
+  assert.equal(ctx.pmjsMvInstallTimingContract(), true);
+  const changed = loadTiming(context => { context.SceneManager = stockShapedScene(); });
+  const method = vm.runInContext('(' + stockUpdateMainSource.replace('this.renderScene();', 'this.renderScene( );') + ')', changed);
+  changed.SceneManager.updateMain = method;
+  assert.equal(changed.pmjsMvInstallTimingContract(), false);
+  assert.equal(changed.SceneManager.updateMain, method);
+});
+
+
+test('private engine updateMain is recognized without rewriting its source',
+  { skip: !process.env.PMJS_MV_REFERENCE_GAME && 'set PMJS_MV_REFERENCE_GAME to run private recognition' }, () => {
+    const guest = vm.createContext({ performance, navigator: { userAgent: '' }, window: {}, location: { search: '' } });
+    const core = fs.readFileSync(path.join(process.env.PMJS_MV_REFERENCE_GAME, 'js/rpg_core.js'), 'utf8');
+    const renderingBoundary = core.indexOf('function Point()');
+    assert.ok(renderingBoundary > 0, 'reference core must provide the reviewed non-rendering declarations');
+    vm.runInContext(core.slice(0, renderingBoundary), guest, { filename: 'rpg_core.js' });
+    vm.runInContext(fs.readFileSync(path.join(process.env.PMJS_MV_REFERENCE_GAME, 'js/rpg_managers.js'), 'utf8'), guest,
+      { filename: 'rpg_managers.js' });
+    const ctx = loadTiming(context => { context.SceneManager = stockShapedScene(); });
+    ctx.SceneManager.updateMain = guest.SceneManager.updateMain;
+    assert.equal(ctx.pmjsMvInstallTimingContract(), true);
+  });

@@ -92,12 +92,18 @@
 
   globalThis.PMJS = globalThis.PMJS || {};
   PMJS.methods = {
-    // Source identity only; callers must also guard mutable dependencies.
+    sourceOf: sourceOf,
+
+    // Exact source strings or SHA-256 digests; callers also guard mutable dependencies.
     matchesSource: function(fn, expected) {
-      if (typeof fn !== 'function' || typeof globalThis.__pmjsBuiltinRequire !== 'function') return false;
+      if (typeof fn !== 'function') return false;
+      var source = sourceOf(fn);
+      var accepted = Array.isArray(expected) ? expected : [expected];
+      if (accepted.includes(source)) return true;
+      if (typeof globalThis.__pmjsBuiltinRequire !== 'function') return false;
       var digest = __pmjsBuiltinRequire('crypto').createHash('sha256')
-        .update(sourceOf(fn)).digest('hex');
-      return Array.isArray(expected) ? expected.includes(digest) : expected === digest;
+        .update(source).digest('hex');
+      return accepted.includes(digest);
     },
 
     wrap: function(definition) { return register(definition, 'wrap'); },

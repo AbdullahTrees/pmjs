@@ -6,17 +6,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const { performance } = require('node:perf_hooks');
+const { writeJson } = require('./preparation-files.cjs');
 const HASH = /^[a-f0-9]{64}$/;
 
 async function readJson(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (_) { return null; }
-}
-async function writeJson(file, data, flush = true) {
-  const handle = await fsp.open(file, 'wx');
-  try {
-    await handle.writeFile(JSON.stringify(data) + '\n');
-    if (flush) await handle.sync();
-  } finally { await handle.close(); }
 }
 const activeLeases = new Map();
 let exitCleanupInstalled = false;

@@ -475,10 +475,7 @@ test('Pixi 5 retains a neutral filter with a composite blend and rejects unsuppo
   stage.filters[0].blendMode = 1.5;
   assert.throws(() => context.pmjsPixi5RenderScene(stage, null, 1), /render.blend-mode/);
   assert.equal(submissions.length, 1);
-  stage.filters[0].blendMode = 1;
-  context.NativeHost.scene.schema.filterCompositeBlend = false;
-  assert.throws(() => context.pmjsPixi5RenderScene(stage, null, 1), /render.filter-blend/);
-  assert.deepEqual(hits.map(hit => hit[0]), ['render.blend-mode', 'render.filter-blend']);
+  assert.deepEqual(hits.map(hit => hit[0]), ['render.blend-mode']);
 });
 
 test('MZ ColorFilter subclasses fall through to compatibility handling or another encoder', () => {
@@ -770,4 +767,19 @@ test('RenderTexture images remain usable until replacement, resize, or disposal'
   assert.deepEqual(released, [50, 51, 52]);
   assert.equal(backing.released, true);
   assert.equal(base.__pmjsPixi5RenderCanvas, undefined);
+});
+
+
+test('Pixi 5 rejects missing required native capabilities before submitting', () => {
+  for (const capability of ['clampedTilingSampling', 'atlasTilingSampling', 'floatSpriteUv',
+    'repeatSpriteSampling', 'filterCompositeBlend', 'isolatedClearRect']) {
+    for (const missing of [false, undefined]) {
+      const { context, submissions } = createContext();
+      if (missing === undefined) delete context.NativeHost.scene.schema[capability];
+      else context.NativeHost.scene.schema[capability] = missing;
+      assert.throws(() => runModule(context, 'js/pmjs-pixi5/scene.js'),
+        new RegExp('missing ' + capability + '; install the matching native add-on'));
+      assert.equal(submissions.length, 0);
+    }
+  }
 });

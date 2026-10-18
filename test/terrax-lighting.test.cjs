@@ -41,7 +41,7 @@ function loadRegistrySupport(context) {
 
 }
 
-function knownAddSprite(x, y, bitmap) {
+const knownAddSprite = function(x, y, bitmap) {
   var sprite = new Sprite(this.viewport); // eslint-disable-line no-undef
   sprite.bitmap = bitmap;
   sprite.blendMode = 2;
@@ -49,12 +49,12 @@ function knownAddSprite(x, y, bitmap) {
   sprite.y = y;
   this._sprites.push(sprite);
   this.addChild(sprite);
-}
+};
 
-function knownRemoveSprite() {
+const knownRemoveSprite = function() {
   var sprite = this._sprites.pop();
   this.removeChild(sprite);
-}
+};
 
 function defineKnownCreateLightmask(SpritesetMap, createState) {
   function Lightmask() {
@@ -67,7 +67,7 @@ function defineKnownCreateLightmask(SpritesetMap, createState) {
   };
 }
 
-function knownUpdateMask() {
+const knownUpdateMask = function() {
   var context = this._maskBitmap._context;
   context.fillStyle = '#000000';
   context.globalCompositeOperation = 'source-over';
@@ -78,7 +78,7 @@ function knownUpdateMask() {
       { offset: 1, color: '#000000' }] };
   context.globalCompositeOperation = 'lighter';
   context.fillRect(10, 10, 20, 20);
-}
+};
 
 const factoryFixture = { prototype: {} };
 defineKnownCreateLightmask(factoryFixture, () => ({}));

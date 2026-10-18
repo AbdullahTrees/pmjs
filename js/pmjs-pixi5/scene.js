@@ -68,8 +68,17 @@
       schema.version !== packetVersion ||
       schema.metadataStride !== 7 || schema.valueStride !== 41 ||
       !schema.transactionalSubmit) {
-    throw new Error('native scene schema does not provide transactional submission');
+    throw new Error('incompatible native scene schema: expected protocol 30 with strides 7/41 ' +
+      'and transactional submission; install the matching native add-on');
   }
+
+  ['clampedTilingSampling', 'atlasTilingSampling', 'floatSpriteUv',
+    'repeatSpriteSampling', 'filterCompositeBlend', 'isolatedClearRect'].forEach(function(capability) {
+    if (schema[capability] !== true) {
+      throw new Error('incompatible native scene add-on: missing ' + capability +
+        '; install the matching native add-on');
+    }
+  });
 
   var metadataStride = schema.metadataStride;
   var valueStride = schema.valueStride;
@@ -341,9 +350,6 @@
           }
           if (!encoded) reject('render.filter', node);
           encoded = Object.assign({}, encoded, { blendMode: blendMode(filter) });
-          if (encoded.blendMode && !schema.filterCompositeBlend) {
-            reject('render.filter-blend', node);
-          }
           supportedFilters = true;
           if (!encoded.neutral || encoded.blendMode || filterTarget) encodedFilters.push(encoded);
         } catch (error) {
@@ -506,12 +512,10 @@
       }
       var valueOffset = spriteIndex * valueStride;
       var metadataOffset = spriteIndex * metadataStride;
-      if (!schema.floatSpriteUv) reject('render.sprite-uv', node);
       metadata[metadataOffset + 5] |= 131072;
       if (PIXI.WRAP_MODES && baseTexture.wrapMode !== undefined &&
           baseTexture.wrapMode !== PIXI.WRAP_MODES.CLAMP && baseTexture.wrapMode !== PIXI.WRAP_MODES.REPEAT) reject('render.texture-wrap', node);
       if (PIXI.WRAP_MODES && baseTexture.wrapMode === PIXI.WRAP_MODES.REPEAT) {
-        if (!schema.repeatSpriteSampling) reject('render.sprite-repeat', node);
         metadata[metadataOffset + 5] |= 262144;
       }
       var rotation = ((Number(texture.rotate) || 0) % 16 + 16) % 16;
@@ -533,7 +537,6 @@
       var tilingMetadataOffset = index * metadataStride;
       var tilingResolution = tilingTextureInfo.resolution;
       if (!simpleTilingTexture(texture)) {
-        if (!schema.clampedTilingSampling) reject('render.tiling-clamp', node);
         metadata[tilingMetadataOffset + 5] |= 32768;
       }
       var scaleX = tilingMatrix.a;

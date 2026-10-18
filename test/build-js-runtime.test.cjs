@@ -459,3 +459,31 @@ test('explicit adapter files execute in supplied order before engine bootstrap',
     [builder, '--profile', 'mv', '--adapter', path.join(root, 'missing.js'), '--output', output]), /ENOENT/);
   assert.equal(fs.readFileSync(output, 'utf8'), bundle);
 });
+
+
+// A staged package supplies the real add-on; normal source-only runs skip this check.
+test('portable indexes preserve resolved options and processor identities with or without artwork',
+  { skip: !process.env.PMJS_TEST_RUNTIME && 'set PMJS_TEST_RUNTIME to a staged runtime package' }, async () => {
+    const { createBundle } = await import('../tools/game-bundle.mjs');
+    const root = temporaryDirectory('pmjs-portable-index-');
+    const game = writeMvGame(root);
+    fs.mkdirSync(path.join(game, 'img/pictures'), { recursive: true });
+    const pixels = Buffer.alloc(64 * 64 * 4);
+    for (let y = 16; y < 48; y++) for (let x = 16; x < 48; x++) pixels.set([255, 0, 0, 255], (y * 64 + x) * 4);
+    fs.writeFileSync(path.join(game, 'img/pictures/test.png'), require('./helpers/png.cjs').png(64, 64, pixels));
+    const config = path.join(root, 'config.json');
+    fs.writeFileSync(config, JSON.stringify({ display: { width: 320, height: 240 }, assetPreparation: { maps: false } }));
+    const indexes = [];
+    for (const includeAssets of [false, true]) {
+      const output = path.join(root, String(includeAssets));
+      await createBundle({ root: process.env.PMJS_TEST_RUNTIME, share: path.resolve(__dirname, '..'),
+        game, config, output, includeAssets });
+      const index = JSON.parse(fs.readFileSync(path.join(output, 'asset-index.json')));
+      assert.equal(index.width, 320); assert.equal(index.height, 240);
+      assert.equal(index.images.length, 1);
+      assert.ok(index.images[0].outputs.length > 0);
+      for (const page of index.images[0].outputs) assert.equal(fs.existsSync(path.join(output, page.path)), includeAssets);
+      indexes.push(index);
+    }
+    assert.deepEqual(indexes[1], indexes[0], 'processor identities, recipes and records must be identical');
+  });

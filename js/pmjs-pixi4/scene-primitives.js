@@ -493,6 +493,13 @@ if (!nativeSceneSchema || nativeScenePacketVersion !== 30 || nativeSceneSchema.v
   throw new Error('incompatible native scene add-on: expected protocol 30 with strides 7/41, ' +
     'transactional submission and prepared world state; install the matching native add-on');
 }
+['clampedTilingSampling', 'atlasTilingSampling', 'floatSpriteUv',
+  'repeatSpriteSampling', 'filterCompositeBlend', 'isolatedClearRect'].forEach(function(capability) {
+  if (nativeSceneSchema[capability] !== true) {
+    throw new Error('incompatible native scene add-on: missing ' + capability +
+      '; install the matching native add-on');
+  }
+});
 var nativeSceneMetadataStride = nativeSceneSchema.metadataStride;
 var nativeSceneValueStride = nativeSceneSchema.valueStride;
 var nativeSceneCapacity = 512;

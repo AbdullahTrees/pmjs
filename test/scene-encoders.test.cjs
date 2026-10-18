@@ -291,33 +291,29 @@ test('WindowLayer invokes effective masks and composites before non-window child
   assert.equal(packet.values[5 * 41 + 7], 32);
 });
 
-for (const unavailable of ['clear capability', 'target depth']) {
-  test('WindowLayer retains drawing when isolated clears lack ' + unavailable, () => {
-    const harness = makeHarness(), { sandbox, sprite } = harness;
-    sandbox.NativeHost.scene.schema.isolatedClearRect = unavailable !== 'clear capability';
-    const layer = new sandbox.WindowLayer();
-    layer.filterArea = { x: 0, y: 0, width: 80, height: 80 };
-    layer._maskWindow = () => { throw new Error('a clear cannot target an enclosing buffer'); };
-    const window = new sandbox.Window();
-    Object.assign(window, { _isWindow: true, _openness: 255, width: 40, height: 40 });
-    window.addChild(sprite()); layer.addChild(window); layer.addChild(sprite());
-    let root = layer;
-    if (unavailable === 'target depth') {
-      sandbox.nativeSceneFilter = () => ({ groups: [{ kind: 20 }], blur: null });
-      for (let depth = 0; depth < 4; ++depth) {
-        const parent = new sandbox.PIXI.Container();
-        parent._filters = [{}]; parent.addChild(root); root = parent;
-      }
-    }
-    assert.equal(sandbox.submitNativeScene(root), true);
-    const packet = harness.submitted.at(-1);
-    const kinds = packet.metadata.filter((_, index) => index % 7 === 0);
-    assert.equal(kinds.filter(kind => kind === 1).length, 2, 'window and non-window pixels remain encoded');
-    assert.equal(kinds.includes(10), false, 'fallback emits no destructive clear');
-    assert.ok(harness.compatHits.some(hit => hit[0] === 'render.window-layer'));
-    if (unavailable === 'target depth') assert.equal(kinds.filter(kind => kind === 6).length, 4);
-  });
-}
+test('WindowLayer retains drawing when isolated clears lack target depth', () => {
+  const harness = makeHarness(), { sandbox, sprite } = harness;
+  const layer = new sandbox.WindowLayer();
+  layer.filterArea = { x: 0, y: 0, width: 80, height: 80 };
+  layer._maskWindow = () => { throw new Error('a clear cannot target an enclosing buffer'); };
+  const window = new sandbox.Window();
+  Object.assign(window, { _isWindow: true, _openness: 255, width: 40, height: 40 });
+  window.addChild(sprite()); layer.addChild(window); layer.addChild(sprite());
+  let root = layer;
+  sandbox.nativeSceneFilter = () => ({ groups: [{ kind: 20 }], blur: null });
+  for (let depth = 0; depth < 4; ++depth) {
+    const parent = new sandbox.PIXI.Container();
+    parent._filters = [{}]; parent.addChild(root); root = parent;
+  }
+  assert.equal(sandbox.submitNativeScene(root), true);
+  const packet = harness.submitted.at(-1);
+  const kinds = packet.metadata.filter((_, index) => index % 7 === 0);
+  assert.equal(kinds.filter(kind => kind === 1).length, 2, 'window and non-window pixels remain encoded');
+  assert.equal(kinds.includes(10), false, 'fallback emits no destructive clear');
+  assert.ok(harness.compatHits.some(hit => hit[0] === 'render.window-layer'));
+  assert.equal(kinds.filter(kind => kind === 6).length, 4);
+});
+
 function setTriangleBitmap(sandbox, mesh, values, options = {}) {
   sandbox.PMJS.plugins.mpp.setTriangleBitmap(mesh, {
     points: [values.slice(0,2), values.slice(2,4), values.slice(4,6)], sourceBounds: values.slice(6,10),
@@ -2445,6 +2441,11 @@ test('incompatible scene protocols fail before any submission', () => {
     host => { host.scene.schema.valueStride = 40; },
     host => { host.scene.schema.transactionalSubmit = false; },
     host => { host.scene.schema.preparedWorldState = false; },
+    ...['clampedTilingSampling', 'atlasTilingSampling', 'floatSpriteUv',
+      'repeatSpriteSampling', 'filterCompositeBlend', 'isolatedClearRect'].flatMap(capability => [
+      host => { host.scene.schema[capability] = false; },
+      host => { delete host.scene.schema[capability]; }
+    ]),
     host => { delete host.scene.schema; },
     host => { delete host.scene; }
   ];

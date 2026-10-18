@@ -4,12 +4,15 @@ const test=require('node:test');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const crypto=require('node:crypto');
+const {loadPmjsRuntime}=require('./helpers/runtime-context.cjs');
 const source=fs.readFileSync(require.resolve('../js/pmjs-rpgmaker/map-images.js'),'utf8');
 function fixture() {
   const definitions=[],loads=[];
   function Tilemap() {} function ShaderTilemap() {} function Bitmap() {}
   for(const name of ['_drawNormalTile','_drawAutotile','_drawTableEdge','_isTableTile']) Tilemap.prototype[name]=()=>{};
-  const PMJS={images:{},methods:{wrap(definition){definitions.push(definition);}}};
+  const PMJS=loadPmjsRuntime({}, ['js/pmjs-core/methods.js']).PMJS;
+  PMJS.images={};
+  PMJS.methods.wrap=definition=>definitions.push(definition);
   const ImageManager={loadTileset(url,hue){loads.push({url,hue,context:PMJS.images.preparedTileSet});return {};},
     loadParserTileset(url,hue){return this.loadTileset(url,hue);},_generateCacheKey(url,hue){return url+':'+hue;}};
   Bitmap.prototype._requestImage=function(){loads.push({context:PMJS.images.preparedTileSet,retry:true});};

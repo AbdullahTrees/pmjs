@@ -19,31 +19,23 @@
 
   // Match complete reviewed implementations. Formatting changes and guest
   // wrappers retain ordinary behavior until their composition is reviewed.
-  function matchesReviewedFunction(fn, expected) {
-    if (typeof fn !== 'function' || !globalThis.__pmjsBuiltinRequire) return false;
-    var source = Function.prototype.toString.call(fn)
-      .replace(/^function(?:\s+[\w$]+)?\s*\(/, 'function(');
-    return globalThis.__pmjsBuiltinRequire('crypto').createHash('sha256')
-      .update(source).digest('hex') === expected;
-  }
-
   function isKnownTerraxCreateLightmask(fn) {
-    return matchesReviewedFunction(fn,
+    return PMJS.methods.matchesSource(fn,
       'd4c1c118e263003d317475cbd0f3d0f2ed52b57c1e4251fa38bfe204c8e580b5');
   }
 
   function isKnownTerraxAddSprite(fn) {
-    return matchesReviewedFunction(fn,
+    return PMJS.methods.matchesSource(fn,
       '4d84eff24f4ff08377d5770c777f19b4a28b28cc0fbcc26ba3e772e1ca5135b5');
   }
 
   function isKnownTerraxRemoveSprite(fn) {
-    return matchesReviewedFunction(fn,
+    return PMJS.methods.matchesSource(fn,
       '0b9bbbb8af744215d532ed784b9d567f3943446e955c28c43f306f910e887cc4');
   }
 
   function isKnownTerraxUpdateMask(fn) {
-    return matchesReviewedFunction(fn,
+    return PMJS.methods.matchesSource(fn,
       'c9ba1198824f74c3e3917b1c604e30d39f66ffdac937f28f54ec6b567f6d34b5');
   }
 

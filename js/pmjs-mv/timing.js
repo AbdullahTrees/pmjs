@@ -97,35 +97,32 @@
     } catch (_) {}
   }
 
-  function reviewedUpdateMain() {
+  // Reviewed MV 1.6.1 implementation; retain exact LF and CRLF forms.
+  var reviewedUpdateSource = `function() {
     if (Utils.isMobileSafari()) {
-      this.changeScene();
-      this.updateScene();
-    } else {
-      var newTime = this._getTimeInMsWithoutMobileSafari();
-      var fTime = (newTime - this._currentTime) / 1000;
-      if (fTime > 0.25) fTime = 0.25;
-      this._currentTime = newTime;
-      this._accumulator += fTime;
-      while (this._accumulator >= this._deltaTime) {
-        this.updateInputData();
         this.changeScene();
         this.updateScene();
-        this._accumulator -= this._deltaTime;
-      }
+    } else {
+        var newTime = this._getTimeInMsWithoutMobileSafari();
+        var fTime = (newTime - this._currentTime) / 1000;
+        if (fTime > 0.25) fTime = 0.25;
+        this._currentTime = newTime;
+        this._accumulator += fTime;
+        while (this._accumulator >= this._deltaTime) {
+            this.updateInputData();
+            this.changeScene();
+            this.updateScene();
+            this._accumulator -= this._deltaTime;
+        }
     }
     this.renderScene();
     this.requestUpdate();
-  }
+}`;
 
-  function reviewedSource(fn) {
-    return Function.prototype.toString.call(fn).replace(/\r\n/g, '\n')
-      .replace(/^function(?:\s+[\w$]+)?\s*\(/, 'function(')
-      .split('\n').map(function(line) { return line.trim(); }).join('\n');
-  }
+  var reviewedUpdateSources = [reviewedUpdateSource, reviewedUpdateSource.replace(/\n/g, '\r\n')];
 
   function pmjsMvRecognizesUpdateMain(fn) {
-    return reviewedSource(fn) === reviewedSource(reviewedUpdateMain);
+    return PMJS.methods.matchesSource(fn, reviewedUpdateSources);
   }
 
   function pmjsMvRefuseTimingContract(reason) {

@@ -3,12 +3,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { spawnSync } = require('node:child_process');
+const { temporaryDirectory } = require('./helpers/temp.cjs');
 
-const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pmjs-release-contract-'));
+const temporary = temporaryDirectory('pmjs-release-contract-');
 try {
   const stage = path.join(temporary, 'relocated runtime');
   fs.cpSync(path.resolve(process.argv[2]), stage, { recursive: true });
@@ -17,7 +17,19 @@ try {
   fs.mkdirSync(path.join(game, 'js/libs'), { recursive: true });
   fs.writeFileSync(path.join(game, 'js/rpg_core.js'), 'Utils.RPGMAKER_VERSION = "1.6.2";');
   fs.writeFileSync(path.join(game, 'js/rpg_managers.js'), '');
-  fs.writeFileSync(path.join(game, 'js/libs/pixi.js'), 'PIXI.VERSION = "4.5.4";');
+  // This release probe ends at guest-library loading. It tests installed launch
+  // and preparation, not MV gameplay or normal engine shutdown.
+  const guestMarker = '[release-workflow] guest library reached';
+  function pixiProbe(version) {
+    return 'globalThis.PIXI = {}; PIXI.VERSION = ' + JSON.stringify(version) + ';\n' +
+      "__pmjsBuiltinRequire('node:fs').writeSync(1, " + JSON.stringify(guestMarker + '\n') + ');\n' +
+      "__pmjsBuiltinRequire('node:process').exit(0);\n";
+  }
+  function assertGuestReached(result) {
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(result.stdout.includes(guestMarker), result.stdout + result.stderr);
+  }
+  fs.writeFileSync(path.join(game, 'js/libs/pixi.js'), pixiProbe('4.5.4'));
   fs.writeFileSync(path.join(game, 'js/libs/pixi-tilemap.js'), '');
   fs.writeFileSync(path.join(game, 'js/plugins.js'), 'var $plugins = [];');
   fs.mkdirSync(path.join(game, 'data'));
@@ -83,7 +95,7 @@ try {
   assert.match(help.stdout, /pmjs prepare --game DIR/);
   assert.match(cli().stdout, /Usage:/, 'no recognized game in the current directory shows help');
   const unprepared = cli('run', '--game', game, '--state', state);
-  assert.equal(unprepared.status, 0, unprepared.stdout + unprepared.stderr);
+  assertGuestReached(unprepared);
   assert.ok(unprepared.stdout.includes(`version=${installedInfo.version} build=build-fixture source=${installedInfo.source.commit}`));
   const missingGame = cli('run', '--game', path.join(temporary, 'missing-game'));
   assert.notEqual(missingGame.status, 0);
@@ -93,7 +105,7 @@ try {
     cwd: game, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',
       LD_LIBRARY_PATH: '', XDG_CACHE_HOME: path.join(temporary, 'cache-default'), XDG_DATA_HOME: dataRoot }
   });
-  assert.equal(fromGameDirectory.status, 0, fromGameDirectory.stdout + fromGameDirectory.stderr);
+  assertGuestReached(fromGameDirectory);
   const prepared = cli('prepare', '--game', game, '--state', state, '--config', config, '--manifest', manifest);
   assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
   const bundle = path.join(temporary, 'game bundle');
@@ -147,11 +159,11 @@ try {
   delete oldDescriptor.patches;
   fs.writeFileSync(oldDescriptorPath, JSON.stringify(oldDescriptor));
   const oldRun = cliAt(path.join(temporary, 'older descriptor data'), oldBundle, '--game', game);
-  assert.equal(oldRun.status, 0, oldRun.stdout + oldRun.stderr);
+  assertGuestReached(oldRun);
   const indexedData = path.join(temporary, 'data-indexed');
   const bundledRun = cliAt(indexedData, movedBundle, '--game', game,
     '--state', path.join(temporary, 'bundle state'));
-  assert.equal(bundledRun.status, 0, bundledRun.stdout + bundledRun.stderr);
+  assertGuestReached(bundledRun);
   assert.ok(fs.existsSync(path.join(temporary, 'bundle state/prepared.json')));
   const editedBundle = path.join(temporary, 'edited bundle');
   fs.cpSync(movedBundle, editedBundle, { recursive: true });
@@ -159,7 +171,7 @@ try {
   const editedState = path.join(temporary, 'edited bundle state');
   const editedRun = cliAt(path.join(temporary, 'edited bundle data'), editedBundle,
     '--game', game, '--state', editedState);
-  assert.equal(editedRun.status, 0, editedRun.stdout + editedRun.stderr);
+  assertGuestReached(editedRun);
   const editedRecord = JSON.parse(fs.readFileSync(path.join(editedState, 'prepared.json')));
   assert.notEqual(editedRecord.bootstrapSha256,
     JSON.parse(fs.readFileSync(path.join(editedBundle, 'pmjs.json'))).bootstrapSha256,
@@ -172,7 +184,7 @@ try {
   fs.appendFileSync(runtimeModule, '\n// changed composition\n');
   const refreshed = cliAt(indexedData, movedBundle, '--game', game,
     '--state', path.join(temporary, 'bundle state'));
-  assert.equal(refreshed.status, 0, refreshed.stdout + refreshed.stderr);
+  assertGuestReached(refreshed);
   const afterComposition = JSON.parse(fs.readFileSync(path.join(temporary, 'bundle state/prepared.json')));
   assert.notEqual(afterComposition.runtimeIdentity, beforeComposition.runtimeIdentity);
   assert.equal(crypto.createHash('sha256').update(
@@ -197,14 +209,14 @@ try {
   assert.deepEqual(indexedImage.page, baselineImage.page);
   const assetsData = path.join(temporary, 'data-with-assets');
   const assetsRun = cliAt(assetsData, withAssets, '--game', game);
-  assert.equal(assetsRun.status, 0, assetsRun.stdout + assetsRun.stderr);
+  assertGuestReached(assetsRun);
   assert.deepEqual(preparedImage(assetsData).page, baselineImage.page);
   const damagedAssets = path.join(temporary, 'damaged assets bundle');
   fs.cpSync(withAssets, damagedAssets, { recursive: true });
   fs.appendFileSync(path.join(damagedAssets, included.images[0].outputs[0].path), 'damaged');
   const damagedData = path.join(temporary, 'data-damaged-assets');
   const damagedRun = cliAt(damagedData, damagedAssets, '--game', game);
-  assert.equal(damagedRun.status, 0, damagedRun.stdout + damagedRun.stderr);
+  assertGuestReached(damagedRun);
   assert.deepEqual(preparedImage(damagedData).page, baselineImage.page,
     'corrupt included page falls back to native preparation');
   const changedDecoder = path.join(temporary, 'changed decoder bundle');
@@ -219,7 +231,7 @@ try {
   fs.writeFileSync(changedDescriptorFile, JSON.stringify(changedDescriptor));
   const incompatibleData = path.join(temporary, 'data-incompatible-index');
   const incompatibleRun = cliAt(incompatibleData, changedDecoder, '--game', game);
-  assert.equal(incompatibleRun.status, 0, incompatibleRun.stdout + incompatibleRun.stderr);
+  assertGuestReached(incompatibleRun);
   assert.deepEqual(preparedImage(incompatibleData).page, baselineImage.page,
     'incompatible decoder uses ordinary preparation');
   const originalImage = fs.readFileSync(path.join(game, 'img/pictures/fixture.png'));
@@ -232,7 +244,7 @@ try {
   ]));
   const replacedData = path.join(temporary, 'data-replaced-source');
   const replacedRun = cliAt(replacedData, movedBundle, '--game', game);
-  assert.equal(replacedRun.status, 0, replacedRun.stdout + replacedRun.stderr);
+  assertGuestReached(replacedRun);
   assert.notEqual(preparedImage(replacedData).manifest.sourceHash, baselineImage.manifest.sourceHash);
   assert.notDeepEqual(preparedImage(replacedData).page, baselineImage.page,
     'source replacement uses newly prepared pixels');
@@ -243,7 +255,7 @@ try {
   assert.equal(fs.readFileSync(path.join(state, 'prepared.json'), 'utf8'), record,
     'failed preparation preserves the working preparation record');
   fs.writeFileSync(config, '{"title":"Changed"}');
-  cli('run', '--game', game, '--state', state);
+  assertGuestReached(cli('run', '--game', game, '--state', state));
   assert.notEqual(fs.readFileSync(path.join(state, 'prepared.json'), 'utf8'), record,
     'configuration changes refresh preparation');
   fs.writeFileSync(config, '{}');
@@ -252,18 +264,18 @@ try {
     const original = fs.readFileSync(file);
     fs.appendFileSync(file, '\n ');
     const prior = fs.readFileSync(path.join(state, 'prepared.json'), 'utf8');
-    cli('run', '--game', game, '--state', state);
+    assertGuestReached(cli('run', '--game', game, '--state', state));
     assert.notEqual(fs.readFileSync(path.join(state, 'prepared.json'), 'utf8'), prior);
     fs.writeFileSync(file, original);
   }
-  fs.writeFileSync(path.join(game, 'js/pixi.js'), 'PIXI.VERSION = "4.8.0";');
+  fs.writeFileSync(path.join(game, 'js/pixi.js'), pixiProbe('4.8.0'));
   const beforePixi = fs.readFileSync(path.join(state, 'prepared.json'), 'utf8');
-  cli('run', '--game', game, '--state', state);
+  assertGuestReached(cli('run', '--game', game, '--state', state));
   assert.notEqual(fs.readFileSync(path.join(state, 'prepared.json'), 'utf8'), beforePixi);
   fs.rmSync(path.join(game, 'js/pixi.js'));
   const bootstrap = path.join(state, JSON.parse(fs.readFileSync(path.join(state, 'prepared.json'))).bootstrap);
   fs.appendFileSync(bootstrap, '\n// damaged\n');
-  cli('run', '--game', game, '--state', state);
+  assertGuestReached(cli('run', '--game', game, '--state', state));
   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(bootstrap)).digest('hex'),
     JSON.parse(fs.readFileSync(path.join(state, 'prepared.json'))).bootstrapSha256,
     'damaged bootstrap is regenerated');

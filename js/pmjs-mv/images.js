@@ -93,36 +93,33 @@ PMJS.mv.bitmap.requestImageFile = pmjsBitmapRequestImageWrap()(Bitmap.prototype.
     getTarget: function() { return typeof Decrypter !== 'undefined' && Decrypter || null; },
     method: 'decryptImg',
     wrap: function(guestDecrypt) {
-      var reviewedDecrypt = function(url, bitmap) {
-          url = this.extToEncryptExt(url);
+      // Reviewed MV 1.6.1 decryptor; only its exact LF/CRLF forms qualify.
+      var reviewed = `function(url, bitmap) {
+    url = this.extToEncryptExt(url);
 
-          var requestFile = new XMLHttpRequest();
-          requestFile.open("GET", url);
-          requestFile.responseType = "arraybuffer";
-          requestFile.send();
+    var requestFile = new XMLHttpRequest();
+    requestFile.open("GET", url);
+    requestFile.responseType = "arraybuffer";
+    requestFile.send();
 
-          requestFile.onload = function () {
-              if(this.status < Decrypter._xhrOk) {
-                  var arrayBuffer = Decrypter.decryptArrayBuffer(requestFile.response);
-                  bitmap._image.src = Decrypter.createBlobUrl(arrayBuffer);
-                  bitmap._image.addEventListener('load', bitmap._loadListener = Bitmap.prototype._onLoad.bind(bitmap));
-                  bitmap._image.addEventListener('error', bitmap._errorListener = bitmap._loader || Bitmap.prototype._onError.bind(bitmap));
-              }
-          };
+    requestFile.onload = function () {
+        if(this.status < Decrypter._xhrOk) {
+            var arrayBuffer = Decrypter.decryptArrayBuffer(requestFile.response);
+            bitmap._image.src = Decrypter.createBlobUrl(arrayBuffer);
+            bitmap._image.addEventListener('load', bitmap._loadListener = Bitmap.prototype._onLoad.bind(bitmap));
+            bitmap._image.addEventListener('error', bitmap._errorListener = bitmap._loader || Bitmap.prototype._onError.bind(bitmap));
+        }
+    };
 
-          requestFile.onerror = function () {
-              if (bitmap._loader) {
-                  bitmap._loader();
-              } else {
-                  bitmap._onError();
-              }
-          };
-      };
-      function reviewedSource(fn) {
-        return Function.prototype.toString.call(fn).replace(/\r\n/g, "\n")
-          .split("\n").map(function(line) { return line.trim(); }).join("\n");
-      }
-      if (reviewedSource(guestDecrypt) !== reviewedSource(reviewedDecrypt)) return guestDecrypt;
+    requestFile.onerror = function () {
+        if (bitmap._loader) {
+            bitmap._loader();
+        } else {
+            bitmap._onError();
+        }
+    };
+}`;
+      if (!methods.matchesSource(guestDecrypt, [reviewed, reviewed.replace(/\n/g, '\r\n')])) return guestDecrypt;
       return function(url, bitmap) {
         var path = decodeResourceUrlPath(url)
           .replace(/^file:\/\/\/game\//, '').replace(/^\.\//, '');

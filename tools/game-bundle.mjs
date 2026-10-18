@@ -134,8 +134,11 @@ export async function createBundle({ root, share, game, output, config, manifest
     if (index) {
       console.log('[pmjs] Preparing asset index; this may take a few minutes for a large game.');
       const { generateAssetIndex } = require(path.join(share, 'runner/asset-index.cjs'));
-      const report = await generateAssetIndex({ root, gameRoot: game,
-        config: configName && path.join(stage, configName), output: stage, includeAssets,
+      const { resolveDefaults } = require(path.join(share, 'runner/index.cjs'));
+      const indexConfig = configName && path.join(stage, configName);
+      const options = resolveDefaults({ gameRoot: game, config: indexConfig });
+      const report = await generateAssetIndex({ root, gameRoot: game, options,
+        config: indexConfig, output: stage, includeAssets,
         shouldCancel: () => cancelled });
       console.log(`Asset index: ${report.preparedImages}/${report.images} images, ${report.maps} maps`);
       for (const warning of report.warnings) console.warn(warning);

@@ -22,7 +22,8 @@ function makeHost(bulkClear) {
       (id === 'scene.record-bulk-clear' ? bulkClear : true) } },
     NativeHost: { scene: { packetVersion: 30,
       schema: { version: 30, metadataStride: 7,
-      valueStride: 41, transactionalSubmit: true, preparedWorldState: true } }, render: {} }
+      valueStride: 41, atlasTilingSampling: true, floatSpriteUv: true, repeatSpriteSampling: true,
+          filterCompositeBlend: true, isolatedClearRect: true, transactionalSubmit: true, preparedWorldState: true, clampedTilingSampling: true } }, render: {} }
   };
   context.globalThis = context;
   vm.createContext(context);

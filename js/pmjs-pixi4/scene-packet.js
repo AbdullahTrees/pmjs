@@ -444,7 +444,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
 
   if (!nativeSceneEmission) nativeSceneEmission = PMJS.pixi4.sceneEncoding.createEmission();
   PMJS.pixi4.sceneEncoding.encode(pipeKind, node, pipeType, particleContext,
-    particleValues, nativeSceneEmission, tint, nativeSceneSchema);
+    particleValues, nativeSceneEmission, tint);
   var kind = nativeSceneEmission.kind;
   var resource = nativeSceneEmission.resource;
   tint = nativeSceneEmission.tint;
@@ -666,7 +666,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
           windowChild.openness > 0) {
 
         if (windowLayer) {
-          if (!NativeHost.scene.schema.isolatedClearRect || !filterGroups.length) {
+          if (!filterGroups.length) {
             PMJS.compat.hit('render.window-layer', 'isolated rectangle clear is unavailable');
           } else {
             node._maskWindow(windowChild, {

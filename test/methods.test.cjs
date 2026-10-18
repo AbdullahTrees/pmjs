@@ -287,3 +287,19 @@ test('cached modules keep globals, prototypes, task queues and native hosts isol
   assert.deepEqual(first.NativeHost.calls, []);
   assert.deepEqual(second.NativeHost.calls, ['second']);
 });
+
+
+test('reviewed source strings match exactly through the captured intrinsic reader', () => {
+  const ctx = context();
+  const reviewed = function(value) { return value + 'a b'; };
+  const source = ctx.PMJS.methods.sourceOf(reviewed);
+  assert.equal(ctx.PMJS.methods.matchesSource(reviewed, source), true);
+  const changed = function(value) { return value + 'ab'; };
+  changed.toString = () => source;
+  assert.equal(ctx.PMJS.methods.matchesSource(changed, [source]), false);
+  assert.notEqual(ctx.PMJS.methods.sourceOf(changed), source);
+  const multiline = 'function() {\n  return 3;\n}';
+  const crlf = vm.runInNewContext('(' + multiline.replace(/\n/g, '\r\n') + ')');
+  assert.equal(ctx.PMJS.methods.matchesSource(crlf, multiline), false);
+  assert.equal(ctx.PMJS.methods.matchesSource(crlf, [multiline, multiline.replace(/\n/g, '\r\n')]), true);
+});

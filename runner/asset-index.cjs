@@ -6,7 +6,6 @@ const crypto = require('node:crypto');
 const { prepareAssets, validDescriptor } = require('./asset-preparation.cjs');
 const { prepareMaps, validTileDescriptor } = require('./map-preparation.cjs');
 const { COMPILER_VERSION } = require('./map-demand.cjs');
-const { resolveDefaults } = require('./index.cjs');
 
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -64,9 +63,8 @@ function portableMaps(result, cacheRoot, includeAssets, output) {
   return { compiler: COMPILER_VERSION, compilations: result.compilations || {}, mapInputs, entries };
 }
 
-async function generateAssetIndex({ root, gameRoot, config, output, includeAssets, shouldCancel = () => false }) {
+async function generateAssetIndex({ root, gameRoot, config, options, output, includeAssets, shouldCancel = () => false }) {
   const nativeAddon = require(path.join(root, 'lib/pmjs_native.node'));
-  const options = resolveDefaults({ gameRoot, config });
   const cacheRoot = path.join(output, '.preparation');
   if (!options.assetPreparation.enabled) {
     const empty = { schema: 1, kind: 'pmjs-asset-index',

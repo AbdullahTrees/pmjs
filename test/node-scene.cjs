@@ -21,6 +21,11 @@ if (schema.version !== native.scene.packetVersion ||
   throw new Error('native scene schema is incomplete');
 }
 
+for (const capability of ['clampedTilingSampling', 'atlasTilingSampling', 'floatSpriteUv',
+  'repeatSpriteSampling', 'filterCompositeBlend', 'isolatedClearRect']) {
+  assert.equal(schema[capability], true, 'required native scene capability: ' + capability);
+}
+
 const canvas = native.canvas.create(1, 1);
 const rgba = new Uint8ClampedArray([12, 34, 56, 255]);
 native.canvas.writePixels(canvas.handle, 0, 0, 1, 1, rgba);
