@@ -160,6 +160,7 @@ test('portable map metadata and atlas pages are checked against recipient inputs
     entries:[{identity,descriptor:manifest.descriptor,
       outputs:[{path:path.posix.join('assets/maps',identity,'tiles-0.png'),
         hash:crypto.createHash('sha256').update(fs.readFileSync(output)).digest('hex')}]}]};
+  portableIndex.entries.push({ ...portableIndex.entries[0], descriptor: null });
   const imported=await prepareMaps({...f,cacheRoot:path.join(bundle,'recipient-cache'),
     portableIndex,portableAssetRoot:bundle});
   assert.equal(imported.selected,1);
@@ -170,6 +171,16 @@ test('portable map metadata and atlas pages are checked against recipient inputs
     portableIndex,portableAssetRoot:bundle});
   assert.equal(damaged.selected,1);
   assert.equal(f.jobs,2,'corrupt page falls back to native preparation');
+  for (const size of [8, 24]) {
+    const invalid = Buffer.alloc(size);
+    fs.writeFileSync(output, invalid);
+    portableIndex.entries[0].outputs[0].hash = crypto.createHash('sha256').update(invalid).digest('hex');
+    const jobs = f.jobs;
+    const rejected = await prepareMaps({...f, cacheRoot:path.join(bundle, 'invalid-header-'+size),
+      portableIndex, portableAssetRoot:bundle});
+    assert.equal(rejected.selected, 1);
+    assert.equal(f.jobs, jobs + 1, 'matching checksum cannot bypass PNG header validation');
+  }
   fs.appendFileSync(path.join(f.gameRoot,'data/Map001.json'),' ');
   const stale=await prepareMaps({...f,cacheRoot:path.join(bundle,'stale-cache'),
     portableIndex,portableAssetRoot:bundle});

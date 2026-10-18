@@ -40,6 +40,7 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
     ImageHandle maskImage = 0;
     std::array<float, 6> maskTransform{};
   };
+  const SceneState rootState;
   std::vector<SceneState> states(nodeCount);
   std::size_t filterDepth = 0;
   for (std::size_t index = 0; index < nodeCount; ++index) {
@@ -92,8 +93,8 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
       values[valueOffset + 2], values[valueOffset + 3],
       values[valueOffset + 4], values[valueOffset + 5]
     };
-    const SceneState parent = parentIndex == noParent
-      ? SceneState{} : states[parentIndex];
+    const SceneState& parent = parentIndex == noParent
+      ? rootState : states[parentIndex];
     SceneState& state = states[index];
     if (spriteVertices) state.world = parent.world;
     else if (preparedWorld) state.world = local;
@@ -209,13 +210,8 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
             }
             if (components > 20) return false;
           }
-        } else if (command.filterKind == FilterKind::blur) {
-          if (resource != 0 || command.filterParameters[0] < 0 ||
-              command.filterParameters[1] < 1 ||
-              command.filterParameters[1] > 15 ||
-              (command.filterParameters[2] != 0 &&
-               command.filterParameters[2] != 5)) return false;
-        } else if (command.filterKind == FilterKind::blurX ||
+        } else if (command.filterKind == FilterKind::blur ||
+                   command.filterKind == FilterKind::blurX ||
                    command.filterKind == FilterKind::blurY) {
           if (resource != 0 || command.filterParameters[0] < 0 ||
               command.filterParameters[1] < 1 ||
@@ -248,9 +244,8 @@ bool Renderer::queueScene(std::uint32_t version, const std::uint32_t* metadata,
         } else if (command.filterKind == FilterKind::noiseGlitch) {
           if (resource != 0 || command.filterParameters[0] < 0 ||
               command.filterParameters[2] < 0) return false;
-        } else if (command.filterKind == FilterKind::zoomBlur) {
-          if (resource != 0 || command.filterParameters[3] < 0) return false;
-        } else if (command.filterKind == FilterKind::shockwave) {
+        } else if (command.filterKind == FilterKind::zoomBlur ||
+                   command.filterKind == FilterKind::shockwave) {
           if (resource != 0 || command.filterParameters[3] < 0) return false;
         } else if (command.filterKind == FilterKind::advancedBloom) {
           if (resource != 0 || command.filterParameters[3] < 1 ||

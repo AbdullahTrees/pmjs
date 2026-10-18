@@ -7,20 +7,20 @@ const crypto = require('node:crypto');
 const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
-const { preparationFiles } = require('./preparation-files.cjs');
+const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const { catalogInvalidator, readCatalog, publishCatalog, checksum, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 const { COMPILER_VERSION, mapContract, geometryEstimate, engineTilemap, compileRpgMap, compileTiledMap } = require('./map-demand.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const identity = object => hash(JSON.stringify(object));
-const digest = async file => hash(await fsp.readFile(file));
+async function digest(file) {
+  const hasher = crypto.createHash('sha256');
+  for await (const chunk of fs.createReadStream(file)) hasher.update(chunk);
+  return hasher.digest('hex');
+}
 const HASH = /^[a-f0-9]{64}$/;
 const installedLeases = new WeakMap();
 async function readJson(file) { return JSON.parse(await fsp.readFile(file, 'utf8')); }
-async function publishJson(file, value, flush = true) {
-  const handle = await fsp.open(file, 'wx');
-  try { await handle.writeFile(JSON.stringify(value)+'\n'); if (flush) await handle.sync(); }
-  finally { await handle.close(); }
-}
+
 function validTileDescriptor(d) {
   const rect = r => Array.isArray(r) && r.length === 4 && r.every(Number.isSafeInteger) && r[0] >= 0 && r[1] >= 0 && r[2] > 0 && r[3] > 0;
   if (!d || d.version !== 1 || !Number.isInteger(d.halo) || d.halo < 1 || d.halo > 32 || !Array.isArray(d.pages) || !d.pages.length || d.pages.length > 4096 ||
@@ -124,6 +124,10 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
   preparationContext = 'live', portableIndex = null, portableAssetRoot = null }) {
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   const offline = preparationContext === 'offline';
+  const indexedMaps = new Map();
+  for (const entry of portableIndex?.entries || []) {
+    if (!indexedMaps.has(entry.identity)) indexedMaps.set(entry.identity, entry);
+  }
   const started = performance.now(), root = path.join(cacheRoot, 'maps');
   const result = { enabled: true, selected: 0, refused: 0, generated: 0, hits: 0, negativeHits: 0,
     installed: 0, compilationHits: 0, indexedCopies: 0, nativePacks: 0,
@@ -346,7 +350,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         } catch (error) {
           keys.push(refusalKey);
           stage = await fsp.mkdtemp(path.join(root,'entries','.stage-'));
-          await publishJson(path.join(stage,'manifest.json'), { compiler: COMPILER_VERSION, key: refusalKey,
+          await writeJson(path.join(stage,'manifest.json'), { compiler: COMPILER_VERSION, key: refusalKey,
             descriptor: null, descriptorHash: identity(null), outputs: [], reason: error.message }, false);
           await validateDependencies(dependencies);
           if (shouldCancel()) { result.cancelled=true; break; }
@@ -400,7 +404,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           if (missing.length) reason = 'missing tile source '+missing.map(input => input.source).join(', ');
           else if (inputs.every(input => !input.rectangles.length)) reason = 'no visual tile demand';
           else if (portableAssetRoot && Array.isArray(portableIndex?.entries)) {
-            const indexed = portableIndex.entries.find(entry => entry.identity === key);
+            const indexed = indexedMaps.get(key);
             if (indexed && validTileDescriptor(indexed.descriptor) &&
                 indexed.descriptor.sources.length === inputs.length &&
                 indexed.outputs?.length === indexed.descriptor.pages.length) {
@@ -412,8 +416,12 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
                     throw new Error('invalid indexed map page');
                   const source = path.join(portableAssetRoot, page.path);
                   if (await digest(source) !== page.hash) throw new Error('indexed map page checksum differs');
-                  const header = await fsp.readFile(source);
-                  if (header.length < 24 || header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
+                  const handle = await fsp.open(source, 'r');
+                  const header = Buffer.alloc(24);
+                  let bytesRead;
+                  try { ({ bytesRead } = await handle.read(header, 0, 24, 0)); }
+                  finally { await handle.close(); }
+                  if (bytesRead !== 24 || header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
                       header.readUInt32BE(16) !== expected.width || header.readUInt32BE(20) !== expected.height)
                     throw new Error('indexed map page header differs');
                   await fsp.copyFile(source, path.join(stage, expected.path));
@@ -448,7 +456,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           manifest = { compiler: COMPILER_VERSION, key, descriptor, descriptorHash: identity(descriptor), outputs,
             reason, estimates: { pageBytes, geometryBytes, metadataBytes, ordinaryBytes, compactBytes } };
           // Disposable entries are validated on reuse; durable publication belongs to the final index/catalog.
-          await publishJson(path.join(stage, 'manifest.json'), manifest, false);
+          await writeJson(path.join(stage, 'manifest.json'), manifest, false);
           if (!await validateEntry(stage, key,files)) throw new Error('tile output validation failed');
           if (shouldCancel()) { result.cancelled = true; break; }
           await validateDependencies(dependencies);
@@ -522,7 +530,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           identity(previousIndex.keys || []) !== identity(keys) || identity(previousIndex.snapshots || []) !== identity(nextIndex.snapshots)) {
         const stagedIndex = indexFile+'.stage-'+process.pid;
         await fsp.rm(stagedIndex, { force: true });
-        await publishJson(stagedIndex, nextIndex);
+        await writeJson(stagedIndex, nextIndex);
         await fsp.rename(stagedIndex, indexFile);
       }
       const retained = new Set([...keys, ...snapshots.keys()]);

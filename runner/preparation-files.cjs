@@ -8,6 +8,14 @@ const crypto = require('node:crypto');
 const HASH = /^[a-f0-9]{64}$/;
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
+async function writeJson(file, value, flush = true) {
+  const handle = await fsp.open(file, 'wx');
+  try {
+    await handle.writeFile(JSON.stringify(value) + '\n');
+    if (flush) await handle.sync();
+  } finally { await handle.close(); }
+}
+
 async function preparationFiles(directory, verifyHashes = false) {
   const index = path.join(directory, 'verified-files.json');
   let previous = {}, previousHash;
@@ -82,4 +90,4 @@ async function preparationFiles(directory, verifyHashes = false) {
   return { hash, inspect, validatedJson, save, stats };
 }
 
-module.exports = { preparationFiles };
+module.exports = { preparationFiles, writeJson };

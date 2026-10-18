@@ -212,3 +212,28 @@ test('MZ manifest paths and filename callbacks describe the same loaded plugin',
   assert.equal(snapshot.counts.loaded, 1); assert.equal(snapshot.counts.unloaded, 0);
   assert.equal(snapshot.guest[0].name, 'Folder/Example');
 });
+
+for (const phase of ['loading', 'loaded', 'late']) {
+  test('plugin callback receiver and original exception survive ' + phase + ' dispatch', () => {
+    const logs = [], seen = [];
+    const ctx = loadPmjsRuntime({ console: { error(...args) { logs.push(args); } } });
+    const failure = new Error('callback failed');
+    function callback() { seen.push(this); throw failure; }
+    callback.call = () => { throw new Error('callback call property must not be invoked'); };
+    if (phase === 'late') ctx.PMJS.plugins.execute('Example', () => {});
+    const subscribe = () => ctx.PMJS.plugins[phase === 'loading' ? 'onLoading' : 'onLoaded'](
+      'Example', 'adapter', callback);
+    if (phase === 'late') assert.throws(subscribe, error => error === failure);
+    else {
+      subscribe();
+      assert.throws(() => ctx.PMJS.plugins.execute('Example', () => {}), error => error === failure);
+    }
+    assert.equal(seen.length, 1);
+    if (phase === 'late') assert.equal(seen[0], undefined);
+    else { assert.equal(seen[0].owner, 'adapter'); assert.equal(seen[0].callback, callback); }
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0][0], '[pmjs] error running ' + (phase === 'loading' ? 'loading' : 'loaded') +
+      ' callback for example (owner adapter):');
+    assert.equal(logs[0][1], failure);
+  });
+}

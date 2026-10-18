@@ -88,6 +88,7 @@ exclusive use of the display.
 For additional logging:
 
 - `PMJS_GRAPHICS_DIAGNOSTICS=1`: graphics diagnostics.
+- `PMJS_EVENT_DIAGNOSTICS=1`: enable MV event-stall timing and reports
 - `PMJS_REQUIRE_HARDWARE_GL=1`: reject software rendering.
 - `PMJS_COMPAT_VERBOSE=1`: log unsupported operations.
 - `PMJS_STRICT_COMPAT=1`: stop at the first unsupported operation.

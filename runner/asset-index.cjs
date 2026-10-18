@@ -100,11 +100,17 @@ async function generateAssetIndex({ root, gameRoot, config, output, includeAsset
       warnings.push('[pmjs] map index unavailable: ' + maps.error);
       maps = null;
     }
+    const imageEntries = new Map();
+    images.entries.forEach((entry, index) => {
+      if (!imageEntries.has(entry.source)) imageEntries.set(entry.source, { entry, index });
+    });
     const imageRecords = images.decisions.map(decision => {
       if (decision.descriptor && !validDescriptor(decision.descriptor)) throw new Error('invalid generated image descriptor');
+      const original = imageEntries.get(decision.source);
+      const decrypted = imageEntries.get(decision.source.replace(/\.(png_|rpgmvp)$/i, '.png'));
+      // Either source spelling can match; retain the first entry in preparation order.
+      const entry = (!original || decrypted && decrypted.index < original.index ? decrypted : original)?.entry;
       const outputs = Object.entries(decision.outputs).map(([name, checksum]) => {
-        const entry = images.entries.find(value => value.source === decision.source ||
-          value.source === decision.source.replace(/\.(png_|rpgmvp)$/i, '.png'));
         if (!entry) throw new Error('missing generated image entry');
         const source = path.join(entry.directory, name);
         if (hash(source) !== checksum) throw new Error('generated image page changed');

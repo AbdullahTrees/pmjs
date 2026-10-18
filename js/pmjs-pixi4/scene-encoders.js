@@ -27,11 +27,6 @@ function resetEmission(scratch, tint) {
   scratch.presentation = null;
 }
 
-function writeNativeSceneContainer(node, type, particleContext, particleValues,
-    scratch) {
-
-}
-
 function writeNativeSceneSprite(node, type, particleContext, particleValues,
     scratch) {
 
@@ -174,7 +169,6 @@ function writeNativeSceneMesh(node, type, particleContext, particleValues,
 }
 
 var nativeSceneEncoders = [];
-nativeSceneEncoders[PMJS_SCENE_KIND.CONTAINER] = writeNativeSceneContainer;
 nativeSceneEncoders[PMJS_SCENE_KIND.SPRITE] = writeNativeSceneSprite;
 nativeSceneEncoders[PMJS_SCENE_KIND.SCREEN_SPRITE] = writeNativeSceneScreenSprite;
 nativeSceneEncoders[PMJS_SCENE_KIND.TILING_SPRITE] = writeNativeSceneTilingSprite;
@@ -183,7 +177,9 @@ nativeSceneEncoders[PMJS_SCENE_KIND.MESH] = writeNativeSceneMesh;
 
 function encode(kind, node, type, particleContext, particleValues, scratch, tint, schema) {
   resetEmission(scratch, tint);
-  nativeSceneEncoders[kind](node, type, particleContext, particleValues, scratch, schema);
+  if (kind !== PMJS_SCENE_KIND.CONTAINER) {
+    nativeSceneEncoders[kind](node, type, particleContext, particleValues, scratch, schema);
+  }
 }
 return { createEmission: createEmission, encode: encode };
 })();

@@ -28,7 +28,11 @@ function compileRpgMap({ map, tileset, Tilemap, mz, tileWidth = 48, tileHeight =
       tileWidth <= 0 || tileHeight <= 0 || tileWidth % 2 || tileHeight % 2) throw new Error('unsupported tile dimensions');
   if (!map || !tileset || !Array.isArray(map.data) || map.data.length !== map.width*map.height*6)
     throw new Error('incomplete map visual planes');
-  const ids = new Set(map.data.slice(0, map.width*map.height*4).filter(id => id > 0));
+  const ids = new Set();
+  for (let index = 0; index < map.width*map.height*4; ++index) {
+    const id = map.data[index];
+    if (id > 0) ids.add(id);
+  }
   for (const event of map.events || []) if (event) for (const page of event.pages || [])
     if (page.image && page.image.tileId > 0) ids.add(page.image.tileId);
   const demands = new Map(), counts = new Map();
@@ -67,10 +71,14 @@ function compileRpgMap({ map, tileset, Tilemap, mz, tileWidth = 48, tileHeight =
     const source = 'img/tilesets/'+name+'.png';
     if (!demands.has(source)) demands.set(source, new Map());
   }
+  let animation = false, priority = false, table = false;
+  for (const id of ids) {
+    if (!animation && Tilemap.isTileA1 && Tilemap.isTileA1(id)) animation = true;
+    if (!priority && tileset.flags[id] & 16) priority = true;
+    if (!table && Tilemap.isTileA2(id) && tileset.flags[id] & 128) table = true;
+  }
   return { renderer: mz ? 'mz' : 'mv', contract: mapContract(map, tileset, tileWidth, tileHeight),
-    features: { animation: [...ids].some(id => Tilemap.isTileA1 && Tilemap.isTileA1(id)),
-      priority: [...ids].some(id => tileset.flags[id] & 16),
-      table: [...ids].some(id => Tilemap.isTileA2(id) && tileset.flags[id] & 128),
+    features: { animation, priority, table,
       shadows: map.data.slice(map.width*map.height*4,map.width*map.height*5).some(Boolean),
       tileEvents: (map.events || []).some(event => event && event.pages.some(page => page.image && page.image.tileId)),
       looping: !!map.scrollType },

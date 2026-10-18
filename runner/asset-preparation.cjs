@@ -6,7 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { pipeline } = require('node:stream/promises');
-const { preparationFiles } = require('./preparation-files.cjs');
+const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
 const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 
@@ -216,13 +216,7 @@ async function discover(gameRoot, cacheRoot) {
 async function readJson(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (_) { return null; }
 }
-async function writeJson(file, data, flush = true) {
-  const handle = await fsp.open(file, 'wx');
-  try {
-    await handle.writeFile(JSON.stringify(data) + '\n');
-    if (flush) await handle.sync();
-  } finally { await handle.close(); }
-}
+
 const installedLeases = new WeakMap();
 
 async function createImageLease(cacheRoot, keys, assets) {
@@ -277,6 +271,12 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   if (!Number.isSafeInteger(workspaceBytes) || workspaceBytes < 0 || workspaceBytes > 256 * 1024 * 1024)
     throw new Error('assetPreparation.workspaceBytes must be an integer from 0 to 268435456');
   const offline = preparationContext === 'offline';
+  const indexedImages = new Map();
+  for (const record of portableIndex?.images || []) {
+    const records = indexedImages.get(record.source);
+    if (records) records.push(record);
+    else indexedImages.set(record.source, [record]);
+  }
   const started = performance.now();
   const result = { enabled: true, total: 0, completed: 0, generated: 0, hits: 0, negativeHits: 0,
     fallback: 0, failedFiles: 0, installFailures: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
@@ -412,7 +412,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
         const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
-        const findIndexed = () => portableIndex?.images?.find(record => record.source === source &&
+        const findIndexed = () => indexedImages.get(source)?.find(record =>
           record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
           record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
           (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||

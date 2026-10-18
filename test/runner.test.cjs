@@ -478,6 +478,7 @@ test('timing config pins MV logic at 60 Hz and validates render rates', () => {
   const uncapped = parseTimingConfig({ PMJS_RENDER_HZ: '0' });
   assert.equal(uncapped.uncapped, true);
   assert.equal(parseTimingConfig({ PMJS_UNCAPPED: '1' }).uncapped, true);
+  assert.equal(parseTimingConfig({ PMJS_RENDER_HZ: '30', PMJS_UNCAPPED: '1' }).uncapped, true);
   assert.equal(parseTimingConfig({ PMJS_CATCHUP_MODE: 'smooth' }).catchupMode, 'smooth');
   assert.equal(parseTimingConfig({ PMJS_CATCHUP_MODE: 'burst' }).catchupMode, 'burst');
   assert.throws(() => parseTimingConfig({ PMJS_CATCHUP_MODE: 'smooh' }), /PMJS_CATCHUP_MODE/);

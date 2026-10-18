@@ -76,6 +76,7 @@ test('diagnostics inspect methods after plugins without replacing setup', () => 
   const hits = [];
   const setup = function() {};
   const sandbox = {
+    NativeHost: { runtime: { env() { return undefined; } } },
     nativeCompatibilityStrict: true, nativeCompatibilityVerbose: false,
     nativeCompatibilityHit: (...args) => hits.push(args),
     PluginManager: { setup },

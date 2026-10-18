@@ -20,18 +20,21 @@ NativePrepareCountLimiter.prototype.allowedToUpload = function() {
   return this.itemsLeft-- > 0;
 };
 
-function nativePrepareSources(item, sources, seen) {
-  if (!item || seen.indexOf(item) >= 0) return;
-  seen.push(item);
+function nativePrepareSources(item, sources, seen, sourceSet) {
+  if (!item || seen.has(item)) return;
+  seen.add(item);
   if (typeof item.updateText === 'function') item.updateText(true);
   var base = item.baseTexture || item._baseTexture || item.__baseTexture ||
     item.texture && item.texture.baseTexture;
   var source = base && base.source;
-  if (source && sources.indexOf(source) < 0) sources.push(source);
+  if (source && !sourceSet.has(source)) {
+    sourceSet.add(source);
+    sources.push(source);
+  }
   var children = item.children;
   if (children) {
     for (var index = 0; index < children.length; index++) {
-      nativePrepareSources(children[index], sources, seen);
+      nativePrepareSources(children[index], sources, seen, sourceSet);
     }
   }
 }
@@ -55,8 +58,9 @@ NativePreparePlugin.prototype.upload = function(item, done) {
   if (item) this.queue.push(item);
   var queued = this.queue.splice(0);
   var sources = [];
+  var sourceSet = new Set();
   for (var index = 0; index < queued.length; index++) {
-    nativePrepareSources(queued[index], sources, []);
+    nativePrepareSources(queued[index], sources, new Set(), sourceSet);
   }
   var plugin = this;
   var remaining = 0;

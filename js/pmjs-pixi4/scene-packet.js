@@ -384,9 +384,8 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   }
   var nodeFilters = null;
   if (!particleContext) {
-    if (node._filters || node.__pmjsNativeDirectFilters === false) {
-      nodeFilters = nativeSceneFilters(node);
-    } else if (node.__pmjsNativeDirectFilters === undefined) {
+    if (node._filters || node.__pmjsNativeDirectFilters === false ||
+        node.__pmjsNativeDirectFilters === undefined) {
       nodeFilters = nativeSceneFilters(node);
     }
   }
@@ -759,7 +758,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
 }
 
 function prepareNativeBitmapCache(node, renderer, root) {
-  if (!node._cacheAsBitmap || node._cacheData && node._cacheData.sprite) return;
+  if (!node._cacheAsBitmap) return;
   if (typeof node._initCachedDisplayObject !== 'function') {
     throw new Error('Pixi bitmap cache initializer is unavailable');
   }
@@ -808,7 +807,7 @@ function prepareNativeDeclaredBitmapCaches(stage, renderer, policy, state) {
     if (nativeSceneNodeRejected(ancestor, null) || ancestor !== node &&
         ancestor._cacheAsBitmap && ancestor._cacheData && ancestor._cacheData.sprite) return true;
     if (ancestor === stage) {
-      prepareNativeBitmapCache(node, renderer, stage);
+      if (!node._cacheData || !node._cacheData.sprite) prepareNativeBitmapCache(node, renderer, stage);
       return true;
     }
     var parent = ancestor.parent;

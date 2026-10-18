@@ -1309,3 +1309,18 @@ test('cancelled warm installation releases its lease and clears partial indexes'
   assert.deepEqual(fs.readdirSync(f.cacheRoot).filter(name => name.startsWith('.lease-')), before);
   cold.releaseCacheLease();
 });
+
+test('portable image lookup keeps ordered candidates for the same source', async () => {
+  const f = fixture();
+  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
+  const matching = { source: f.source, sourceHash, recipe: null,
+    encryptionSettingsSha256: null, descriptor: null, outputs: [] };
+  const result = await prepareAssets({ ...f, portableAssetRoot: f.root, portableIndex: { images: [
+    { ...matching, source: 'img/unrelated.png' },
+    { ...matching, sourceHash: '0'.repeat(64) },
+    matching,
+    { ...matching, get descriptor() { throw new Error('later duplicate must not be inspected'); } }
+  ] } });
+  assert.equal(result.indexedNegative, 1);
+  assert.equal(f.jobs, 0);
+});

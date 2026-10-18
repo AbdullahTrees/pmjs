@@ -16,6 +16,19 @@
 
 namespace pmjs {
 namespace {
+void flipRgbaRows(std::vector<std::uint8_t>& pixels, int width, int height) {
+  const std::size_t rowBytes = static_cast<std::size_t>(width) * 4U;
+  std::vector<std::uint8_t> row(rowBytes);
+  for (int y = 0; y < height / 2; ++y) {
+    auto top = pixels.begin() + static_cast<std::ptrdiff_t>(y) * rowBytes;
+    auto bottom = pixels.begin() +
+      static_cast<std::ptrdiff_t>(height - y - 1) * rowBytes;
+    std::copy(top, top + static_cast<std::ptrdiff_t>(rowBytes), row.begin());
+    std::copy(bottom, bottom + static_cast<std::ptrdiff_t>(rowBytes), top);
+    std::copy(row.begin(), row.end(), bottom);
+  }
+}
+
 bool nearestTileGeometry(const std::vector<TileLayerTile>& tiles) {
   const auto integral = [](float value, float limit) {
     return std::isfinite(value) && std::abs(value) <= limit && value == std::floor(value);
@@ -985,16 +998,7 @@ std::vector<std::uint8_t> Renderer::captureSceneRawPremultiplied() {
 
   // RenderTexture projection puts logical row zero at GL row zero.
   if (offscreenRender_) return pixels;
-  const std::size_t rowBytes = static_cast<std::size_t>(width_) * 4U;
-  std::vector<std::uint8_t> row(rowBytes);
-  for (int y = 0; y < height_ / 2; ++y) {
-    auto top = pixels.begin() + static_cast<std::ptrdiff_t>(y) * rowBytes;
-    auto bottom = pixels.begin() +
-      static_cast<std::ptrdiff_t>(height_ - y - 1) * rowBytes;
-    std::copy(top, top + static_cast<std::ptrdiff_t>(rowBytes), row.begin());
-    std::copy(bottom, bottom + static_cast<std::ptrdiff_t>(rowBytes), top);
-    std::copy(row.begin(), row.end(), bottom);
-  }
+  flipRgbaRows(pixels, width_, height_);
   return pixels;
 }
 
@@ -1018,16 +1022,7 @@ std::vector<std::uint8_t> Renderer::captureDrawableRgba(AlphaMode alphaMode) {
   glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 
-  const std::size_t rowBytes = static_cast<std::size_t>(width) * 4U;
-  std::vector<std::uint8_t> row(rowBytes);
-  for (int y = 0; y < height / 2; ++y) {
-    auto top = pixels.begin() + static_cast<std::ptrdiff_t>(y) * rowBytes;
-    auto bottom = pixels.begin() +
-      static_cast<std::ptrdiff_t>(height - y - 1) * rowBytes;
-    std::copy(top, top + static_cast<std::ptrdiff_t>(rowBytes), row.begin());
-    std::copy(bottom, bottom + static_cast<std::ptrdiff_t>(rowBytes), top);
-    std::copy(row.begin(), row.end(), bottom);
-  }
+  flipRgbaRows(pixels, width, height);
   if (alphaMode == AlphaMode::straight)
     for (size_t offset = 0; offset < pixels.size(); offset += 4)
       convertPixel(pixels.data() + offset, PixelEncoding::PremultipliedRGBA8,

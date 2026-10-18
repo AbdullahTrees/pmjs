@@ -158,7 +158,7 @@ function parseTimingConfig(env) {
       `PMJS_RENDER_HZ must be one of 0 (uncapped), ` +
       `${PMJS_SUPPORTED_RENDER_HZ.join(', ')}: ${raw}`);
   }
-  if (renderHz === 0 || uncappedFlag) {
+  if (uncappedFlag) {
     return { logicHz: PMJS_MV_LOGIC_HZ, renderHz: 0, uncapped: true,
       renderPeriod: Infinity, catchupMode };
   }
@@ -360,6 +360,111 @@ function createPreparationLog(details, { log = message => console.log(message), 
   };
 }
 
+async function prepareStartupAssets(options, native) {
+  const preparationStarted = performance.now();
+  console.log(`[pmjs] preparation event=start workspace_bytes=${options.assetPreparation.workspaceBytes} ` +
+    `processor=${JSON.stringify(native.assets.preparationVersion || null)} ` +
+    `lz4_version=${JSON.stringify(native.assets.preparationLz4Version || null)}`);
+  const portableIndex = require('./asset-index.cjs').loadAssetIndex(options.assetIndex, native, options);
+  let cancelled = false;
+  let preparationFailed = false;
+  let preparationError;
+  const failPreparation = error => {
+    if (!preparationFailed) preparationError = error;
+    preparationFailed = true;
+    cancelled = true;
+  };
+  const screenStarted = performance.now();
+  let screenUpdated = -Infinity;
+  let current = { completed: 0, total: 0, phase: 'discover' };
+  let stageBaseline = null;
+  const showProgress = () => {
+    if (preparationFailed || (cancelled && !current.terminal) ||
+        typeof native.runtime.preparationProgress !== 'function') return;
+    const elapsedMs = performance.now() - screenStarted;
+    // Coalesce file notifications before formatting or crossing into native drawing.
+    if (!current.terminal && elapsedMs - screenUpdated < 500) return;
+    screenUpdated = elapsedMs;
+    const stepped = stageProgress(current, elapsedMs, stageBaseline);
+    stageBaseline = stepped.baseline;
+    const progress = stepped.progress;
+    native.runtime.preparationProgress({ ...progress, lines: progressLines(progress),
+      fonts: options.preparationFonts });
+  };
+  showProgress();
+  let activeLog;
+  const pump = setInterval(() => {
+    if (cancelled) return;
+    try {
+      if (!native.pollEvents()) cancelled = true;
+      activeLog?.heartbeat();
+      showProgress();
+    } catch (error) { failPreparation(error); }
+  }, 16);
+  let preparation, preparationStatus = 'failed';
+  try {
+    activeLog = createPreparationLog({ stage: 'images', codec: options.assetPreparation.pageCodec,
+      cacheRoot: options.assetPreparation.cacheRoot, verifyHashes: options.assetPreparation.verifyHashes });
+    preparation = await prepareAssets({ gameRoot: options.gameRoot,
+      cacheRoot: options.assetPreparation.cacheRoot, recipes: options.assetPreparation.recipes, native,
+      portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
+      verifyHashes: options.assetPreparation.verifyHashes,
+      workspaceBytes: options.assetPreparation.workspaceBytes,
+      pageCodec: options.assetPreparation.pageCodec,
+      shouldCancel: () => cancelled,
+      onProgress: progress => {
+        activeLog.progress(progress);
+        current = progress;
+        try { showProgress(); }
+        catch (error) { failPreparation(error); }
+      } });
+    activeLog.finish(preparation, preparationFailed ? preparationError : undefined);
+    console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
+      `decrypted=${preparation.decrypted} fallback=${preparation.fallback} ` +
+      `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
+      `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
+      `unindexed_processed=${preparation.unindexedProcessed} ` +
+      `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
+      `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
+    if (!cancelled && options.assetPreparation.maps) {
+      activeLog = createPreparationLog({ stage: 'maps', codec: 'png',
+        cacheRoot: path.join(options.assetPreparation.cacheRoot, 'maps'), verifyHashes: options.assetPreparation.verifyHashes });
+      current = { phase: 'map-discover', completed: 0, total: 0 };
+      preparation.maps = await prepareMaps({ gameRoot: options.gameRoot,
+        cacheRoot: options.assetPreparation.cacheRoot, native, width: options.width, height: options.height,
+        portableIndex: portableIndex?.maps,
+        portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
+        verifyHashes: options.assetPreparation.verifyHashes,
+        shouldCancel: () => cancelled, onProgress: progress => {
+          activeLog.progress(progress); current = progress;
+          try { showProgress(); }
+          catch (error) { failPreparation(error); }
+        } });
+      const maps = preparation.maps;
+      activeLog.finish(maps, preparationFailed ? preparationError : undefined);
+      console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
+        `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
+        `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
+        `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
+        `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
+    }
+    preparationStatus = preparationFailed ? 'failed' :
+      cancelled || preparation.cancelled || preparation.maps?.cancelled ? 'cancelled' :
+        preparation.error || preparation.maps?.error ? 'failed' :
+          preparation.failedFiles || preparation.installFailures ? 'partial' : 'complete';
+  } catch (error) {
+    activeLog?.finish({ ...current, cancelled }, preparationFailed ? preparationError : error);
+    throw preparationFailed ? preparationError : error;
+  } finally {
+    clearInterval(pump);
+    console.log(`[pmjs] preparation event=finish status=${preparationStatus} duration_ms=${(performance.now() - preparationStarted).toFixed(1)}`);
+  }
+  if (preparationFailed) throw preparationError;
+  return { preparation, cancelled,
+    invalidateImages: preparation.invalidateCatalog,
+    invalidateMaps: preparation.maps && preparation.maps.invalidateCatalog };
+}
+
 async function run(input) {
   const startupStarted = performance.now();
   const options = validate(input);
@@ -406,110 +511,12 @@ async function run(input) {
     native.storage = createStorage(options.saveRoot);
     native.fs = createGameFilesystem(native.fs, path.join(options.saveRoot, 'game-files'));
     if (options.assetPreparation.enabled) {
-      const preparationStarted = performance.now();
-      console.log(`[pmjs] preparation event=start workspace_bytes=${options.assetPreparation.workspaceBytes} ` +
-        `processor=${JSON.stringify(native.assets.preparationVersion || null)} ` +
-        `lz4_version=${JSON.stringify(native.assets.preparationLz4Version || null)}`);
-      const portableIndex = require('./asset-index.cjs').loadAssetIndex(options.assetIndex, native, options);
-      let cancelled = false;
-      let preparationFailed = false;
-      let preparationError;
-      const failPreparation = error => {
-        if (!preparationFailed) preparationError = error;
-        preparationFailed = true;
-        cancelled = true;
-      };
-      const screenStarted = performance.now();
-      let screenUpdated = -Infinity;
-      let current = { completed: 0, total: 0, phase: 'discover' };
-      let stageBaseline = null;
-      const showProgress = () => {
-        if (preparationFailed || (cancelled && !current.terminal) ||
-            typeof native.runtime.preparationProgress !== 'function') return;
-        const elapsedMs = performance.now() - screenStarted;
-        // Coalesce file notifications before formatting or crossing into native drawing.
-        if (!current.terminal && elapsedMs - screenUpdated < 500) return;
-        screenUpdated = elapsedMs;
-        const stepped = stageProgress(current, elapsedMs, stageBaseline);
-        stageBaseline = stepped.baseline;
-        const progress = stepped.progress;
-        native.runtime.preparationProgress({ ...progress, lines: progressLines(progress),
-          fonts: options.preparationFonts });
-      };
-      showProgress();
-      let activeLog;
-      const pump = setInterval(() => {
-        if (cancelled) return;
-        try {
-          if (!native.pollEvents()) cancelled = true;
-          activeLog?.heartbeat();
-          showProgress();
-        } catch (error) { failPreparation(error); }
-      }, 16);
-      let preparation, preparationStatus = 'failed';
-      try {
-        activeLog = createPreparationLog({ stage: 'images', codec: options.assetPreparation.pageCodec,
-          cacheRoot: options.assetPreparation.cacheRoot, verifyHashes: options.assetPreparation.verifyHashes });
-        preparation = await prepareAssets({ gameRoot: options.gameRoot,
-          cacheRoot: options.assetPreparation.cacheRoot, recipes: options.assetPreparation.recipes, native,
-          portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
-          verifyHashes: options.assetPreparation.verifyHashes,
-          workspaceBytes: options.assetPreparation.workspaceBytes,
-          pageCodec: options.assetPreparation.pageCodec,
-          shouldCancel: () => cancelled,
-          onProgress: progress => {
-            activeLog.progress(progress);
-            current = progress;
-            try { showProgress(); }
-            catch (error) { failPreparation(error); }
-          } });
-        activeLog.finish(preparation, preparationFailed ? preparationError : undefined);
-        console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
-          `decrypted=${preparation.decrypted} fallback=${preparation.fallback} ` +
-          `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
-          `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
-          `unindexed_processed=${preparation.unindexedProcessed} ` +
-          `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
-          `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
-        if (!cancelled && options.assetPreparation.maps) {
-          activeLog = createPreparationLog({ stage: 'maps', codec: 'png',
-            cacheRoot: path.join(options.assetPreparation.cacheRoot, 'maps'), verifyHashes: options.assetPreparation.verifyHashes });
-          current = { phase: 'map-discover', completed: 0, total: 0 };
-          preparation.maps = await prepareMaps({ gameRoot: options.gameRoot,
-            cacheRoot: options.assetPreparation.cacheRoot, native, width: options.width, height: options.height,
-            portableIndex: portableIndex?.maps,
-            portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
-            verifyHashes: options.assetPreparation.verifyHashes,
-            shouldCancel: () => cancelled, onProgress: progress => {
-              activeLog.progress(progress); current = progress;
-              try { showProgress(); }
-              catch (error) { failPreparation(error); }
-            } });
-          const maps = preparation.maps;
-          activeLog.finish(maps, preparationFailed ? preparationError : undefined);
-          console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
-            `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
-            `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
-            `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
-            `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
-        }
-        preparationStatus = preparationFailed ? 'failed' :
-          cancelled || preparation.cancelled || preparation.maps?.cancelled ? 'cancelled' :
-            preparation.error || preparation.maps?.error ? 'failed' :
-              preparation.failedFiles || preparation.installFailures ? 'partial' : 'complete';
-      } catch (error) {
-        activeLog?.finish({ ...current, cancelled }, preparationFailed ? preparationError : error);
-        throw preparationFailed ? preparationError : error;
-      } finally {
-        clearInterval(pump);
-        console.log(`[pmjs] preparation event=finish status=${preparationStatus} duration_ms=${(performance.now() - preparationStarted).toFixed(1)}`);
-      }
-      if (preparationFailed) throw preparationError;
-      invalidateImages = preparation.invalidateCatalog;
-      invalidateMaps = preparation.maps && preparation.maps.invalidateCatalog;
-      const { entries, decryptedEntries, releaseCacheLease, invalidateCatalog, ...preparationStats } = preparation;
+      const startup = await prepareStartupAssets(options, native);
+      invalidateImages = startup.invalidateImages;
+      invalidateMaps = startup.invalidateMaps;
+      const { entries, decryptedEntries, releaseCacheLease, invalidateCatalog, ...preparationStats } = startup.preparation;
       native.assets.preparationStats = preparationStats;
-      if (cancelled || preparation.cancelled) { native.runtime.quit(); return; }
+      if (startup.cancelled || startup.preparation.cancelled) { native.runtime.quit(); return; }
     } else if (native.assets && typeof native.assets.installPrepared === 'function') {
       native.assets.installPrepared([]);
       if (native.assets.installDecrypted) native.assets.installDecrypted([]);

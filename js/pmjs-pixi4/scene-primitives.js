@@ -52,32 +52,39 @@ function nativeStageRenderState(stage) {
 PMJS.pixi4 = PMJS.pixi4 || {};
 Object.assign(PMJS.pixi4, {
   setStageRenderOptions: function(stage, options) {
+    var previous = nativeStageRenderOptions.get(stage);
     // Local mode composes local transforms in the native hierarchy without
     // calling authored world-transform hooks. Node preparation still runs;
     // skipUpdateTransform overrides this mode and consumes supplied world state.
     if (options && options.worldState !== 'pixi' && options.worldState !== 'native' &&
         options.worldState !== 'local') throw new TypeError('worldState must be pixi, native or local');
     if (options && options.plainSpriteSegments !== undefined && typeof options.plainSpriteSegments !== 'boolean') throw new TypeError('plainSpriteSegments must be a boolean');
-    var producers = options && options.bitmapCacheProducers;
+    var producers = options ? options.bitmapCacheProducers : undefined;
     if (producers !== undefined && (!producers || !Array.isArray(producers.nodes) ||
         typeof producers.valid !== 'function' || producers.nodes.some(function(node) {
           return !node || typeof node !== 'object';
         }) || new Set(producers.nodes).size !== producers.nodes.length)) {
       throw new TypeError('bitmapCacheProducers requires distinct nodes and a valid callback');
     }
-    var previous = nativeStageRenderOptions.get(stage);
     if (options) {
       var selected = Object.assign({}, options);
-      if (producers) selected.bitmapCacheProducers = Object.freeze({
-        nodes: Object.freeze(producers.nodes.slice()), valid: producers.valid });
+      if (producers && (!previous || producers !== previous.bitmapCacheProducers)) {
+        selected.bitmapCacheProducers = Object.freeze({
+          nodes: Object.freeze(producers.nodes.slice()), valid: producers.valid });
+      }
       nativeStageRenderOptions.set(stage, selected);
     }
     else nativeStageRenderOptions.delete(stage);
-    nativeStageBitmapCacheAdmissions.delete(stage);
+    if (!options || !previous || previous.bitmapCacheProducers !== selected.bitmapCacheProducers) {
+      nativeStageBitmapCacheAdmissions.delete(stage);
+    }
     return previous;
   },
   getStageRenderOptions: function(stage) { return nativeStageRenderOptions.get(stage); },
-  getStageRenderState: function(stage) { return nativeStageRenderStates.get(stage); },
+  getStageRenderState: function(stage) {
+    var state = nativeStageRenderStates.get(stage);
+    return state && Object.assign({}, state);
+  },
   supportsGpuSpriteTextures: !!(NativeHost.scene && NativeHost.scene.schema && NativeHost.scene.schema.gpuSpriteTextures),
   clearBackgroundTriangles: function(texture, points, rectangles, normals) {
     var base = texture && texture.baseTexture;

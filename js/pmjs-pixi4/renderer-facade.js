@@ -553,7 +553,7 @@ function createNativePixiRenderer(width, height, options) {
     generateTextureGpu: function(displayObject, scaleMode, resolution, region, options) {
       resolution = Math.max(0.000001, Number(resolution) || 1);
       region = region || displayObject.getLocalBounds();
-      prepareNativeBitmapCaches(displayObject, this);
+      prepareNativeBitmapCaches(displayObject, this, null, false);
       var targetWidth = Math.max(1, Math.ceil(region.width * resolution));
       var targetHeight = Math.max(1, Math.ceil(region.height * resolution));
       this.stage = displayObject;

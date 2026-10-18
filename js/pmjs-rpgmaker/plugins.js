@@ -42,6 +42,14 @@
     return guests[canonical];
   }
 
+  function invokeCallback(plugin, owner, callback, phase, receiver) {
+    try { Reflect.apply(callback, receiver, []); } catch (error) {
+      console.error('[pmjs] error running ' + phase + ' callback for ' + plugin +
+        ' (owner ' + owner + '):', error);
+      throw error;
+    }
+  }
+
   function loaded(name) {
     var entry = guest(name);
     entry.state = 'loaded';
@@ -50,11 +58,7 @@
     var listeners = callbacks[entry.key] || [];
     delete callbacks[entry.key];
     listeners.forEach(function(listener) {
-      try { listener.callback(); } catch (error) {
-        console.error('[pmjs] error running loaded callback for ' + entry.key +
-          ' (owner ' + listener.owner + '):', error);
-        throw error;
-      }
+      invokeCallback(entry.key, listener.owner, listener.callback, 'loaded', listener);
     });
   }
 
@@ -165,11 +169,7 @@
       if (typeof callback !== 'function') return;
       var canonical = key(name);
       if (isLoaded(name)) {
-        try { callback(); } catch (error) {
-          console.error('[pmjs] error running loaded callback for ' + canonical +
-            ' (owner ' + owner + '):', error);
-          throw error;
-        }
+        invokeCallback(canonical, owner, callback, 'loaded', undefined);
         return;
       }
       (callbacks[canonical] || (callbacks[canonical] = [])).push({
@@ -197,11 +197,7 @@
         var listeners = loadingCallbacks[key(name)] || [];
         delete loadingCallbacks[key(name)];
         listeners.forEach(function(listener) {
-          try { listener.callback(); } catch (error) {
-            console.error('[pmjs] error running loading callback for ' + key(name) +
-              ' (owner ' + listener.owner + '):', error);
-            throw error;
-          }
+          invokeCallback(key(name), listener.owner, listener.callback, 'loading', listener);
         });
         load();
       } catch (caught) {

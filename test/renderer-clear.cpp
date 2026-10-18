@@ -6,9 +6,11 @@
 #include <iostream>
 
 int main() {
+  SDL_SetHint(SDL_HINT_VIDEO_X11_FORCE_EGL, "1");
   assert(SDL_Init(SDL_INIT_VIDEO) == 0);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
   auto* window = SDL_CreateWindow("Renderer clearing", 0, 0, 16, 12,
                                  SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
   assert(window);
@@ -63,6 +65,43 @@ int main() {
     glDeleteFramebuffers(2, framebuffers.data());
   }
   SDL_GL_DeleteContext(context);
+  const auto captureContext = SDL_GL_CreateContext(window);
+  assert(captureContext);
+  {
+    pmjs::ImageStore images;
+    pmjs::Renderer renderer(1, 3, images);
+    const std::vector<std::uint8_t> premultiplied{
+      128, 0, 0, 128, 0, 255, 0, 255, 0, 0, 255, 255};
+    const std::vector<std::uint8_t> straight{
+      255, 0, 0, 128, 0, 255, 0, 255, 0, 0, 255, 255};
+    renderer.clearScene(0, 0, 1, 1);
+    renderer.clearScene(0.5F, 0, 0, 0.5F, std::array<int, 4>{0, 2, 1, 1});
+    renderer.clearScene(0, 1, 0, 1, std::array<int, 4>{0, 1, 1, 1});
+    assert(renderer.captureSceneRawPremultiplied() == premultiplied);
+    assert(renderer.captureSceneRgba(pmjs::AlphaMode::straight) == straight);
+    assert(renderer.captureSceneRgba(pmjs::AlphaMode::premultiplied) == premultiplied);
+
+    const auto image = images.createRgba(1, 3, premultiplied.data(), true);
+    assert(image);
+    assert(renderer.renderToRgba(1, 3, image->handle, pmjs::AlphaMode::premultiplied) == premultiplied);
+    assert(renderer.renderToRgba(1, 3, image->handle, pmjs::AlphaMode::straight) == straight);
+
+    renderer.setDrawableSize(1, 3);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_SCISSOR_TEST);
+    for (int y = 0; y < 3; ++y) {
+      const auto offset = static_cast<std::size_t>(2 - y) * 4;
+      glScissor(0, y, 1, 1);
+      glClearColor(premultiplied[offset] / 255.0F, premultiplied[offset + 1] / 255.0F,
+                   premultiplied[offset + 2] / 255.0F, premultiplied[offset + 3] / 255.0F);
+      glClear(GL_COLOR_BUFFER_BIT);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    assert(renderer.captureDrawableRgba(pmjs::AlphaMode::premultiplied) == premultiplied);
+    assert(renderer.captureDrawableRgba(pmjs::AlphaMode::straight) == straight);
+  }
+  SDL_GL_DeleteContext(captureContext);
   SDL_DestroyWindow(window);
   SDL_Quit();
   std::cout << "Immediate clearing preserves framebuffer, scissor, viewport and color state\n";

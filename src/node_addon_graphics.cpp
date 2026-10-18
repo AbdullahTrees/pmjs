@@ -169,6 +169,8 @@ napi_value createFilterPlan(napi_env env, napi_callback_info info) try {
     plan->resolutions.push_back(resolution);
   }
   if (plan->resolutions.size() < 2) throw std::invalid_argument("filter plan requires input and output");
+  GLint textureUnits = 0;
+  glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &textureUnits);
   for (auto item : elements(property(env, args[0], "passes"), 256)) {
     CustomFilterPass pass;
     pass.program = asUint32(env, property(env, item, "program"));
@@ -233,8 +235,6 @@ napi_value createFilterPlan(napi_env env, napi_callback_info info) try {
         components += count;
       }
     }
-    GLint textureUnits = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &textureUnits);
     if (components != pass.uniforms.size() || samplers != pass.samplers.size() ||
         samplers + 1 > static_cast<std::size_t>(textureUnits))
       throw std::invalid_argument("invalid filter uniform or sampler count");

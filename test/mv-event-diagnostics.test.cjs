@@ -7,8 +7,9 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { loadPmjsRuntime } = require('./helpers/runtime-context.cjs');
 
-function fixture(plugin) {
-  const clock = { time: 0 }, warnings = [];
+function fixture(plugin, diagnosticSetting) {
+  if (arguments.length < 2) diagnosticSetting = '1';
+  const clock = { time: 0, reads: 0 }, warnings = [];
   function Interpreter(list, event = 1) {
     this._list = list; this._index = 0; this._eventId = event; this._mapId = 2;
     this._frameCount = 0; this._freezeChecker = 0; this._childInterpreter = null;
@@ -31,16 +32,18 @@ function fixture(plugin) {
   Map.prototype.update = function() { this.interpreters.forEach(interpreter => interpreter.update()); };
   const graphics = { frameCount: 1 };
   const guestChecker = Interpreter.prototype.checkFreeze;
+  const guestUpdate = Interpreter.prototype.update, guestMapUpdate = Map.prototype.update;
   const ctx = loadPmjsRuntime({
     Game_Interpreter: Interpreter, Game_Map: Map, Graphics: graphics, $gameMap: { _mapId: 2 },
-    $dataCommonEvents: [], performance: { now() { return clock.time; } },
+    $dataCommonEvents: [], NativeHost: { runtime: { env() { return diagnosticSetting; } } },
+    performance: { now() { clock.reads++; return clock.time; } },
     console: { warn(message) { warnings.push(message); } }
   }, ['js/pmjs-core/methods.js']);
   ctx.PMJS.compat = { audit: false }; ctx.PMJS.phases = { on() {} };
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-mv/diagnostics.js'), 'utf8'), ctx);
   if (plugin) plugin(Interpreter);
   ctx.PMJS.methods.install();
-  return { clock, warnings, Interpreter, Map, graphics, ctx, guestChecker };
+  return { clock, warnings, Interpreter, Map, graphics, ctx, guestChecker, guestUpdate, guestMapUpdate };
 }
 function command(run, code = 355) { return { code, run }; }
 function warning(f) { return JSON.parse(f.warnings[0].slice(f.warnings[0].indexOf('{'))); }
@@ -123,3 +126,14 @@ test('diagnostics wrap the final plugin update once and preserve its result', ()
   assert.equal(f.warnings.length, 1);
   assert.equal(warning(f).elapsedMs, 120); assert.equal(warning(f).freezeChecks, 3);
 });
+
+for (const setting of [undefined, '', '0', 'true']) {
+  test(`event diagnostics stay uninstalled for ${String(setting)}`, () => {
+    const f = fixture(null, setting);
+    assert.equal(f.Interpreter.prototype.update, f.guestUpdate);
+    assert.equal(f.Map.prototype.update, f.guestMapUpdate);
+    new f.Interpreter([command(() => { f.clock.time += 200; })]).update();
+    assert.equal(f.clock.reads, 0);
+    assert.equal(f.warnings.length, 0);
+  });
+}

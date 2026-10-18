@@ -41,6 +41,7 @@ function inspectPluginCompatibility() {
 PMJS.phases.on('afterPlugins', 'pmjs-mv.diagnostics', inspectPluginCompatibility);
 
 (function() {
+  if (NativeHost.runtime.env('PMJS_EVENT_DIAGNOSTICS') !== '1') return;
   var thresholdMs = 100;
   var repeatIntervalMs = 5000;
   var active = null;

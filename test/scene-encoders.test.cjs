@@ -787,6 +787,148 @@ test('nested bitmap caches build inside out and draw the parent snapshot', () =>
     (_, index) => index % 7 === 0), [0, 0, 1]);
 });
 
+test('declared bitmap producer follows live cache, visibility and attachment state', () => {
+  const { sandbox, sprite } = makeHarness();
+  const root = new sandbox.PIXI.Container(), parent = root.addChild(new sandbox.PIXI.Container());
+  const cached = parent.addChild(new sandbox.PIXI.Container()), other = root.addChild(new sandbox.PIXI.Container());
+  let scans = 0, builds = 0, valid = true;
+  Object.defineProperty(other, 'children', { get() { scans++; return []; } });
+  cached._cacheData = { sprite: null };
+  cached._initCachedDisplayObject = () => {
+    assert.equal(cached.__pmjsBuildingBitmapCache, true);
+    assert.equal(cached.worldAlpha, 0.125);
+    builds++; cached._cacheData.sprite = sprite();
+  };
+  root.alpha = parent.alpha = cached.alpha = 0.5;
+  const nodes = [cached];
+  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local',
+    bitmapCacheProducers: { nodes, valid: stage => stage === root && valid } });
+  nodes.length = 0;
+  const policy = sandbox.PMJS.pixi4.getStageRenderOptions(root).bitmapCacheProducers;
+  function prepare() { sandbox.prepareNativeBitmapCaches(root, {}, null, policy); }
+  prepare(); assert.equal(scans, 1);
+  cached._cacheAsBitmap = true; prepare(); prepare();
+  assert.equal(builds, 1); assert.equal(scans, 1, 'admission scans only once');
+  cached._cacheData.sprite = null;
+  parent.visible = false; prepare(); assert.equal(builds, 1);
+  parent.visible = true;
+  parent.children.length = 0; prepare(); assert.equal(builds, 1, 'stale parent pointer is detached');
+  parent.children.push(cached); prepare(); assert.equal(builds, 2);
+  cached._cacheAsBitmap = false; cached._cacheData.sprite = null;
+  prepare(); assert.equal(builds, 2);
+  cached._cacheAsBitmap = true; prepare(); assert.equal(builds, 3, 'private flag changes are read live');
+  valid = false; prepare();
+  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheAdmission, 'invalid');
+  valid = true; prepare(); assert.equal(scans, 3, 'validation recovery performs admission again');
+  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheMode, 'declared');
+});
+
+test('undeclared hidden bitmap producers retain ordinary census and multiple caches retain postorder', () => {
+  const { sandbox, sprite } = makeHarness();
+  const root = new sandbox.PIXI.Container(), outer = root.addChild(new sandbox.PIXI.Container());
+  const inner = outer.addChild(new sandbox.PIXI.Container()), order = [];
+  for (const [name, node] of [['outer', outer], ['inner', inner]]) {
+    node._cacheAsBitmap = true; node._cacheData = { sprite: null };
+    node._initCachedDisplayObject = () => { order.push(name); node._cacheData.sprite = sprite(); };
+  }
+  inner.visible = false;
+  function prepare(nodes) {
+    sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'native',
+      bitmapCacheProducers: { nodes, valid: () => true } });
+    sandbox.prepareNativeBitmapCaches(root, {}, null,
+      sandbox.PMJS.pixi4.getStageRenderOptions(root).bitmapCacheProducers);
+    return sandbox.PMJS.pixi4.getStageRenderState(root);
+  }
+  assert.equal(prepare([outer]).bitmapCacheAdmission, 'rejected');
+  assert.deepEqual(order, ['outer']);
+  order.length = 0; outer._cacheData.sprite = null; inner.visible = true;
+  const state = prepare([outer, inner]);
+  assert.deepEqual(order, ['inner', 'outer']);
+  assert.equal(state.bitmapCacheMode, 'full');
+  assert.equal(state.bitmapCacheAdmission, 'accepted');
+});
+
+test('world-state policy changes preserve producer admission until the declaration changes', () => {
+  const { sandbox } = makeHarness(), api = sandbox.PMJS.pixi4;
+  const root = new sandbox.PIXI.Container(), producer = root.addChild(new sandbox.PIXI.Container());
+  const other = root.addChild(new sandbox.PIXI.Container());
+  let scans = 0;
+  Object.defineProperty(other, 'children', { get() { scans++; return []; } });
+  api.setStageRenderOptions(root, { worldState: 'pixi',
+    bitmapCacheProducers: { nodes: [producer], valid: () => true } });
+  const original = api.getStageRenderOptions(root).bitmapCacheProducers;
+  function prepare() {
+    sandbox.prepareNativeBitmapCaches(root, {}, null, api.getStageRenderOptions(root).bitmapCacheProducers);
+  }
+  prepare();
+  for (let index = 0; index < 20; index++) {
+    api.setStageRenderOptions(root, { ...api.getStageRenderOptions(root),
+      worldState: index % 2 ? 'pixi' : 'local' });
+    assert.equal(api.getStageRenderOptions(root).bitmapCacheProducers, original);
+    prepare();
+  }
+  assert.equal(scans, 1, 'world-state transitions reuse the original admission');
+  api.setStageRenderOptions(root, { worldState: 'local',
+    bitmapCacheProducers: { nodes: [producer], valid: () => true } });
+  assert.notEqual(api.getStageRenderOptions(root).bitmapCacheProducers, original);
+  prepare(); assert.equal(scans, 2, 'replacement declarations require admission');
+  api.setStageRenderOptions(root, null);
+  api.setStageRenderOptions(root, { worldState: 'local', bitmapCacheProducers: original });
+  prepare(); assert.equal(scans, 3, 'clearing the policy invalidates its admission');
+});
+
+test('producer declaration validates shape and preserves initializer error cleanup', () => {
+  const { sandbox } = makeHarness(), api = sandbox.PMJS.pixi4;
+  const root = new sandbox.PIXI.Container();
+  for (const policy of [null, {}, { nodes: [], valid: false },
+    { nodes: [null], valid() {} }, { nodes: [root, root], valid() {} }]) {
+    assert.throws(() => api.setStageRenderOptions(root,
+      { worldState: 'local', bitmapCacheProducers: policy }), /bitmapCacheProducers/);
+  }
+  root._cacheAsBitmap = true;
+  root._initCachedDisplayObject = () => { throw new Error('cache build failed'); };
+  api.setStageRenderOptions(root, { worldState: 'local',
+    bitmapCacheProducers: { nodes: [root], valid: () => true } });
+  assert.throws(() => sandbox.prepareNativeBitmapCaches(root, {}, null,
+    api.getStageRenderOptions(root).bitmapCacheProducers), /cache build failed/);
+  assert.equal(root.__pmjsBuildingBitmapCache, false);
+  api.setStageRenderOptions(root, null);
+  assert.equal(api.getStageRenderOptions(root), undefined);
+});
+
+test('renderer confines producer selection to configured screen renders and reports the selected route', () => {
+  const { sandbox } = makeHarness();
+  sandbox.PIXI.RENDERER_TYPE = { WEBGL: 1 };
+  sandbox.PIXI.Texture.EMPTY = { baseTexture: {} };
+  sandbox.PIXI.Matrix = class { identity() { return this; } };
+  sandbox.PIXI.WebGLRenderer = class {};
+  Object.assign(sandbox.NativeHost.render, { setScreenRenderSize() {}, setRenderTargetSize() {}, renderToCanvas() {} });
+  sandbox.CanvasElement.prototype._pmjsContentChanged = function() {};
+  for (const name of ['renderer-managers', 'renderer-facade']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-pixi4', name + '.js'), 'utf8'), sandbox);
+  }
+  const renderer = sandbox.createNativePixiRenderer({ width: 32, height: 24, view: { style: {} } });
+  const root = new sandbox.PIXI.Container(), inner = new sandbox.PIXI.Container();
+  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local',
+    bitmapCacheProducers: { nodes: [], valid: () => true } });
+  const submit = sandbox.submitNativeScene;
+  sandbox.submitNativeScene = function(stage, color) {
+    if (stage === root) renderer.render(inner);
+    return submit(stage, color);
+  };
+  renderer.render(root);
+  const state = sandbox.PMJS.pixi4.getStageRenderState(root);
+  assert.equal(state.worldState, 'local'); assert.equal(state.renders, 1);
+  assert.equal(state.bitmapCacheMode, 'declared'); assert.equal(state.bitmapCacheAdmission, 'accepted');
+  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(inner).bitmapCacheMode, 'full');
+  renderer.render(root, { baseTexture: { width: 8, height: 8 } });
+  const after = sandbox.PMJS.pixi4.getStageRenderState(root);
+  assert.equal(after.renders, 2);
+  assert.equal(after.bitmapCacheMode, 'full'); assert.equal(after.bitmapCacheAdmission, 'offscreen');
+  assert.equal(state.renders, 1, 'earlier diagnostic snapshots remain unchanged');
+  assert.equal(state.bitmapCacheMode, 'declared');
+});
+
 test('active blur filter takes the advanced lane and stays correct', () => {
   const harness = makeHarness();
   const { sandbox, sprite } = harness;
@@ -2524,3 +2666,18 @@ test('exceptional alpha retains Pixi packed colors and recovers on the same obje
     assert.deepEqual(harness.submitted.at(-1), baseline);
   }
 });
+
+for (const filters of [undefined, null, []]) {
+  for (const flag of [undefined, false, true, null, 0]) {
+    test(`scene filter selection preserves filters=${String(filters)} flag=${String(flag)}`, () => {
+      const harness = makeHarness();
+      const root = new harness.sandbox.PIXI.Container();
+      root._filters = filters;
+      root.__pmjsNativeDirectFilters = flag;
+      const selected = [];
+      harness.sandbox.nativeSceneFilters = node => { selected.push(node); return null; };
+      submitOnly(harness, root);
+      assert.equal(selected.includes(root), !!filters || flag === false || flag === undefined);
+    });
+  }
+}

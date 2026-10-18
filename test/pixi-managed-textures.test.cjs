@@ -152,3 +152,20 @@ test('destroyed managers ignore stale events without affecting another context o
   assert.deepEqual(Array.from(second.textureManager.managedTextures), [base]);
   second.destroy();
 });
+
+test('preparation revisits text for each root and deduplicates shared sources in encounter order', () => {
+  const [renderer] = createRenderers();
+  const subscriptions = [], visits = [];
+  function source(name) {
+    return { complete: false, addEventListener(event) { subscriptions.push(name + ':' + event); } };
+  }
+  const first = source('first'), second = source('second');
+  const child = { baseTexture: { source: second }, children: [] };
+  const root = { baseTexture: { source: first }, children: [child, child],
+    updateText(force) { visits.push(force); } };
+  child.children.push(root);
+  renderer.plugins.prepare.add(root).add(root).upload();
+  assert.deepEqual(visits, [true, true]);
+  assert.deepEqual(subscriptions, ['first:load', 'first:error', 'second:load', 'second:error']);
+  renderer.destroy();
+});
