@@ -38,17 +38,46 @@ var nativeBlankTileCanvas = null;
 var nativeRetainedMeshes = new WeakMap();
 var nativeMeshMaterials = new WeakMap();
 var nativeStageRenderOptions = new WeakMap();
+var nativeStageRenderStates = new WeakMap();
+var nativeStageBitmapCacheAdmissions = new WeakMap();
+function nativeStageRenderState(stage) {
+  var state = nativeStageRenderStates.get(stage);
+  if (!state) {
+    state = { renders: 0, worldState: null, skipUpdateTransform: false,
+      bitmapCacheMode: 'full', bitmapCacheAdmission: 'unconfigured' };
+    nativeStageRenderStates.set(stage, state);
+  }
+  return state;
+}
 PMJS.pixi4 = PMJS.pixi4 || {};
 Object.assign(PMJS.pixi4, {
   setStageRenderOptions: function(stage, options) {
-    if (options && options.worldState !== 'pixi' && options.worldState !== 'native') throw new TypeError('worldState must be pixi or native');
+    // Local mode composes local transforms in the native hierarchy without
+    // calling authored world-transform hooks. Node preparation still runs;
+    // skipUpdateTransform overrides this mode and consumes supplied world state.
+    if (options && options.worldState !== 'pixi' && options.worldState !== 'native' &&
+        options.worldState !== 'local') throw new TypeError('worldState must be pixi, native or local');
     if (options && options.plainSpriteSegments !== undefined && typeof options.plainSpriteSegments !== 'boolean') throw new TypeError('plainSpriteSegments must be a boolean');
+    var producers = options && options.bitmapCacheProducers;
+    if (producers !== undefined && (!producers || !Array.isArray(producers.nodes) ||
+        typeof producers.valid !== 'function' || producers.nodes.some(function(node) {
+          return !node || typeof node !== 'object';
+        }) || new Set(producers.nodes).size !== producers.nodes.length)) {
+      throw new TypeError('bitmapCacheProducers requires distinct nodes and a valid callback');
+    }
     var previous = nativeStageRenderOptions.get(stage);
-    if (options) nativeStageRenderOptions.set(stage, Object.assign({}, options));
+    if (options) {
+      var selected = Object.assign({}, options);
+      if (producers) selected.bitmapCacheProducers = Object.freeze({
+        nodes: Object.freeze(producers.nodes.slice()), valid: producers.valid });
+      nativeStageRenderOptions.set(stage, selected);
+    }
     else nativeStageRenderOptions.delete(stage);
+    nativeStageBitmapCacheAdmissions.delete(stage);
     return previous;
   },
   getStageRenderOptions: function(stage) { return nativeStageRenderOptions.get(stage); },
+  getStageRenderState: function(stage) { return nativeStageRenderStates.get(stage); },
   supportsGpuSpriteTextures: !!(NativeHost.scene && NativeHost.scene.schema && NativeHost.scene.schema.gpuSpriteTextures),
   clearBackgroundTriangles: function(texture, points, rectangles, normals) {
     var base = texture && texture.baseTexture;

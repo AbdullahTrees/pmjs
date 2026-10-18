@@ -123,6 +123,113 @@ test('temporary preparation parents are restored before encoding and absent on s
   assert.equal(stage.parent, parent);
 });
 
+test('explicit local mode composes the hierarchy and root projection without world hooks', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const parent = new sandbox.PIXI.Container();
+  const root = parent.addChild(new sandbox.PIXI.Container());
+  const child = root.addChild(sprite());
+  root.x = 4; root.y = 5; root.alpha = 0.5;
+  child.x = 7; child.y = 8; child.alpha = 0.75;
+  for (const node of [root, child]) {
+    node.transform.worldTransform.tx = 999;
+    node.worldAlpha = 0.125;
+    node.updateTransform = () => { throw new Error('authored world hook'); };
+  }
+  sandbox.pmjsPixiRenderPreflight.transformPlan = () => { throw new Error('world-plan census'); };
+  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local' });
+  function render(projection) {
+    sandbox.renderNativeStage(root, projection, 1, false, false, null,
+      sandbox.PMJS.pixi4.getStageRenderOptions(root));
+    return harness.submitted.at(-1);
+  }
+  let packet = render();
+  assert.deepEqual(packet.values.slice(0, 7), [1, 0, 0, 1, 4, 5, 0.5]);
+  assert.deepEqual(packet.values.slice(41, 48), [1, 0, 0, 1, 7, 8, 0.75]);
+  assert.equal(packet.metadata[7 + 1], 0, 'child inherits the root through the native hierarchy');
+  assert.equal(packet.metadata[5] & 524288, 0);
+  assert.equal(packet.metadata[12] & 524288, 0);
+  child.x = 9;
+  packet = render({ a: 2, b: 0.5, c: -0.25, d: 3, tx: 10, ty: 20 });
+  assert.deepEqual(packet.values.slice(0, 7), [2, 0.5, -0.25, 3, 16.75, 37, 0.5]);
+  assert.equal(packet.values[45], 9, 'later local changes remain live');
+  assert.equal(root.transform.worldTransform.tx, 999, 'world state is untouched');
+  assert.equal(child.transform.worldTransform.tx, 999);
+  assert.equal(root.worldAlpha, 0.125);
+  assert.equal(root.parent, parent);
+});
+
+test('local mode retains window and per-node preparation', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const root = new sandbox.PIXI.Container(), window = root.addChild(new sandbox.Window());
+  const calls = [];
+  for (const method of ['_updateCursor', '_updateArrows', '_updatePauseSign', '_updateContents']) {
+    window[method] = () => { calls.push(method); };
+  }
+  const child = window.addChild(sprite());
+  const prepare = sandbox.PMJS.pixi4.scenePreparation.prepare;
+  sandbox.PMJS.pixi4.scenePreparation.prepare = function(node, resolution, prepared) {
+    assert.equal(prepared, false);
+    if (node === child) child.x = 17;
+    return prepare(node, resolution, prepared);
+  };
+  sandbox.renderNativeStage(root, undefined, 1, false, false, null, { worldState: 'local' });
+  assert.deepEqual(calls, ['_updateCursor', '_updateArrows', '_updatePauseSign', '_updateContents']);
+  assert.equal(harness.submitted.at(-1).values[2 * 41 + 4], 17);
+});
+
+test('skipUpdateTransform overrides local mode while default world-hook behavior is unchanged', () => {
+  const harness = preparedHarness(), { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  root.x = 12;
+  root.transform.worldTransform.tx = 30;
+  root.worldAlpha = 0.25;
+  let calls = 0;
+  const update = root.updateTransform;
+  root.updateTransform = function() { calls++; update.call(this); };
+  const projection = { a: 2, b: 0, c: 0, d: 2, tx: 5, ty: 3 };
+  sandbox.renderNativeStage(root, projection, 1, false, true, null, { worldState: 'local' });
+  const skipped = harness.submitted.at(-1);
+  assert.deepEqual(skipped.values.slice(0, 7), [2, 0, 0, 2, 65, 3, 0.25]);
+  assert.ok(skipped.metadata[5] & 524288);
+  assert.equal(calls, 0);
+  sandbox.renderNativeStage(root);
+  assert.equal(calls, 1, 'unspecified mode still invokes the effective world hook');
+  assert.equal(harness.submitted.at(-1).values[4], 12);
+});
+
+test('nested local rendering restores outer world state after success and errors', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const outer = new sandbox.PIXI.Container(), inner = new sandbox.PIXI.Container();
+  outer.addChild(sprite()); inner.addChild(sprite());
+  outer.x = 3; inner.x = 7;
+  const parent = new sandbox.PIXI.Container(); parent.addChild(inner);
+  const projection = { a: 1, b: 0, c: 0, d: 1, tx: 10, ty: 0 };
+  sandbox.renderNativeStage(outer, projection, 1, false, false, null, { worldState: 'pixi' }, () => {
+    for (const fail of [false, true]) {
+      const render = () => sandbox.renderNativeStage(inner, projection, 1, false, false, null,
+        { worldState: 'local' }, () => {
+          assert.equal(sandbox.nativeSceneUsePixiWorldState, false);
+          assert.equal(sandbox.nativeSceneRootUsesWorldTransform, false);
+          assert.equal(inner.parent, parent);
+          if (fail) throw new Error('nested bind failure');
+        });
+      if (fail) assert.throws(render, /nested bind failure/);
+      else render();
+      assert.equal(sandbox.nativeSceneUsePixiWorldState, true);
+      assert.equal(sandbox.nativeSceneTransformsPrepared, true);
+      assert.equal(sandbox.nativeSceneRootUsesWorldTransform, true);
+      assert.equal(inner.parent, parent);
+    }
+  });
+  assert.equal(harness.submitted.at(-1).values[4], 13);
+  assert.ok(harness.submitted.at(-1).metadata[5] & 524288);
+  assert.equal(sandbox.nativeSceneUsePixiWorldState, false);
+  assert.equal(sandbox.nativeSceneTransformsPrepared, false);
+  assert.equal(sandbox.nativeSceneRootUsesWorldTransform, false);
+  assert.equal(sandbox.nativeSceneRootTransform, sandbox.nativeIdentityTransform);
+  assert.equal(outer.parent, null);
+});
+
 test('prepared masks consume effective world state without repeating transform hooks', () => {
   const harness = preparedHarness(), { sandbox, sprite } = harness;
   const stage = new sandbox.PIXI.Container(), mask = sprite();

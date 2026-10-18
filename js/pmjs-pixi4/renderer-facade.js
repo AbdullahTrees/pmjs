@@ -335,7 +335,9 @@ function createNativePixiRenderer(width, height, options) {
       if (!this._pmjsPreparingBitmapCache) {
         this._pmjsPreparingBitmapCache = true;
         try {
-          prepareNativeBitmapCaches(stage, this);
+          var stageOptions = PMJS.pixi4.getStageRenderOptions(stage);
+          prepareNativeBitmapCaches(stage, this, null,
+            renderTexture ? false : stageOptions && stageOptions.bitmapCacheProducers);
         } finally {
           this._pmjsPreparingBitmapCache = false;
         }

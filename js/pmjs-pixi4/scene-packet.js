@@ -758,17 +758,8 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   closeNativeSceneFilters(filterGroups.length, parentIndex, nativeClip);
 }
 
-function prepareNativeBitmapCaches(node, renderer, root) {
-  if (!node || nativeSceneNodeRejected(node, null)) return;
-  root = root || node;
-  if (node._cacheAsBitmap && node._cacheData && node._cacheData.sprite) return;
-  var children = node.children;
-  if (children) {
-    for (var index = 0; index < children.length; index++) {
-      prepareNativeBitmapCaches(children[index], renderer, root);
-    }
-  }
-  if (!node._cacheAsBitmap) return;
+function prepareNativeBitmapCache(node, renderer, root) {
+  if (!node._cacheAsBitmap || node._cacheData && node._cacheData.sprite) return;
   if (typeof node._initCachedDisplayObject !== 'function') {
     throw new Error('Pixi bitmap cache initializer is unavailable');
   }
@@ -787,6 +778,63 @@ function prepareNativeBitmapCaches(node, renderer, root) {
   } finally {
     node.__pmjsBuildingBitmapCache = false;
   }
+}
+
+function prepareNativeDeclaredBitmapCaches(stage, renderer, policy, state) {
+  if (policy.valid(stage) !== true) {
+    nativeStageBitmapCacheAdmissions.delete(stage);
+    state.bitmapCacheAdmission = 'invalid';
+    return false;
+  }
+  var admission = nativeStageBitmapCacheAdmissions.get(stage);
+  if (!admission || admission.policy !== policy) {
+    function declared(node) {
+      if (!node) return true;
+      if (node._cacheAsBitmap && policy.nodes.indexOf(node) < 0) return false;
+      var children = node.children || [];
+      for (var i = 0; i < children.length; i++) if (!declared(children[i])) return false;
+      return true;
+    }
+    admission = { policy: policy, accepted: declared(stage) };
+    nativeStageBitmapCacheAdmissions.set(stage, admission);
+  }
+  state.bitmapCacheAdmission = admission.accepted ? 'accepted' : 'rejected';
+  if (!admission.accepted || policy.nodes.length > 1) return false;
+  state.bitmapCacheMode = 'declared';
+  var node = policy.nodes[0];
+  if (!node) return true;
+  var ancestor = node;
+  while (ancestor) {
+    if (nativeSceneNodeRejected(ancestor, null) || ancestor !== node &&
+        ancestor._cacheAsBitmap && ancestor._cacheData && ancestor._cacheData.sprite) return true;
+    if (ancestor === stage) {
+      prepareNativeBitmapCache(node, renderer, stage);
+      return true;
+    }
+    var parent = ancestor.parent;
+    if (!parent || !parent.children || parent.children.indexOf(ancestor) < 0) return true;
+    ancestor = parent;
+  }
+  return true;
+}
+
+function prepareNativeBitmapCaches(node, renderer, root, policy) {
+  if (!root && node) {
+    var state = nativeStageRenderState(node);
+    state.bitmapCacheMode = 'full';
+    state.bitmapCacheAdmission = policy === false ? 'offscreen' : 'unconfigured';
+    if (policy && prepareNativeDeclaredBitmapCaches(node, renderer, policy, state)) return;
+  }
+  if (!node || nativeSceneNodeRejected(node, null)) return;
+  root = root || node;
+  if (node._cacheAsBitmap && node._cacheData && node._cacheData.sprite) return;
+  var children = node.children;
+  if (children) {
+    for (var index = 0; index < children.length; index++) {
+      prepareNativeBitmapCaches(children[index], renderer, root);
+    }
+  }
+  prepareNativeBitmapCache(node, renderer, root);
 }
 
 function encodeNativeScene(stage, backgroundColor = null) {
@@ -854,6 +902,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     d: parentWorld.d, tx: parentWorld.tx, ty: parentWorld.ty };
   nativeScreenOverlays.length = 0;
   nativeTileRects = 0;
+  var localTransforms = !skipUpdateTransform && options.worldState === 'local';
   var parent = stage.parent;
   var parentReplaced = !skipUpdateTransform;
   if (parentReplaced) stage.parent = nativeTransformParent;
@@ -862,7 +911,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
       rootTransform.d !== 1 || rootTransform.tx !== 0 || rootTransform.ty !== 0) ?
     rootTransform : nativeIdentityTransform;
   nativeSceneRootUsesWorldTransform = !!skipUpdateTransform ||
-    nativeSceneRootTransform !== nativeIdentityTransform;
+    (!localTransforms && nativeSceneRootTransform !== nativeIdentityTransform);
   nativeSceneFilterResolution = Math.max(0.000001,
     Number(filterResolution) || 1);
   nativeSceneRoundPixels = !!roundPixels;
@@ -882,12 +931,12 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   try {
     if (NativeHost.scene) {
       if (newStage) renderNativeStage._tilemaps = collectNativeTilemaps(stage, []);
-      var plan = !skipUpdateTransform && options.worldState !== 'pixi' &&
+      var plan = !skipUpdateTransform && !localTransforms && options.worldState !== 'pixi' &&
         pmjsPixiRenderPreflight.transformPlan(stage);
-      nativeSceneUsePixiWorldState = !!skipUpdateTransform || !!plan || options.worldState === 'pixi' ||
-        typeof stage.updateTransform === 'function';
+      nativeSceneUsePixiWorldState = !!skipUpdateTransform || !localTransforms &&
+        (!!plan || options.worldState === 'pixi' || typeof stage.updateTransform === 'function');
       nativeSceneTransformsPrepared = nativeSceneUsePixiWorldState;
-      if (!skipUpdateTransform) {
+      if (!skipUpdateTransform && !localTransforms) {
         if (plan) PMJS.pixi4.scenePreparation.transforms(plan, stage);
         else if (typeof stage.updateTransform === 'function') stage.updateTransform();
       }
@@ -900,6 +949,10 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
       }
       if (bindTarget) bindTarget();
       submitNativeScene(stage, backgroundColor);
+      var state = nativeStageRenderState(stage);
+      state.renders++;
+      state.worldState = localTransforms ? 'local' : nativeSceneUsePixiWorldState ? 'pixi' : 'native';
+      state.skipUpdateTransform = !!skipUpdateTransform;
     }
   } catch (error) {
     renderNativeStage._ready = false;
