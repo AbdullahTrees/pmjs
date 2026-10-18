@@ -23,7 +23,7 @@ Usage:
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
       [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs BUNDLE [--game DIR]
-  pmjs package BUNDLE --runtime DIR --output ZIP
+  pmjs package BUNDLE --runtime DIR --output ZIP [--sources FILE --sources-url URL]
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
@@ -92,7 +92,7 @@ function runtimeIdentity() {
 function matches(record, context) {
   try {
     return record.schema === 2 && record.game === context.game &&
-      record.packageSha256 === context.packageSha256 && record.runtimeIdentity === context.runtimeIdentity &&
+      record.runtimeIdentity === context.runtimeIdentity &&
       record.config === context.config && record.manifest === context.manifest &&
       record.bundleBootstrapSha256 === context.bundleBootstrapSha256 &&
       JSON.stringify(record.adapters) === JSON.stringify(context.adapters) &&
@@ -166,11 +166,18 @@ async function main() {
   if (first === 'package') {
     const bundleArgument = args.shift();
     if (!bundleArgument || bundleArgument.startsWith('--')) throw new Error('package requires a bundle directory');
-    const options = parse(args, ['--runtime', '--output'], false);
+    if (!fs.existsSync(path.join(share, 'tools/portmaster.py'))) {
+      throw new Error('Packaging requires a host installation; use tools/portmaster.py from the PMJS source checkout');
+    }
+    const sourceUrlAt = args.indexOf('--sources-url');
+    const sourceUrl = sourceUrlAt < 0 ? undefined : args.splice(sourceUrlAt, 2)[1];
+    if (sourceUrlAt >= 0 && !sourceUrl) throw new Error('--sources-url requires a URL');
+    const options = parse(args, ['--runtime', '--output', '--sources'], false);
     if (!options['--runtime'] || !options['--output']) throw new Error('package requires --runtime and --output');
-    const bundle = readBundle(bundleArgument);
     const result = spawnSync('python3', [path.join(share, 'tools/portmaster.py'),
-      '--stage', options['--runtime'], '--bundle', bundle.root, '--output', options['--output']],
+      '--stage', options['--runtime'], '--bundle', path.resolve(bundleArgument), '--output', options['--output'],
+      ...(options['--sources'] ? ['--sources', options['--sources']] : []),
+      ...(sourceUrl ? ['--sources-url', sourceUrl] : [])],
     { stdio: 'inherit', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`packaging failed (${result.signal || result.status})`);

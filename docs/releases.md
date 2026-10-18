@@ -2,16 +2,25 @@
 (Written by AI. Not finalized yet)
 
 
-Build the ARM64 installation with [build.sh](building.md) before release work.
 Linux ARM64 is the first release target; local x64 builds are for development
-and testing.
+and testing. Public releases require the explicit release presets below.
 
 ## Stage the runtime
 
-The build command installs to `dist/pmjs-arm64`:
+For ARM64, set `PMJS_SOURCE_URL` to the permanent download URL for the matching
+source archive, then prepare an empty staging destination:
 
 ```sh
-./build.sh --target arm64
+python3 tools/dependencies.py --jobs 4
+export PMJS_SDK_ROOT="$PWD/.cache/linux-arm64/sdk"
+export PMJS_NODE_ROOT="$PWD/.cache/linux-arm64/node"
+export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/arm64"
+export PMJS_EFFEKSEER_ARCHIVE="$PWD/.cache/effekseer/source.tar.gz"
+export PMJS_LZ4_ARCHIVE="$PWD/.cache/lz4/source.tar.gz"
+cmake --preset release-linux-arm64
+python3 tools/release.py sources --sdk "$PMJS_SDK_ROOT" --output dist/pmjs-ffmpeg-sources.tar.gz
+python3 tools/release.py stage --build build/release-linux-arm64 --output dist/pmjs-arm64 \
+  --sources dist/pmjs-ffmpeg-sources.tar.gz --sources-url "$PMJS_SOURCE_URL"
 ```
 
 For a separate x64 release build, use `cmake --preset release-x64`, build
@@ -21,8 +30,8 @@ For a separate x64 release build, use `cmake --preset release-x64`, build
 bin/pmjs           launcher
 bin/node           bundled Node, when selected
 lib/               addon and native libraries
-share/pmjs/        runner, modules, tools, docs, notices and sources
-build-info.json    source, build details and file checksums
+share/pmjs/        runner, modules, diagnostics and notices
+build-info.json    runtime configuration and a compact payload checksum
 LICENSE
 THIRD_PARTY_NOTICES.md
 ```
@@ -32,8 +41,10 @@ Node and nongraphics dependencies; SDL2, EGL, GLES and graphics drivers come
 from the firmware. The ABI baseline is glibc 2.28, GLIBCXX 3.4.25,
 CXXABI 1.3.11 and GCC 7.0.0.
 
-Installation checks native inputs and the addon checksum. Documentation and
-JavaScript changes are recorded at installation without rebuilding native code.
+Release staging verifies native inputs, strips Release binaries and audits the
+ABI. Detailed provenance and file inventories go in `RUNTIME.release.json`
+beside the runtime; keep the matching source archive there too. Documentation,
+host tools and source materials are excluded from the runtime.
 
 ## Verify
 
@@ -70,14 +81,17 @@ python3 tools/release.py verify --stage dist/pmjs-arm64 \
   --receipt dist/device-receipt.json --report dist/verification-arm64.json
 python3 tools/release.py archive --stage dist/pmjs-arm64 \
   --report dist/verification-arm64.json --output dist/pmjs-linux-arm64.tar.gz
+python3 tools/release.py verify-archive --archive dist/pmjs-linux-arm64.tar.gz
 ```
 
 Public archives require a clean source tree, compiled provenance and a matching
 graphics test. ARM64 requires a hardware renderer and Skia65. x64 may use software
 rendering under Xvfb. Addon loading alone is insufficient.
 
-The archive includes the verification report and gets a sibling `.sha256` file.
-Creating it does not publish it. For a local candidate without device testing:
+The archive contains only the runtime. Publish its `ARCHIVE.release.json` and
+`ARCHIVE.verification.json` companions and matching source archive together.
+Use a fresh archive filename; publication is atomic per file, not per group.
+Creating an archive does not publish it. For a local candidate without device testing:
 
 ```sh
 python3 tools/release.py archive --stage dist/pmjs-arm64 \
@@ -86,6 +100,7 @@ python3 tools/release.py archive --stage dist/pmjs-arm64 \
 
 Before distributing, test saves, repeated launching, game compatibility, audio,
 controls, frame pacing and return to the menu on the intended device and firmware.
+Hosted CI publishes development prereleases without device qualification.
 
 ## PortMaster ZIP
 
@@ -96,6 +111,7 @@ Test the actual ZIP on each target firmware before distributing it.
 
 ## Redistribution
 
-Keep license notices, dependency sources and build materials with the package.
+Keep license notices in the runtime and publish the referenced matching source
+archive and rebuild materials alongside the distribution.
 FFmpeg is built without GPL/nonfree options. Check third-party license terms
 before publishing; PMJS's MIT license does not cover its dependencies.

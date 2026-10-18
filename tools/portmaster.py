@@ -10,7 +10,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from release import checked_manifest, digest, elf, inventory, static_audit, write_json
+from runtime_artifact import checked_runtime, digest, elf, inventory, static_audit, strip_binary, write_json, source_reference, payload_digest
 
 
 PORTMASTER_LAUNCHER = '''#!/bin/bash
@@ -112,7 +112,6 @@ if type pm_platform_helper >/dev/null 2>&1; then
   pm_platform_helper "$port/runtime/bin/node" || exit 1
 fi
 (
-  export LD_LIBRARY_PATH="$port/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   export XDG_CACHE_HOME="$port/.cache"
   exec "$port/runtime/bin/pmjs" "$port" --game "$game" --save-root "$port/saves" --asset-cache-root "$port/.cache"
 ) &
@@ -134,11 +133,23 @@ def write_zip(directory, output, epoch):
             entry = zipfile.ZipInfo(name + ('/' if file.is_dir() else ''), timestamp)
             entry.create_system = 3
             entry.external_attr = ((0o40755 if file.is_dir() else file.stat().st_mode) << 16)
-            bundle.writestr(entry, b'' if file.is_dir() else file.read_bytes(),
-                            compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            # ZipInfo's compression level has no public setter in Python 3.12.
+            entry._compresslevel = 9
+            entry.file_size = 0 if file.is_dir() else file.stat().st_size
+            with bundle.open(entry, 'w') as destination:
+                if not file.is_dir():
+                    with file.open('rb') as source:
+                        shutil.copyfileobj(source, destination, length=1024 * 1024)
 
 
 def checked_bundle(bundle):
+    actual = set()
+    for file in bundle.rglob('*'):
+        if file.is_symlink():
+            raise ValueError('Bundle cannot contain symbolic links')
+        if file.is_file():
+            actual.add(file.relative_to(bundle).as_posix())
     descriptor = json.loads((bundle / 'pmjs.json').read_text())
     if descriptor.get('schema') != 1 or descriptor.get('kind') != 'pmjs-game-bundle':
         raise ValueError('Unsupported PMJS bundle')
@@ -200,77 +211,44 @@ def checked_bundle(bundle):
                     raise ValueError('Generated asset checksum differs from asset index')
     elif descriptor.get('assets'):
         raise ValueError('Generated assets require an asset index')
-    actual = set()
-    for file in bundle.rglob('*'):
-        if file.is_symlink():
-            raise ValueError('Bundle cannot contain symbolic links')
-        if file.is_file():
-            actual.add(file.relative_to(bundle).as_posix())
     if actual != expected:
         raise ValueError('Bundle contains missing or undeclared files: ' +
                          ', '.join(sorted(actual.symmetric_difference(expected))[:5]))
     return descriptor
 
 
-def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=None,
-               bundle=None, host_runtime=None, no_index=False, include_assets=False, manifest=None,
-               extra_notices=()):
-    info = checked_manifest(stage)
+def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), sources=None, sources_url=None):
+    original_info = checked_runtime(stage)
+    info = original_info
+    if sources is not None or sources_url is not None:
+        if sources is None or sources_url is None:
+            raise ValueError('--sources and --sources-url must be provided together')
+        info = {**info, 'dependencySources': source_reference(sources, sources_url)}
     if not (stage / 'bin/node').is_file():
         raise ValueError('PortMaster packaging requires a runtime with bundled target Node')
-    if output.is_relative_to(stage) or (game and output.is_relative_to(game)) or (bundle and output.is_relative_to(bundle)):
+    if output.is_relative_to(stage) or output.is_relative_to(bundle):
         raise ValueError('Package output must be outside the runtime and game directories')
-    if (game is None) == (bundle is None):
-        raise ValueError('Provide exactly one of --game or --bundle')
-    if include_assets and no_index:
-        raise ValueError('--include-assets requires an asset index')
-    if bundle and (config or adapters or manifest or no_index or include_assets):
-        raise ValueError('Bundle options are set when creating the bundle, not when packaging it')
-    if bundle:
-        descriptor = checked_bundle(bundle)
-        if name is None:
-            name = descriptor.get('title')
-    elif name is None:
-        name = json.loads((game / 'data/System.json').read_text())['gameTitle']
-    if not isinstance(name, str) or not name.strip() or re.search(r'[/\\\x00-\x1f]', name) or name.strip() in ('.', '..'):
-        raise ValueError('Use a nonempty game name without path separators or control characters')
-    name = name.strip()
-    identifier = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
-    if not identifier:
-        raise ValueError('Game name must contain an ASCII letter or number')
-    strip = strip or next((tool for tool in ('llvm-strip-20', 'llvm-strip', 'aarch64-linux-gnu-strip')
-                           if shutil.which(tool)), None)
-    if not strip:
-        raise ValueError('Install llvm-strip or specify --strip; package binaries must be stripped')
+    if not bundle.is_dir():
+        raise ValueError('Bundle directory does not exist')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='pmjs-portmaster-', dir=output.parent) as temporary:
         workspace = Path(temporary)
         payload = workspace / 'payload'
+        staged_bundle = workspace / 'staged-bundle'
+        shutil.copytree(bundle, staged_bundle, symlinks=True)
+        descriptor = checked_bundle(staged_bundle)
+        if name is None:
+            name = descriptor.get('title')
+        if not isinstance(name, str) or not name.strip() or re.search(r'[/\\\x00-\x1f]', name) or name.strip() in ('.', '..'):
+            raise ValueError('Use a nonempty game name without path separators or control characters')
+        name = name.strip()
+        identifier = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+        if not identifier:
+            raise ValueError('Game name must contain an ASCII letter or number')
+        payload.mkdir()
         port = payload / identifier
+        staged_bundle.rename(port)
         runtime = port / 'runtime'
-        if bundle is None:
-            bundle = workspace / 'generated-bundle'
-            host = host_runtime or (Path(__file__).resolve().parent.parent / 'dist/pmjs')
-            if (host / 'bin/pmjs').is_file():
-                command = [host / 'bin/pmjs', 'bundle', game, '--output', bundle]
-                if config:
-                    command.extend(['--config', config])
-                if manifest:
-                    command.extend(['--manifest', manifest])
-                for adapter in adapters:
-                    command.extend(['--adapter', adapter])
-                if no_index:
-                    command.append('--no-index')
-                if include_assets:
-                    command.append('--include-assets')
-            elif no_index and manifest is None:
-                command = ['node', Path(__file__).resolve().parent / 'game-bundle.mjs',
-                           game, bundle, str(config) if config else '', '', *adapters]
-            else:
-                raise ValueError('Build a local host PMJS installation or pass --host-runtime to generate the asset index')
-            subprocess.run([str(value) for value in command], check=True)
-        checked_bundle(bundle)
-        shutil.copytree(bundle, port)
         runtime.mkdir()
         subprocess.run(['node', '--check', port / 'bootstrap.js'], check=True)
 
@@ -285,16 +263,14 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
             target = runtime / file.relative_to(stage)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(file, target)
-            symbols = subprocess.check_output(['readelf', '--dyn-syms', '--wide', file])
-            dynamic = subprocess.check_output(['readelf', '-d', '--wide', file])
-            subprocess.run([strip, '--strip-unneeded', target], check=True)
-            if (symbols != subprocess.check_output(['readelf', '--dyn-syms', '--wide', target]) or
-                    dynamic != subprocess.check_output(['readelf', '-d', '--wide', target])):
-                raise ValueError('Stripping changed dynamic symbols or loader information: ' + file.name)
-            sections = subprocess.check_output(['readelf', '-S', '--wide', target], text=True)
-            if re.search(r'\.(?:debug\w*|zdebug\w*|symtab)\b', sections):
-                raise ValueError('Strip tool left debug information: ' + file.name)
-            pending.extend(stage / 'lib' / dependency for dependency in elf(file)['needed']
+            inspection = elf(target, stripping=True)
+            if inspection['needsStrip']:
+                strip = strip or next((tool for tool in ('llvm-strip-20', 'llvm-strip', 'aarch64-linux-gnu-strip')
+                                       if shutil.which(tool)), None)
+                if not strip:
+                    raise ValueError('Install llvm-strip or specify --strip; package binaries must be stripped')
+                strip_binary(target, strip, inspection['dynamic'])
+            pending.extend(stage / 'lib' / dependency for dependency in inspection['needed']
                            if (stage / 'lib' / dependency).is_file())
         static_audit(runtime, info)
         shutil.copy2(stage / 'bin/pmjs', runtime / 'bin/pmjs')
@@ -315,25 +291,21 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
                 licenses.write(f'===== {notice.name} =====\n\n{notice.read_text().rstrip()}\n\n')
             if info.get('dependencySources'):
                 licenses.write('FFmpeg source and build materials: ' + info['dependencySources']['url'] + '\n')
-        # Only the bundled LGPL media libraries require matching source here.
         if any(file.name.startswith('libav') for file in copied) and not info.get('dependencySources'):
-            sources = stage / 'share/pmjs/sources'
-            record = sources / 'build-records/ffmpeg.json'
-            recipe = json.loads(record.read_text())['recipe']['source']
-            archive = sources / ('ffmpeg-' + recipe['url'].rsplit('/', 1)[-1])
-            if digest(archive) != recipe['sha256']:
-                raise ValueError('Matching FFmpeg source archive is required')
-            preparation = sources / 'tools/linux-arm64'
-            toolchain = sources / 'cmake/toolchains/portable-arm64.cmake'
-            materials = [archive, record, sources / 'build-records/toolchain.json',
-                         sources / 'build-records/sysroot.json', preparation / 'prepare-sdk.py',
-                         preparation / 'sdk-recipes.json', preparation / 'sdk-packages.json', toolchain]
-            for file in materials:
-                target = runtime / 'sources' / file.relative_to(sources)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, target)
-        package_info = dict(info)
-        package_info['files'] = inventory(runtime)
+            raise ValueError('Bundled FFmpeg requires a source archive reference; specify --sources and --sources-url')
+        package_info = {key: value for key, value in info.items()
+                        if key not in ('files', 'compiledInputs', 'configuration', 'environment', 'loader')}
+        package_info['source'] = {key: value for key, value in info['source'].items()
+                                  if key in ('commit', 'dirty', 'sourceDateEpoch')}
+        if 'node' in package_info:
+            package_info['node'] = {key: value for key, value in info['node'].items() if key != 'source'}
+        files = inventory(runtime)
+        if info['schema'] == 1:
+            package_info.pop('payloadSha256', None)
+            # Older diagnostic scripts require the original per-file inventory.
+            package_info['files'] = files
+        else:
+            package_info['payloadSha256'] = payload_digest(files)
         write_json(runtime / 'build-info.json', package_info)
         launcher = payload / (name + '.sh')
         launcher.write_text(PORTMASTER_LAUNCHER.replace('@ID@', identifier))
@@ -342,7 +314,7 @@ def portmaster(stage, game, output, name=None, config=None, adapters=(), strip=N
         epoch = info['source']['sourceDateEpoch']
         package = workspace / 'game.zip'
         write_zip(payload, package, epoch)
-        if inventory(stage) != info['files']:
+        if checked_runtime(stage) != original_info:
             raise ValueError('Installed runtime changed during packaging')
         package.replace(output)
         print(f'{output} ({output.stat().st_size / 1024**2:.1f} MiB)')
@@ -352,27 +324,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('stage', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--game', type=Path)
-    source.add_argument('--bundle', type=Path)
-    parser.add_argument('--name', help='Launcher name; defaults to the game title')
-    parser.add_argument('--config', type=Path)
-    parser.add_argument('--manifest', type=Path)
-    parser.add_argument('--patch', '--adapter', dest='adapter', type=Path, action='append', default=[],
-                        help='Load a custom JavaScript patch before engine boot')
-    parser.add_argument('--host-runtime', type=Path)
-    parser.add_argument('--no-index', action='store_true')
-    parser.add_argument('--include-assets', action='store_true')
+    parser.add_argument('--bundle', type=Path, required=True)
+    parser.add_argument('--name', help='Launcher name; defaults to the bundle title')
     parser.add_argument('--strip', help='Target-capable strip executable')
+    parser.add_argument('--sources', type=Path, help='Corresponding FFmpeg source archive, distributed separately')
+    parser.add_argument('--sources-url', help='Permanent HTTP(S) download URL for that archive')
     parser.add_argument('--notice', type=Path, action='append', default=[], help='Add a port-specific license notice')
     args = parser.parse_args()
     try:
-        portmaster(args.stage.resolve(), args.game.resolve() if args.game else None, args.output.resolve(), args.name,
-                   args.config.resolve() if args.config else None, [file.resolve() for file in args.adapter], args.strip,
-                   args.bundle.resolve() if args.bundle else None,
-                   args.host_runtime.resolve() if args.host_runtime else None,
-                   args.no_index, args.include_assets, args.manifest.resolve() if args.manifest else None,
-                   [file.resolve() for file in args.notice])
+        portmaster(args.stage.resolve(), args.bundle.resolve(), args.output.resolve(), args.name,
+                   args.strip, [file.resolve() for file in args.notice],
+                   args.sources.resolve() if args.sources else None, args.sources_url)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

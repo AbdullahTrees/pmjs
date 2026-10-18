@@ -71,6 +71,10 @@ class SdkCache(unittest.TestCase):
         script = self.tools / 'prepare-sdk.py'
         script.write_text(script.read_text() + '\n# Diagnostic-only edit\n')
         self.assertEqual(before, self.builder.recipes(self.sdk, self.spec))
+        for name, recipe in before.items():
+            record = self.builder.read_record(self.sdk, name)
+            self.assertNotEqual(record['builderSha256'], self.builder.digest(script))
+            self.assertIsNone(self.builder.cache_reason(self.sdk, record, recipe))
         self.spec['revision'] += 1
         (self.tools / 'sdk-recipes.json').write_text(json.dumps(self.spec))
         after = self.builder.recipes(self.sdk, self.spec)

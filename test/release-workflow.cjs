@@ -10,7 +10,7 @@ const { temporaryDirectory } = require('./helpers/temp.cjs');
 
 const temporary = temporaryDirectory('pmjs-release-contract-');
 try {
-  const stage = path.join(temporary, 'relocated runtime');
+  let stage = path.join(temporary, 'relocated runtime');
   fs.cpSync(path.resolve(process.argv[2]), stage, { recursive: true });
   const game = path.join(temporary, 'game with spaces');
   const state = path.join(temporary, 'prepared state');
@@ -165,6 +165,43 @@ try {
     '--state', path.join(temporary, 'bundle state'));
   assertGuestReached(bundledRun);
   assert.ok(fs.existsSync(path.join(temporary, 'bundle state/prepared.json')));
+  const cachedRuns = [
+    { args: ['run', '--game', game, '--state', state], state },
+    { args: [movedBundle, '--game', game, '--state', path.join(temporary, 'bundle state')],
+      state: path.join(temporary, 'bundle state') }
+  ].map(run => {
+    const record = fs.readFileSync(path.join(run.state, 'prepared.json'), 'utf8');
+    return { ...run, record, bootstrapTime: fs.statSync(
+      path.join(run.state, JSON.parse(record).bootstrap), { bigint: true }).mtimeNs };
+  });
+  const documentation = path.join(stage, 'THIRD_PARTY_NOTICES.md');
+  const originalDocumentation = fs.readFileSync(documentation);
+  const originalInfo = fs.readFileSync(infoFile);
+  try {
+    fs.appendFileSync(documentation, '\nDocumentation update\n');
+    const info = JSON.parse(originalInfo);
+    if (info.files) {
+      info.files['THIRD_PARTY_NOTICES.md'].sha256 = crypto.createHash('sha256')
+        .update(fs.readFileSync(documentation)).digest('hex');
+      info.files['THIRD_PARTY_NOTICES.md'].bytes = fs.statSync(documentation).size;
+    } else {
+      info.buildId = 'updated-documentation';
+    }
+    fs.writeFileSync(infoFile, JSON.stringify(info));
+    const updatedPackageHash = crypto.createHash('sha256').update(fs.readFileSync(infoFile)).digest('hex');
+    for (const run of cachedRuns) {
+      const result = cli(...run.args);
+      assertGuestReached(result);
+      assert.ok(result.stdout.includes(`package=${updatedPackageHash}`), 'startup logs the current package');
+      assert.equal(fs.readFileSync(path.join(run.state, 'prepared.json'), 'utf8'), run.record,
+        'documentation-only installation changes preserve preparation records');
+      assert.equal(fs.statSync(path.join(run.state, JSON.parse(run.record).bootstrap), { bigint: true }).mtimeNs,
+        run.bootstrapTime, 'compatible cached bootstraps are neither rebuilt nor recopied');
+    }
+  } finally {
+    fs.writeFileSync(documentation, originalDocumentation);
+    fs.writeFileSync(infoFile, originalInfo);
+  }
   const editedBundle = path.join(temporary, 'edited bundle');
   fs.cpSync(movedBundle, editedBundle, { recursive: true });
   fs.writeFileSync(path.join(editedBundle, 'config.json'), '{"title":"Edited bundle"}');
@@ -191,6 +228,21 @@ try {
     fs.readFileSync(path.join(movedBundle, 'bootstrap.js'))).digest('hex'), bundleBootstrapHash,
   'distributed bootstrap remains unchanged');
   fs.writeFileSync(runtimeModule, runtimeSource);
+  const builder = path.join(stage, 'share/pmjs/tools/build-js-runtime.mjs');
+  const builderSource = fs.readFileSync(builder);
+  assertGuestReached(cliAt(indexedData, movedBundle, '--game', game,
+    '--state', path.join(temporary, 'bundle state')));
+  const beforeBuilder = JSON.parse(fs.readFileSync(path.join(temporary, 'bundle state/prepared.json')));
+  try {
+    fs.appendFileSync(builder, '\n// changed bundle generation\n');
+    assertGuestReached(cliAt(indexedData, movedBundle, '--game', game,
+      '--state', path.join(temporary, 'bundle state')));
+    const afterBuilder = JSON.parse(fs.readFileSync(path.join(temporary, 'bundle state/prepared.json')));
+    assert.notEqual(afterBuilder.runtimeIdentity, beforeBuilder.runtimeIdentity,
+      'bundle-generation tool changes invalidate preparation independently of the package manifest');
+  } finally {
+    fs.writeFileSync(builder, builderSource);
+  }
   const gameId = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   function preparedImage(data) {
     const entries = path.join(data, 'pmjs', gameId, 'saves/asset-cache/entries');
@@ -279,22 +331,42 @@ try {
   assert.equal(crypto.createHash('sha256').update(fs.readFileSync(bootstrap)).digest('hex'),
     JSON.parse(fs.readFileSync(path.join(state, 'prepared.json'))).bootstrapSha256,
     'damaged bootstrap is regenerated');
+  if (!installedInfo.files && !installedInfo.payloadSha256) {
+    const plainLoad = cli('self-test');
+    assert.equal(plainLoad.status, 0, plainLoad.stdout + plainLoad.stderr);
+    assert.equal(JSON.parse(plainLoad.stdout.trim().split('\n').at(-1)).test, 'runtime-load');
+    assert.ok(process.argv[3], 'pass the producing build directory to inventory a plain installation');
+    const runtimeStage = path.join(temporary, 'distribution');
+    for (const component of ['native-addon', 'runtime']) {
+      const installed = spawnSync('cmake', ['--install', path.resolve(process.argv[3]),
+        '--prefix', runtimeStage, '--component', component], { encoding: 'utf8' });
+      assert.equal(installed.status, 0, installed.stdout + installed.stderr);
+    }
+    fs.writeFileSync(path.join(runtimeStage, 'share/pmjs/notices/unicode-😀-é.txt'), 'payload checksum fixture');
+    stage = runtimeStage;
+    const qualified = spawnSync('python3', [path.resolve(__dirname, '../tools/release.py'), 'manifest',
+      '--stage', stage, '--build', path.resolve(process.argv[3]), '--source', path.resolve(__dirname, '..')],
+    { encoding: 'utf8' });
+    assert.equal(qualified.status, 0, qualified.stdout + qualified.stderr);
+  }
   const packageSha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(stage, 'build-info.json'))).digest('hex');
+  const releaseRecord = path.join(path.dirname(stage), path.basename(stage) + '.release.json');
+  const releaseRecordSha256 = crypto.createHash('sha256').update(fs.readFileSync(releaseRecord)).digest('hex');
   const report = path.join(temporary, 'verification.json');
   function archive(verification, development = false) {
-    fs.writeFileSync(report, JSON.stringify(verification));
+    fs.writeFileSync(report, JSON.stringify({ releaseRecordSha256, ...verification }));
     return spawnSync('python3', [path.resolve(__dirname, '../tools/release.py'), 'archive',
       '--stage', stage, '--report', report, '--output', path.join(temporary, 'release.tar.gz'),
       ...(development ? ['--development'] : [])],
     { encoding: 'utf8' });
   }
-  const wrongPackage = archive({ schema: 1, packageSha256: '0'.repeat(64), static: 'passed' });
+  const wrongPackage = archive({ schema: 2, packageSha256: '0'.repeat(64), static: 'passed' });
   assert.notEqual(wrongPackage.status, 0);
   assert.match(wrongPackage.stderr, /different package/);
-  const noExecution = archive({ schema: 1, packageSha256, static: 'passed', smoke: null });
+  const noExecution = archive({ schema: 2, packageSha256, static: 'passed', smoke: null });
   assert.notEqual(noExecution.status, 0);
   assert.match(noExecution.stderr, /executed smoke test is required/);
-  const incompleteReceipt = archive({ schema: 1, packageSha256, static: 'passed', smoke: { load: true } });
+  const incompleteReceipt = archive({ schema: 2, packageSha256, static: 'passed', smoke: { load: true } });
   assert.notEqual(incompleteReceipt.status, 0);
   assert.match(incompleteReceipt.stderr, /does not verify this exact package/);
   const load = cli('self-test');
@@ -302,10 +374,10 @@ try {
   const receipt = JSON.parse(load.stdout.trim().split('\n').at(-1));
   assert.equal(receipt.test, 'package-load');
   assert.equal(receipt.graphics, null);
-  const loadOnly = archive({ schema: 1, packageSha256, static: 'passed', smoke: receipt });
+  const loadOnly = archive({ schema: 2, packageSha256, static: 'passed', smoke: receipt });
   assert.notEqual(loadOnly.status, 0);
   assert.match(loadOnly.stderr, /require a graphics smoke receipt/);
-  const development = archive({ schema: 1, packageSha256, static: 'passed', smoke: null }, true);
+  const development = archive({ schema: 2, packageSha256, static: 'passed', smoke: null }, true);
   assert.equal(development.status, 0, development.stdout + development.stderr);
   fs.chmodSync(path.join(stage, 'LICENSE'), 0o755);
   const synthesizedModes = cli('self-test');
@@ -319,12 +391,12 @@ try {
   fs.writeFileSync(extraFile, 'unexpected');
   const changedPayload = cli('self-test');
   assert.notEqual(changedPayload.status, 0);
-  assert.match(changedPayload.stderr, /exact package payload/);
+  assert.match(changedPayload.stderr, /exact package payload|runtime payload checksum/);
   fs.rmSync(extraFile);
   fs.appendFileSync(path.join(stage, 'share/pmjs/runner/cli.cjs'), '\n// damaged\n');
   const tampered = cli('self-test');
   assert.notEqual(tampered.status, 0);
-  assert.match(tampered.stderr, /package checksum/);
+  assert.match(tampered.stderr, /package checksum|runtime payload checksum/);
   console.log('Installed preparation, relocation, archive gates and tamper checks passed');
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

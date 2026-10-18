@@ -20,7 +20,7 @@ def run(arguments, **kwargs):
 
 def build(options):
     if options.verify:
-        validate(options.output.resolve(), options.arch)
+        validate(options.output.resolve(), options.arch, mask_test=options.mask_test)
         return
     cache = (options.cache or ROOT / (".cache/skia65" if options.arch == "x64" else ".cache/skia65-arm64")).resolve()
     if getattr(options, "explain", False):
@@ -67,7 +67,7 @@ def build_locked(options, cache):
     explain = getattr(options, "explain", False)
     if options.reuse or explain:
         try:
-            validate(destination, options.arch, toolchain)
+            validate(destination, options.arch, toolchain, mask_test=options.mask_test)
             tests = ["pmjs-skia65-mask-test", "pmjs-skia65-raster-test"] if options.mask_test else []
             if all((destination / name).is_file() for name in tests):
                 print("Skia65: unchanged verified component" if explain else destination / "libpmjs-skia65.so")
@@ -104,7 +104,7 @@ def build_locked(options, cache):
         "dependencies": lock, "compilerVersion": compiler_version,
         "compilerSha256": toolchain["compilerSha256"], "configuration": args, "toolchain": toolchain,
         "strip": {"version": lock["clangVersion"], "sha256": toolchain["stripSha256"], "arguments": ["--strip-debug"]},
-        "sources": source_hashes(),
+        "sources": source_hashes(mask_test=options.mask_test),
         "adaptations": adaptations,
         "librarySha256": digest(library), "libraryBytes": library.stat().st_size,
         "readelfDynamic": subprocess.check_output(["readelf", "-d", library], text=True),

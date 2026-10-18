@@ -1,6 +1,7 @@
 import copy
 import json
 import pathlib
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -70,6 +71,37 @@ class ArtifactTests(unittest.TestCase):
         self.write({"arch": "x64"})
         with self.assertRaisesRegex(RuntimeError, "Invalid Skia65 component"):
             artifact.validate(self.directory, "x64")
+
+    def test_test_source_changes_only_invalidate_requested_tests(self):
+        self.source.stop()
+        source_root = artifact.ROOT
+        fixture = self.directory / "source"
+        for name in artifact.source_hashes(mask_test=True):
+            target = fixture / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_root / name, target)
+        with patch.object(artifact, "ROOT", fixture), \
+             patch.object(artifact, "LOCK", fixture / "tools/skia65/sources.lock.json"), \
+             patch.object(artifact, "__file__", str(fixture / "tools/skia65/artifact.py")):
+            self.manifest["sources"] = artifact.source_hashes(mask_test=True)
+            self.write()
+            artifact.validate(self.directory, "x64", mask_test=True)
+            for name in ("mask_test.cpp", "raster_test.cpp"):
+                with self.subTest(name=name):
+                    file = fixture / "src/skia65" / name
+                    file.write_text(file.read_text() + "\n// Test-only change\n")
+                    artifact.validate(self.directory, "x64")
+                    with self.assertRaisesRegex(RuntimeError, "component sources changed"):
+                        artifact.validate(self.directory, "x64", mask_test=True)
+            production = fixture / "src/skia65/pmjs_skia65.cpp"
+            production.write_text(production.read_text() + "\n// Production change\n")
+            with self.assertRaisesRegex(RuntimeError, "component sources changed"):
+                artifact.validate(self.directory, "x64")
+            self.manifest["sources"] = artifact.source_hashes()
+            self.write()
+            artifact.validate(self.directory, "x64")
+            with self.assertRaisesRegex(RuntimeError, "component sources changed"):
+                artifact.validate(self.directory, "x64", mask_test=True)
 
 
 if __name__ == "__main__":

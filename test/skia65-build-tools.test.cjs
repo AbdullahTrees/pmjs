@@ -5,6 +5,13 @@ const path = require('node:path');
 const test = require('node:test');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
+test('Skia component verification separates production and requested test inputs', () => {
+  const result = spawnSync('python3', [path.resolve(__dirname, '../tools/skia65/artifact_test.py')], {
+    encoding: 'utf8', env: { ...process.env, TMPDIR: temporaryDirectory('pmjs-skia-artifact-') }
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test('Skia source downloads verify contents independently of generated archive timestamps', () => {
   const result = spawnSync('python3', [path.resolve(__dirname, '../tools/skia65/provision_test.py')], {
     encoding: 'utf8', env: { ...process.env, TMPDIR: temporaryDirectory('pmjs-skia-provision-') }

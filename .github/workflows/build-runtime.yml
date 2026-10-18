@@ -1,5 +1,5 @@
-name: Build runtime
-run-name: Build PMJS (${{ github.ref_name }})
+name: Build development runtime
+run-name: Build PMJS development candidate (${{ github.ref_name }})
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ defaults:
 
 jobs:
   build:
-    name: Build Linux ARM64
+    name: Build Linux ARM64 development candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -36,7 +36,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config git python3 curl \
+            build-essential cmake ninja-build pkg-config git python3 \
             clang-20=1:20.1.2-0ubuntu1~24.04.3 llvm-20=1:20.1.2-0ubuntu1~24.04.3 \
             nodejs libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev \
             libpng-dev libwebp-dev zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
@@ -67,19 +67,30 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-arm64-v1-
 
-      - name: Build runtime
-        run: ./build.sh --target arm64 --jobs 2
+      - name: Prepare ARM64 dependencies
+        run: python3 tools/dependencies.py --jobs 2
+
+      - name: Build runtimes
+        run: |
+          ./build.sh --jobs 2
+          ./build.sh --target arm64 --jobs 2
 
       - name: Archive FFmpeg source and build materials
         run: |
+          python3 tools/release.py sources --sdk .cache/linux-arm64/sdk \
+            --output "dist/pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz"
+
+      - name: Audit distribution inventories
+        run: |
+          python3 tools/release.py stage --build build/local --output dist/runtime-local
           source_archive="pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz"
-          python3 tools/release.py separate-sources --stage dist/pmjs-arm64 \
-            --output "dist/$source_archive" \
-            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$PMJS_BUILD_ID/$source_archive"
+          python3 tools/release.py manifest --stage dist/pmjs-arm64 --build build/pmjs-arm64 --source . \
+            --strip llvm-strip-20 --sources "dist/$source_archive" \
+            --sources-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$PMJS_BUILD_ID/$source_archive"
 
       - name: Verify host graphics and ARM64 package
         run: |
-          python3 tools/release.py verify --stage dist/pmjs \
+          python3 tools/release.py verify --stage dist/runtime-local \
             --report dist/verification-local.json --graphics --xvfb
           python3 tools/release.py verify --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json --static
@@ -90,6 +101,7 @@ jobs:
           python3 tools/release.py archive --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json \
             --output "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" --development
+          python3 tools/release.py verify-archive --archive "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz"
 
       - name: Save build files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -97,6 +109,7 @@ jobs:
           name: pmjs-linux-arm64
           path: |
             dist/pmjs-linux-arm64-*.tar.gz
+            dist/pmjs-linux-arm64-*.tar.gz.*.json
             dist/pmjs-ffmpeg-sources-*.tar.gz
             dist/static-arm64.json
             dist/verification-local.json
@@ -105,7 +118,7 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish build download
+    name: Publish development download
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -117,7 +130,7 @@ jobs:
           name: pmjs-linux-arm64
           path: dist
 
-      - name: Publish release with build files
+      - name: Publish development prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ needs.build.outputs.build-id }}
@@ -134,14 +147,17 @@ jobs:
             changelog="https://github.com/$GITHUB_REPOSITORY/commits/$GITHUB_SHA"
           fi
           {
+            printf '%s\n\n' 'Development build: not production qualified. No handheld graphics or gameplay acceptance is claimed.'
             printf '%s\n' "$changes"
             printf '\n**Full Changelog**: %s\n' "$changelog"
           } > release-notes.md
           release_url=$(gh release create "$BUILD_ID" \
             "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" \
+            "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz.release.json" \
+            "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz.verification.json" \
             "dist/pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "PMJS $BUILD_ID" \
-            --notes-file release-notes.md --latest)
+            --title "PMJS development $BUILD_ID" \
+            --notes-file release-notes.md --prerelease --latest=false)
           printf 'Build download: %s\n\nRelease assets have no automatic expiration.\n' \
             "$release_url" >> "$GITHUB_STEP_SUMMARY"

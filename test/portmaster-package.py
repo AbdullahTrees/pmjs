@@ -1,6 +1,8 @@
 """Exercise minimal packaging with real ELF fixtures and MV/MZ inspection."""
 import ctypes
+from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -10,12 +12,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
+from unittest.mock import Mock, patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
-import release
+import runtime_artifact as artifacts
 import portmaster
 
 
@@ -65,15 +69,34 @@ class PortMasterPackage(unittest.TestCase):
         (self.game / 'js/libs/pixi-tilemap.js').write_text('')
         (self.game / 'js/plugins.js').write_text('var $plugins = [];')
         self.output = self.root / 'output/game.zip'
+        self.bundle = self.create_bundle(self.root / 'default bundle')
 
     def refresh_manifest(self):
-        release.write_json(self.stage / 'build-info.json', {'schema': 1, 'architecture': 'x86_64',
+        artifacts.write_json(self.stage / 'build-info.json', {'schema': 2, 'architecture': 'x86_64',
                            'buildId': 'build-package-fixture',
-                           'source': {'sourceDateEpoch': 0}, 'files': release.inventory(self.stage)})
+                           'source': {'sourceDateEpoch': 0}, 'files': artifacts.inventory(self.stage)})
+
+    def create_bundle(self, bundle=None, config=None, adapters=()):
+        bundle = bundle or self.root / 'portable bundle'
+        subprocess.run(['node', ROOT / 'tools/game-bundle.mjs', self.game, bundle, config or '', '', *adapters],
+                       check=True, capture_output=True)
+        return bundle
 
     def test_minimal_contents_and_stripping(self):
-        original = release.inventory(self.stage)
-        portmaster.portmaster(self.stage, self.game, self.output)
+        # Legacy/general installations may include development material and provenance.
+        for name in ('share/pmjs/docs/guide.md', 'share/pmjs/tools/portmaster.py',
+                     'share/pmjs/tools/release.py', 'share/pmjs/tools/linux-arm64/audit-abi.py', 'src/runtime.cpp'):
+            file = self.stage / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text('host-only material')
+        self.refresh_manifest()
+        info = json.loads((self.stage / 'build-info.json').read_text())
+        info.update(compiledInputs={'files': {'host/source.cpp': 'hash'}}, environment={'recipe': 'host'},
+                    loader={'host': 'audit'})
+        info['source']['files'] = {'host/source.cpp': 'hash'}
+        artifacts.write_json(self.stage / 'build-info.json', info)
+        original = artifacts.inventory(self.stage)
+        portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
             self.assertIsNone(package.testzip())
             names = package.namelist()
@@ -91,10 +114,18 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIn('minimal-game/runtime/build-info.json', names)
             packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
             self.assertEqual(packaged_info['buildId'], 'build-package-fixture')
+            for key in ('compiledInputs', 'environment', 'loader'):
+                self.assertNotIn(key, packaged_info)
+            self.assertNotIn('files', packaged_info['source'])
+            self.assertFalse(any('/docs/' in name or '/src/' in name or name.endswith('.py') for name in names))
             expected_runtime_files = {name.removeprefix('minimal-game/runtime/') for name in names
                                       if name.startswith('minimal-game/runtime/') and not name.endswith('/')
                                       and name != 'minimal-game/runtime/build-info.json'}
-            self.assertEqual(set(packaged_info['files']), expected_runtime_files)
+            self.assertNotIn('files', packaged_info)
+            runtime_files = {name: {'sha256': hashlib.sha256(package.read('minimal-game/runtime/' + name)).hexdigest(),
+                                    'bytes': len(package.read('minimal-game/runtime/' + name))}
+                             for name in expected_runtime_files}
+            self.assertEqual(packaged_info['payloadSha256'], artifacts.payload_digest(runtime_files))
             self.assertEqual([name for name in names if '/gamedata/' in name], ['minimal-game/gamedata/'])
             self.assertEqual(package.getinfo('Minimal Game.sh').external_attr >> 16 & 0o777, 0o755)
             binary = self.root / 'pmjs_native.node'
@@ -104,11 +135,11 @@ class PortMasterPackage(unittest.TestCase):
             self.assertNotIn('.debug', sections)
             self.assertNotIn('.symtab', sections)
             self.assertEqual(ctypes.CDLL(str(binary)).example(), 42, 'stripped code and dependency load')
-        self.assertEqual(release.inventory(self.stage), original)
+        self.assertEqual(artifacts.inventory(self.stage), original)
         self.assertEqual(list(self.output.parent.iterdir()), [self.output], 'one ZIP, no companion files')
-        checksum = release.digest(self.output)
-        portmaster.portmaster(self.stage, self.game, self.output)
-        self.assertEqual(release.digest(self.output), checksum, 'deterministic ZIP')
+        checksum = artifacts.digest(self.output)
+        portmaster.portmaster(self.stage, self.bundle, self.output)
+        self.assertEqual(artifacts.digest(self.output), checksum, 'deterministic ZIP')
 
     def test_adapter_configuration_and_mz(self):
         adapter = self.root / 'adapter.js'
@@ -120,7 +151,8 @@ class PortMasterPackage(unittest.TestCase):
                 (self.game / 'js/rpg_core.js').unlink()
                 (self.game / 'js/rmmz_core.js').write_text('Utils.RPGMAKER_VERSION = "1.10.0";')
                 (self.game / 'js/libs/pixi.js').write_text('PIXI.VERSION = "5.3.12";')
-            portmaster.portmaster(self.stage, self.game, self.output, config=config, adapters=[adapter])
+            bundle = self.create_bundle(self.root / (engine + " bundle"), config=config, adapters=[adapter])
+            portmaster.portmaster(self.stage, bundle, self.output)
             with zipfile.ZipFile(self.output) as package:
                 bundle = package.read('minimal-game/bootstrap.js').decode()
                 self.assertLess(bundle.index('adapterRegistered'), bundle.index(f'// BEGIN js/pmjs-{engine}/bootstrap.js'))
@@ -130,8 +162,55 @@ class PortMasterPackage(unittest.TestCase):
         self.output.parent.mkdir()
         self.output.write_bytes(b'existing package')
         with self.assertRaises(subprocess.CalledProcessError):
-            portmaster.portmaster(self.stage, self.game, self.output, strip='/bin/false')
+            portmaster.portmaster(self.stage, self.bundle, self.output, strip='/bin/false')
         self.assertEqual(self.output.read_bytes(), b'existing package')
+        write_zip = portmaster.write_zip
+
+        def failed_archive(directory, output, epoch):
+            with patch('portmaster.shutil.copyfileobj', side_effect=OSError('archive write failed')):
+                write_zip(directory, output, epoch)
+
+        with patch('portmaster.write_zip', side_effect=failed_archive):
+            with self.assertRaisesRegex(OSError, 'archive write failed'):
+                portmaster.portmaster(self.stage, self.bundle, self.output)
+        self.assertEqual(self.output.read_bytes(), b'existing package')
+        self.assertEqual(list(self.output.parent.iterdir()), [self.output])
+
+    def test_stripped_closure_needs_no_strip_tool(self):
+        selected = ('bin/node', 'lib/pmjs_native.node', 'lib/librequired.so.1')
+        for name in selected:
+            artifacts.strip_binary(self.stage / name, 'strip')
+        self.refresh_manifest()
+        original = artifacts.inventory(self.stage)
+        self.assertTrue(artifacts.elf(self.stage / 'lib/libunused.so.1', stripping=True)['needsStrip'])
+        with patch('portmaster.shutil.which', return_value=None):
+            portmaster.portmaster(self.stage, self.bundle, self.output)
+        with zipfile.ZipFile(self.output) as package:
+            for name in selected:
+                self.assertEqual(package.read('minimal-game/runtime/' + name), (self.stage / name).read_bytes())
+        self.assertEqual(artifacts.inventory(self.stage), original)
+
+    def test_unstripped_closure_requires_a_strip_tool(self):
+        with patch('portmaster.shutil.which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'specify --strip'):
+                portmaster.portmaster(self.stage, self.bundle, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_strip_cannot_change_symbols_or_loader_information(self):
+        original = artifacts.inventory(self.stage)
+        tool = self.root / 'corrupt-strip'
+        self.output.parent.mkdir()
+        self.output.write_bytes(b'existing package')
+        for old, new in ((b'required', b'changed_'), (b'$ORIGIN', b'$BROKEN')):
+            with self.subTest(value=old):
+                tool.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nimport sys\n'
+                                f'file = Path(sys.argv[-1])\n'
+                                f'file.write_bytes(file.read_bytes().replace({old!r}, {new!r}))\n')
+                tool.chmod(0o755)
+                with self.assertRaisesRegex(ValueError, 'changed dynamic symbols or loader information'):
+                    portmaster.portmaster(self.stage, self.bundle, self.output, strip=tool)
+                self.assertEqual(self.output.read_bytes(), b'existing package')
+        self.assertEqual(artifacts.inventory(self.stage), original)
 
     def test_separate_media_source_download_is_preserved(self):
         shutil.copy2(self.stage / 'lib/librequired.so.1', self.stage / 'lib/libavutil.so.58')
@@ -143,8 +222,8 @@ class PortMasterPackage(unittest.TestCase):
         info = json.loads((self.stage / 'build-info.json').read_text())
         info['dependencySources'] = {'filename': 'pmjs-ffmpeg-sources-1234567.tar.gz', 'sha256': 'a' * 64,
                                     'url': 'https://example.invalid/releases/download/build/source.tar.gz'}
-        release.write_json(self.stage / 'build-info.json', info)
-        portmaster.portmaster(self.stage, self.game, self.output)
+        artifacts.write_json(self.stage / 'build-info.json', info)
+        portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
             packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
             self.assertEqual(packaged_info['dependencySources'], info['dependencySources'])
@@ -152,13 +231,47 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIn('minimal-game/runtime/lib/libavutil.so.58', package.namelist())
             self.assertFalse(any('/sources/' in name for name in package.namelist()))
 
+    def test_explicit_source_archive_is_verified_and_not_embedded(self):
+        archive = self.root / 'ffmpeg-sources.tar.gz'
+        source = b'matching source code'
+        recipe = {'url': 'https://example.invalid/ffmpeg-fixture.tar.xz',
+                  'sha256': hashlib.sha256(source).hexdigest()}
+        materials = {'ffmpeg-ffmpeg-fixture.tar.xz': source,
+                     'build-records/ffmpeg.json': json.dumps({'recipe': {'source': recipe}}).encode(),
+                     'tools/linux-arm64/sdk-recipes.json': json.dumps({'sources': {'ffmpeg': recipe}}).encode()}
+        for name in ('build-records/toolchain.json', 'build-records/sysroot.json',
+                     'tools/linux-arm64/prepare-sdk.py', 'tools/linux-arm64/sdk-packages.json',
+                     'cmake/toolchains/portable-arm64.cmake'):
+            materials[name] = b'fixture rebuild material'
+        def write_archive():
+            with tarfile.open(archive, 'w:gz') as output:
+                for name, data in materials.items():
+                    entry = tarfile.TarInfo('pmjs-ffmpeg-sources/' + name)
+                    entry.size = len(data)
+                    output.addfile(entry, io.BytesIO(data))
+        write_archive()
+        kwargs = {'sources': archive, 'sources_url': 'https://example.invalid/ffmpeg-sources.tar.gz'}
+        portmaster.portmaster(self.stage, self.bundle, self.output, **kwargs)
+        with zipfile.ZipFile(self.output) as package:
+            info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertEqual(info['dependencySources']['sha256'], artifacts.digest(archive))
+            self.assertFalse(any('/sources/' in name or name.endswith('.tar.gz') for name in package.namelist()))
+        before = self.output.read_bytes()
+        materials['ffmpeg-ffmpeg-fixture.tar.xz'] = b'wrong source code'
+        write_archive()
+        with self.assertRaisesRegex(ValueError, 'source checksum'):
+            portmaster.portmaster(self.stage, self.bundle, self.output, **kwargs)
+        archive.write_bytes(b'invalid archive')
+        with self.assertRaisesRegex(ValueError, 'Invalid FFmpeg source archive'):
+            portmaster.portmaster(self.stage, self.bundle, self.output, **kwargs)
+        self.assertEqual(self.output.read_bytes(), before)
+
     def test_bundle_rejects_extra_files_and_carries_declared_generated_pages(self):
-        bundle = self.root / 'portable bundle'
-        subprocess.run(['node', ROOT / 'tools/game-bundle.mjs', self.game, bundle, '', ''], check=True)
+        bundle = self.create_bundle()
         extra = bundle / 'unexpected-game-file.png'
         extra.write_bytes(b'not declared')
         with self.assertRaisesRegex(ValueError, 'undeclared files'):
-            portmaster.portmaster(self.stage, None, self.output, bundle=bundle)
+            portmaster.portmaster(self.stage, bundle, self.output)
         self.assertFalse(self.output.exists())
         extra.unlink()
         page = 'assets/images/' + 'a' * 64 + '/page-0.png'
@@ -177,37 +290,202 @@ class PortMasterPackage(unittest.TestCase):
                           assetIndexSha256=hashlib.sha256(index_file.read_bytes()).hexdigest(),
                           assets='assets')
         descriptor_file.write_text(json.dumps(descriptor))
-        portmaster.portmaster(self.stage, None, self.output, bundle=bundle)
+        portmaster.portmaster(self.stage, bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
             self.assertEqual(package.read('minimal-game/' + page), target.read_bytes())
+        target.write_bytes(b'corrupt generated page')
+        checksum = artifacts.digest(self.output)
+        with self.assertRaisesRegex(ValueError, 'Generated asset checksum'):
+            portmaster.portmaster(self.stage, bundle, self.output)
+        self.assertEqual(artifacts.digest(self.output), checksum)
 
-    def test_legacy_packaging_without_host_runtime_can_skip_index(self):
-        portmaster.portmaster(self.stage, self.game, self.output,
-                              host_runtime=self.root / 'missing-host-runtime', no_index=True)
+    def test_bundle_rejects_traversal_and_checksum_mismatches(self):
+        bundle = self.create_bundle()
+        file = bundle / 'pmjs.json'
+        descriptor = json.loads(file.read_text())
+        for key, value, message in (('bootstrap', '../outside.js', 'Invalid path'),
+                                    ('bootstrapSha256', '0' * 64, 'bootstrap checksum')):
+            with self.subTest(key=key):
+                file.write_text(json.dumps({**descriptor, key: value}))
+                with self.assertRaisesRegex(ValueError, message):
+                    portmaster.portmaster(self.stage, bundle, self.output)
+                self.assertFalse(self.output.exists())
+
+    def test_bundle_rejects_symlinks_before_reading_descriptor(self):
+        bundle = self.create_bundle()
+        for name in ('pmjs.json', 'bootstrap.js', 'gamedata'):
+            with self.subTest(name=name):
+                file = bundle / name
+                saved = self.root / ('saved-' + name)
+                original = file.read_bytes() if file.is_file() else None
+                file.rename(saved)
+                file.symlink_to(saved)
+                try:
+                    # A descriptor link must be rejected without parsing its target.
+                    if name == 'pmjs.json':
+                        saved.write_text('not JSON')
+                    with self.assertRaisesRegex(ValueError, 'symbolic links'):
+                        portmaster.portmaster(self.stage, bundle, self.output)
+                    self.assertFalse(self.output.exists())
+                finally:
+                    file.unlink()
+                    if original is not None:
+                        saved.write_bytes(original)
+                    saved.rename(file)
+
+    def test_bundle_is_validated_after_copy_and_published_from_that_copy(self):
+        bundle = self.create_bundle()
+        bootstrap = bundle / 'bootstrap.js'
+        original = bootstrap.read_bytes()
+        copytree = shutil.copytree
+
+        def corrupt_copy(source, destination, *args, **kwargs):
+            result = copytree(source, destination, *args, **kwargs)
+            if source == bundle:
+                (destination / 'bootstrap.js').write_bytes(b'corrupt staged bootstrap')
+            return result
+
+        with patch('portmaster.shutil.copytree', side_effect=corrupt_copy):
+            with self.assertRaisesRegex(ValueError, 'bootstrap checksum'):
+                portmaster.portmaster(self.stage, bundle, self.output)
+        self.assertFalse(self.output.exists())
+
+        def change_source(source, destination, *args, **kwargs):
+            result = copytree(source, destination, *args, **kwargs)
+            if source == bundle:
+                bootstrap.write_bytes(b'changed after copy')
+            return result
+
+        with patch('portmaster.shutil.copytree', side_effect=change_source):
+            portmaster.portmaster(self.stage, bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            descriptor = json.loads(package.read('minimal-game/pmjs.json'))
-            self.assertIsNone(descriptor['assetIndex'])
-            self.assertNotIn('minimal-game/asset-index.json', package.namelist())
+            self.assertEqual(package.read('minimal-game/bootstrap.js'), original)
+
+    def test_package_cli_delegates_bundle_validation_to_python(self):
+        bundle = self.create_bundle()
+        # The CLI prefix needs its own packager; the minimal target fixture omits it.
+        for name in ('portmaster.py', 'runtime_artifact.py'):
+            shutil.copy2(ROOT / 'tools' / name, self.stage / 'share/pmjs/tools' / name)
+        self.refresh_manifest()
+        info = json.loads((self.stage / 'build-info.json').read_text())
+        info.update(version='fixture', source={**info['source'], 'commit': '0' * 40})
+        artifacts.write_json(self.stage / 'build-info.json', info)
+        command = ['node', self.stage / 'share/pmjs/tools/pmjs.mjs', self.stage, 'package', bundle,
+                   '--runtime', self.stage, '--output', self.output]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        checksum = artifacts.digest(self.output)
+        (bundle / 'bootstrap.js').write_text('corrupt bootstrap')
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Bundle bootstrap checksum differs', result.stderr)
+        self.assertIn('packaging failed', result.stderr)
+        self.assertEqual(artifacts.digest(self.output), checksum)
+        result = subprocess.run(command[:3] + [bundle, '--game', self.game, '--state', self.root / 'state'],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('bundle bootstrap checksum differs', result.stderr)
+        self.assertNotIn('packaging failed', result.stderr)
+
+    def test_zip_streams_contents_and_preserves_metadata(self):
+        payload = self.root / 'payload'
+        payload.mkdir()
+        (payload / 'empty').mkdir()
+        file = payload / 'large.bin'
+        content = b'large ZIP entry\x00' * (256 * 1024)
+        file.write_bytes(content)
+        file.chmod(0o755)
+        archive = self.root / 'streamed.zip'
+        open_file = Path.open
+
+        @contextmanager
+        def bounded_open(path, *args, **kwargs):
+            with open_file(path, *args, **kwargs) as stream:
+                if path == file:
+                    def read(size=-1):
+                        self.assertGreater(size, 0, 'ZIP reads must be bounded')
+                        self.assertLessEqual(size, 1024 * 1024)
+                        return stream.read(size)
+                    reader = Mock(wraps=stream)
+                    reader.read.side_effect = read
+                    yield reader
+                else:
+                    yield stream
+
+        # Exercise ZIP64 headers without allocating a multi-gigabyte fixture.
+        for limit in (zipfile.ZIP64_LIMIT, 1024 * 1024):
+            with self.subTest(zip64_limit=limit), patch.object(zipfile, 'ZIP64_LIMIT', limit):
+                with patch.object(Path, 'open', bounded_open):
+                    portmaster.write_zip(payload, archive, 0)
+                with zipfile.ZipFile(archive) as package:
+                    self.assertIsNone(package.testzip())
+                    self.assertEqual(package.namelist(), ['empty/', 'large.bin'])
+                    self.assertEqual(package.read('large.bin'), content)
+                    for name in package.namelist():
+                        entry = package.getinfo(name)
+                        self.assertEqual(entry.date_time, (1980, 1, 1, 0, 0, 0))
+                        self.assertEqual(entry.external_attr >> 16 & 0o777, 0o755)
+                        self.assertEqual(entry.compress_type, zipfile.ZIP_DEFLATED)
+                checksum = artifacts.digest(archive)
+                os.utime(file, (1700000000, 1700000000))
+                portmaster.write_zip(payload, archive, 0)
+                self.assertEqual(artifacts.digest(archive), checksum)
+
+    def test_plain_runtime_can_be_packaged_without_release_qualification(self):
+        info = json.loads((self.stage / 'build-info.json').read_text())
+        del info['files']
+        artifacts.write_json(self.stage / 'build-info.json', info)
+        portmaster.portmaster(self.stage, self.bundle, self.output)
+        with zipfile.ZipFile(self.output) as package:
+            packaged = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertTrue(packaged['payloadSha256'])
+            self.assertNotIn('files', packaged)
+            self.assertNotIn('compiledInputs', packaged)
+        result = subprocess.run(['python3', ROOT / 'tools/portmaster.py', '--stage', self.stage,
+                                 '--game', self.game, '--output', self.output], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        # Plain input still has to supply every selected runtime tool.
+        (self.stage / 'share/pmjs/tools/game-inspect.mjs').unlink()
+        before = self.output.read_bytes()
+        with self.assertRaises(FileNotFoundError):
+            portmaster.portmaster(self.stage, self.bundle, self.output)
+        self.assertEqual(self.output.read_bytes(), before)
+
+    def test_legacy_runtime_keeps_its_diagnostic_inventory(self):
+        info = json.loads((self.stage / 'build-info.json').read_text())
+        info['schema'] = 1
+        info['payloadSha256'] = artifacts.payload_digest(artifacts.inventory(self.stage))
+        info['compiledInputs'] = {'host': 'detail'}
+        artifacts.write_json(self.stage / 'build-info.json', info)
+        portmaster.portmaster(self.stage, self.bundle, self.output)
+        with zipfile.ZipFile(self.output) as package:
+            info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertEqual(info['schema'], 1)
+            self.assertNotIn('payloadSha256', info)
+            self.assertTrue(info['files'])
+            self.assertNotIn('compiledInputs', info)
 
     def test_wrong_strip_tool_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'left debug information'):
-            portmaster.portmaster(self.stage, self.game, self.output, strip='/bin/true')
+            portmaster.portmaster(self.stage, self.bundle, self.output, strip='/bin/true')
         self.assertFalse(self.output.exists())
 
     def test_unbundled_node_and_changed_runtime_are_rejected(self):
         (self.stage / 'bin/node').unlink()
         self.refresh_manifest()
         with self.assertRaisesRegex(ValueError, 'bundled target Node'):
-            portmaster.portmaster(self.stage, self.game, self.output)
+            portmaster.portmaster(self.stage, self.bundle, self.output)
         (self.stage / 'LICENSE').write_text('changed')
+        self.assertEqual(artifacts.recognize_runtime(self.stage)['schema'], 2,
+                         'recognition does not claim payload integrity')
         with self.assertRaisesRegex(ValueError, 'differ from build-info'):
-            portmaster.portmaster(self.stage, self.game, self.output)
+            portmaster.portmaster(self.stage, self.bundle, self.output)
 
     def test_output_and_name_cannot_escape(self):
         with self.assertRaisesRegex(ValueError, 'outside'):
-            portmaster.portmaster(self.stage, self.game, self.game / 'game.zip')
+            portmaster.portmaster(self.stage, self.bundle, self.bundle / 'game.zip')
         with self.assertRaisesRegex(ValueError, 'path separators'):
-            portmaster.portmaster(self.stage, self.game, self.output, name='../escape')
+            portmaster.portmaster(self.stage, self.bundle, self.output, name='../escape')
 
 
 class PortMasterLauncher(unittest.TestCase):
@@ -242,7 +520,7 @@ if 'READY_FD' in os.environ:
 sys.exit(int(os.environ.get('NODE_STATUS', '0')))
 ''')
         node.chmod(0o755)
-        shutil.copy2(node, self.port / 'runtime/bin/pmjs')
+        shutil.copy2(ROOT / 'bin/pmjs', self.port / 'runtime/bin/pmjs')
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(('SDL_', 'PMJS_', 'PORTMASTER_')) and
                     key not in ('controlfolder', 'directory', 'HOTKEY', 'LD_LIBRARY_PATH')}

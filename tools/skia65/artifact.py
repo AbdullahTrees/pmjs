@@ -3,12 +3,15 @@ import pathlib
 
 from provision import ROOT, LOCK, digest
 
+TEST_SOURCES = ("src/skia65/mask_test.cpp", "src/skia65/raster_test.cpp")
 
-def source_hashes():
+
+def source_hashes(*, mask_test=False):
     files = [LOCK, ROOT / "third_party/skia65-mask-tail.patch", ROOT / "third_party/skia65-arm-parity.patch"]
     files += [pathlib.Path(__file__).with_name(name) for name in
         ["build.py", "provision.py", "artifact.py", "component_sources.py", "raster.py"]]
-    files += sorted(file for file in (ROOT / "src/skia65").iterdir() if file.is_file())
+    files += sorted(file for file in (ROOT / "src/skia65").iterdir()
+                    if file.is_file() and (mask_test or str(file.relative_to(ROOT)) not in TEST_SOURCES))
     files += [ROOT / "src" / name for name in
         ["text_layout.cpp", "text_layout.hpp", "canvas_pixels.hpp", "unicode_default_ignorables.hpp"]]
     return {str(file.relative_to(ROOT)): digest(file) for file in files}
@@ -32,13 +35,18 @@ def configuration(arch, ar):
         "extra_cflags": flags, "extra_cflags_cc": ["-fvisibility-inlines-hidden"]}
 
 
-def validate(directory, arch, toolchain=None):
+def validate(directory, arch, toolchain=None, *, mask_test=False):
     try:
         manifest = json.loads((directory / "manifest.json").read_text())
         lock = json.loads(LOCK.read_text())
         if manifest["arch"] != arch:
             raise RuntimeError("architecture changed")
-        if manifest["dependencies"] != lock or manifest["sources"] != source_hashes():
+        sources = manifest["sources"]
+        if not isinstance(sources, dict):
+            raise RuntimeError("invalid component source inventory")
+        if not mask_test:
+            sources = {name: checksum for name, checksum in sources.items() if name not in TEST_SOURCES}
+        if manifest["dependencies"] != lock or sources != source_hashes(mask_test=mask_test):
             raise RuntimeError("pinned dependencies or component sources changed")
         if manifest["configuration"] != configuration(arch, manifest["configuration"]["ar"]):
             raise RuntimeError("raster configuration changed")

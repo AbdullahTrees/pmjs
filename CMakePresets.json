@@ -35,22 +35,22 @@
       }
     },
     {
-      "name": "release-x64",
+      "name": "runtime-x64",
       "inherits": "base",
-      "displayName": "x64 release with verified Skia65",
+      "displayName": "x64 runtime with prepared Skia65",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "OFF",
         "PMJS_ENABLE_SKIA65": "ON",
-        "PMJS_RELEASE_PROVENANCE": "ON",
+        "PMJS_RELEASE_PROVENANCE": "OFF",
         "PMJS_BUILD_SKIA65_COMPONENT": "OFF",
         "PMJS_SKIA65_COMPONENT_DIR": "$env{PMJS_SKIA65_COMPONENT_DIR}"
       }
     },
     {
-      "name": "release-linux-arm64",
-      "inherits": "release-x64",
-      "displayName": "ARM64/glibc 2.28 production runtime",
+      "name": "linux-arm64",
+      "inherits": "runtime-x64",
+      "displayName": "ARM64/glibc 2.28 runtime",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/linux-arm64.cmake",
         "PMJS_OFFLINE": "ON",
@@ -58,6 +58,22 @@
         "PMJS_LZ4_ARCHIVE": "$env{PMJS_LZ4_ARCHIVE}",
         "PMJS_NODE_ROOT": "$env{PMJS_NODE_ROOT}",
         "PMJS_BUNDLE_DEPENDENCIES": "ON"
+      }
+    },
+    {
+      "name": "release-x64",
+      "inherits": "runtime-x64",
+      "displayName": "x64 release qualification",
+      "cacheVariables": {
+        "PMJS_RELEASE_PROVENANCE": "ON"
+      }
+    },
+    {
+      "name": "release-linux-arm64",
+      "inherits": "linux-arm64",
+      "displayName": "ARM64 release qualification",
+      "cacheVariables": {
+        "PMJS_RELEASE_PROVENANCE": "ON"
       }
     }
   ],
@@ -77,6 +93,14 @@
     {
       "name": "release-linux-arm64",
       "configurePreset": "release-linux-arm64"
+    },
+    {
+      "name": "runtime-x64",
+      "configurePreset": "runtime-x64"
+    },
+    {
+      "name": "linux-arm64",
+      "configurePreset": "linux-arm64"
     }
   ],
   "testPresets": [

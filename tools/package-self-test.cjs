@@ -16,24 +16,38 @@ function selfTest(root, graphics) {
   const architecture = { aarch64: 'arm64', x86_64: 'x64', amd64: 'x64', AMD64: 'x64' }[info.architecture];
   assert.equal(process.arch, architecture, 'package architecture');
   assert.ok(Number(process.versions.napi) >= info.nodeApi, 'Node-API compatibility');
-  const payload = [];
-  function visit(directory) {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const file = path.join(directory, entry.name);
-      assert.equal(entry.isSymbolicLink(), false, `package symlink: ${file}`);
-      if (entry.isDirectory()) visit(file);
-      else if (file !== manifest) payload.push(path.relative(root, file));
+  let verifiedFiles = 0;
+  if (info.files !== undefined || info.payloadSha256 !== undefined) {
+    if (info.files !== undefined) assert.ok(info.files && typeof info.files === 'object' && !Array.isArray(info.files), 'package inventory');
+    const payload = [];
+    function visit(directory) {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const file = path.join(directory, entry.name);
+        assert.equal(entry.isSymbolicLink(), false, `package symlink: ${file}`);
+        if (entry.isDirectory()) visit(file);
+        else if (file !== manifest) payload.push(path.relative(root, file));
+      }
     }
+    visit(root);
+    payload.sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    if (info.files) assert.deepEqual([...payload].sort(), Object.keys(info.files).sort(), 'exact package payload');
+    const checksum = crypto.createHash('sha256');
+    for (const name of payload) {
+      const file = path.join(root, name);
+      const digest = hash(file);
+      checksum.update(name + '\0' + digest + '\0' + fs.statSync(file).size + '\n');
+      if (info.files) {
+        const expected = info.files[name];
+        assert.equal(digest, expected.sha256, `package checksum: ${name}`);
+        // FAT deployments synthesize permission bits; required executables must still run.
+        if (expected.mode & 0o111) fs.accessSync(file, fs.constants.X_OK);
+      }
+    }
+    if (info.payloadSha256 !== undefined) assert.equal(checksum.digest('hex'), info.payloadSha256, 'runtime payload checksum');
+    verifiedFiles = payload.length;
   }
-  visit(root);
-  assert.deepEqual(payload.sort(), Object.keys(info.files).sort(), 'exact package payload');
-  for (const [name, expected] of Object.entries(info.files)) {
-    const file = path.resolve(root, name);
-    assert.ok(file.startsWith(root + path.sep), 'package entry stays inside its root');
-    assert.equal(hash(file), expected.sha256, `package checksum: ${name}`);
-    // FAT deployments synthesize permission bits; required executables must still run.
-    if (expected.mode & 0o111) fs.accessSync(file, fs.constants.X_OK);
-  }
+  fs.accessSync(path.join(root, 'bin/pmjs'), fs.constants.X_OK);
+  if (info.node?.bundled) fs.accessSync(path.join(root, 'bin/node'), fs.constants.X_OK);
   const native = require(path.join(root, 'lib/pmjs_native.node'));
   assert.equal(typeof native.initialize, 'function');
   assert.equal(typeof native.runtime.quit, 'function');
@@ -61,8 +75,8 @@ function selfTest(root, graphics) {
   }
   return { schema: 1, packageSha256: hash(manifest), platform: process.platform, architecture: process.arch,
     kernel: os.release(), node: process.version, nodeApi: Number(process.versions.napi),
-    verifiedFiles: Object.keys(info.files).length, load: true, graphics: gpu, textBackend,
-    test: graphics ? 'runtime-graphics' : 'package-load',
+    verifiedFiles, load: true, graphics: gpu, textBackend,
+    test: graphics ? 'runtime-graphics' : verifiedFiles ? 'package-load' : 'runtime-load',
     status: 'passed' };
 }
 

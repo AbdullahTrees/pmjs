@@ -107,6 +107,7 @@ def cache_reason(sdk, record, recipe):
 
 
 def complete(sdk, name, recipe, files):
+    # The builder hash records provenance; recipes and verified outputs control cache reuse.
     record = {"recipe": recipe, "files": inventory(sdk, files), "builderSha256": digest(Path(__file__))}
     write_changed(sdk / "records" / (name + ".json"), json.dumps(record, indent=2) + "\n")
     return record

@@ -60,20 +60,23 @@ PMJS recreates decrypted inputs and source snapshots locally as needed.
 
 ## PortMaster ZIP
 
-Build the ARM64 installation and package the bundle:
+Build the ARM64 installation and prepare its separate source distribution. Set
+`PMJS_SOURCE_URL` to the permanent URL where that source archive will be published:
 
 ```sh
+python3 tools/dependencies.py --jobs 4
 ./build.sh --target arm64
+python3 tools/release.py sources --sdk .cache/linux-arm64/sdk --output dist/pmjs-ffmpeg-sources.tar.gz
 dist/pmjs/bin/pmjs package /path/to/bundle \
-  --runtime dist/pmjs-arm64 --output /path/to/game.zip
+  --runtime dist/pmjs-arm64 --output /path/to/game.zip \
+  --sources dist/pmjs-ffmpeg-sources.tar.gz --sources-url "$PMJS_SOURCE_URL"
 ```
 
 The ZIP contains a PortMaster launcher, your bundle, the ARM64 runtime and
 its notices, and an empty `gamedata/`. It carries the asset index and
 generated pages only if they are in the bundle. The packager checks the
-runtime installation, copies its library closure, strips binaries without
-changing loader symbols, and includes matching source materials where
-required.
+runtime installation, copies its library closure, strips unstripped binaries
+without changing loader symbols, and references the separate source archive.
 
 Extract the ZIP into the firmware's ports directory and copy the game's
 folder containing `www`, the `www` folder itself, or its contents into

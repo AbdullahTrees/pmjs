@@ -32,8 +32,6 @@ if(PMJS_ENABLE_SKIA65 OR PMJS_BUILD_SKIA65_COMPONENT)
     "${CMAKE_CURRENT_SOURCE_DIR}/src/skia65/exports.map"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/skia65/pmjs_skia65.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/skia65/pmjs_skia65.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/skia65/mask_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/skia65/raster_test.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/skia65-mask-tail.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/skia65-arm-parity.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/skia65/build.py"
@@ -56,11 +54,6 @@ if(PMJS_ENABLE_SKIA65 OR PMJS_BUILD_SKIA65_COMPONENT)
       DEPENDS ${pmjs_skia65_sources}
       USES_TERMINAL VERBATIM)
   else()
-    execute_process(COMMAND ${pmjs_skia65_command} --verify
-      RESULT_VARIABLE pmjs_skia65_validation ERROR_VARIABLE pmjs_skia65_error)
-    if(NOT pmjs_skia65_validation EQUAL 0)
-      message(FATAL_ERROR "${pmjs_skia65_error}")
-    endif()
     add_custom_target(pmjs_skia65_component
       COMMAND ${pmjs_skia65_command} --verify
       DEPENDS ${pmjs_skia65_sources} USES_TERMINAL VERBATIM)
