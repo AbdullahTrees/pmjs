@@ -83,7 +83,7 @@ function fixture({ disabled = false, unknown = false, composed = false } = {}) {
   const context = { __pmjsBuiltinRequire: require, Window_BattleStatusUpgrade: Status,
     ImageManager: { loadFace() { return images.face; }, loadSystem() { return images.icons; } },
     SRD: { BattleStatusCustomizer: config }, TextManager: { hpA: 'HP' },
-    BattleManager: { highestBaseAgi() { return 40; } },
+    BattleManager: { highestBaseAgi() { return calls.highestAgi || 40; } },
     PMJS: { plugins: {
       registerOptimization() {}, onLoaded(name, owner, callback) { loaded.set(name, callback); }
     }, phases: { on(name, owner, callback) { phases.set(name, callback); } },
@@ -113,13 +113,14 @@ test('ATB decreases, zero and full use one authored gauge draw and preserve styl
   assert.equal(h.calls.full, 2);
 });
 
-for (const change of ['HP', 'icons', 'buff turns', 'face', 'contents', 'actor', 'canvas write',
+for (const change of ['HP', 'maximum HP', 'icons', 'buff turns', 'face', 'contents', 'actor', 'canvas write',
   'master write', 'paint opacity', 'clip', 'transform', 'composite', 'alpha', 'label',
   'removed gauge', 'font', 'layout', 'late method', 'instance method', 'dependency', 'load', 'range', 'source replacement', 'source mutation', 'source pending']) {
   test(`${change} uses a complete refresh`, () => {
     const h = fixture(), w = h.window();
     switch (change) {
       case 'HP': h.actor.hp--; break;
+      case 'maximum HP': h.actor.mhp++; break;
       case 'icons': h.actor.icons.push(4); break;
       case 'buff turns': h.actor._buffTurns[0]++; break;
       case 'face': h.actor.face = 'other'; break;
@@ -199,4 +200,74 @@ test('active status icons keep full composition on subsequent ATB changes', () =
   h.speed(w); assert.equal(h.calls.full, 3);
   h.actor.icons = []; h.speed(w); assert.equal(h.calls.full, 4);
   h.speed(w); assert.equal(h.calls.full, 4);
+});
+
+test('explicit refresh always clears both contents and rebuilds refresh dependencies', () => {
+  const h = fixture(), w = h.window();
+  const revision = w.contents._canvas.__pmjsContentRevision;
+  const masterRevision = w._statusWindow.contents._canvas.__pmjsContentRevision;
+  let dependencies = w._checkForRefresh;
+  for (let i = 0; i < 8; i++) {
+    assert.equal(w.refresh(), 'full');
+    assert.notEqual(w._checkForRefresh, dependencies);
+    dependencies = w._checkForRefresh;
+  }
+  assert.equal(h.calls.full, 9);
+  assert.equal(h.calls.gauge, 18);
+  assert.ok(w.contents._canvas.__pmjsContentRevision > revision);
+  assert.equal(w._statusWindow.contents._canvas.__pmjsContentRevision, masterRevision + 8);
+});
+
+test('explicit ATB and maximum changes retain the full authored refresh', () => {
+  const h = fixture(), w = h.window();
+  h.actor._atbSpeed = 1200;
+  assert.equal(w.refresh(), 'full');
+  assert.equal(h.calls.full, 2);
+  assert.equal(w._checkForRefresh[1][0], 1200);
+  h.calls.highestAgi = 80;
+  assert.equal(w.refresh(), 'full');
+  assert.equal(h.calls.full, 3);
+});
+
+for (const change of ['HP', 'maximum HP', 'icons', 'states', 'state counter', 'contents',
+  'canvas write', 'master write', 'windowskin write', 'helper', 'source mutation']) {
+  test(`explicit ${change} refresh updates the complete panel in the same call`, () => {
+    const h = fixture(), w = h.window();
+    if (change === 'windowskin write') {
+      w.windowskin = { width: 192, height: 192, _canvas: { __pmjsContentRevision: 0 } };
+      w.refresh();
+    }
+    const before = h.calls.full;
+    switch (change) {
+      case 'HP': h.actor.hp--; break;
+      case 'maximum HP': h.actor.mhp++; break;
+      case 'icons': h.actor.icons.push(4); break;
+      case 'states': h.actor._states.push(35); break;
+      case 'state counter': h.actor._stateCounter[35] = 2; break;
+      case 'contents': w.contents = new h.Bitmap(); break;
+      case 'canvas write': w.contents._canvas.__pmjsContentRevision++; break;
+      case 'master write': w._statusWindow.contents._canvas.__pmjsContentRevision++; break;
+      case 'windowskin write': w.windowskin._canvas.__pmjsContentRevision++; break;
+      case 'helper': w.normalColor = function() { return '#ff0000'; }; break;
+      case 'source mutation': h.images.face._canvas = { __pmjsContentRevision: 1 }; break;
+    }
+    assert.equal(w.refresh(), 'full');
+    assert.equal(h.calls.full, before + 1);
+  });
+}
+
+test('explicit first refresh and malformed dependencies keep the full draw path', () => {
+  const initial = fixture(), first = new initial.Status();
+  assert.equal(first._checkForRefresh, undefined);
+  assert.equal(first.refresh(), 'full');
+  assert.equal(initial.calls.full, 1);
+  for (const checks of [undefined, null, [], [null, null, null],
+    [[100, 'actor.hp'], [100, 'actor.hp'], [500, 'actor._atbSpeed']],
+    [[100, 'actor.hp'], [[], 'actor.allIcons()'], [500, 'unknown']]]) {
+    const h = fixture(), w = h.window();
+    w._checkForRefresh = checks;
+    assert.equal(w.refresh(), 'full');
+    assert.equal(h.calls.full, 2);
+    assert.equal(w._checkForRefresh.length, 3);
+  }
 });

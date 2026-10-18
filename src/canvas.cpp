@@ -778,33 +778,46 @@ void CanvasStore::fillRectNow(Content& surface, int x, int y, int width, int hei
   markDirty(surface, x0, y0, x1 - x0, y1 - y0);
 }
 
-void CanvasStore::clearNow(Content& surface) {
-  std::fill(surface.pixels.begin(), surface.pixels.end(), 0);
+void CanvasStore::clearNow(Content& surface, ImageHandle image) {
+  clearRectNow(surface, 0, 0, surface.width, surface.height, image);
   surface.mayHaveOverAlpha = false;
-  markDirty(surface, 0, 0, surface.width, surface.height);
 }
 
-void CanvasStore::clearRectNow(Content& surface, int x, int y, int width, int height) {
+void CanvasStore::clearRectNow(Content& surface, int x, int y, int width, int height,
+                               ImageHandle image) {
   const int x0 = std::clamp(x, 0, surface.width);
   const int y0 = std::clamp(y, 0, surface.height);
   const int x1 = static_cast<int>(std::clamp<std::int64_t>(
     static_cast<std::int64_t>(x) + width, 0, surface.width));
   const int y1 = static_cast<int>(std::clamp<std::int64_t>(
     static_cast<std::int64_t>(y) + height, 0, surface.height));
-  for (int py = y0; py < y1; ++py) {
-    for (int px = x0; px < x1; ++px) {
-      const std::size_t offset =
-        (static_cast<std::size_t>(py) * surface.width + px) * 4U;
-      std::fill_n(surface.pixels.data() + offset, 4, 0);
+  if (x1 <= x0 || y1 <= y0) return;
+  const bool allZero = surface.knownAllZero ||
+    (x0 == 0 && y0 == 0 && x1 == surface.width && y1 == surface.height);
+  bool changed = false;
+  for (int py = y0; !surface.knownAllZero && py < y1; ++py) {
+    auto* first = surface.pixels.data() +
+      (static_cast<std::size_t>(py) * surface.width + x0) * 4U;
+    auto* last = first + static_cast<std::size_t>(x1 - x0) * 4U;
+    if (std::any_of(first, last, [](std::uint8_t value) { return value != 0; })) {
+      std::fill(first, last, 0);
+      changed = true;
     }
   }
-  markDirty(surface, x0, y0, x1 - x0, y1 - y0);
+  // CPU equality alone cannot prove that an externally changed texture is clear.
+  if (!changed && image) {
+    const auto info = images_.lookup(image);
+    changed = !info || !info->knownAllZero || !images_.contentRevision(image);
+  }
+  if (changed) markDirty(surface, x0, y0, x1 - x0, y1 - y0);
+  surface.knownAllZero = allZero;
 }
 
 bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& command) {
   auto [source, canvas, snapshot, sourceX, sourceY, sourceWidth, sourceHeight,
                destinationX, destinationY, destinationWidth, destinationHeight, alpha, smoothing] = command;
   if (alpha == 0) return true;
+  destinationSurface.knownAllZero = false;
   struct SourcePixels {
     int width;
     int height;
@@ -933,6 +946,7 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
 bool CanvasStore::drawTextNow(Content& surface, const std::vector<std::filesystem::path>& fontPaths,
                               const std::string& text, float x, float y, float pixelSize,
                               std::uint32_t rgba, float strokeWidth, const CanvasTextStyle& style) {
+  surface.knownAllZero = false;
   if (textBackend_.skia()) {
     int bounds[4];
     if (!textBackend_.draw(fontPaths, text, x, y, pixelSize, rgba, strokeWidth, style,
@@ -1068,6 +1082,7 @@ bool CanvasStore::realizeContent(Content& surface) {
     prepared.pixels.assign(static_cast<std::size_t>(surface.width) *
                              static_cast<std::size_t>(surface.height) * 4U, 0);
     if (prepared.opaque) for (size_t i = 3; i < prepared.pixels.size(); i += 4) prepared.pixels[i] = 255;
+    prepared.knownAllZero = !prepared.opaque;
     for (const auto& cmd : surface.commands) {
       const bool ok = std::visit([this, &prepared](const auto& c) -> bool {
         using T = std::decay_t<decltype(c)>;
@@ -1098,6 +1113,7 @@ bool CanvasStore::realizeContent(Content& surface) {
 
   surface.pixels = std::move(prepared.pixels);
   surface.mayHaveOverAlpha = prepared.mayHaveOverAlpha;
+  surface.knownAllZero = prepared.knownAllZero;
   surface.state = ContentState::Realized;
   discardCommands(surface);
   surface.dirtyX0 = surface.dirtyY0 = 0;
@@ -1251,6 +1267,7 @@ CanvasStore::Content* CanvasStore::writableContent(CanvasHandle handle) {
     copy->state = old.state;
     copy->pixels = old.pixels;
     copy->mayHaveOverAlpha = old.mayHaveOverAlpha;
+    copy->knownAllZero = old.knownAllZero;
     auto commands = old.commands;
     for (const auto& command : commands) {
       if (const auto* draw = std::get_if<DrawImageCmd>(&command); draw && draw->source) {
@@ -1392,7 +1409,7 @@ bool CanvasStore::clear(CanvasHandle handle) {
     }
     return true;
   }
-  clearNow(*surface);
+  clearNow(*surface, lookup(handle)->image);
   return true;
 }
 
@@ -1413,7 +1430,7 @@ bool CanvasStore::clearRect(CanvasHandle handle, int x, int y, int width, int he
       return true;
     }
   }
-  clearRectNow(*surface, x, y, width, height);
+  clearRectNow(*surface, x, y, width, height, lookup(handle)->image);
   return true;
 }
 
@@ -1434,6 +1451,7 @@ bool CanvasStore::paintRect(CanvasHandle handle, const std::array<float, 4>& rec
   const float padding = stroke / 2 + 1;
   const std::array<float, 4> bounds = {rect[0] - padding, rect[1] - padding,
     rect[2] + 2 * padding, rect[3] + 2 * padding};
+  surface->knownAllZero = false;
   const auto region = rasterCanvasRegion(surface->pixels, surface->width, surface->height, bounds,
     [&](uint8_t* pixels, int width, int height, size_t stride, int left, int top) {
       return pmjs_skia65_rect_bgra_strided(pixels, width, height, stride, left, top, rect.data(), color, stroke,
@@ -1507,6 +1525,7 @@ void CanvasStore::markDirty(Content& surface, int x, int y, int width,
   const int y1 = static_cast<int>(std::clamp<std::int64_t>(
     static_cast<std::int64_t>(y) + height, 0, surface.height));
   if (x1 <= x0 || y1 <= y0) return;
+  surface.knownAllZero = false;
   if (surface.dirtyX1 <= surface.dirtyX0 || surface.dirtyY1 <= surface.dirtyY0) {
     surface.dirtyX0 = x0;
     surface.dirtyY0 = y0;

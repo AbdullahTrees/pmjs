@@ -282,6 +282,8 @@ class CanvasStore {
     std::vector<std::uint8_t> pixels;
     // Conservative hint: raw premultiplied input can violate RGB <= alpha.
     bool mayHaveOverAlpha = false;
+    // Whole CPU content only; GPU equality is checked separately before eliding uploads.
+    bool knownAllZero = false;
     std::vector<CanvasCommand> commands;
     bool opaque = false;
     std::size_t queuedCommandBytes = 0;
@@ -312,8 +314,9 @@ class CanvasStore {
 
   void fillRectNow(Content& surface, int x, int y, int width, int height,
                    std::uint32_t rgba);
-  void clearNow(Content& surface);
-  void clearRectNow(Content& surface, int x, int y, int width, int height);
+  void clearNow(Content& surface, ImageHandle image);
+  void clearRectNow(Content& surface, int x, int y, int width, int height,
+                    ImageHandle image = 0);
   bool drawImageNow(Content& destination, const DrawImageCmd& command);
   bool drawTextNow(Content& surface, const std::vector<std::filesystem::path>& fontPaths,
                    const std::string& text, float x, float y, float pixelSize,

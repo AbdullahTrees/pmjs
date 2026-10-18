@@ -93,7 +93,7 @@
       values.push(key, keys.length);
       keys.forEach(function(name) { values.push(name, object[name]); });
     });
-    [face, icons].forEach(function(bitmap) {
+    [face, icons, window.windowskin].filter(Boolean).forEach(function(bitmap) {
       var canvas = bitmap._canvas, image = bitmap._image;
       values.push(bitmap, bitmap.width, bitmap.height, canvas, canvas && canvas.__pmjsContentRevision,
         image, image && image._nativeImage && image._nativeImage.handle);
@@ -126,7 +126,7 @@
     var cached = new WeakMap(), updating = new WeakSet();
     var helpers = {};
     ['drawActorFace', 'drawFace', 'drawActorIconsScale', 'drawActorIconsTurns',
-      'drawIconScale', 'drawText', 'drawCurrentAndMax', 'systemColor', 'hpGaugeColor2',
+      'drawIconScale', 'drawText', 'drawCurrentAndMax', 'systemColor', 'normalColor', 'textColor', 'hpGaugeColor2',
       'contentsWidth', 'contentsHeight', 'lineHeight'].forEach(function(name) {
       helpers[name] = prototype[name];
     });
@@ -149,22 +149,27 @@
     }
 
     function optimizedRefresh() {
-      var actor = this._actor, bitmap = this.contents, dependency;
+      var actor = this._actor, bitmap = this.contents, dependency, hpCheck = false, iconCheck = false;
       // HP and icon changes return before configuration/state comparisons.
       var speedOnly = updating.has(this) && actor && this.updateRefreshes === optimizedUpdate;
       if (speedOnly) {
         var checks = this._checkForRefresh;
-        speedOnly = checks.length === 3;
+        speedOnly = Array.isArray(checks) && checks.length === 3;
         for (var i = 0; speedOnly && i < checks.length; i++) {
           var check = checks[i];
-          if (check[1] === 'actor._atbSpeed' && !dependency) dependency = check;
-          else if (check[1] === 'actor.hp') speedOnly = check[0] === actor.hp;
-          else if (check[1] === 'actor.allIcons()') speedOnly = equal(check[0], actor.allIcons());
-          else speedOnly = false;
+          if (!Array.isArray(check) || check.length !== 2) speedOnly = false;
+          else if (check[1] === 'actor._atbSpeed' && !dependency) dependency = check;
+          else if (check[1] === 'actor.hp' && !hpCheck) {
+            hpCheck = true;
+            speedOnly = check[0] === actor.hp;
+          } else if (check[1] === 'actor.allIcons()' && !iconCheck) {
+            iconCheck = true;
+            speedOnly = Array.isArray(check[0]) && equal(check[0], actor.allIcons());
+          } else speedOnly = false;
         }
       }
       var previous = speedOnly && cached.get(this);
-      if (speedOnly && dependency && eligible(this, previous)) {
+      if (speedOnly && dependency && hpCheck && iconCheck && eligible(this, previous)) {
         var max = Math.max(5000, BattleManager.highestBaseAgi() * 100);
         var current = actor._atbSpeed;
         if (Number.isFinite(current) && Number.isFinite(max) && max > 0 && current >= 0 && current <= max) {
