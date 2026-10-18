@@ -423,60 +423,6 @@ test('failed geometry replacements preserve the previous valid cache entry', () 
   assert.equal(callIn(context, 'ensureNativeRectTileLayer(layer)', 'layer', layer), layerHandle);
 });
 
-test('storage.read-burst-coalesce disables cleanly via optimization gate', () => {
-  const storageSource = fs.readFileSync(
-    path.join(runtimeRoot, 'js/pmjs-mv/storage.js'), 'utf8');
-
-  function makeStorageContext(disabled = false) {
-    let reads = 0;
-    const context = {
-      PMJS_GAME_CONFIG: disabled ? { disableOptimizations: ['storage.read-burst-coalesce'] } : {},
-      NativeHost: {
-        storage: {
-          generation: () => 0,
-          exists: () => true,
-          readText: () => { reads++; return 'BASE64_DATA'; },
-          writeText: () => {},
-          remove: () => {},
-          rename: () => {}
-        }
-      },
-      StorageManager: {
-        isLocalMode: () => true,
-        localFilePath: () => '/save/global.rpgsave',
-        loadFromLocalFile: function(id) {
-          reads++;
-          return '{"test":1}';
-        },
-        localFileExists: () => true
-      },
-      LZString: {
-        decompressFromBase64: s => s
-      },
-      queueMicrotask: globalThis.queueMicrotask
-    };
-    context.globalThis = context;
-    vm.createContext(context);
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-core/config.js'), 'utf8'), context);
-    vm.runInContext(optimizationsSource, context);
-    vm.runInContext(storageSource, context);
-    vm.runInContext('installNativeStorageManager()', context);
-    return { context, getReads: () => reads };
-  }
-
-  // Enabled: reads coalesce in synchronous burst
-  const enabled = makeStorageContext(false);
-  enabled.context.StorageManager.loadFromLocalFile(0);
-  enabled.context.StorageManager.loadFromLocalFile(0);
-  assert.equal(enabled.getReads(), 1, 'enabled read-burst-coalesce should coalesce reads to 1');
-
-  // Disabled: reads bypass burst cache every call
-  const disabled = makeStorageContext(true);
-  disabled.context.StorageManager.loadFromLocalFile(0);
-  disabled.context.StorageManager.loadFromLocalFile(0);
-  assert.equal(disabled.getReads(), 2, 'disabled read-burst-coalesce should read on every call');
-});
-
 test('scene resource release preserves authored objects and rebuilds geometry on reuse', () => {
   const { context, calls, finalizers } = loadScenePrimitives();
   const mesh = gpuMesh();

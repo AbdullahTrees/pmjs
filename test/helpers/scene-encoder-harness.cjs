@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { runModule } = require('./runtime-context.cjs');
 
 const WRITER_REQUIREMENTS = new Set(['js/pmjs-core/methods.js', 'js/pmjs-web/canvas.js', 'js/pmjs-pixi4/render-preflight.js',
   'js/pmjs-pixi4/scene-primitives.js', 'js/pmjs-mv/bitmap-mesh.js', 'js/pmjs-plugins/mpp/triangle-bitmap.js',
@@ -19,11 +20,6 @@ const writerSources = [...profile.modules.slice(0, -1), ...mpp.modules, profile.
   .filter(source => WRITER_REQUIREMENTS.has(source));
 for (const source of WRITER_REQUIREMENTS) {
   if (!writerSources.includes(source)) throw new Error('Scene harness source missing from composition: ' + source);
-}
-
-function loadWriterSources() {
-  return writerSources.map(relative =>
-    fs.readFileSync(path.join(root, relative), 'utf8')).join('\n');
 }
 
 function makeHarness(options = {}) {
@@ -210,8 +206,7 @@ function makeHarness(options = {}) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   if (options.beforeWriter) options.beforeWriter(sandbox);
-  vm.runInContext(loadWriterSources(), sandbox,
-    { filename: 'scene-writer.js' });
+  for (const relative of writerSources) runModule(sandbox, relative);
   const filterPlanner = sandbox.nativeSceneFilter;
   sandbox.nativeSceneFilter = function(node, filters) {
     counts.filterPlans++;
@@ -233,4 +228,16 @@ function makeHarness(options = {}) {
   return { sandbox, submitted, compatHits, compatObserved, counts, makeTexture, sprite };
 }
 
-module.exports = { makeHarness, writerSources };
+function packetNode(packet, index) {
+  const m = index * 7, v = index * 41;
+  return {
+    kind: packet.metadata[m], parent: packet.metadata[m + 1],
+    resource: packet.metadata[m + 2], color: packet.metadata[m + 3],
+    flags: packet.metadata[m + 5],
+    a: packet.values[v], b: packet.values[v + 1],
+    c: packet.values[v + 2], d: packet.values[v + 3],
+    x: packet.values[v + 4], y: packet.values[v + 5], alpha: packet.values[v + 6]
+  };
+}
+
+module.exports = { makeHarness, writerSources, packetNode };

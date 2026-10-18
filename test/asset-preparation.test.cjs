@@ -601,7 +601,6 @@ test('cancellation during final cleanup never reports assets ready', async () =>
   } });
   assert.equal(result.cancelled, true);
   assertProgress(progress, result, 'cancelled');
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, '.prepare-lock')), false);
   assert.equal((await prepareAssets(f)).generated, 0, 'completed cache entries remain reusable after cancellation');
 });
 

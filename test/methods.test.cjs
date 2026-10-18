@@ -268,3 +268,22 @@ test('unrecognized source leaves the effective guest method as the original fall
     if (original !== reviewed) assert.equal(target.update, original);
   }
 });
+
+test('cached modules keep globals, prototypes, task queues and native hosts isolated', async t => {
+  function fixture() {
+    return loadPmjsRuntime({ performance, __pmjsBuiltinRequire: require,
+      NativeHost: { calls: [] } }, ['js/pmjs-core/methods.js', 'js/pmjs-web/scheduler.js']);
+  }
+  const first = fixture(), second = fixture();
+  t.after(() => { first.PMJS.tasks.stop(); second.PMJS.tasks.stop(); });
+  vm.runInContext(`globalThis.marker = 1; Object.prototype.marker = 2;
+    PMJS.methods.wrap({ key: 'first', id: 'fixture', getTarget: () => NativeHost,
+      method: 'update', wrap: next => next });`, first);
+  assert.equal(vm.runInContext('typeof marker', second), 'undefined');
+  assert.equal(vm.runInContext('Object.prototype.marker', second), undefined);
+  assert.equal(second.PMJS.methods.dump().length, 0);
+  first.PMJS.tasks.stop();
+  await second.PMJS.tasks.invoke(() => second.NativeHost.calls.push('second'));
+  assert.deepEqual(first.NativeHost.calls, []);
+  assert.deepEqual(second.NativeHost.calls, ['second']);
+});

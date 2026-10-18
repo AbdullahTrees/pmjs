@@ -1,11 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
-const { loadPmjsRuntime } = require('./helpers/runtime-context.cjs');
+const { loadPmjsRuntime, runModule } = require('./helpers/runtime-context.cjs');
 
 const adapters = [
   ['yanfly/message-core', 'YEP_MessageCore', ['plugins.yanfly.message-word-wrap-measure']],
@@ -21,8 +18,7 @@ for (const [adapter, plugin, ids] of adapters) {
   for (const state of ['unloaded', 'failed', 'disabled', 'not discovered']) {
     test(adapter + ' refuses an unavailable guest: ' + state, () => {
       const ctx = loadPmjsRuntime({ console: { log() {}, error() {} } });
-      vm.runInContext(fs.readFileSync(path.join(__dirname,
-        '../js/pmjs-plugins/' + adapter + '.js'), 'utf8'), ctx);
+      runModule(ctx, 'js/pmjs-plugins/' + adapter + '.js');
       ctx.PMJS.plugins.snapshotEffectiveManifest(state === 'not discovered'
         ? [] : [{ name: plugin, status: state !== 'disabled' }]);
       if (state === 'failed') {
@@ -50,8 +46,7 @@ for (const [adapter, plugin, ids] of adapters) {
             ? ids.join(',') : undefined;
         } } },
       });
-      vm.runInContext(fs.readFileSync(path.join(__dirname,
-        '../js/pmjs-plugins/' + adapter + '.js'), 'utf8'), ctx);
+      runModule(ctx, 'js/pmjs-plugins/' + adapter + '.js');
       ctx.PMJS.plugins.snapshotEffectiveManifest([]);
       ctx.PMJS.plugins.finish();
       ctx.PMJS.phases.emit('afterGuestPlugins');

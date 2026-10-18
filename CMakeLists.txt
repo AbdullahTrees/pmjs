@@ -389,7 +389,69 @@ if(BUILD_TESTING)
   target_link_libraries(pmjs-canvas-upload-test PRIVATE pmjs_runtime)
   target_compile_options(pmjs-canvas-upload-test PRIVATE -UNDEBUG)
   add_test(NAME native-canvas-upload COMMAND pmjs-canvas-upload-test)
-  foreach(PMJS_NODE_TEST IN ITEMS node-desktop node-filter-intermediate-cache node-identity-filter-shader node-nearest-tile-shader node-scene node-sprite-byte-precision node-pixi4-clear node-window-layer-clears node-mask-pixels node-renderer-stats node-empty-sprite node-preparation-progress node-derived-sprite node-compact-sprite node-uniform-inline-matrix node-filter-coordinates node-filter-input node-bitmap-region-batching node-bitmap-region-flash node-mv-bitmap-filtering node-tile-edge-filtering node-four-texture-tiles node-yed-retained-tiles node-presentation-byte-precision node-render-to-image node-render-to-canvas node-render-target-filters node-image-coalesce node-image-retention node-image-warm-cache node-image-no-warm-cache node-image-fallback node-image-bytes node-audio-bytes node-video-texture node-video-color node-canvas-deferred node-canvas-pixels node-canvas-webp node-canvas-radial-gradient node-primitive-surface node-filter-bounds node-tone-boundary-pixels node-mz-color-pixels node-pixi5-zoom-pixels node-pixi5-tiling-pixels node-pixi5-sprite-rounding-pixels node-mz-host-contracts node-mz-canvas-pixels node-mz-sampling-pixels node-mesh-post-tint-overlay node-glyph-cache node-text-layout node-text-layout-cache node-text-upload node-freetype-facade node-primitive-canvas)
+  foreach(PMJS_NODE_TEST IN ITEMS
+    # Rendering
+    node-filter-intermediate-cache
+    node-identity-filter-shader
+    node-nearest-tile-shader
+    node-scene
+    node-sprite-byte-precision
+    node-pixi4-clear
+    node-window-layer-clears
+    node-mask-pixels
+    node-renderer-stats
+    node-empty-sprite
+    node-derived-sprite
+    node-compact-sprite
+    node-uniform-inline-matrix
+    node-filter-coordinates
+    node-filter-input
+    node-bitmap-region-batching
+    node-bitmap-region-flash
+    node-mv-bitmap-filtering
+    node-tile-edge-filtering
+    node-four-texture-tiles
+    node-yed-retained-tiles
+    node-presentation-byte-precision
+    node-render-to-image
+    node-render-target-filters
+    node-primitive-surface
+    node-filter-bounds
+    node-tone-boundary-pixels
+    node-mz-color-pixels
+    node-pixi5-zoom-pixels
+    node-pixi5-tiling-pixels
+    node-pixi5-sprite-rounding-pixels
+    node-mz-sampling-pixels
+    node-mesh-post-tint-overlay
+    # Canvas and text
+    node-render-to-canvas
+    node-canvas-deferred
+    node-canvas-pixels
+    node-canvas-webp
+    node-canvas-radial-gradient
+    node-mz-canvas-pixels
+    node-glyph-cache
+    node-text-layout
+    node-text-layout-cache
+    node-text-upload
+    node-freetype-facade
+    node-primitive-canvas
+    # Resources and preparation
+    node-preparation-progress
+    node-image-coalesce
+    node-image-retention
+    node-image-warm-cache
+    node-image-no-warm-cache
+    node-image-fallback
+    node-image-bytes
+    # Audio and video
+    node-audio-bytes
+    node-video-texture
+    node-video-color
+    # Platform
+    node-desktop
+    node-mz-host-contracts)
     if(NOT PMJS_ENABLE_SKIA65 AND PMJS_NODE_TEST STREQUAL "node-mz-canvas-pixels")
       continue()
     endif()
@@ -411,29 +473,21 @@ if(BUILD_TESTING)
     PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-prepared-frame-effects COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-effects.cjs" $<TARGET_FILE:pmjs_native>)
-  set_tests_properties(node-prepared-frame-effects
-    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-large-prepared-frame COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-large-prepared-frame.cjs" $<TARGET_FILE:pmjs_native>)
-  set_tests_properties(node-large-prepared-frame
-    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-block-sprite COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native>)
-  set_tests_properties(node-block-sprite
-    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-block-sprite-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --disabled)
-  set_tests_properties(node-block-sprite-disabled
-    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-identity-filter-shader-full-resolution COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-identity-filter-shader.cjs" $<TARGET_FILE:pmjs_native>
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets" 816x624)
-  set_tests_properties(node-identity-filter-shader-full-resolution PROPERTIES ENVIRONMENT
-    "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   set_tests_properties(node-presentation-byte-precision PROPERTIES ENVIRONMENT
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
-  set_tests_properties(node-derived-sprite node-compact-sprite node-uniform-inline-matrix PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
-  set_tests_properties(node-audio-bytes PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  set_tests_properties(node-prepared-frame-effects node-large-prepared-frame
+    node-block-sprite node-block-sprite-disabled node-identity-filter-shader-full-resolution
+    node-derived-sprite node-compact-sprite node-uniform-inline-matrix node-audio-bytes
+    PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-pixi4-tiling-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-pixi4-tiling-pixels.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-pixi4-tiling-pixels PROPERTIES ENVIRONMENT

@@ -5,7 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
-const { loadPmjsRuntime } = require('./helpers/runtime-context.cjs');
+const { loadPmjsRuntime, runModule } = require('./helpers/runtime-context.cjs');
 
 const root = path.resolve(__dirname, '..');
 function plain(value) { return JSON.parse(JSON.stringify(value)); }
@@ -201,7 +201,7 @@ test('MV bootstrap executes plugins in order and logs a final summary', () => {
 });
 
 test('MZ manifest paths and filename callbacks describe the same loaded plugin', () => {
-  const { loadPmjsRuntime } = require('./helpers/runtime-context.cjs');
+  const { loadPmjsRuntime, runModule } = require('./helpers/runtime-context.cjs');
   const context = loadPmjsRuntime({ PMJS_RUNTIME_ENGINE: 'mz' });
   let called = 0;
   context.PMJS.plugins.snapshotEffectiveManifest([{ name: 'Folder/Example', status: true }]);
@@ -237,3 +237,296 @@ for (const phase of ['loading', 'loaded', 'late']) {
     assert.equal(logs[0][1], failure);
   });
 }
+
+function runPluginInfra(context) {
+  for (const relative of ['pmjs-core/config.js', 'pmjs-rpgmaker/lifecycle.js',
+    'pmjs-core/methods.js', 'pmjs-rpgmaker/plugins.js', 'pmjs-core/optimizations.js',
+    'pmjs-rpgmaker/bootstrap.js']) runModule(context, 'js/' + relative);
+}
+
+test('two-pass PluginManager.setup allows cross-plugin parameter lookups', () => {
+  const context = {
+    PluginManager: {
+      _path: 'js/plugins/',
+      _scripts: [],
+      _parameters: {},
+      setParameters: function(name, params) { this._parameters[name.toLowerCase()] = params; },
+      parameters: function(name) { return this._parameters[name.toLowerCase()] || {}; },
+      loadScript: function() {}
+    }
+  };
+  vm.createContext(context);
+  runPluginInfra(context);
+  runModule(context, 'js/pmjs-mv/plugin-loader.js');
+
+  let p1SawP2Params = null;
+  context.NativeHost = { runtime: { loadScript(name) {
+    if (name === 'js/plugins/PluginA.js') {
+      p1SawP2Params = context.PluginManager.parameters('PluginB');
+    }
+  } } };
+
+  const samplePlugins = [
+    { name: 'PluginA', status: true, description: '', parameters: { optA: '123' } },
+    { name: 'PluginB', status: true, description: '', parameters: { optB: '456' } },
+    { name: 'PluginA', status: true, description: 'dup', parameters: { optA: 'dup' } }
+  ];
+
+  context.$plugins = samplePlugins;
+  context.pmjsMvInitializePlugins();
+  assert.deepEqual(p1SawP2Params, { optB: '456' }, 'PluginA should see PluginB parameters before PluginB script loads');
+  assert.equal(context.PluginManager._scripts.length, 2, 'Duplicate plugins should be suppressed');
+  assert.equal(context.PluginManager._scripts[0], 'PluginA');
+  assert.equal(context.PluginManager._scripts[1], 'PluginB');
+});
+
+test('plugin lifecycle hooks install after PluginManager becomes available', () => {
+  const loaded = [];
+  const context = {
+    NativeHost: { runtime: { loadScript(name) { loaded.push(name); } } }
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  runPluginInfra(context);
+  runModule(context, 'js/pmjs-mv/plugin-loader.js');
+
+  assert.equal(context.PluginManager, undefined);
+  context.PluginManager = {
+    _path: 'js/plugins/',
+    _scripts: [],
+    setParameters() {},
+    setup() { throw new Error('stock setup should be replaced'); }
+  };
+  const events = [];
+  context.PMJS.plugins.onLoaded('YED_Tiled', () => events.push('loaded'));
+
+  context.$plugins = [{ name: 'YED_Tiled', status: true, parameters: {} }];
+  context.pmjsMvInitializePlugins();
+
+  assert.deepEqual(loaded, ['js/plugins/YED_Tiled.js']);
+  assert.deepEqual(events, ['loaded']);
+  assert.equal(context.PluginManager._pmjsLifecycleInstalled, true);
+});
+
+test('document.currentScript stack exposes file:///game/ URL and restores on return and on error', () => {
+  const scriptsLoaded = [];
+  const context = {
+    document: {},
+    NativeHost: {
+      runtime: {
+        loadScript: function(scriptPath) {
+          scriptsLoaded.push({
+            path: scriptPath,
+            currentScriptSrc: context.document.currentScript ? context.document.currentScript.src : null
+          });
+          if (scriptPath === 'outer.js') {
+            try {
+              context.NativeHost.runtime.loadScript('throwing.js');
+            } catch (_) {}
+            scriptsLoaded.push({
+              path: 'outer.js-after-throw',
+              currentScriptSrc: context.document.currentScript ? context.document.currentScript.src : null
+            });
+            context.NativeHost.runtime.loadScript('inner.js');
+            scriptsLoaded.push({
+              path: 'outer.js-resumed',
+              currentScriptSrc: context.document.currentScript ? context.document.currentScript.src : null
+            });
+          } else if (scriptPath === 'throwing.js') {
+            throw new Error('boom');
+          }
+        }
+      }
+    }
+  };
+  vm.createContext(context);
+  runModule(context, 'js/pmjs-web/script-loader.js');
+
+  assert.equal(context.document.currentScript, null, 'Idle currentScript should be null');
+
+  context.NativeHost.runtime.loadScript('outer.js');
+
+  assert.equal(context.document.currentScript, null, 'Post-execution currentScript should be null');
+  assert.equal(scriptsLoaded.length, 5);
+  assert.equal(scriptsLoaded[0].path, 'outer.js');
+  assert.equal(scriptsLoaded[0].currentScriptSrc, 'file:///game/outer.js');
+  assert.equal(scriptsLoaded[1].path, 'throwing.js');
+  assert.equal(scriptsLoaded[1].currentScriptSrc, 'file:///game/throwing.js');
+  assert.equal(scriptsLoaded[2].path, 'outer.js-after-throw');
+  assert.equal(scriptsLoaded[2].currentScriptSrc, 'file:///game/outer.js');
+  assert.equal(scriptsLoaded[3].path, 'inner.js');
+  assert.equal(scriptsLoaded[3].currentScriptSrc, 'file:///game/inner.js');
+  assert.equal(scriptsLoaded[4].path, 'outer.js-resumed');
+  assert.equal(scriptsLoaded[4].currentScriptSrc, 'file:///game/outer.js');
+});
+
+test('bootstrap dispatches window load event listeners and window.onload', () => {
+  let onloadCalled = false;
+  let addEventListenerCalled = false;
+
+  const listeners = [];
+  const context = {
+    window: {
+      onload: () => { onloadCalled = true; },
+      dispatchEvent: (event) => {
+        if (event.type === 'load') {
+          for (const l of listeners) l(event);
+        }
+      }
+    }
+  };
+  listeners.push(() => { addEventListenerCalled = true; });
+
+  vm.createContext(context);
+  runPluginInfra(context);
+  runModule(context, 'js/pmjs-mv/boot.js');
+
+  assert.equal(typeof context.pmjsMvStart, 'function');
+  context.pmjsMvStart();
+
+  assert.equal(onloadCalled, true, 'window.onload should be invoked');
+  assert.equal(addEventListenerCalled, true, 'window load event listeners should be dispatched');
+});
+
+test('integrated stack: PluginManager.setup -> loadScript -> document.currentScript -> parameter resolution', () => {
+  const loadedScripts = [];
+  const context = {
+    document: {},
+    PluginManager: {
+      _path: 'js/plugins/',
+      _scripts: [],
+      _parameters: {},
+      setParameters: function(name, params) { this._parameters[name.toLowerCase()] = params; },
+      parameters: function(name) { return this._parameters[name.toLowerCase()] || {}; }
+    },
+    NativeHost: {
+      runtime: {
+        loadScript: function(scriptPath) {
+          loadedScripts.push({
+            path: scriptPath,
+            src: context.document.currentScript.src,
+            paramP2: context.PluginManager.parameters('PluginTwo')
+          });
+        }
+      }
+    }
+  };
+  vm.createContext(context);
+  runPluginInfra(context);
+  runModule(context, 'js/pmjs-web/script-loader.js');
+  runModule(context, 'js/pmjs-mv/plugin-loader.js');
+
+  const plugins = [
+    { name: 'PluginOne', status: true, description: '', parameters: { opt1: 'v1' } },
+    { name: 'PluginTwo', status: true, description: '', parameters: { opt2: 'v2' } }
+  ];
+
+  context.$plugins = plugins;
+  context.pmjsMvInitializePlugins();
+
+  assert.equal(loadedScripts.length, 2);
+  assert.equal(loadedScripts[0].path, 'js/plugins/PluginOne.js');
+  assert.equal(loadedScripts[0].src, 'file:///game/js/plugins/PluginOne.js');
+  assert.deepEqual(loadedScripts[0].paramP2, { opt2: 'v2' }, 'PluginOne should observe PluginTwo parameters at load time');
+
+  assert.equal(loadedScripts[1].path, 'js/plugins/PluginTwo.js');
+  assert.equal(loadedScripts[1].src, 'file:///game/js/plugins/PluginTwo.js');
+});
+
+test('lifecycle pulses beforePlugins, afterPlugins, and beforeBoot', () => {
+  const events = [];
+  const sandbox = {
+    globalThis: {},
+    window: {
+      addEventListener() {},
+      dispatchEvent() {},
+      onload: null
+    },
+    document: {},
+    NativeHost: {
+      runtime: {
+        loadScript(file) {
+          if (file === 'js/main.js') {
+            sandbox.window.onload = () => { events.push('window.onload'); };
+          } else if (file.startsWith('js/plugins/')) {
+            events.push('plugin-script-loaded');
+          }
+        }
+      }
+    },
+    $plugins: [{ name: 'TestPlugin', status: true, parameters: {} }],
+    PluginManager: {
+      _scripts: [],
+      _path: 'js/plugins/',
+      loadScript() { events.push('plugin-script-loaded'); },
+      setParameters() {},
+      setup: null
+    }
+  };
+  sandbox.globalThis = sandbox;
+  const context = vm.createContext(sandbox);
+
+  runPluginInfra(context);
+  context.PMJS.phases.on('beforePlugins', () => events.push('beforePlugins'));
+  context.PMJS.phases.on('afterPlugins', () => events.push('afterPlugins'));
+  context.PMJS.phases.on('beforeBoot', () => events.push('beforeBoot'));
+  context.globalThis.pmjsPixiRenderPreflight = {
+    scan() { events.push('pixi-preflight'); }
+  };
+
+  runModule(context, 'js/pmjs-mv/plugin-loader.js');
+  runModule(context, 'js/pmjs-mv/boot.js');
+
+  context.pmjsMvInitializePlugins();
+  context.pmjsMvLoadEntrypoint();
+  context.pmjsMvStart();
+
+  assert.deepEqual(events, [
+    'beforePlugins',
+    'plugin-script-loaded',
+    'afterPlugins',
+    'pixi-preflight',
+    'beforeBoot',
+    'window.onload'
+  ]);
+});
+
+test('phases run multiple hooks in registration order', () => {
+  const events = [];
+  const sandbox = {
+    globalThis: {},
+    window: { addEventListener() {}, dispatchEvent() {}, onload: null },
+    document: {},
+    NativeHost: { runtime: { loadScript() {} } },
+    $plugins: [],
+    PluginManager: {
+      _scripts: [],
+      _path: 'js/plugins/',
+      loadScript() {},
+      setParameters() {},
+      setup() {}
+    }
+  };
+  sandbox.globalThis = sandbox;
+  const context = vm.createContext(sandbox);
+
+  runPluginInfra(context);
+  context.PMJS.phases.on('afterPlugins', () => events.push('hook-1'));
+  context.PMJS.phases.on('afterPlugins', () => events.push('hook-2'));
+
+  runModule(context, 'js/pmjs-mv/plugin-loader.js');
+
+  context.pmjsMvInitializePlugins();
+
+  assert.deepEqual(events, ['hook-1', 'hook-2']);
+});
+
+test('named plugin installer failures stop peers and propagate', () => {
+  const context = vm.createContext({ console });
+  runPluginInfra(context);
+  const seen = [];
+  context.PMJS.plugins.onLoaded('SomePlugin', () => { throw new Error('boom'); });
+  context.PMJS.plugins.onLoaded('someplugin.js', () => seen.push('loaded'));
+  assert.throws(() => context.PMJS.plugins.execute('SomePlugin', function() {}), /boom/);
+  assert.deepEqual(seen, []);
+});

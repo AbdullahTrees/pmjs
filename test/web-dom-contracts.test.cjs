@@ -89,3 +89,24 @@ test('session storage is isolated from persistent storage and a new guest', () =
   assert.equal(c.sessionStorage.key(0), 'key'); assert.equal(setup().c.sessionStorage.getItem('key'), null);
   c.sessionStorage.clear(); assert.equal(c.localStorage.getItem('key'), 'persistent');
 });
+
+
+test('host fixtures preserve caller clocks and method receivers with an optional isolated clock', () => {
+  const runtime = Object.freeze({
+    now() { assert.equal(this, runtime); return 123; },
+    env() { assert.equal(this, runtime); return ''; },
+    windowSize() { assert.equal(this, runtime); return { width: 816, height: 624 }; }
+  });
+  const native = Object.freeze({ runtime });
+  const ordinary = createHostContext(native, { graphics: false });
+  const mocked = createHostContext(native, { graphics: false, now: () => 456 });
+  assert.equal(ordinary.performance.now(), 123);
+  assert.equal(mocked.performance.now(), 456);
+  assert.equal(native.runtime.now(), 123);
+  assert.notEqual(ordinary.NativeHost.runtime, runtime);
+  assert.notEqual(mocked.NativeHost.runtime, ordinary.NativeHost.runtime);
+  mocked.NativeHost.runtime.loadScript = () => {};
+  assert.equal(native.runtime.loadScript, undefined);
+  assert.equal(ordinary.NativeHost.runtime.loadScript, undefined);
+  assert.equal(mocked.NativeHost.runtime.windowSize().width, 816);
+});

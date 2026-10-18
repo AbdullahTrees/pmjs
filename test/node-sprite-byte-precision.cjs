@@ -5,9 +5,10 @@ const path = require('node:path');
 const native = require(path.resolve(process.argv[2]));
 native.initialize({ gameRoot: path.resolve(process.argv[3]), width: 256, height: 256,
   windowTitle: 'sprite byte precision' });
-const schema = native.scene.schema;
-const image = native.canvas.create(256, 1);
+let image;
 try {
+  const schema = native.scene.schema;
+  image = native.canvas.create(256, 1);
   const pixels = new Uint8Array(256 * 4);
   for (let byte = 0; byte < 256; byte++) pixels.set([byte, byte, byte, 255], byte * 4);
   native.canvas.writePremultipliedPixels(image.handle, 0, 0, 256, 1, pixels);
@@ -34,5 +35,6 @@ try {
     }
   }
 } finally {
-  native.canvas.release(image.handle);
+  try { if (image) native.canvas.release(image.handle); }
+  finally { native.runtime.quit(); }
 }

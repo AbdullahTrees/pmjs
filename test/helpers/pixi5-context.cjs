@@ -1,15 +1,7 @@
 'use strict';
 
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
-
-const runtimeRoot = path.resolve(__dirname, '../..');
-
-function runModule(context, relative) {
-  const source = fs.readFileSync(path.join(runtimeRoot, relative), 'utf8');
-  vm.runInContext(source, context, { filename: relative });
-}
+const { runModule } = require('./runtime-context.cjs');
 
 function createContext({ strictCompatibility = true } = {}) {
   let nextCanvasHandle = 900;

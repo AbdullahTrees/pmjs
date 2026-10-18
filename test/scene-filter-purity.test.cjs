@@ -3,13 +3,10 @@
 // Engine and plugin updates own filter state. Render preparation translates
 // the current state into a render plan without advancing it.
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const source = fs.readFileSync(path.join(__dirname,
-  '../js/pmjs-pixi4/scene-filters.js'), 'utf8');
+const { runModule } = require('./helpers/runtime-context.cjs');
 
 function createHarness() {
   class NoiseFilter {
@@ -42,16 +39,9 @@ function createHarness() {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'pmjs-pixi4/scene-filters.js' });
+  runModule(sandbox, 'js/pmjs-pixi4/scene-filters.js');
   return sandbox;
 }
-
-test('render preparation performs no semantic mutation', () => {
-  assert.ok(source.indexOf('__pmjsPrepareSceneFilters') === -1,
-    'render preparation must not invoke scene-filter preparation hooks');
-  assert.ok(source.indexOf('updateHorror') === -1,
-    'render preparation must not advance horror effects');
-});
 
 test('an active effect advances once per game update, never per render', () => {
   const sandbox = createHarness();

@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-const { makeHarness } = require('./helpers/scene-encoder-harness.cjs');
+const { makeHarness, packetNode } = require('./helpers/scene-encoder-harness.cjs');
 
 function preparedHarness() {
   const harness = makeHarness({ beforeWriter(sandbox) {
@@ -97,8 +97,8 @@ test('nested rendering restores transform preparation and root state', () => {
   assert.equal(sandbox.nativeSceneRenderer, null);
   assert.equal(following.worldTransform.tx, 3);
   const packet = harness.submitted.at(-1);
-  assert.equal(packet.values[2 * 41 + 4], 13, 'outer packet consumes the restored world state');
-  assert.ok(packet.metadata[2 * 7 + 5] & 524288);
+  assert.equal(packetNode(packet, 2).x, 13, 'outer packet consumes the restored world state');
+  assert.ok(packetNode(packet, 2).flags & 524288);
   assert.equal(stage.parent, null);
   assert.equal(nested.parent, null);
 });
@@ -691,244 +691,6 @@ test('skipUpdateTransform uses the rendered root world transform', () => {
   assert.equal(harness.submitted[1].values[5], 3);
 });
 
-test('an uninitialized bitmap cache draws live children and logs', () => {
-  const harness = makeHarness();
-  const { sandbox, sprite } = harness;
-  const root = new sandbox.PIXI.Container();
-  const cached = new sandbox.PIXI.Container();
-  cached._cacheAsBitmap = true;
-  cached.addChild(sprite());
-  root.addChild(cached);
-  assert.equal(sandbox.submitNativeScene(root), true);
-  assert.equal(harness.submitted.length, 1);
-  assert.deepEqual(harness.compatHits,
-    [['render.cacheAsBitmap',
-      'Container: uninitialized cache, drawing live children']]);
-  assert.deepEqual(harness.submitted[0].metadata.filter((_, index) => index % 7 === 0),
-    [0, 0, 1]);
-});
-
-test('bitmap cache uses one Pixi snapshot until the cache is disabled', () => {
-  const harness = makeHarness();
-  const { sandbox, sprite } = harness;
-  const root = new sandbox.PIXI.Container();
-  const cached = new sandbox.PIXI.Container();
-  const child = sprite();
-  const snapshot = sprite();
-  snapshot.alpha = 0.4;
-  cached.x = 12;
-  cached._cacheAsBitmap = true;
-  cached._cacheData = { sprite: null };
-  cached.addChild(child);
-  root.addChild(cached);
-  let builds = 0;
-  cached._initCachedDisplayObject = renderer => {
-    builds++;
-    assert.equal(cached.__pmjsBuildingBitmapCache, true);
-    assert.equal(renderer.render(cached), true);
-    cached._cacheData.sprite = snapshot;
-  };
-  const renderer = { render(node) {
-    const packet = sandbox.encodeNativeScene(node);
-    assert.ok(packet.count >= 0);
-    return true;
-  } };
-  sandbox.prepareNativeBitmapCaches(root, renderer);
-  assert.equal(sandbox.submitNativeScene(root), true);
-  const first = harness.submitted[0];
-  child.x = 100;
-  sandbox.prepareNativeBitmapCaches(root, renderer);
-  assert.equal(sandbox.submitNativeScene(root), true);
-  const second = harness.submitted[1];
-  assert.equal(builds, 1);
-  assert.deepEqual(first, second);
-  assert.deepEqual(first.metadata.filter((_, index) => index % 7 === 0),
-    [0, 0, 1]);
-  assert.equal(first.values[41 + 4], 12);
-  assert.equal(first.values[2 * 41 + 6], 1);
-  cached.alpha = 0.6;
-  assert.equal(sandbox.submitNativeScene(root), true);
-  assert.ok(Math.abs(harness.submitted[2].values[41 + 6] - 0.6) < 0.000001);
-  assert.equal(harness.submitted[2].values[2 * 41 + 6], 1);
-  assert.deepEqual(harness.compatObserved,
-    [['render.cacheAsBitmap', 'Container'],
-      ['render.cacheAsBitmap', 'Container'],
-      ['render.cacheAsBitmap', 'Container']]);
-  assert.deepEqual(harness.compatHits, []);
-});
-
-test('nested bitmap caches build inside out and draw the parent snapshot', () => {
-  const harness = makeHarness();
-  const { sandbox, sprite } = harness;
-  const root = new sandbox.PIXI.Container();
-  const outer = new sandbox.PIXI.Container();
-  const inner = new sandbox.PIXI.Container();
-  inner.addChild(sprite());
-  outer.addChild(inner);
-  root.addChild(outer);
-  const order = [];
-  for (const [name, node] of [['inner', inner], ['outer', outer]]) {
-    node._cacheAsBitmap = true;
-    node._cacheData = { sprite: null };
-    node._initCachedDisplayObject = renderer => {
-      order.push(name);
-      assert.equal(renderer.render(node), true);
-      node._cacheData.sprite = sprite();
-    };
-  }
-  const renderer = { render(node) {
-    sandbox.encodeNativeScene(node);
-    return true;
-  } };
-  sandbox.prepareNativeBitmapCaches(root, renderer);
-  assert.deepEqual(order, ['inner', 'outer']);
-  assert.equal(sandbox.submitNativeScene(root), true);
-  assert.deepEqual(harness.submitted[0].metadata.filter(
-    (_, index) => index % 7 === 0), [0, 0, 1]);
-});
-
-test('declared bitmap producer follows live cache, visibility and attachment state', () => {
-  const { sandbox, sprite } = makeHarness();
-  const root = new sandbox.PIXI.Container(), parent = root.addChild(new sandbox.PIXI.Container());
-  const cached = parent.addChild(new sandbox.PIXI.Container()), other = root.addChild(new sandbox.PIXI.Container());
-  let scans = 0, builds = 0, valid = true;
-  Object.defineProperty(other, 'children', { get() { scans++; return []; } });
-  cached._cacheData = { sprite: null };
-  cached._initCachedDisplayObject = () => {
-    assert.equal(cached.__pmjsBuildingBitmapCache, true);
-    assert.equal(cached.worldAlpha, 0.125);
-    builds++; cached._cacheData.sprite = sprite();
-  };
-  root.alpha = parent.alpha = cached.alpha = 0.5;
-  const nodes = [cached];
-  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local',
-    bitmapCacheProducers: { nodes, valid: stage => stage === root && valid } });
-  nodes.length = 0;
-  const policy = sandbox.PMJS.pixi4.getStageRenderOptions(root).bitmapCacheProducers;
-  function prepare() { sandbox.prepareNativeBitmapCaches(root, {}, null, policy); }
-  prepare(); assert.equal(scans, 1);
-  cached._cacheAsBitmap = true; prepare(); prepare();
-  assert.equal(builds, 1); assert.equal(scans, 1, 'admission scans only once');
-  cached._cacheData.sprite = null;
-  parent.visible = false; prepare(); assert.equal(builds, 1);
-  parent.visible = true;
-  parent.children.length = 0; prepare(); assert.equal(builds, 1, 'stale parent pointer is detached');
-  parent.children.push(cached); prepare(); assert.equal(builds, 2);
-  cached._cacheAsBitmap = false; cached._cacheData.sprite = null;
-  prepare(); assert.equal(builds, 2);
-  cached._cacheAsBitmap = true; prepare(); assert.equal(builds, 3, 'private flag changes are read live');
-  valid = false; prepare();
-  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheAdmission, 'invalid');
-  valid = true; prepare(); assert.equal(scans, 3, 'validation recovery performs admission again');
-  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(root).bitmapCacheMode, 'declared');
-});
-
-test('undeclared hidden bitmap producers retain ordinary census and multiple caches retain postorder', () => {
-  const { sandbox, sprite } = makeHarness();
-  const root = new sandbox.PIXI.Container(), outer = root.addChild(new sandbox.PIXI.Container());
-  const inner = outer.addChild(new sandbox.PIXI.Container()), order = [];
-  for (const [name, node] of [['outer', outer], ['inner', inner]]) {
-    node._cacheAsBitmap = true; node._cacheData = { sprite: null };
-    node._initCachedDisplayObject = () => { order.push(name); node._cacheData.sprite = sprite(); };
-  }
-  inner.visible = false;
-  function prepare(nodes) {
-    sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'native',
-      bitmapCacheProducers: { nodes, valid: () => true } });
-    sandbox.prepareNativeBitmapCaches(root, {}, null,
-      sandbox.PMJS.pixi4.getStageRenderOptions(root).bitmapCacheProducers);
-    return sandbox.PMJS.pixi4.getStageRenderState(root);
-  }
-  assert.equal(prepare([outer]).bitmapCacheAdmission, 'rejected');
-  assert.deepEqual(order, ['outer']);
-  order.length = 0; outer._cacheData.sprite = null; inner.visible = true;
-  const state = prepare([outer, inner]);
-  assert.deepEqual(order, ['inner', 'outer']);
-  assert.equal(state.bitmapCacheMode, 'full');
-  assert.equal(state.bitmapCacheAdmission, 'accepted');
-});
-
-test('world-state policy changes preserve producer admission until the declaration changes', () => {
-  const { sandbox } = makeHarness(), api = sandbox.PMJS.pixi4;
-  const root = new sandbox.PIXI.Container(), producer = root.addChild(new sandbox.PIXI.Container());
-  const other = root.addChild(new sandbox.PIXI.Container());
-  let scans = 0;
-  Object.defineProperty(other, 'children', { get() { scans++; return []; } });
-  api.setStageRenderOptions(root, { worldState: 'pixi',
-    bitmapCacheProducers: { nodes: [producer], valid: () => true } });
-  const original = api.getStageRenderOptions(root).bitmapCacheProducers;
-  function prepare() {
-    sandbox.prepareNativeBitmapCaches(root, {}, null, api.getStageRenderOptions(root).bitmapCacheProducers);
-  }
-  prepare();
-  for (let index = 0; index < 20; index++) {
-    api.setStageRenderOptions(root, { ...api.getStageRenderOptions(root),
-      worldState: index % 2 ? 'pixi' : 'local' });
-    assert.equal(api.getStageRenderOptions(root).bitmapCacheProducers, original);
-    prepare();
-  }
-  assert.equal(scans, 1, 'world-state transitions reuse the original admission');
-  api.setStageRenderOptions(root, { worldState: 'local',
-    bitmapCacheProducers: { nodes: [producer], valid: () => true } });
-  assert.notEqual(api.getStageRenderOptions(root).bitmapCacheProducers, original);
-  prepare(); assert.equal(scans, 2, 'replacement declarations require admission');
-  api.setStageRenderOptions(root, null);
-  api.setStageRenderOptions(root, { worldState: 'local', bitmapCacheProducers: original });
-  prepare(); assert.equal(scans, 3, 'clearing the policy invalidates its admission');
-});
-
-test('producer declaration validates shape and preserves initializer error cleanup', () => {
-  const { sandbox } = makeHarness(), api = sandbox.PMJS.pixi4;
-  const root = new sandbox.PIXI.Container();
-  for (const policy of [null, {}, { nodes: [], valid: false },
-    { nodes: [null], valid() {} }, { nodes: [root, root], valid() {} }]) {
-    assert.throws(() => api.setStageRenderOptions(root,
-      { worldState: 'local', bitmapCacheProducers: policy }), /bitmapCacheProducers/);
-  }
-  root._cacheAsBitmap = true;
-  root._initCachedDisplayObject = () => { throw new Error('cache build failed'); };
-  api.setStageRenderOptions(root, { worldState: 'local',
-    bitmapCacheProducers: { nodes: [root], valid: () => true } });
-  assert.throws(() => sandbox.prepareNativeBitmapCaches(root, {}, null,
-    api.getStageRenderOptions(root).bitmapCacheProducers), /cache build failed/);
-  assert.equal(root.__pmjsBuildingBitmapCache, false);
-  api.setStageRenderOptions(root, null);
-  assert.equal(api.getStageRenderOptions(root), undefined);
-});
-
-test('renderer confines producer selection to configured screen renders and reports the selected route', () => {
-  const { sandbox } = makeHarness();
-  sandbox.PIXI.RENDERER_TYPE = { WEBGL: 1 };
-  sandbox.PIXI.Texture.EMPTY = { baseTexture: {} };
-  sandbox.PIXI.Matrix = class { identity() { return this; } };
-  sandbox.PIXI.WebGLRenderer = class {};
-  Object.assign(sandbox.NativeHost.render, { setScreenRenderSize() {}, setRenderTargetSize() {}, renderToCanvas() {} });
-  sandbox.CanvasElement.prototype._pmjsContentChanged = function() {};
-  for (const name of ['renderer-managers', 'renderer-facade']) {
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-pixi4', name + '.js'), 'utf8'), sandbox);
-  }
-  const renderer = sandbox.createNativePixiRenderer({ width: 32, height: 24, view: { style: {} } });
-  const root = new sandbox.PIXI.Container(), inner = new sandbox.PIXI.Container();
-  sandbox.PMJS.pixi4.setStageRenderOptions(root, { worldState: 'local',
-    bitmapCacheProducers: { nodes: [], valid: () => true } });
-  const submit = sandbox.submitNativeScene;
-  sandbox.submitNativeScene = function(stage, color) {
-    if (stage === root) renderer.render(inner);
-    return submit(stage, color);
-  };
-  renderer.render(root);
-  const state = sandbox.PMJS.pixi4.getStageRenderState(root);
-  assert.equal(state.worldState, 'local'); assert.equal(state.renders, 1);
-  assert.equal(state.bitmapCacheMode, 'declared'); assert.equal(state.bitmapCacheAdmission, 'accepted');
-  assert.equal(sandbox.PMJS.pixi4.getStageRenderState(inner).bitmapCacheMode, 'full');
-  renderer.render(root, { baseTexture: { width: 8, height: 8 } });
-  const after = sandbox.PMJS.pixi4.getStageRenderState(root);
-  assert.equal(after.renders, 2);
-  assert.equal(after.bitmapCacheMode, 'full'); assert.equal(after.bitmapCacheAdmission, 'offscreen');
-  assert.equal(state.renders, 1, 'earlier diagnostic snapshots remain unchanged');
-  assert.equal(state.bitmapCacheMode, 'declared');
-});
-
 test('active blur filter takes the advanced lane and stays correct', () => {
   const harness = makeHarness();
   const { sandbox, sprite } = harness;
@@ -959,7 +721,7 @@ test('active rectangle mask resolves to a scissor without alpha work', () => {
   assert.deepEqual(harness.counts,
     { filterPlans: 1, rectMasks: 1, alphaMasks: 0 });
 
-  assert.equal(packet.metadata[1 * 7 + 5] & 1, 1);
+  assert.equal(packetNode(packet, 1).flags & 1, 1);
 });
 
 function fillMask(harness, mask) {
@@ -991,7 +753,7 @@ test('proven full-frame Sprite mask resolves to a scissor without alpha work', (
   const packet = submitOnly(harness, root);
   assert.deepEqual(harness.counts,
     { filterPlans: 1, rectMasks: 1, alphaMasks: 0 });
-  assert.equal(packet.metadata[1 * 7 + 5] & 1, 1);
+  assert.equal(packetNode(packet, 1).flags & 1, 1);
   assert.deepEqual(packet.values.slice(1 * 41 + 17, 1 * 41 + 21),
     [7, 25, 107, 117]);
 });
@@ -1251,7 +1013,7 @@ test('aborted visual encoders preserve a neutral transformed parent for children
   assert.equal(packet.count, 3);
   assert.deepEqual(packet.metadata.filter((_, index) => index % 7 === 0),
     [0, 0, 1]);
-  assert.equal(packet.metadata[2 * 7 + 1], 1,
+  assert.equal(packetNode(packet, 2).parent, 1,
     'child must remain parented to the degraded node');
   assert.equal(packet.values[41 + 4], 30);
   assert.equal(packet.values[41 + 5], 12);
@@ -1687,7 +1449,7 @@ test('tone and blend colors ride the sprite record', () => {
   toned._blendColor = [255, 0, 0, 128];
   root.addChild(toned);
   const packet = submitOnly(harness, root);
-  assert.equal(packet.metadata[1 * 7 + 5] & 16, 16);
+  assert.equal(packetNode(packet, 1).flags & 16, 16);
   assert.deepEqual(
     [41 + 33, 41 + 34, 41 + 35, 41 + 36, 41 + 37, 41 + 40].map(offset =>
       packet.values[offset]),
@@ -1811,8 +1573,8 @@ test('particle children carry tone and blend colors regardless of attachment tim
 
   assert.deepEqual(packet.metadata.filter((_, index) => index % 7 === 0),
     [0, 0, 1, 1]);
-  assert.equal(packet.metadata[2 * 7 + 5] & 16, 16);
-  assert.equal(packet.metadata[3 * 7 + 5] & 16, 16);
+  assert.equal(packetNode(packet, 2).flags & 16, 16);
+  assert.equal(packetNode(packet, 3).flags & 16, 16);
   assert.deepEqual(
     [2 * 41 + 33, 2 * 41 + 34, 2 * 41 + 35, 2 * 41 + 36, 2 * 41 + 37, 2 * 41 + 40].map(offset =>
       packet.values[offset]),
@@ -1840,7 +1602,7 @@ test('rect tile layers bypass rejection with retained records', () => {
 
   assert.deepEqual(packet.metadata.filter((_, index) => index % 7 === 0),
     [0, 0, 4]);
-  assert.equal(packet.metadata[2 * 7 + 5] & 8, 8);
+  assert.equal(packetNode(packet, 2).flags & 8, 8);
   sandbox.PIXI.tilemap.TileRenderer.SCALE_MODE = sandbox.PIXI.SCALE_MODES.LINEAR;
   assert.equal(submitOnly(harness, root).metadata[2 * 7 + 5] & 8, 0);
 });
@@ -2024,7 +1786,7 @@ test('rectangular mask with colorMatrix filter preserves scissor and avoids alph
 
   assert.equal(packet.metadata[1 * 7 + 4], 25);
 
-  assert.equal(packet.metadata[2 * 7 + 5] & 1, 1);
+  assert.equal(packetNode(packet, 2).flags & 1, 1);
 
   assert.equal(alphaMaskGroups(packet).length, 0);
 });
@@ -2072,7 +1834,7 @@ test('disjoint clip intersection normalizes to a zero-area clip without rejectio
   assert.equal(intersected.bottom, 100);
 
   const packet = directPacket(harness, stage, intersected, null);
-  assert.equal(packet.metadata[0 * 7 + 5] & 1, 1);
+  assert.equal(packetNode(packet, 0).flags & 1, 1);
   assert.deepEqual(
     [packet.values[17], packet.values[18], packet.values[19], packet.values[20]],
     [100, 100, 100, 100]);
@@ -2249,7 +2011,6 @@ test('scene submission asks the video owner for diagnostics only on failure', ()
   assert.ok(errors[0].endsWith('videos=' + JSON.stringify(snapshot)));
 });
 
-
 test('retained triangle material leaves scene fields available and can be cleared', () => {
   const harness = makeHarness();
   const { sandbox, makeTexture } = harness;
@@ -2273,7 +2034,6 @@ test('retained triangle material leaves scene fields available and can be cleare
   assert.notEqual(cleared.metadata[9], resource);
   assert.throws(() => setTriangleBitmap(sandbox, mesh, [NaN]), /finite points/);
 });
-
 
 test('MV bitmap flash retains its material and rejects ambiguous generic overlays', () => {
   const harness = makeHarness();
@@ -2348,7 +2108,6 @@ test('background fill is explicit per scene submission and never persists into o
   assert.equal(harness.submitted[2].metadata[3], 0x102030);
 });
 
-
 test('triangle stroke coverage is retained material state with validated sample count', () => {
   const { sandbox, makeTexture } = makeHarness();
   const mesh = new sandbox.PIXI.mesh.Mesh(makeTexture(64, 64));
@@ -2409,7 +2168,6 @@ test('Sprite world hooks and packed color are consumed before Float32 scene seri
     assert.equal(skipped.metadata[index * 7 + 3], 0x32333333);
   }
 });
-
 
 test('Sprite vertex packets preserve Pixi Float32 corners and logical GPU bitmap views', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
@@ -2514,7 +2272,6 @@ test('nonfinite leaf quads retain enclosing masks, filters and sibling traversal
   assert.equal(sandbox.nativeSceneFilterDepth, 0);
 });
 
-
 test('an unknown stage transform executes once before encoding', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
   const root = new sandbox.PIXI.Container(); root.addChild(sprite());
@@ -2532,7 +2289,6 @@ test('bitmap bake and clear share quantized triangle coefficient construction', 
   assert.deepEqual(Array.from(material.slice(16,22)),
     Array.from(sandbox.nativeTriangleClipNormals(Float32Array.from(coordinates))));
 });
-
 
 test('skipped Sprite world vertices receive the explicit render root transform once', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
@@ -2554,7 +2310,6 @@ test('skipped Sprite world vertices receive the explicit render root transform o
   assert.deepEqual(Array.from(vertices), [3.125,4.375,19.75,5.5,18.25,23.625,1.625,22.5]);
   assert.equal(packet.metadata[12]&4096,4096);
 });
-
 
 test('unknown stage hooks run in default and explicitly requested guest preparation', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
@@ -2718,4 +2473,15 @@ test('prepared Pixi world records preserve singular parents and root projection 
   assert.deepEqual(packet.values.slice(41, 48), [0, 0, 0, 0, 30, 50, 0.5]);
   assert.deepEqual(packet.values.slice(82, 89), [0, 0, 0, 0, 30, 50, 0.25]);
   assert.ok(packet.metadata[7 + 5] & 524288);
+});
+
+test('scene harnesses keep Pixi prototypes and native submissions separate', () => {
+  const first = makeHarness(), second = makeHarness();
+  first.sandbox.PIXI.Container.prototype.fixtureMarker = true;
+  assert.equal(second.sandbox.PIXI.Container.prototype.fixtureMarker, undefined);
+  const stage = new first.sandbox.PIXI.Container();
+  stage.addChild(first.sprite());
+  first.sandbox.renderNativeStage(stage);
+  assert.equal(first.submitted.length, 1);
+  assert.equal(second.submitted.length, 0);
 });

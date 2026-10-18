@@ -1,20 +1,25 @@
 'use strict';
 
-const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const vm = require('node:vm');
+const { runModule } = require('./runtime-context.cjs');
 
-function createHostContext(native, { graphics = true } = {}) {
-  native.runtime.now = () => performance.now();
+function createHostContext(native, { graphics = true, now } = {}) {
+  const runtime = Object.fromEntries(Object.entries(native.runtime).map(([name, value]) =>
+    [name, typeof value === 'function' ? value.bind(native.runtime) : value]));
+  runtime.now = now || runtime.now || (() => performance.now());
+  const host = { ...native, runtime };
   const context = vm.createContext({ __pmjsBuiltinRequire: require, console, performance, Uint8Array, Uint8ClampedArray,
     PMJS: { config: { fonts: { GameFont: 'testfont.ttf' } } },
-    NativeHost: native,
+    NativeHost: host,
     trackNativeResource: resource => resource,
     releaseNativeResource: (resource, kind) => { if (resource) native[kind === 'canvas' ? 'canvas' : 'images'].release(resource.handle); },
     Input: { gamepadMapper: { 0: 'ok', 1: 'cancel' } }
   });
-  for (const module of ['pmjs-core/methods', 'pmjs-web/filesystem', 'pmjs-web/runtime', 'pmjs-web/events',
-    'pmjs-web/canvas', ...require('./web-element-sources.cjs').elementSources.map(file => file.slice(3, -3)), 'pmjs-web/presentation', 'pmjs-web/fallback-font']) {
-    const file = path.resolve(__dirname, '../../js', module + '.js');
-    vm.runInContext(fs.readFileSync(file, 'utf8'), context, { filename: file });
+  for (const relative of ['js/pmjs-core/methods.js', 'js/pmjs-web/filesystem.js',
+    'js/pmjs-web/runtime.js', 'js/pmjs-web/events.js', 'js/pmjs-web/canvas.js',
+    ...require('./web-element-sources.cjs').elementSources,
+    'js/pmjs-web/presentation.js', 'js/pmjs-web/fallback-font.js']) {
+    runModule(context, relative);
   }
   if (graphics) {
     // A contained engine-contract fixture. Differential validation uses stock classes.
@@ -45,8 +50,7 @@ function createHostContext(native, { graphics = true } = {}) {
       pageToCanvasX(x) { return Math.round((x - canvas.offsetLeft) / this._realScale); },
       pageToCanvasY(y) { return Math.round((y - canvas.offsetTop) / this._realScale); }
     };
-    const file = path.resolve(__dirname, '../../js/pmjs-mz/graphics.js');
-    vm.runInContext(fs.readFileSync(file, 'utf8'), context, { filename: file });
+    runModule(context, 'js/pmjs-mz/graphics.js');
     context.PMJS.methods.install();
   }
   return context;

@@ -1,6 +1,7 @@
 'use strict';
 
-const { createContext, runModule } = require('./pixi5-context.cjs');
+const { createContext } = require('./pixi5-context.cjs');
+const { runModule } = require('./runtime-context.cjs');
 
 function createMzContext(options) {
   const fixture = createContext(options);

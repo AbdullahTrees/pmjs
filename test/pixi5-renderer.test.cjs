@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { packetNode } = require('./helpers/scene-encoder-harness.cjs');
 
 const { createContext, runModule } = require('./helpers/pixi5-context.cjs');
 
@@ -24,8 +25,8 @@ test('Pixi 5 Application keeps plugins and uses the native renderer', () => {
   app.render();
   const packet = fixture.submissions[0];
   assert.equal(packet.count, 3, 'background, resolution transform, stage');
-  assert.equal(packet.values[1 * 41], 2);
-  assert.equal(packet.values[1 * 41 + 3], 2);
+  assert.equal(packetNode(packet, 1).a, 2);
+  assert.equal(packetNode(packet, 1).d, 2);
 });
 
 test('Pixi 5 scene installation preserves the shared namespace and other capabilities', () => {
@@ -70,13 +71,13 @@ test('Pixi 5 scene encoder reads resource.source and submits sprites', () => {
   const packet = fixture.submissions[0];
   assert.equal(packet.version, 30);
   assert.equal(packet.count, 3, 'background, stage container, sprite');
-  assert.equal(packet.metadata[2 * 7], 1);
-  assert.equal(packet.metadata[2 * 7 + 2], 42);
-  assert.equal(packet.metadata[2 * 7 + 5] & 8, 8);
-  assert.equal(packet.metadata[2 * 7 + 5] & 131072, 131072, 'Pixi 5 preserves float UVs');
-  assert.equal(packet.metadata[2 * 7 + 5] & 262144, 262144, 'ordinary sprites preserve repeating sampling');
-  assert.equal(packet.values[2 * 41 + 4], 12);
-  assert.equal(packet.values[2 * 41 + 5], 8);
+  assert.equal(packetNode(packet, 2).kind, 1);
+  assert.equal(packetNode(packet, 2).resource, 42);
+  assert.equal(packetNode(packet, 2).flags & 8, 8);
+  assert.equal(packetNode(packet, 2).flags & 131072, 131072, 'Pixi 5 preserves float UVs');
+  assert.equal(packetNode(packet, 2).flags & 262144, 262144, 'ordinary sprites preserve repeating sampling');
+  assert.equal(packetNode(packet, 2).x, 12);
+  assert.equal(packetNode(packet, 2).y, 8);
   assert.equal(packet.values[2 * 41 + 7], -10);
   assert.equal(packet.values[2 * 41 + 8], -2.5);
   assert.equal(packet.values[2 * 41 + 9], 4);
@@ -276,9 +277,9 @@ test('Pixi 5 scene encoder emits full-texture TilingSprite packets', () => {
 
   app.render();
   const packet = fixture.submissions[0];
-  assert.equal(packet.metadata[2 * 7], 2);
-  assert.equal(packet.metadata[2 * 7 + 2], 73);
-  assert.equal(packet.metadata[2 * 7 + 5] & 8, 8);
+  assert.equal(packetNode(packet, 2).kind, 2);
+  assert.equal(packetNode(packet, 2).resource, 73);
+  assert.equal(packetNode(packet, 2).flags & 8, 8);
   assert.equal(packet.values[2 * 41 + 7], -40);
   assert.equal(packet.values[2 * 41 + 8], -10);
   assert.equal(packet.values[2 * 41 + 9], -6);
@@ -307,8 +308,8 @@ test('Pixi 5 scene encoder isolates atlas frames used by TilingSprite', () => {
 
   app.render();
   const packet = fixture.submissions[0];
-  assert.equal(packet.metadata[2 * 7], 2);
-  assert.equal(packet.metadata[2 * 7 + 2], 900);
+  assert.equal(packetNode(packet, 2).kind, 2);
+  assert.equal(packetNode(packet, 2).resource, 900);
   assert.equal(texture.__pmjsPixi5TilingCanvas.width, 96);
   assert.equal(texture.__pmjsPixi5TilingCanvas.height, 96);
   assert.deepEqual(texture.__pmjsPixi5TilingCanvas.drawCalls[0].slice(1),

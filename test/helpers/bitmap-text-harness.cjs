@@ -1,7 +1,6 @@
 /* global document */
 'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
+const { runModule } = require('./runtime-context.cjs');
 const vm = require('node:vm');
 const { createHostContext } = require('./mz-host-context.cjs');
 
@@ -65,7 +64,7 @@ function makeBitmapTextHarness(native, enabled = true, deferActivation = false) 
   vm.runInContext('(' + installBitmapFixture.toString() + ')()', context);
   for (const file of ['pmjs-core/optimizations',
     ...(deferActivation ? ['pmjs-rpgmaker/lifecycle'] : []), 'pmjs-mv/bitmap']) {
-    vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../../js', file + '.js'), 'utf8'), context);
+    runModule(context, 'js/' + file + '.js');
   }
   return context;
 }

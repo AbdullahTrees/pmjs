@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { runModule } = require('./helpers/runtime-context.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { createStorage } = require('../runner/storage.cjs');
 
@@ -180,4 +181,215 @@ test('MV and MZ retain stock desktop detection before plugin initialization', ()
     assert.equal(c.Utils.isNwjs, stock); assert.equal(c.Utils.isNwjs(), true);
     assert.equal(c.process.versions.nw, engine === 'mz' ? '0.48.4' : '0.29.0');
   }
+});
+
+function runDesktopModules(context) {
+  context.__pmjsBuiltinRequire ||= require;
+  context.PMJS.tasks ||= { enqueue() {}, onStop() {} };
+  context.NativeHost ||= {};
+  context.NativeHost.fs ||= { readText() { return null; } };
+  context.NativeHost.runtime ||= {};
+  context.NativeHost.runtime.isFullscreen ||= () => false;
+  const state = { x: 0, y: 0, width: 640, height: 480 };
+  context.NativeHost.runtime.windowState ||= () => state;
+  context.NativeHost.runtime.windowCommand ||= (name, x, y) => {
+    if (name === 'resize') { state.width = x; state.height = y; }
+    if (name === 'move') { state.x = x; state.y = y; }
+  };
+  context.NativeHost.runtime.clipboardText ||= () => '';
+  context.location ||= {};
+  context.__pmjsUpdateWindowState ||= () => {};
+  runModule(context, 'js/pmjs-web/modules.js');
+}
+
+test('nw.gui unsupported calls are diagnosed and external links reach the host', () => {
+  const hits = [];
+  const opened = [];
+  const context = {
+    NativeHost: { runtime: { openExternal(url) { opened.push(url); return true; } } },
+    process: { platform: 'linux', arch: 'x64', versions: {} },
+    nativePlatform: { platform: 'linux', arch: 'x64' },
+    nativeLogicalWidth: 800,
+    nativeLogicalHeight: 600,
+    PMJS: { config: {}, compat: { hit: (capability, detail) =>
+      hits.push([capability, String(detail)]) } },
+    nativeCompatibilityHit(capability, detail) {
+      hits.push([capability, String(detail)]);
+    }
+  };
+  vm.createContext(context);
+  runDesktopModules(context);
+
+  const gui = context.require('nw.gui');
+  assert.equal(context.nw, gui);
+
+  assert.throws(() => gui.Window.open('editor.html'), { code: 'ERR_NW_UNSUPPORTED_WINDOW' });
+  assert.equal((new gui.Menu()).items.length, 0);
+  assert.equal((new gui.MenuItem({ label: 'x' })).label, 'x');
+  assert.equal(gui.Clipboard.get().get(), '');
+  assert.equal(hits.length, 0);
+
+  gui.Window.get().show();
+  gui.Window.get().show();
+  gui.Shell.openExternal('https://example.com');
+  (new gui.Menu()).append({});
+  gui.App.clearCache();
+  assert.deepEqual(opened, ['https://example.com']);
+  assert.deepEqual(hits, [
+    ['browser.nwGui', 'App.clearCache']
+  ]);
+});
+
+test('process.versions and process.version reflect host Node and NW.js compatibility', () => {
+  const context = {
+    process: {
+      platform: 'linux',
+      arch: 'x64',
+      versions: { node: '25.4.0', v8: '14.0.0', uv: '1.48.0' }
+    },
+    nativePlatform: { platform: 'linux', arch: 'x64' },
+    nativeLogicalWidth: 800,
+    nativeLogicalHeight: 600,
+    PMJS: { config: {} }
+  };
+  vm.createContext(context);
+  runDesktopModules(context);
+
+  assert.ok(context.process.versions);
+  assert.equal(context.process.version, 'v25.4.0');
+  assert.equal(context.process.versions.node, '25.4.0');
+  assert.equal(context.process.versions.v8, '14.0.0');
+  assert.equal(context.process.versions.nw, '0.29.0');
+  assert.equal(context.process.versions['node-webkit'], '0.29.0');
+});
+
+test('guest OS identity queries reach Node while filesystem paths remain virtual', () => {
+  const hostOs = require('node:os');
+  let network;
+  const context = vm.createContext({
+    process,
+    nativePlatform: { platform: process.platform, arch: process.arch },
+    PMJS: { config: {} },
+    __pmjsBuiltinRequire(name) {
+      if (name !== 'os') return require(name);
+      return {
+        hostname: () => hostOs.hostname(),
+        userInfo: options => hostOs.userInfo(options),
+        networkInterfaces: () => (network = hostOs.networkInterfaces())
+      };
+    }
+  });
+  runDesktopModules(context);
+  const os = context.require('os');
+  assert.equal(os.hostname(), hostOs.hostname());
+  assert.equal(os.networkInterfaces(), network);
+  assert.equal(os.userInfo().username, hostOs.userInfo().username);
+  assert.equal(Buffer.isBuffer(os.userInfo({ encoding: 'buffer' }).username), true);
+  assert.equal(os.homedir(), '/save');
+  assert.equal(context.process.execPath, '/game/pmjs');
+  assert.equal(context.process.cwd(), '/game');
+});
+
+test('document.title and nw.Window.title read from and write to authoritative __pmjsGameInfo', () => {
+  const { elementSources } = require('./helpers/web-element-sources.cjs');
+
+  const context = {
+    globalThis: {},
+    PMJS: { config: {} },
+    CanvasContext2D: function CanvasContext2D() {},
+    nativeWindowState: { focused: true, visible: true },
+    nativePlatform: { platform: 'linux', arch: 'x64' },
+    nativeLogicalWidth: 816,
+    nativeLogicalHeight: 624,
+    NativeHost: { runtime: { env() { return ''; }, quit() {} } },
+    __pmjsGameInfo: { title: 'Authoritative Game Title', width: 960, height: 720 },
+    __pmjsLegacyConfigTitle: 'Fallback Config Title',
+    __pmjsSetWindowTitle(value) { this.__pmjsGameInfo.title = String(value); }
+  };
+  context.window = context;
+  context.globalThis = context;
+  vm.createContext(context);
+  runModule(context, 'js/pmjs-web/events.js');
+  for (const relative of elementSources) runModule(context, relative);
+  runDesktopModules(context);
+
+  assert.equal(context.document.title, 'Authoritative Game Title');
+  const nw = context.require('nw.gui');
+  assert.equal(nw.Window.get().title, 'Authoritative Game Title');
+
+  context.document.title = 'New Mutated Title';
+  assert.equal(context.__pmjsGameInfo.title, 'New Mutated Title');
+  assert.equal(nw.Window.get().title, 'New Mutated Title');
+});
+
+test('DOM and NW window dimensions agree while the authored viewport stays separate', () => {
+  const { elementSources } = require('./helpers/web-element-sources.cjs');
+
+  const windowTitles = [];
+  const context = {
+    globalThis: {},
+    PMJS: { config: {}, compat: { hit() {} } },
+    CanvasContext2D: function CanvasContext2D() {},
+    NativeHost: {
+      runtime: {
+        now() { return 0; },
+        env() { return ''; },
+        quit() {},
+        displaySize() { return { width: 640, height: 480 }; },
+        setWindowTitle(title) { windowTitles.push(title); }
+      }
+    },
+    __pmjsGameInfo: {
+      title: 'Demo Game',
+      width: 960,
+      height: 720,
+      displayWidth: 640,
+      displayHeight: 480
+    }
+  };
+  context.window = context;
+  context.globalThis = context;
+  vm.createContext(context);
+  runModule(context, 'js/pmjs-web/runtime.js');
+  runModule(context, 'js/pmjs-web/events.js');
+  for (const relative of elementSources) runModule(context, relative);
+  runDesktopModules(context);
+
+  // Screen reports physical display
+  assert.equal(context.screen.width, 640);
+  assert.equal(context.screen.height, 480);
+
+  // DOM inner dimensions report the physical window.
+  assert.equal(context.innerWidth, 640);
+  assert.equal(context.innerHeight, 480);
+
+  const nw = context.require('nw.gui');
+  const win = nw.Window.get();
+  assert.equal(win.width, 640);
+  assert.equal(win.height, 480);
+  assert.equal(win.title, 'Demo Game');
+
+  // NW setters change the window without changing the authored resolution.
+  win.width = 1000;
+  assert.equal(win.width, 1000);
+  assert.equal(context.__pmjsGameInfo.width, 960);
+  assert.equal(context.innerWidth, 1000);
+  assert.equal(context.screen.width, 640, 'screen.width remains physical display');
+
+  // Inner dimensions are observational rather than resize commands.
+  assert.throws(() => { context.innerWidth = 1280; }, TypeError);
+  assert.equal(context.innerWidth, 1000);
+  assert.equal(win.width, 1000);
+  assert.equal(context.__pmjsGameInfo.width, 960);
+
+  // Title mutation propagates to NativeHost.runtime.setWindowTitle
+  context.document.title = 'Title Changed';
+  assert.equal(context.__pmjsGameInfo.title, 'Title Changed');
+  assert.equal(win.title, 'Title Changed');
+  assert.equal(windowTitles[windowTitles.length - 1], 'Title Changed');
+
+  win.title = 'Title Changed via NW';
+  assert.equal(context.__pmjsGameInfo.title, 'Title Changed via NW');
+  assert.equal(context.document.title, 'Title Changed via NW');
+  assert.equal(windowTitles[windowTitles.length - 1], 'Title Changed via NW');
 });

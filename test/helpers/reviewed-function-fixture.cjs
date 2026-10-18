@@ -1,8 +1,8 @@
 'use strict';
 const { createHash } = require('node:crypto');
 
-// Pin independent fixture implementations without distributing guest source.
-// Only the accepted fingerprints change; production recognition still runs.
+// Rewrite accepted fingerprints for synthetic adapter unit tests.
+// These fixtures do not verify production fingerprints or plugin compatibility.
 function reviewedFunctionFixture(source, functions) {
   for (const [recognizer, fn] of Object.entries(functions)) {
     const body = Function.prototype.toString.call(fn)
@@ -15,6 +15,7 @@ function reviewedFunctionFixture(source, functions) {
 }
 module.exports = { reviewedFunctionFixture };
 
+// The adapter runs with a synthetic accepted contract, not its production hash.
 function pinSourceFingerprint(source, variable, fn) {
   const digest = createHash('sha256').update(Function.prototype.toString.call(fn)).digest('hex');
   const pattern = new RegExp('(var ' + variable + " = )(?:'[^']*'|\\[[\\s\\S]*?\\])(;)");
