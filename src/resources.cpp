@@ -406,12 +406,13 @@ struct ImageStore::SharedPreparedPage {
   std::mutex mutex;
   std::weak_ptr<ImagePixels> pixels;
   std::string key;
-  std::atomic<std::uint16_t> cpuFrames{60};
+  std::atomic<std::uint64_t> lastCpuUse{0};
 };
 struct ImageStore::PreparedPool {
   std::mutex mutex;
   std::unordered_map<std::string, std::weak_ptr<SharedPreparedPage>> pages;
   std::atomic<std::uint64_t> hits{0};
+  std::atomic<std::uint64_t> cpuClock{0};
 };
 struct ImageStore::SharedTexture {
   ImageStore* owner = nullptr;
@@ -443,13 +444,11 @@ struct ImageStore::PreparedBacking {
     std::filesystem::path path;
     std::string identity, expectedHash;
     bool verifyHash = false;
-    std::uint64_t lastCpuUse = 0;
   };
   PreparedImageDescriptor descriptor;
   std::vector<Page> pages;
   std::vector<ImageHandle> cellImages;
   std::size_t gpuBytes = 0;
-  std::uint64_t cpuClock = 0;
   std::optional<bool> compactEligible;
   bool compactRealizationFailed = false;
   std::array<std::uint32_t, 4> compactTables{};
@@ -1410,20 +1409,9 @@ void ImageStore::update() {
   for (const auto handle : activePreparedFrames_) endUse(handle);
   activePreparedFrames_.clear();
   std::size_t currentWarmBytes = 0;
-  std::unordered_map<const SharedPreparedPage*, bool> expiredPages;
   for (std::size_t index = 0; index < slots_.size(); ++index) {
     auto& slot = slots_[index];
     if (!slot.live) continue;
-    if (slot.prepared) for (auto& page : slot.prepared->pages) {
-      if (!page.pixels) continue;
-      auto [expired, inserted] = expiredPages.emplace(page.shared.get(), false);
-      if (inserted) {
-        auto remaining = page.shared->cpuFrames.load(std::memory_order_relaxed);
-        expired->second = remaining == 0;
-        if (remaining) page.shared->cpuFrames.store(remaining-1, std::memory_order_relaxed);
-      }
-      if (expired->second) page.pixels.reset();
-    }
     // Explicitly retained slots keep CPU pixels for the life of the texture;
     // on-demand buffers age out here.
     if (slot.cachedPixels && !slot.retainCpuPixels) {
@@ -1715,15 +1703,15 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
   return inspect(handle);
 }
 
-void ImageStore::trimPreparedPages() {
-  // Loading many images must not accumulate a full page cache for every image.
+void ImageStore::trimPreparedPages() const {
+  // Shared CPU pages stay resident until the global byte budget needs space.
   std::vector<std::pair<std::uint64_t, PreparedBacking::Page*>> pages;
   std::size_t bytes = 0;
   std::unordered_set<const ImagePixels*> seen;
   for (auto& slot : slots_) if (slot.live && slot.prepared) {
     for (auto& page : slot.prepared->pages) if (page.pixels) {
       if (seen.insert(page.pixels.get()).second) bytes += page.pixels->rgba.capacity();
-      pages.emplace_back(slot.lastUsedSerial, &page);
+      pages.emplace_back(page.shared->lastCpuUse.load(std::memory_order_relaxed), &page);
     }
   }
   if (bytes <= preparedPageCacheBudget) return;
@@ -1769,11 +1757,14 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
     return result;
   }
   ++preparedRegionReads_;
-  return readPreparedRegion(*slot.prepared, x, y, width, height);
+  bool acquired = false;
+  auto result = readPreparedRegion(*slot.prepared, x, y, width, height, &acquired);
+  if (acquired) trimPreparedPages();
+  return result;
 }
 
 std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backing,
-    int x, int y, int width, int height) {
+    int x, int y, int width, int height, bool* acquired) {
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
   ImagePixels result{width, height, std::vector<std::uint8_t>(extent->rgbaBytes)};
@@ -1810,7 +1801,7 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
     const int copyRight = std::min(right, cropX + cell.crop[2]);
     const int copyBottom = std::min(bottom, cropY + cell.crop[3]);
     if (copyLeft >= copyRight || copyTop >= copyBottom) continue;
-    const auto* page = preparedPixels(backing, cell.page);
+    const auto* page = preparedPixels(backing, cell.page, acquired);
     if (!page) return std::nullopt;
     const auto rowBytes = static_cast<std::size_t>(copyRight - copyLeft) * 4U;
     for (int row = copyTop; row < copyBottom; ++row) {
@@ -1825,23 +1816,29 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
   return result;
 }
 
-ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t index) {
+ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t index, bool* acquired) {
   auto& page = backing.pages[index];
   if (!page.pixels) {
+    if (acquired) *acquired = true;
     const auto& dimensions = backing.descriptor.pages[index];
     const auto requestedBytes = static_cast<std::size_t>(dimensions.width)*dimensions.height*4U;
     if (requestedBytes > preparedPageCacheBudget) return nullptr;
     std::size_t cachedBytes = 0;
+    std::unordered_set<const ImagePixels*> seen;
     for (const auto& candidate : backing.pages)
-      if (candidate.pixels) cachedBytes += candidate.pixels->rgba.capacity();
+      if (candidate.pixels && seen.insert(candidate.pixels.get()).second)
+        cachedBytes += candidate.pixels->rgba.capacity();
     while (cachedBytes > preparedPageCacheBudget - requestedBytes) {
       PreparedBacking::Page* oldest = nullptr;
       for (auto& candidate : backing.pages)
         if (&candidate != &page && candidate.pixels &&
-            (!oldest || candidate.lastCpuUse < oldest->lastCpuUse)) oldest = &candidate;
+            (!oldest || candidate.shared->lastCpuUse.load(std::memory_order_relaxed) <
+              oldest->shared->lastCpuUse.load(std::memory_order_relaxed))) oldest = &candidate;
       if (!oldest) return nullptr;
       cachedBytes -= oldest->pixels->rgba.capacity();
-      oldest->pixels.reset();
+      const auto* storage = oldest->pixels.get();
+      for (auto& candidate : backing.pages)
+        if (candidate.pixels.get() == storage) candidate.pixels.reset();
     }
     if (!page.shared) {
       const auto& source = *page.source;
@@ -1894,7 +1891,8 @@ ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t in
     }
     if (!page.channels) page.channels = grayscaleChannels(*page.pixels);
   }
-  page.shared->cpuFrames.store(60, std::memory_order_relaxed); page.lastCpuUse = ++backing.cpuClock;
+  page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1,
+    std::memory_order_relaxed);
   return &*page.pixels;
 }
 
@@ -1904,12 +1902,14 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
   auto& texture = premultiplied ? page.premultipliedTexture : page.texture;
   auto& shared = premultiplied ? page.sharedPremultipliedTexture : page.sharedTexture;
   if (!texture) {
-    const auto* decoded = preparedPixels(backing, index);
+    bool acquired = false;
+    const auto* decoded = preparedPixels(backing, index, &acquired);
     if (!decoded) return std::nullopt;
     const auto key = "page:" + page.shared->key + (premultiplied ? "p" : "s");
     if (auto existing = preparedTextures_[key].lock()) {
       shared = std::move(existing); texture = shared->texture; ++preparedSharedTextureHits_;
       const auto& d = backing.descriptor.pages[index];
+      if (acquired) trimPreparedPages();
       return ImageInfo{0, d.width, d.height, texture, premultiplied, false};
     }
     const auto& pixels = *decoded;
@@ -1923,12 +1923,16 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
       bytes = converted.data();
     }
     texture = uploadTexture(pixels.width, pixels.height, bytes, page.channels);
-    if (!texture) return std::nullopt;
+    if (!texture) {
+      if (acquired) trimPreparedPages();
+      return std::nullopt;
+    }
     const auto uploaded = static_cast<std::size_t>(pixels.width) * pixels.height * page.channels;
     ++textureCreates_; ++textureEpoch_; textureUploadBytes_ += uploaded;
     gpuBytes_ += uploaded; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
     shared = shareTexture(key, texture, uploaded, page.channels);
     if (!shared) backing.gpuBytes += uploaded;
+    if (acquired) trimPreparedPages();
   }
   const auto& dimensions = backing.descriptor.pages[index];
   return ImageInfo{0, dimensions.width, dimensions.height, texture, premultiplied, false};
@@ -2149,13 +2153,16 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
   auto& textures = backing.blockTextures[targetPremultiplied ? 1 : 0];
   const auto& page = descriptor.pages.front();
   if (!textures.atlas) {
-    const auto* pixels = preparedPixels(backing, 0);
+    bool acquired = false;
+    const auto* pixels = preparedPixels(backing, 0, &acquired);
     if (!pixels) return std::nullopt;
     const int channels = grayscaleChannels(*pixels);
     if (channels > 2 || std::any_of(descriptor.cells.begin(), descriptor.cells.end(), [](const auto& cell) {
         return cell.fill[0] != cell.fill[1] || cell.fill[0] != cell.fill[2];
       })) {
-      backing.blockEligible = false; return std::nullopt;
+      backing.blockEligible = false;
+      if (acquired) trimPreparedPages();
+      return std::nullopt;
     }
     const bool validatePadding = !backing.blockEligible.has_value();
     std::vector<std::uint16_t> table(static_cast<std::size_t>(tableSize[0])*tableSize[1]*2U);
@@ -2182,13 +2189,18 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
           if (!cell.crop[2] && left >= r[0] && top >= r[1] &&
               right <= r[0]+r[2] && bottom <= r[1]+r[3]) continue;
           auto expected = readPreparedRegion(backing, left, top, right-left, bottom-top);
-          if (!expected) return std::nullopt;
+          if (!expected) {
+            if (acquired) trimPreparedPages();
+            return std::nullopt;
+          }
           for (int py = top; py < bottom; ++py) for (int px = left; px < right; ++px) {
             const auto* actual = expected->rgba.data()+(static_cast<std::size_t>(py-top)*expected->width+px-left)*4U;
             const auto* stored = cell.crop[2] ? pixels->rgba.data()+
               (static_cast<std::size_t>(cell.atlas[1]+py-r[1])*pixels->width+cell.atlas[0]+px-r[0])*4U : cell.fill.data();
             if (!std::equal(actual, actual+4, stored)) {
-              backing.blockEligible = false; return std::nullopt;
+              backing.blockEligible = false;
+              if (acquired) trimPreparedPages();
+              return std::nullopt;
             }
           }
         }
@@ -2202,6 +2214,7 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
       atlas[i*channels] = static_cast<std::uint8_t>(converted ? (source[0]*source[3]+127)/255 : source[0]);
       if (channels == 2) atlas[i*channels+1] = source[3];
     }
+    if (acquired) trimPreparedPages();
     GLint binding = 0, unpackBuffer = 0;
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
     glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
@@ -2260,6 +2273,9 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
   return BlockImageRegion{{0, page.width, page.height, textures.atlas, targetPremultiplied, false},
     textures.table, *descriptor.blockGrid, tableSize, logical->width, logical->height};
 } catch (const std::bad_alloc&) {
+  // Reclaim cache storage without allocating the LRU bookkeeping on this path.
+  for (auto& slot : slots_) if (slot.live && slot.prepared)
+    for (auto& page : slot.prepared->pages) page.pixels.reset();
   // All CPU allocation precedes GL state changes and texture publication.
   if (inspect(handle)) {
     auto& backing = slots_[(handle & indexMask)-1U].prepared;
@@ -2293,6 +2309,7 @@ std::optional<CompactImageRegion> ImageStore::resolveCompactRegion(ImageHandle h
     std::chrono::steady_clock::now();
   const auto fill = descriptor.cells.front().fill;
   if (!backing.compactEligible) {
+    bool acquired = false;
     GLint maxTexture = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
     if (info->width > maxTexture || info->height > maxTexture ||
         fill[0] != fill[1] || fill[0] != fill[2] || fill[3] != 255) {
@@ -2304,26 +2321,35 @@ std::optional<CompactImageRegion> ImageStore::resolveCompactRegion(ImageHandle h
           (cell.crop[0] < inset || cell.crop[1] < inset ||
            cell.crop[0] + cell.crop[2] + inset > cell.rect[2] ||
            cell.crop[1] + cell.crop[3] + inset > cell.rect[3]))) {
-        backing.compactEligible = false; return std::nullopt;
+        backing.compactEligible = false;
+        if (acquired) trimPreparedPages();
+        return std::nullopt;
       }
       if (!cell.crop[2] || !cell.crop[3]) continue;
-      const auto* decoded = preparedPixels(backing, cell.page);
-      if (!decoded) return std::nullopt;
+      const auto* decoded = preparedPixels(backing, cell.page, &acquired);
+      if (!decoded) {
+        if (acquired) trimPreparedPages();
+        return std::nullopt;
+      }
       for (int row = 0; row < cell.crop[3]; ++row) for (int column = 0; column < cell.crop[2]; ++column) {
         const auto* pixel = decoded->rgba.data() +
             (static_cast<std::size_t>(cell.atlas[1] + row) * decoded->width + cell.atlas[0] + column) * 4U;
         if (pixel[0] != pixel[1] || pixel[0] != pixel[2] || pixel[3] != 255) {
-          backing.compactEligible = false; return std::nullopt;
+          backing.compactEligible = false;
+          if (acquired) trimPreparedPages();
+          return std::nullopt;
         }
       }
     }
     backing.compactEligible = true;
+    if (acquired) trimPreparedPages();
   }
   const auto powerOfTwo = [](int value) { int result = 1; while (result < value) result *= 2; return result; };
   const auto& pageSize = descriptor.pages[found->page];
   const int atlasWidth = powerOfTwo(pageSize.width), atlasHeight = powerOfTwo(pageSize.height);
   if (!page.compactTexture) {
-    const auto* decoded = preparedPixels(backing, found->page);
+    bool acquired = false;
+    const auto* decoded = preparedPixels(backing, found->page, &acquired);
     if (!decoded) return std::nullopt;
     // Rebuild fill around retained crops instead of sampling atlas padding as image content.
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(atlasWidth) * atlasHeight, fill[0]);
@@ -2333,6 +2359,7 @@ std::optional<CompactImageRegion> ImageStore::resolveCompactRegion(ImageHandle h
         pixels[static_cast<std::size_t>(cell.atlas[1] + row) * atlasWidth + cell.atlas[0] + column] =
           decoded->rgba[(static_cast<std::size_t>(cell.atlas[1] + row) * decoded->width + cell.atlas[0] + column) * 4U];
     }
+    if (acquired) trimPreparedPages();
     const bool createTables = backing.compactTables[0] == 0;
     std::array<std::vector<std::uint8_t>, 2> indices;
     std::array<std::vector<std::uint16_t>, 2> phases;
@@ -2435,21 +2462,29 @@ std::optional<std::size_t> ImageStore::uploadPreparedCrops(Slot& slot, std::uint
   // Only retained crops determine the image; atlas padding may be transparent or colored.
   std::vector<std::vector<std::uint8_t>> crops(cells.size());
   std::size_t uploaded = 0;
+  bool acquired = false;
   for (std::size_t index = 0; index < cells.size(); ++index) {
     const auto& cell = cells[index];
     if (!cell.crop[2] || !cell.crop[3]) continue;
-    const auto* page = preparedPixels(backing, cell.page);
-    if (!page) return std::nullopt;
+    const auto* page = preparedPixels(backing, cell.page, &acquired);
+    if (!page) {
+      if (acquired) trimPreparedPages();
+      return std::nullopt;
+    }
     auto& crop = crops[index];
     crop.resize(static_cast<std::size_t>(cell.crop[2]) * cell.crop[3]);
     for (int y = 0; y < cell.crop[3]; ++y) for (int x = 0; x < cell.crop[2]; ++x) {
       const auto* pixel = page->rgba.data() +
           (static_cast<std::size_t>(cell.atlas[1] + y) * page->width + cell.atlas[0] + x) * 4U;
-      if (pixel[0] != pixel[1] || pixel[0] != pixel[2] || pixel[3] != 255) return std::nullopt;
+      if (pixel[0] != pixel[1] || pixel[0] != pixel[2] || pixel[3] != 255) {
+        if (acquired) trimPreparedPages();
+        return std::nullopt;
+      }
       crop[static_cast<std::size_t>(y) * cell.crop[2] + x] = pixel[0];
     }
     uploaded += crop.size();
   }
+  if (acquired) trimPreparedPages();
   GLint framebuffer = 0, binding = 0, unpackBuffer = 0;
   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
   glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);

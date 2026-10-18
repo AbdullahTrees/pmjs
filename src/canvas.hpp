@@ -197,6 +197,7 @@ class CanvasStore {
   std::size_t capacityBytes() const;
   std::size_t liveCount() const { return liveCount_; }
   std::size_t peakCpuBytes() const { return peakCpuBytes_; }
+  std::uint64_t imageViewRegionReads() const { return imageViewRegionReads_; }
   std::size_t peakLiveCount() const { return peakLiveCount_; }
   std::size_t deferredCanvasCount() const;
   std::size_t realizedCanvasCount() const;
@@ -337,6 +338,7 @@ class CanvasStore {
   std::vector<Surface> surfaces_;
   std::size_t liveCount_ = 0;
   std::size_t peakCpuBytes_ = 0;
+  std::uint64_t imageViewRegionReads_ = 0;
   std::size_t peakLiveCount_ = 0;
 };
 

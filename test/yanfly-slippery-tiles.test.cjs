@@ -300,3 +300,104 @@ test('disabled via PMJS_DISABLE_OPT falls back to stock', () => {
   assert.equal(map.isSlippery(5, 5), false);
   assert.equal(context.calls.isValid, 1); // Ran stock query
 });
+
+// Optional private inputs: an MV engine directory containing js/rpg_*.js,
+// js/plugins.js and js/plugins/YEP_SlipperyTiles.js. No guest source is rewritten.
+const referenceGame = process.env.PMJS_MV_REFERENCE_GAME;
+test('MV 1.6.1 and YEP Slippery Tiles 1.05 production recognition',
+  { skip: !referenceGame && 'set PMJS_MV_REFERENCE_GAME to run private integration' }, async t => {
+    const { loadPmjsRuntime, runModule } = require('./helpers/runtime-context.cjs');
+    function integration({ region, unsupported = false, disabled = false } = {}) {
+      // Only top-level browser/Pixi declarations are stubbed. Query, membership,
+      // map accessors, parameter loading and tileset notetags execute guest code.
+      function PixiDeclaration() {}
+      const context = loadPmjsRuntime({ __pmjsBuiltinRequire: require, console, performance,
+        PMJS_GAME_CONFIG: { disableOptimizations: disabled ? ['plugins.yanfly.slippery-tiles'] : [] },
+        document: { fonts: {} }, window: {}, navigator: { userAgent: '' }, location: { search: '' },
+        PIXI: { glCore: { VertexArrayObject: {} }, settings: {}, GC_MODES: { AUTO: 0 },
+          SCALE_MODES: { NEAREST: 0 }, Point: PixiDeclaration, Rectangle: PixiDeclaration,
+          Container: PixiDeclaration, Sprite: PixiDeclaration, Filter: PixiDeclaration,
+          Texture: PixiDeclaration, extras: { PictureTilingSprite: PixiDeclaration, TilingSprite: PixiDeclaration },
+          filters: { ColorMatrixFilter: PixiDeclaration, VoidFilter: PixiDeclaration },
+          tilemap: { TileRenderer: {}, ZLayer: PixiDeclaration, CompositeRectTileLayer: PixiDeclaration } }
+      });
+      function guest(relative) {
+        const file = path.join(referenceGame, relative);
+        vm.runInContext(fs.readFileSync(file, 'utf8'), context, { filename: relative });
+      }
+      for (const file of ['rpg_core', 'rpg_managers', 'rpg_objects']) guest('js/' + file + '.js');
+      assert.equal(context.Utils.RPGMAKER_VERSION, '1.6.1');
+      guest('js/plugins.js');
+      const plugin = context.$plugins.find(entry => entry.name === 'YEP_SlipperyTiles');
+      assert.ok(plugin && plugin.status, 'reference manifest must enable Slippery Tiles');
+      const parameters = { ...plugin.parameters };
+      if (region !== undefined) parameters['Slippery Region'] = String(region);
+      context.PluginManager.setParameters(plugin.name, parameters);
+      runModule(context, 'js/pmjs-plugins/yanfly/slippery-tiles.js');
+      context.PMJS.plugins.snapshotEffectiveManifest([plugin]);
+      context.PMJS.plugins.execute(plugin.name, () => guest('js/plugins/YEP_SlipperyTiles.js'));
+      assert.equal(context.Yanfly.Slip.version, 1.05);
+      if (unsupported) vm.runInContext('Game_Map.prototype.isSlippery = function() { return "custom"; };', context);
+      const original = context.Game_Map.prototype.isSlippery;
+      context.PMJS.plugins.finish();
+      context.PMJS.phases.emit('afterGuestPlugins');
+      vm.runInContext(`
+        $dataTilesets = [null, { note: '', flags: [0] }];
+        DataManager.processSlipNotetags($dataTilesets);
+        $dataMap = { width: 2, height: 2, scrollType: 0, data: new Array(24).fill(0) };
+        $gameParty = new Game_Party();
+        $gameMap = Object.create(Game_Map.prototype);
+        $gameMap._tilesetId = 1;
+      `, context);
+      return { context, original, map: context.$gameMap };
+    }
+
+    await t.test('reviewed sources activate unchanged and preserve results through live invalidation', () => {
+      const fast = integration({ region: 0 }), ordinary = integration({ region: 0, disabled: true });
+      const { context: c, map } = fast;
+      assert.equal(c.PMJS.optimizations.reason('plugins.yanfly.slippery-tiles'), 'enabled');
+      assert.notEqual(c.Game_Map.prototype.isSlippery, fast.original);
+      assert.equal(ordinary.context.Game_Map.prototype.isSlippery, ordinary.original);
+      // A read trap proves the eligible path skipped the query rather than
+      // merely returning the same false result through a silent fallback.
+      const isValid = map.isValid;
+      map.isValid = () => { throw new Error('guest query reached'); };
+      assert.equal(map.isSlippery(0, 0), false);
+      map.isValid = isValid;
+      for (const f of [fast, ordinary]) {
+        assert.equal(f.map.isSlippery(0, 0), false);
+        vm.runInContext(`$dataTilesets[1].note = '<Slippery: 3>';
+          DataManager.processSlipNotetags($dataTilesets);
+          $dataTilesets[1].flags[0] = 3 << 12;`, f.context);
+        assert.equal(f.map.isSlippery(0, 0), true, 'terrain tags must use the original query');
+        f.context.Yanfly.Param.SlipRegion = 10;
+        vm.runInContext(`$dataTilesets[1].note = '';
+          DataManager.processSlipNotetags($dataTilesets);
+          $dataMap.data[20] = 10;`, f.context);
+        assert.equal(f.map.isSlippery(0, 0), true, 'region mutation must use the original query');
+        f.context.$gameParty._inBattle = true;
+        assert.equal(f.map.isSlippery(0, 0), false);
+        vm.runInContext(`$gameParty._inBattle = false;
+          Yanfly.Param.SlipRegion = 0;
+          Array.prototype.indexOf = function() { return 0; };`, f.context);
+        assert.equal(f.map.isSlippery(0, 0), true, 'changed membership must use the original query');
+      }
+    });
+
+    await t.test('authored region 10 refuses activation and retains the query', () => {
+      const { context: c, map, original } = integration();
+      assert.equal(c.Yanfly.Param.SlipRegion, 10);
+      assert.equal(c.Game_Map.prototype.isSlippery, original);
+      assert.match(c.PMJS.optimizations.reason('plugins.yanfly.slippery-tiles'), /refused: slippery region/);
+      assert.equal(map.isSlippery(0, 0), false);
+      vm.runInContext('$dataMap.data[20] = 10;', c);
+      assert.equal(map.isSlippery(0, 0), true);
+    });
+
+    await t.test('an unsupported effective query is refused without replacing it', () => {
+      const { context: c, map, original } = integration({ region: 0, unsupported: true });
+      assert.equal(c.Game_Map.prototype.isSlippery, original);
+      assert.match(c.PMJS.optimizations.reason('plugins.yanfly.slippery-tiles'), /unrecognized Yanfly isSlippery/);
+      assert.equal(map.isSlippery(0, 0), 'custom');
+    });
+  });

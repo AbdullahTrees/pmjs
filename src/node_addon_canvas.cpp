@@ -559,6 +559,8 @@ napi_value canvasMemory(napi_env env, napi_callback_info) try {
     number(env, canvases.peakLiveCount())), "cannot set peak canvas count");
   check(env, napi_set_named_property(env, result, "deferredCanvasCount",
     number(env, canvases.deferredCanvasCount())), "cannot set deferred canvas count");
+  check(env, napi_set_named_property(env, result, "imageViewRegionReads",
+    number(env, canvases.imageViewRegionReads())), "cannot set image view region reads");
   check(env, napi_set_named_property(env, result, "realizedCanvasCount",
     number(env, canvases.realizedCanvasCount())), "cannot set realized canvas count");
   check(env, napi_set_named_property(env, result, "deferredCommandCount",

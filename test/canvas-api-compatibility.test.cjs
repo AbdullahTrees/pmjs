@@ -264,6 +264,72 @@ test('public colors convert to CSS strings and serialize their parsed values', (
   context.fillStyle = { toString() { return 'red'; } }; assert.equal(context.fillStyle, '#ff0000');
 });
 
+test('repeated font and color assignments reuse parsing without skipping public coercion', () => {
+  const { realm, context } = harness();
+  const parseFont = realm.parseCanvasFontValue, parseColor = realm.parseCanvasColorValue;
+  let fontParses = 0, colorParses = 0, fontCoercions = 0, colorCoercions = 0;
+  realm.parseCanvasFontValue = value => { fontParses++; return parseFont(value); };
+  realm.parseCanvasColorValue = value => { colorParses++; return parseColor(value); };
+  let fontValue = 'italic bold 12pt serif', colorValue = 'rgba(11,22,33,0.5)';
+  const font = { toString() { fontCoercions++; return fontValue; } };
+  const color = { toString() { colorCoercions++; return colorValue; } };
+  for (let i = 0; i < 3; i++) {
+    context.font = font;
+    context.fillStyle = color; context.strokeStyle = color; context.shadowColor = color;
+  }
+  assert.equal(context.font, 'italic bold 16px serif');
+  assert.equal(fontParses, 1); assert.equal(colorParses, 1);
+  assert.equal(fontCoercions, 3); assert.equal(colorCoercions, 9);
+  const validColor = context.fillStyle;
+  fontValue = 'invalid-font'; colorValue = 'invalid-color';
+  for (let i = 0; i < 2; i++) { context.font = font; context.fillStyle = color; }
+  assert.equal(context.font, 'italic bold 16px serif'); assert.equal(context.fillStyle, validColor);
+  assert.equal(fontParses, 2); assert.equal(colorParses, 2);
+  assert.equal(fontCoercions, 5); assert.equal(colorCoercions, 11);
+  const failure = new Error('coercion failed'), throwing = { toString() { throw failure; } };
+  assert.throws(() => { context.font = throwing; }, error => error === failure);
+  assert.throws(() => { context.fillStyle = throwing; }, error => error === failure);
+  assert.equal(context.font, 'italic bold 16px serif'); assert.equal(context.fillStyle, validColor);
+  const gradient = context.createLinearGradient(0, 0, 1, 0);
+  context.fillStyle = gradient; assert.equal(context.fillStyle, gradient);
+});
+
+test('color reuse preserves HWB acceptance when the reference engine changes', () => {
+  const { realm, context } = harness();
+  const hwb = ' HWB(120 20% 30%) ';
+  context.fillStyle = hwb; const accepted = context.fillStyle;
+  assert.notEqual(accepted, '#000000');
+  for (const engine of ['mv', 'mz']) {
+    realm.PMJS_RUNTIME_ENGINE = engine;
+    context.fillStyle = 'red'; context.fillStyle = hwb;
+    assert.equal(context.fillStyle, '#ff0000');
+  }
+  realm.PMJS_RUNTIME_ENGINE = '';
+  context.fillStyle = hwb; assert.equal(context.fillStyle, accepted);
+  realm.PMJS_RUNTIME_GAME = { engine: 'mv' };
+  context.fillStyle = 'blue'; context.fillStyle = hwb;
+  assert.equal(context.fillStyle, '#0000ff');
+  realm.PMJS_RUNTIME_GAME.engine = '';
+  context.fillStyle = hwb; assert.equal(context.fillStyle, accepted);
+});
+
+test('font and color reuse stays bounded and leaves long values uncached', () => {
+  const { realm, context, canvas } = harness();
+  for (let i = 0; i < 1024; i++) {
+    const color = '#' + i.toString(16).padStart(6, '0'), font = '12px "font-' + i + '"';
+    context.fillStyle = color; context.font = font;
+    assert.equal(context.fillStyle, color); assert.equal(context.font, font);
+    assert.ok(realm.canvasColorValues.size <= 256); assert.ok(realm.canvasFontValues.size <= 128);
+  }
+  const longColor = ' '.repeat(300) + 'red', longFont = '16px "' + 'A'.repeat(300) + '"';
+  context.fillStyle = longColor; context.font = longFont;
+  assert.equal(context.fillStyle, '#ff0000'); assert.equal(context.font, longFont);
+  assert.equal(realm.canvasColorValues.has(longColor), false);
+  assert.equal(realm.canvasFontValues.has(longFont), false);
+  canvas.width = canvas.width;
+  assert.equal(context.fillStyle, '#000000'); assert.equal(context.font, '10px sans-serif');
+});
+
 test('singular clip preserves the current path and prior clipping region', () => {
   const { context } = harness();
   context.rect(0, 0, 3, 3); context.clip(); const existing = context._clipPaths[0];

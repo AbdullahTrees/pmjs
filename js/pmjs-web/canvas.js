@@ -201,7 +201,16 @@ function canvasSourcePixels(source, nativeSource, region) {
   }
 }
 
+var canvasFontValues = new Map();
 function canvasFontValue(value) {
+  if (value.length > 256) return parseCanvasFontValue(value);
+  if (canvasFontValues.has(value)) return canvasFontValues.get(value);
+  var result = parseCanvasFontValue(value);
+  if (canvasFontValues.size >= 128) canvasFontValues.clear();
+  canvasFontValues.set(value, result);
+  return result;
+}
+function parseCanvasFontValue(value) {
   var match = /^\s*((?:(?:normal|italic|oblique|small-caps|bold|bolder|lighter|[1-9]00)\s+)*)(\d+(?:\.\d+)?|\.\d+)(px|pt|pc|in|cm|mm|em|rem|%)\s*(?:\/\s*(?:normal|\d+(?:\.\d+)?(?:px|pt|em|%)?)\s+)?(.+?)\s*$/i.exec(value);
   if (!match || !(Number(match[2]) > 0)) return null;
   var prefix = match[1].trim().split(/\s+/).filter(Boolean);
@@ -894,7 +903,17 @@ var canvasNamedColors = {
   white: 0xffffff, whitesmoke: 0xf5f5f5, yellow: 0xffff00, yellowgreen: 0x9acd32
 };
 
+var canvasColorValues = new Map();
 function parseCanvasColor(color) {
+  // HWB acceptance depends on the current reference engine.
+  if (typeof color !== 'string' || color.length > 256 || /hwb/i.test(color)) return parseCanvasColorValue(color);
+  if (canvasColorValues.has(color)) return canvasColorValues.get(color);
+  var result = parseCanvasColorValue(color);
+  if (canvasColorValues.size >= 256) canvasColorValues.clear();
+  canvasColorValues.set(color, result);
+  return result;
+}
+function parseCanvasColorValue(color) {
   if (typeof color === 'number' && Number.isFinite(color)) return ((color & 0xffffff) << 8 | 255) >>> 0;
   if (typeof color !== 'string') return null;
   var text = color.trim().toLowerCase();

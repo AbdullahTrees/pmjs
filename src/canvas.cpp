@@ -826,14 +826,49 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
     bool mayHaveOverAlpha;
   } sourcePixels{};
   std::optional<ImagePixels> regionPixels;
+  std::optional<Content> croppedSource;
   if (snapshot && snapshot->pixels) {
     const auto& pixels = *snapshot->pixels;
     sourceX -= snapshot->x; sourceY -= snapshot->y;
     sourcePixels = {pixels.width, pixels.height, pixels.rgba.data(),
       snapshot->premultiplied ? PixelEncoding::PremultipliedRGBA8 : PixelEncoding::StraightRGBA8, false};
   } else if (canvas) {
-    if (!realizeContent(*canvas)) return false;
-    sourcePixels = {canvas->width, canvas->height, canvas->pixels.data(), PixelEncoding::PremultipliedBGRA8, canvas->mayHaveOverAlpha};
+    // Realize only the sampled region of an untouched image-backed Canvas.
+    // Keep the intermediate BGRA conversion before the destination blend.
+    if (canvas->state == ContentState::Deferred && !canvas->opaque && canvas->commands.size() == 1 &&
+        alpha == 1 && sourceWidth == destinationWidth && sourceHeight == destinationHeight &&
+        static_cast<double>(sourceWidth + 2) * (sourceHeight + 2) <= static_cast<double>(canvas->width) * canvas->height / 4 &&
+        sourceX >= 0 && sourceY >= 0 && sourceX + sourceWidth <= canvas->width && sourceY + sourceHeight <= canvas->height &&
+        sourceX == std::floor(sourceX) && sourceY == std::floor(sourceY) &&
+        sourceWidth == std::floor(sourceWidth) && sourceHeight == std::floor(sourceHeight) &&
+        destinationX == std::floor(destinationX) && destinationY == std::floor(destinationY)) {
+      const auto* view = std::get_if<DrawImageCmd>(&canvas->commands.front());
+      const auto info = view && view->source ? images_.inspect(view->source) : std::nullopt;
+      if (info && !view->canvas && view->alpha == 1 && view->sourceX == 0 && view->sourceY == 0 &&
+          view->destinationX == 0 && view->destinationY == 0 &&
+          view->sourceWidth == canvas->width && view->sourceHeight == canvas->height &&
+          view->destinationWidth == canvas->width && view->destinationHeight == canvas->height &&
+          info->width == canvas->width && info->height == canvas->height) {
+        const int left = std::max(0, static_cast<int>(sourceX) - 1);
+        const int top = std::max(0, static_cast<int>(sourceY) - 1);
+        const int width = std::min(canvas->width, static_cast<int>(sourceX + sourceWidth) + 1) - left;
+        const int height = std::min(canvas->height, static_cast<int>(sourceY + sourceHeight) + 1) - top;
+        auto& crop = croppedSource.emplace(*this);
+        crop.width = width; crop.height = height; crop.state = ContentState::Realizing;
+        crop.pixels.assign(static_cast<size_t>(width) * height * 4, 0);
+        auto read = *view;
+        read.sourceX = left; read.sourceY = top; read.sourceWidth = width; read.sourceHeight = height;
+        read.destinationX = read.destinationY = 0; read.destinationWidth = width; read.destinationHeight = height;
+        if (!drawImageNow(crop, read)) return false;
+        sourceX -= left; sourceY -= top;
+        sourcePixels = {width, height, crop.pixels.data(), PixelEncoding::PremultipliedBGRA8, crop.mayHaveOverAlpha};
+        ++imageViewRegionReads_;
+      }
+    }
+    if (!sourcePixels.rgba) {
+      if (!realizeContent(*canvas)) return false;
+      sourcePixels = {canvas->width, canvas->height, canvas->pixels.data(), PixelEncoding::PremultipliedBGRA8, canvas->mayHaveOverAlpha};
+    }
   } else {
     const auto* decoded = images_.hasPreparedBacking(source) ? nullptr : images_.readPixels(source);
     if (!decoded) {

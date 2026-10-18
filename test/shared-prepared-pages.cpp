@@ -28,18 +28,18 @@ struct Fixture {
   std::vector<std::uint8_t> pixels;
 };
 Fixture fixture(const std::filesystem::path& root, const char* name, int cropX = 9, int fill = 241,
-                int width = 49, int height = 37, int pageFill = 241) {
+                int width = 49, int height = 37, int pageFill = 241, int pageWidth = 29, int pageHeight = 27) {
   Fixture result;
   result.source = root / (std::string(name) + ".png");
   result.directory = root / name;
   std::filesystem::create_directory(result.directory);
   auto& d = result.descriptor;
   d.width = width; d.height = height; d.halo = 3;
-  d.pages = {{"page-0.png",29,27}};
+  d.pages = {{"page-0.png",pageWidth,pageHeight}};
   d.cells = {{{0,0,width,height},{cropX,7,23,21},{3,3,23,21},
     {static_cast<std::uint8_t>(fill),static_cast<std::uint8_t>(fill),static_cast<std::uint8_t>(fill),0},0}};
   result.pixels.resize(width * height * 4);
-  std::vector<std::uint8_t> page(29 * 27 * 4);
+  std::vector<std::uint8_t> page(pageWidth * pageHeight * 4);
   for (std::size_t i = 0; i < result.pixels.size(); i += 4) {
     result.pixels[i] = result.pixels[i+1] = result.pixels[i+2] = static_cast<std::uint8_t>(fill);
   }
@@ -50,11 +50,11 @@ Fixture fixture(const std::filesystem::path& root, const char* name, int cropX =
     const auto gray = static_cast<std::uint8_t>((x * 13 + y * 17) % 256);
     const auto alpha = static_cast<std::uint8_t>((x * 19 + y * 7) % 256);
     const std::array<std::uint8_t,4> color{gray,gray,gray,alpha};
-    std::copy(color.begin(),color.end(),page.begin() + ((y+3)*29+x+3)*4);
+    std::copy(color.begin(),color.end(),page.begin() + ((y+3)*pageWidth+x+3)*4);
     std::copy(color.begin(),color.end(),result.pixels.begin() + ((y+7)*width+x+cropX)*4);
   }
   write(result.source,width,height,result.pixels);
-  write(result.directory / "page-0.png",29,27,page);
+  write(result.directory / "page-0.png",pageWidth,pageHeight,page);
   return result;
 }
 void install(pmjs::ImageStore& images, const Fixture& value) {
@@ -102,12 +102,12 @@ int main() {
       require(images.preparedPageDecodes() == 1,"concurrent identical pages decoded more than once");
       require(images.cpuBytes() == pageBytes,"shared CPU page counted or stored twice");
       for (int tick = 0; tick < 40; ++tick) images.update();
-      require(images.cpuBytes() == pageBytes,"multiple owners aged the shared page more than once per update");
+      require(images.cpuBytes() == pageBytes,"shared page accounting changed while idle");
       for (int tick = 40; tick < 61; ++tick) images.update();
-      require(images.cpuBytes() == 0,"idle shared page did not expire");
+      require(images.cpuBytes() == pageBytes,"idle shared page was discarded below its byte budget");
       const auto decodes = images.preparedPageDecodes();
       pixels(images,first->handle,a.pixels); pixels(images,second->handle,b.pixels);
-      require(images.preparedPageDecodes() == decodes+1,"expired shared page was decoded separately for each owner");
+      require(images.preparedPageDecodes() == decodes,"retained shared page was decoded again for an owner");
       const auto firstStraight = images.lookup(first->handle);
       const auto creates = images.textureCreates(), uploads = images.textureUploadBytes();
       const auto secondStraight = images.lookup(second->handle);
@@ -251,7 +251,69 @@ int main() {
       require(images.release(second->handle),"last block owner release failed"); images.update();
       require(images.gpuBytes() == 0 && images.cpuBytes() == 0,"block resources survived their last owner");
     }
+    {
+      const auto largeA=fixture(root,"budget-a",9,241,49,37,31,1536,1536);
+      const auto largeB=fixture(root,"budget-b",9,241,49,37,63,1536,1536);
+      const auto largeC=fixture(root,"budget-c",9,241,49,37,95,1536,1536);
+      const auto largeD=fixture(root,"budget-d",9,241,49,37,127,1536,1536);
+      const auto aliasB=fixture(root,"budget-b-alias",9,241,49,37,63,1536,1536);
+      pmjs::ImageStore images; images.setWarmBudgetBytes(0);
+      for(const auto* value : {&largeA,&largeB,&largeC,&largeD,&aliasB}) install(images,*value);
+      const auto first=images.loadPng(largeA.source), second=images.loadPng(largeB.source), third=images.loadPng(largeC.source);
+      require(first && second && third,"budget fixtures did not load");
+      constexpr std::size_t retainedBytes=3U*1536U*1536U*4U;
+      require(images.cpuBytes()==retainedBytes,"independent CPU pages were not accounted globally");
+      const auto alias=images.loadPng(aliasB.source); require(alias.has_value(),"budget alias did not load");
+      require(images.preparedPageDecodes()==3 && images.cpuBytes()==retainedBytes,"alias duplicated physical CPU page storage");
+      const auto fourth=images.loadPng(largeD.source); require(fourth.has_value(),"pressure fixture did not load");
+      require(images.cpuBytes()==retainedBytes,"page installation exceeded the global byte budget");
+      pixels(images,alias->handle,aliasB.pixels);
+      const auto before=images.preparedPageDecodes();
+      pixels(images,first->handle,largeA.pixels);
+      require(images.preparedPageDecodes()==before+1 && images.cpuBytes()==retainedBytes,
+        "evicted page reconstruction did not restore the global byte limit");
+      for(const auto [handle,value] : {
+          std::pair{second->handle,&largeB}, {alias->handle,&aliasB},
+          {fourth->handle,&largeD}, {first->handle,&largeA}}) pixels(images,handle,value->pixels);
+      require(images.preparedPageDecodes()==before+1,"global eviction discarded a more recently read physical page");
+      pixels(images,third->handle,largeC.pixels);
+      require(images.preparedPageDecodes()==before+2 && images.cpuBytes()==retainedBytes,
+        "least recently read page did not reconstruct within the global byte limit");
+      for(const auto handle : {first->handle,second->handle,third->handle,fourth->handle,alias->handle})
+        require(images.release(handle),"budget fixture release failed");
+      images.update();
+      require(images.cpuBytes()==0 && images.gpuBytes()==0,"budgeted pages survived their final owners");
+
+      Fixture localAliases;
+      localAliases.directory=root/"local-aliases";
+      std::filesystem::create_directory(localAliases.directory);
+      localAliases.source=root/"local-aliases.png";
+      auto& descriptor=localAliases.descriptor;
+      descriptor.width=196; descriptor.height=37; descriptor.halo=3;
+      localAliases.pixels.resize(196*37*4);
+      int page=0;
+      for(const auto* value : {&largeA,&largeB,&largeB,&largeC}) {
+        const auto name="page-"+std::to_string(page)+".png";
+        std::filesystem::create_hard_link(value->directory/"page-0.png",localAliases.directory/name);
+        descriptor.pages.push_back({name,1536,1536});
+        descriptor.cells.push_back({{page*49,0,49,37},{9,7,23,21},{3,3,23,21},{241,241,241,0},page});
+        for(int y=0;y<37;++y) std::copy_n(value->pixels.data()+y*49*4,49*4,
+          localAliases.pixels.data()+(y*196+page*49)*4);
+        ++page;
+      }
+      write(localAliases.source,196,37,localAliases.pixels);
+      pmjs::ImageStore aliases; aliases.setWarmBudgetBytes(0);
+      install(aliases,localAliases);
+      const auto logical=aliases.loadPng(localAliases.source); require(logical.has_value(),"local aliases failed to load");
+      require(aliases.preparedPageDecodes()==3 && aliases.cpuBytes()==retainedBytes,
+        "within-image aliases were counted as separate physical allocations");
+      pixels(aliases,logical->handle,localAliases.pixels);
+      require(aliases.preparedPageDecodes()==3 && aliases.cpuBytes()==retainedBytes,
+        "local alias counting evicted a page below the physical byte limit");
+      require(aliases.release(logical->handle),"local alias release failed"); aliases.update();
+      require(aliases.cpuBytes()==0 && aliases.gpuBytes()==0,"local page aliases survived their final owner");
+    }
     std::filesystem::remove_all(root);
-    std::cout << "shared prepared pages: concurrent decoding, physical accounting, full textures, aging and mutation isolation passed\n";
+    std::cout << "shared prepared pages: concurrent decoding, physical accounting, global LRU budget and mutation isolation passed\n";
   } catch (...) { std::filesystem::remove_all(root); throw; }
 }

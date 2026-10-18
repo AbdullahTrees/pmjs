@@ -401,12 +401,12 @@ class ImageStore {
   std::uint64_t tilePageDecodes_ = 0, tilePageUploads_ = 0;
   std::unordered_map<std::string, std::uint64_t> tileFallbacks_, tileRegionSets_;
   void clearPrepared(Slot& slot);
-  void trimPreparedPages();
+  void trimPreparedPages() const;
   bool materialize(Slot& slot, bool premultiplied);
   std::optional<std::size_t> uploadPreparedCrops(Slot& slot, std::uint32_t& texture);
-  static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page);
+  static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page, bool* acquired = nullptr);
   static std::optional<ImagePixels> readPreparedRegion(PreparedBacking& backing,
-      int x, int y, int width, int height);
+      int x, int y, int width, int height, bool* acquired = nullptr);
   std::optional<ImageInfo> preparedPage(Slot& slot, std::size_t page, bool premultiplied);
   static ImageHandle makeHandle(std::size_t index, std::uint16_t generation);
   void markUsed(Slot& slot);

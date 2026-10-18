@@ -244,5 +244,37 @@ int main() {
   assert(images.updateRgba(unreadable->handle,opaqueRed.data()));
   assert((canvases.readPixels(retry->handle,0,0,1,1)->rgba==std::vector<uint8_t>(4,0)));
   assert(canvases.release(retry->handle)); assert(images.release(unreadable->handle));
+
+  // Cropping an unchanged image view agrees with first realizing the complete
+  // source, including clipped destinations and captured pre-mutation pixels.
+  for (const bool premultiplied : {false,true}) for (const bool mutate : {false,true}) for (int dx : {-1,0}) {
+    std::vector<uint8_t> pixels(16*12*4);
+    for (size_t i=0;i<16*12;i++) {
+      pixels[i*4]=37; pixels[i*4+1]=67; pixels[i*4+2]=103;
+      pixels[i*4+3]=static_cast<uint8_t>(i*23);
+      if (premultiplied) for (int c=0;c<3;c++) pixels[i*4+c]=pixels[i*4+c]*pixels[i*4+3]/255;
+    }
+    const auto asset=images.createRgba(16,12,pixels.data(),premultiplied); assert(asset);
+    const auto view=canvases.create(16,12), reference=canvases.create(16,12);
+    assert(view && reference);
+    for (auto handle : {view->handle,reference->handle})
+      assert(canvases.drawImage(handle,asset->handle,0,0,16,12,0,0,16,12,1,true));
+    assert(canvases.readPixels(reference->handle,0,0,16,12));
+    if (mutate) {
+      const std::vector<uint8_t> replacement(16*12*4,255);
+      assert(images.updateRgba(asset->handle,replacement.data()));
+    }
+    assert(images.release(asset->handle));
+    const auto crop=canvases.create(3,3), expected=canvases.create(3,3); assert(crop && expected);
+    assert(canvases.drawImage(crop->handle,view->handle,1,0,3,3,dx,0,3,3,1,true));
+    assert(canvases.drawImage(expected->handle,reference->handle,1,0,3,3,dx,0,3,3,1,true));
+    // Mutating the source after capture detaches its new command stream.
+    assert(canvases.fillRect(view->handle,0,0,16,12,0xff0000ff));
+    const auto beforeCrop=canvases.cpuBytes();
+    const auto actual=canvases.readPixels(crop->handle,0,0,3,3); assert(actual);
+    assert(canvases.cpuBytes()==beforeCrop+3*3*4);
+    assert(actual->rgba==canvases.readPixels(expected->handle,0,0,3,3)->rgba);
+    for (auto handle : {view->handle,reference->handle,crop->handle,expected->handle}) assert(canvases.release(handle));
+  }
   std::cout << "[canvas-upload] exact RGBA premultiplied transfers, region bounds and failed-upload retry agree\n";
 }

@@ -123,7 +123,7 @@ int main() {
     require(readGpu(first->image)==expectedPages[0],"compact page lost exact crop or fill pixels");
     const auto creates=images.textureCreates(),uploads=images.textureUploadBytes();
     require(images.resolveCompactRegion(image->handle,1,1,12,8).has_value() &&
-      images.textureCreates()==creates && images.textureUploadBytes()==uploads && images.preparedPageDecodes()==4,
+      images.textureCreates()==creates && images.textureUploadBytes()==uploads && images.preparedPageDecodes()==2,
       "compact reuse uploaded or decoded again");
     const auto second=images.resolveCompactRegion(image->handle,16,0,16,12);
     require(second && second->indexX==first->indexX && second->indexY==first->indexY &&
@@ -250,7 +250,7 @@ int main() {
     }
     if(variant==0) {
       require(images.gpuBytes()==2*24*8 && images.textureUploadBytes()==2*(9+8),"crop allocation or upload accounting failed");
-      require(images.preparedRegionReads()==0 && images.preparedPageDecodes()==4,"crop realization expanded CPU image or repeated page decode");
+      require(images.preparedRegionReads()==0 && images.preparedPageDecodes()==2,"crop realization expanded CPU image or repeated page decode");
       require(images.readPixelsRegion(image->handle,0,0,24,8)->rgba==original,"crop upload changed straight CPU pixels");
       std::vector<std::uint8_t> replacement(24*8*4);
       for(std::size_t i=0;i<replacement.size();i+=4) {
@@ -401,14 +401,14 @@ int main() {
     require(images.inspect(image->handle)->texture==0,"ordinary region forced full backing");
     require(images.preparedPageDecodes()==1,"first reconstruction or atlas upload decoded the validated page again");
     for(int tick=0;tick<61;++tick) images.update();
-    require(images.cpuBytes()==0,"on-demand compact CPU pages escaped expiry");
-    require(images.resolveSpriteRegion(image->handle,4,0,4,4,false).has_value()&&images.cpuBytes()==0,
-            "resident GPU page needlessly decoded CPU pixels after expiry");
-    require(images.preparedPageDecodes()==1,"resident GPU page decoded again after CPU expiry");
+    require(images.cpuBytes()==atlas.size(),"bounded compact CPU page was discarded while idle");
+    require(images.resolveSpriteRegion(image->handle,4,0,4,4,false).has_value()&&images.cpuBytes()==atlas.size(),
+            "resident GPU page changed retained CPU storage");
+    require(images.preparedPageDecodes()==1,"resident page decoded again while retained");
     require(!images.resolveSpriteRegion(image->handle,3,0,2,4,false),"cross-cell crop escaped fallback");
     auto full=images.lookup(image->handle);
     require(full&&readGpu(*full)==original,"full fallback changed original pixels");
-    require(images.preparedPageDecodes()==2,"expired page was not decoded once for full fallback");
+    require(images.preparedPageDecodes()==1,"full fallback decoded a retained page again");
     auto premultiplied=images.lookupPremultiplied(image->handle);
     auto expected=original;
     for(std::size_t i=0;i<expected.size();i+=4) for(int c=0;c<3;++c)
