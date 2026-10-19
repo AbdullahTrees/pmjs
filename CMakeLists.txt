@@ -128,6 +128,7 @@ set(PMJS_RUNTIME_SOURCES
   src/vfs.cpp
   src/file_identity.cpp
   src/media_decoder.cpp
+  src/encrypted_audio_file.cpp
   src/media_service.cpp
   src/effects.cpp)
 
@@ -274,6 +275,9 @@ if(BUILD_TESTING)
   add_test(NAME node-image-recovery COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-image-recovery.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-image-recovery PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-encrypted-images COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-encrypted-images.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-encrypted-images PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   pmjs_add_cpp_test(pmjs-filter-precision-test native-filter-precision test/filter-precision.cpp)
   add_executable(pmjs-renderer-clear-test test/renderer-clear.cpp)
   target_link_libraries(pmjs-renderer-clear-test PRIVATE pmjs_runtime)
@@ -308,6 +312,12 @@ if(BUILD_TESTING)
   set_tests_properties(native-effects-gl-state-es2 PROPERTIES
     ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;MESA_GLES_VERSION_OVERRIDE=2.0" RESOURCE_LOCK pmjs_effect_fixtures)
   add_executable(pmjs-media-decoder-test test/media-decoder.cpp)
+  add_executable(pmjs-encrypted-audio-test test/encrypted-audio.cpp)
+  target_include_directories(pmjs-encrypted-audio-test PRIVATE src)
+  target_link_libraries(pmjs-encrypted-audio-test PRIVATE pmjs_runtime)
+  target_compile_options(pmjs-encrypted-audio-test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME native-encrypted-audio COMMAND ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/encrypted-audio.cjs" $<TARGET_FILE:pmjs-encrypted-audio-test>)
   target_include_directories(pmjs-media-decoder-test PRIVATE src)
   target_compile_options(pmjs-media-decoder-test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(pmjs-media-decoder-test PRIVATE pmjs_runtime)
@@ -524,6 +534,9 @@ if(BUILD_TESTING)
   add_test(NAME node-prepared-media COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-media.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-prepared-media PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-encrypted-audio COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-encrypted-audio.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-encrypted-audio PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-prepared-media-mv COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-media.cjs" $<TARGET_FILE:pmjs_native> MV)
   set_tests_properties(node-prepared-media-mv PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")

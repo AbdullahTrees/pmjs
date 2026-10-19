@@ -273,6 +273,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   if (!Number.isSafeInteger(workspaceBytes) || workspaceBytes < 0 || workspaceBytes > 256 * 1024 * 1024)
     throw new Error('assetPreparation.workspaceBytes must be an integer from 0 to 268435456');
   const offline = preparationContext === 'offline';
+  const audioViewSupport = !offline && typeof native?.media?.installAudioViews === 'function';
+  const audioSettings = audioViewSupport ? await encryptionSettings(native, gameRoot) : null;
   const negativeHints = new Set((portableIndex?.negativeHints || []).filter(source =>
     safeSource(source) && source.endsWith('.png')));
   const indexedImages = new Map();
@@ -286,7 +288,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     fallback: 0, failedFiles: 0, installFailures: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
     indexedNegative: 0, indexedLayoutAttempts: 0, indexedZeroPage: 0,
     indexedPageCopies: 0, unindexedProcessed: 0, processingMs: 0,
-    cancelled: false, entries: [], decryptedEntries: [], decisions: [], durationMs: 0 };
+    cancelled: false, entries: [], decryptedEntries: [], audioViewEntries: [], audioViews: 0, decisions: [], durationMs: 0 };
   const catalogFile = path.join(cacheRoot, 'catalog-'+identity(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
@@ -301,7 +303,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   async function clearIndexes() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => native.assets.installPrepared([])),
-      Promise.resolve().then(() => native.assets.installDecrypted?.([]))
+      Promise.resolve().then(() => native.assets.installDecrypted?.([])),
+      Promise.resolve().then(() => native.media?.installAudioViews?.([]))
     ]);
     for (const value of results) if (value.status === 'rejected')
       logger.warn('[pmjs] cannot clear preparation index: '+value.reason.message);
@@ -322,7 +325,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     }
 
     const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes,
-      contentIdentity: 1 };
+      contentIdentity: 1, ...(audioViewSupport ? { audioViewVersion: 1, audioSettingsHash: audioSettings.hash || null } : {}) };
     const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
       typeof native.assets.installDerivedCatalog === 'function';
     result.catalogStatus = offline ? 'offline' : verifyHashes ? 'verify-hashes' :
@@ -340,6 +343,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           report('install');
           lease = await createImageLease(cacheRoot, catalog.keys, native.assets);
           await native.assets.installDerivedCatalog(catalog.decryptedEntries);
+          if (audioViewSupport && native.media.installAudioViews(catalog.audioViewEntries || []) !== (catalog.audioViewEntries || []).length)
+            throw new Error('incomplete audio view installation');
+          if (audioViewSupport && (await encryptionSettings(native, gameRoot)).hash !== audioSettings.hash)
+            throw new Error('audio encryption settings changed during preparation');
           const installed = await native.assets.installPreparedCatalog(catalog.entries);
           if (installed !== catalog.entries.length) throw new Error('incomplete image catalog installation');
           if (cancelled()) throw new Error('catalog installation cancelled');
@@ -347,6 +354,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           installedLeases.set(native.assets, lease);
           if (previous) previous();
           Object.assign(result, catalog.summary, { entries: catalog.entries, decryptedEntries: catalog.decryptedEntries,
+            audioViewEntries: catalog.audioViewEntries || [],
             generated: 0, failedFiles: 0, installFailures: 0, catalogHit: true, catalogStatus: 'hit', releaseCacheLease: lease });
           report('install');
           return result;
@@ -371,7 +379,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       if (cancelled()) return result;
       if (!offline) {
         await native.assets.installPrepared([]);
-        if (native.assets.installDecrypted) native.assets.installDecrypted([]);
+        if (native.assets.installDecrypted) await native.assets.installDecrypted([]);
+        if (audioViewSupport) native.media.installAudioViews([]);
       }
       return result;
     }
@@ -403,10 +412,19 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         const encrypted = decryptedPath !== null;
         const logicalSource = decryptedPath || source;
         const extension = path.extname(logicalSource).toLowerCase();
+        const audioView = audioViewSupport && encrypted && source.startsWith('audio/');
         if (encrypted && (!settings.key || !(extension === '.png' ? settings.images : settings.audio) ||
-            (!offline && typeof native.assets.installDecrypted !== 'function'))) throw new Error('cached decryption is unavailable');
-        if (encrypted && fs.existsSync(path.join(gameRoot, logicalSource))) throw new Error('plaintext source path already exists');
+            (!offline && !audioView && typeof native.assets.installDecrypted !== 'function'))) throw new Error('cached decryption is unavailable');
+        if (encrypted && !audioView && fs.existsSync(path.join(gameRoot, logicalSource))) throw new Error('plaintext source path already exists');
         const file = sourceFile(native, gameRoot, source);
+        if (audioView) {
+          const size = (await fsp.stat(file)).size;
+          result.audioViewEntries.push({ source, logicalSource, key: settings.key.toString('hex') });
+          result.sourceBytes += size;
+          result.completed += 1;
+          report('audio-view', source);
+          continue;
+        }
         let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
         const hintedNegative = !offline && !verifyHashes && !encrypted && extension === '.png' &&
           !recipeMap.has(logicalSource) && negativeHints.has(source);
@@ -574,6 +592,13 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           return true;
         });
       }
+      if (audioViewSupport) {
+        if ((await encryptionSettings(native, gameRoot)).hash !== audioSettings.hash)
+          throw new Error('audio encryption settings changed during preparation');
+        result.audioViews = native.media.installAudioViews(result.audioViewEntries);
+        result.fallback += result.audioViewEntries.length - result.audioViews;
+        result.installFailures += result.audioViewEntries.length - result.audioViews;
+      }
       const installed = await native.assets.installPrepared(result.entries, catalogCapable);
       if (previousLease) previousLease();
       result.prepared = result.entries.length;
@@ -583,13 +608,13 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       if (result.installed < result.prepared) {
         logger.warn(`[pmjs] prepared image index installed ${result.installed}/${result.prepared}; remaining images use ordinary loading`);
       }
-      if (catalogCapable && result.installed === result.entries.length && result.decrypted === result.decryptedEntries.length) {
+      if (catalogCapable && result.installed === result.entries.length && result.decrypted === result.decryptedEntries.length && result.audioViews === result.audioViewEntries.length) {
         report('publish');
         const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
-        summary.hits = keys.length + indexedNegativeSkips;
+        summary.hits = keys.length + indexedNegativeSkips + result.audioViews;
         summary.negativeHits = catalogNegativeHits;
         await publishCatalog(catalogFile, binding, cacheRoot, { keys, entries: result.entries,
-          decryptedEntries: result.decryptedEntries, summary });
+          decryptedEntries: result.decryptedEntries, audioViewEntries: result.audioViewEntries, summary });
       }
       report('cleanup');
       await files.save();
@@ -622,7 +647,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     if (result.releaseCacheLease) {
       result.releaseCacheLease(); delete result.releaseCacheLease;
       await clearIndexes();
-      result.installed = result.decrypted = 0;
+      result.installed = result.decrypted = result.audioViews = 0;
     }
     result.fallback += result.total - result.completed;
     logger.warn(`[pmjs] asset preparation unavailable: ${error.message}`);
@@ -636,7 +661,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     if (result.cancelled && result.releaseCacheLease) {
       result.releaseCacheLease(); delete result.releaseCacheLease;
       await clearIndexes();
-      result.installed = result.decrypted = 0;
+      result.installed = result.decrypted = result.audioViews = 0;
     }
     report(result.cancelled ? 'cancelled' : terminalPhase, '', true);
   }

@@ -50,6 +50,40 @@ function contextFor(prepare) {
   return context;
 }
 
+test('prepared encrypted views install through the ordinary voice lifecycle', () => {
+  const context = contextFor();
+  let fetches = 0;
+  context.NativeHost.media.loadAudioView = (logical, options) => {
+    assert.equal(logical, 'audio/bgm/theme.ogg');
+    assert.equal(options.intent, 'music');
+    return { handle: 12, duration: 4 };
+  };
+  const voice = context.PMJS.rpgmaker.audio.createVoice('music');
+  voice.fetchEncrypted = () => { ++fetches; };
+  assert.equal(voice.loadSource('audio/bgm/theme.ogg', () => ({ path: 'audio/bgm/theme.ogg_', decrypt() {} })), true);
+  assert.equal(voice.handle, 12);
+  assert.equal(voice.duration, 4);
+  assert.equal(fetches, 0);
+  voice.release();
+  assert.deepEqual(context.calls.releases, [12]);
+});
+
+test('missing and rejected encrypted views retain the original encrypted path', () => {
+  const context = contextFor();
+  const voice = context.PMJS.rpgmaker.audio.createVoice('music');
+  const fetched = [];
+  const decrypt = () => {};
+  voice.fetchEncrypted = (source, fn) => fetched.push([source, fn]);
+  for (const loader of [() => null, () => { throw new Error('invalid header'); }]) {
+    context.NativeHost.media.loadAudioView = loader;
+    assert.equal(voice.loadSource('audio/bgm/theme.ogg', () => ({ path: 'audio/bgm/theme.ogg_', decrypt })), true);
+  }
+  assert.deepEqual(fetched, [['audio/bgm/theme.ogg_', decrypt], ['audio/bgm/theme.ogg_', decrypt]]);
+  context.NativeHost.media.loadAudioView = () => { throw new Error('plaintext must bypass the view'); };
+  voice.loadSource('audio/bgm/plain.ogg', () => null);
+  assert.equal(voice.handle, 1);
+});
+
 test('audio capability owns voices without leaking the constructor', () => {
   const context = contextFor();
   const audio = context.PMJS.rpgmaker.audio;

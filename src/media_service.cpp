@@ -402,6 +402,25 @@ std::uint32_t MediaService::loadAudioBytes(std::vector<std::uint8_t> bytes,
   return impl_->loadDecoder(std::move(decoder), key, options.intent, error,
     impl_->diagnostics ? std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - opened).count() : 0);
 }
+std::uint32_t MediaService::loadEncryptedAudio(const std::filesystem::path& path, AudioEncryptionKey encryptionKey,
+    std::string* error, const AudioLoadOptions& options) {
+  const auto identity = options.intent == AudioIntent::effect ? audioFileKey(path) : std::string{};
+  const auto key = identity.empty() ? std::string{} : "encrypted:" + identity + ':' +
+    std::string(reinterpret_cast<const char*>(encryptionKey.data()), encryptionKey.size());
+  const auto counted = [&](std::uint32_t handle) {
+    if (handle && impl_->diagnostics) { std::lock_guard lock(impl_->mutex); ++impl_->cacheStats.encryptedLoads; }
+    return handle;
+  };
+  if (auto asset = impl_->cached(key, options.intent))
+    return counted(impl_->installVoice(std::make_shared<Impl::Voice>(std::move(asset))));
+  const auto opened = impl_->diagnostics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  std::unique_ptr<AudioDecoderSession> decoder;
+  try { decoder = std::make_unique<AudioDecoderSession>(path, encryptionKey); }
+  catch (const std::exception& exception) { if (error) *error = exception.what(); return 0; }
+  return counted(impl_->loadDecoder(std::move(decoder), key, options.intent, error,
+    impl_->diagnostics ? std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - opened).count() : 0));
+}
+
 AudioCacheStats MediaService::audioCacheStats() const {
   std::lock_guard lock(impl_->mutex);
   auto stats = impl_->cacheStats;

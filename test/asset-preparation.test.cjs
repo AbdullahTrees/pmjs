@@ -851,6 +851,88 @@ function encryptedFixture(engine = 'MZ') {
   return { ...f, encrypt, audio, encryptedImage, encryptedAudio, systemFile, get jobs() { return f.jobs; }, get installs() { return f.installs; } };
 }
 
+for (const engine of ['MV', 'MZ']) test(engine + ' audio views prepare without materializing or hashing the audio payload', async () => {
+  const f = encryptedFixture(engine);
+  fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+  const installed = [];
+  f.native.media = { installAudioViews(entries) { installed.push(entries); return entries.length; } };
+  f.native.assets.installPreparedCatalog = () => 0;
+  f.native.assets.installDerivedCatalog = () => {};
+  const cold = await prepareAssets(f);
+  assert.equal(cold.error, undefined);
+  assert.equal(cold.total, 1);
+  assert.equal(cold.audioViews, 1);
+  assert.equal(cold.generated, 0);
+  assert.equal(cold.decrypted, 0);
+  assert.equal(cold.cacheBytes, 0);
+  assert.equal(cold.validation.hashedBytes, 0);
+  assert.equal(installed.at(-1)[0].source, f.encryptedAudio);
+  const warm = await prepareAssets(f);
+  assert.equal(warm.catalogStatus, 'hit');
+  assert.equal(warm.audioViews, 1);
+  const system = JSON.parse(fs.readFileSync(f.systemFile));
+  system.hasEncryptedAudio = false;
+  fs.writeFileSync(f.systemFile, JSON.stringify(system));
+  const changed = await prepareAssets(f);
+  assert.notEqual(changed.catalogStatus, 'hit');
+  assert.equal(changed.audioViews, 0);
+  assert.equal(installed.at(-1).length, 0);
+});
+
+for (const engine of ['MV', 'MZ']) test(engine + ' default audio views replace materialized audio while retaining prepared images', async () => {
+  const f = encryptedFixture(engine);
+  const legacy = await prepareAssets(f);
+  assert.equal(legacy.decrypted, 2);
+  const oldAudio = legacy.decryptedEntries.find(entry => entry.source === f.encryptedAudio).file;
+  let views = [];
+  f.native.media = { installAudioViews(entries) { views = entries; return entries.length; } };
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = entries => f.native.assets.installDecrypted(entries);
+  const upgraded = await prepareAssets(f);
+  assert.equal(upgraded.error, undefined);
+  assert.equal(upgraded.generated, 0, 'existing image cache is retained');
+  assert.equal(upgraded.decrypted, 1);
+  assert.equal(upgraded.installed, 1);
+  assert.equal(upgraded.audioViews, 1);
+  assert.equal(fs.existsSync(oldAudio), false, 'unreferenced duplicate audio is removed');
+  assert.equal(views[0].source, f.encryptedAudio);
+  const warm = await prepareAssets(f);
+  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.audioViews, 1);
+  assert.equal(warm.decrypted, 1);
+  fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+  fs.rmSync(path.join(f.gameRoot, 'audio'), { recursive: true });
+  await prepareAssets({ ...f, verifyHashes: true });
+  assert.deepEqual(views, [], 'successful empty preparation clears audio registrations');
+});
+
+test('audio view registrations and counts clear after installation failure or cancellation', async () => {
+  for (const fail of [true, false]) {
+    const f = encryptedFixture();
+    fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+    let views = [], cancel = false;
+    f.native.media = { installAudioViews(entries) { views = entries; return entries.length; } };
+    if (fail) f.native.assets.installPrepared = () => { throw new Error('install failed'); };
+    const result = await prepareAssets({ ...f, shouldCancel: () => cancel,
+      onProgress(progress) { if (!fail && progress.phase === 'cleanup') cancel = true; } });
+    assert.equal(result.audioViews, 0);
+    assert.deepEqual(views, []);
+    if (fail) assert.match(result.error, /install failed/);
+    else assert.equal(result.cancelled, true);
+  }
+});
+
+test('audio view preparation retains a mapping when a plaintext original takes precedence', async () => {
+  const f = encryptedFixture();
+  fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+  fs.writeFileSync(path.join(f.gameRoot, 'audio/bgm/theme.ogg'), f.audio);
+  f.native.media = { installAudioViews(entries) { return entries.length; } };
+  const result = await prepareAssets(f);
+  assert.equal(result.audioViews, 1);
+  assert.equal(result.decrypted, 0);
+  assert.equal(result.error, undefined);
+});
+
 test('encrypted character index decisions use the recipe found after decryption', async () => {
   const f = encryptedFixture('MV');
   const source = 'img/characters/$indexed.rpgmvp';

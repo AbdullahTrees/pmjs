@@ -291,8 +291,9 @@ napi_status queueImageWork(napi_env env, AsyncImageLoad& load) {
 }
 
 napi_value queueImageLoad(napi_env env, const std::filesystem::path& path,
-                          bool retainCpuPixels, const std::string& requestedTileSet = {}) {
-  auto source = pmjs::ImageStore::openFile(path);
+                          bool retainCpuPixels, const std::string& requestedTileSet = {},
+                          std::optional<ImageEncryptionKey> encryptionKey = std::nullopt) {
+  auto source = pmjs::ImageStore::openFile(path, encryptionKey);
   if (!source) throw std::runtime_error("cannot open image");
   const auto tileSet = state->images.effectiveTileSet(*source, requestedTileSet);
   const std::string key = source->key() + (tileSet.empty() ? "" : "\n"+tileSet);
@@ -345,6 +346,17 @@ napi_value loadImageAsync(napi_env env, napi_callback_info info) try {
   if (!path) throw std::runtime_error("cannot resolve image");
   return queueImageLoad(env, *path,
     args.size() > 1 && asBoolean(env, args.at(1)), args.size() > 2 ? asString(env, args[2]) : "");
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value loadEncryptedImageAsync(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 3);
+  auto& value = host(env);
+  const auto path = value.vfs.resolve(asString(env, args.at(0)));
+  if (!path) throw std::runtime_error("cannot resolve encrypted image");
+  return queueImageLoad(env, *path, args.size() > 2 && asBoolean(env, args[2]), "",
+    imageEncryptionKey(asString(env, args.at(1))));
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
@@ -580,6 +592,7 @@ void registerResourceBindings(napi_env env, napi_value exports) {
   method(env, images, "load", loadImage);
   method(env, images, "isOpaque", isOpaqueImage);
   method(env, images, "loadAsync", loadImageAsync);
+  method(env, images, "loadEncryptedAsync", loadEncryptedImageAsync);
   method(env, images, "acquireCached", acquireCachedImage);
   method(env, images, "loadBytes", loadImageBytes);
   method(env, images, "loadBytesAsync", loadImageBytesAsync);

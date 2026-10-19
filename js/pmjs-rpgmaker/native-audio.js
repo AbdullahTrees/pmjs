@@ -138,7 +138,15 @@ NativeAudioVoice.prototype.loadSource = function(url, encryptedSource) {
     this.loadObjectUrl(url);
   } else if (path) {
     var encrypted = typeof encryptedSource === 'function' ? encryptedSource(path) : null;
-    if (encrypted) this.fetchEncrypted(encrypted.path, encrypted.decrypt);
+    if (encrypted) {
+      var loaded = null;
+      if (typeof NativeHost.media.loadAudioView === 'function') {
+        try { loaded = NativeHost.media.loadAudioView(path, this.loadOptions()); }
+        catch (_) { /* An unavailable view retains the engine's encrypted loader. */ }
+      }
+      if (loaded) this.install(loaded, ++this.loadGeneration);
+      else this.fetchEncrypted(encrypted.path, encrypted.decrypt);
+    }
     else this.loadPath(path);
   } else {
     return false;

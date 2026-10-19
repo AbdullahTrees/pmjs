@@ -134,10 +134,42 @@ Format open(const std::filesystem::path& path, std::string* error) {
   return format;
 }
 
-Format open(MemoryInput& input, std::string* error) {
+struct EncryptedInput {
+  EncryptedInput(const std::filesystem::path& path, AudioEncryptionKey key) : file(path, key) {
+    auto* buffer = static_cast<unsigned char*>(av_malloc(32768));
+    if (!buffer) throw std::runtime_error("cannot allocate encrypted audio buffer");
+    context = avio_alloc_context(buffer, 32768, 0, this, read, nullptr, seek);
+    if (!context) { av_free(buffer); throw std::runtime_error("cannot allocate encrypted audio input"); }
+  }
+  ~EncryptedInput() { av_freep(&context->buffer); avio_context_free(&context); }
+  static int read(void* opaque, std::uint8_t* output, int requested) {
+    auto& input = *static_cast<EncryptedInput*>(opaque);
+    if (requested <= 0) return AVERROR(EINVAL);
+    try {
+      const auto count = input.file.read(input.position, {output, static_cast<std::size_t>(requested)});
+      input.position += static_cast<std::int64_t>(count);
+      return count ? static_cast<int>(count) : AVERROR_EOF;
+    } catch (...) { return AVERROR(EIO); }
+  }
+  static std::int64_t seek(void* opaque, std::int64_t offset, int whence) {
+    auto& input = *static_cast<EncryptedInput*>(opaque);
+    const int origin = whence & ~AVSEEK_FORCE;
+    if (origin == AVSEEK_SIZE) return input.file.size();
+    const auto base = origin == SEEK_CUR ? input.position : origin == SEEK_END ? input.file.size() : 0;
+    if ((origin != SEEK_CUR && origin != SEEK_END && origin != SEEK_SET) ||
+        offset < -base || offset > input.file.size() - base) return AVERROR(EINVAL);
+    input.position = base + offset;
+    return input.position;
+  }
+  EncryptedAudioFile file;
+  std::int64_t position = 0;
+  AVIOContext* context = nullptr;
+};
+
+Format open(AVIOContext* input, std::string* error) {
   AVFormatContext* raw = avformat_alloc_context();
   if (!raw) { fail(error, "cannot allocate media context"); return nullptr; }
-  raw->pb = input.context;
+  raw->pb = input;
   raw->flags |= AVFMT_FLAG_CUSTOM_IO;
   const int result = avformat_open_input(&raw, nullptr, nullptr, nullptr);
   if (result < 0) {
@@ -624,7 +656,15 @@ struct AudioDecoderSession::Impl {
   explicit Impl(std::vector<std::uint8_t> bytes)
       : memory(std::make_unique<MemoryInput>(std::move(bytes))) {
     std::string error;
-    auto opened = open(*memory, &error);
+    auto opened = open(memory->context, &error);
+    if (!opened) throw std::runtime_error(error);
+    initialize(std::move(opened));
+  }
+
+  Impl(const std::filesystem::path& path, AudioEncryptionKey key)
+      : encrypted(std::make_unique<EncryptedInput>(path, key)) {
+    std::string error;
+    auto opened = open(encrypted->context, &error);
     if (!opened) throw std::runtime_error(error);
     initialize(std::move(opened));
   }
@@ -766,6 +806,7 @@ struct AudioDecoderSession::Impl {
   }
 
   std::unique_ptr<MemoryInput> memory;
+  std::unique_ptr<EncryptedInput> encrypted;
   Format format{nullptr}; Codec codec{nullptr}; Packet packet{nullptr};
   Frame frame{nullptr}; Swr resampler{nullptr}; AVStream* stream = nullptr;
   int streamIndex = -1; double durationSeconds = 0.0, discardUntil = 0.0;
@@ -778,6 +819,8 @@ AudioDecoderSession::AudioDecoderSession(const std::filesystem::path& path)
     : impl_(std::make_unique<Impl>(path)) {}
 AudioDecoderSession::AudioDecoderSession(std::vector<std::uint8_t> bytes)
     : impl_(std::make_unique<Impl>(std::move(bytes))) {}
+AudioDecoderSession::AudioDecoderSession(const std::filesystem::path& path, AudioEncryptionKey key)
+    : impl_(std::make_unique<Impl>(path, key)) {}
 AudioDecoderSession::~AudioDecoderSession() = default;
 double AudioDecoderSession::duration() const { return impl_->durationSeconds; }
 int AudioDecoderSession::sourceChannels() const { return impl_->codec->ch_layout.nb_channels; }

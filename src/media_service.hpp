@@ -29,6 +29,7 @@ struct AudioCacheStats {
   std::size_t cacheBytes = 0, livePcmBytes = 0, entries = 0;
   std::size_t sampleVoices = 0, streamVoices = 0;
   std::uint64_t loads = 0, decoderOpens = 0;
+  std::uint64_t encryptedLoads = 0;
   std::uint64_t preparations = 0, admissions = 0, evictions = 0, rejections = 0;
   std::uint64_t sampleLoads = 0, streamLoads = 0, prepareUs = 0, decoderOpenUs = 0;
   std::uint64_t workerDecodeCalls = 0, workerDecodeUs = 0, workerCpuUs = 0;
@@ -49,6 +50,8 @@ class MediaService {
   std::uint32_t loadAudioBytes(std::vector<std::uint8_t> bytes,
                                std::string* error = nullptr,
                                const AudioLoadOptions& options = {});
+  std::uint32_t loadEncryptedAudio(const std::filesystem::path& path, AudioEncryptionKey key,
+      std::string* error = nullptr, const AudioLoadOptions& options = {});
   AudioCacheStats audioCacheStats() const;
   void setPreparedAudioPolicyForTesting(PreparedAudioPolicy policy);
   std::size_t sampleMemoryBytes() const;

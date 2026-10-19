@@ -25,6 +25,10 @@ namespace pmjs::addon {
 
 struct AsyncImageLoad;
 struct Video;
+struct AudioView {
+  std::string source;
+  AudioEncryptionKey key;
+};
 struct State {
   State(const std::string& root, int initWidth, int initHeight,
         const std::string& assetRoot, const std::string& windowTitle,
@@ -40,6 +44,7 @@ struct State {
   pmjs::Renderer& renderer;
   pmjs::Vfs& vfs;
   std::unique_ptr<pmjs::Vfs> assets;
+  std::unordered_map<std::string, AudioView> audioViews;
   std::int64_t reportedExternalBytes = 0;
   double frameUploadMs = 0;
   double frameDrawMs = 0;

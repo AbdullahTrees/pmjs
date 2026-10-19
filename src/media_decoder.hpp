@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "video_color.hpp"
+#include "encrypted_audio_file.hpp"
 
 namespace pmjs {
 
@@ -59,6 +60,7 @@ struct VideoDecodeStats {
 class AudioDecoderSession {
  public:
   explicit AudioDecoderSession(const std::filesystem::path& path);
+  AudioDecoderSession(const std::filesystem::path& path, AudioEncryptionKey key);
   explicit AudioDecoderSession(std::vector<std::uint8_t> bytes);
   ~AudioDecoderSession();
   AudioDecoderSession(const AudioDecoderSession&) = delete;

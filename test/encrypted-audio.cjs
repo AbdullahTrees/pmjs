@@ -1,0 +1,26 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { temporaryDirectory } = require('./helpers/temp.cjs');
+
+const root = temporaryDirectory('encrypted-audio-');
+const key = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
+const wav = Buffer.alloc(44 + 4800 * 4);
+wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8);
+wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(2, 22);
+wav.writeUInt32LE(48000, 24); wav.writeUInt32LE(192000, 28);
+wav.writeUInt16LE(4, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(wav.length - 44, 40);
+for (let i = 44; i < wav.length; i += 2) wav.writeInt16LE(Math.round(Math.sin(i / 30) * 4000), i);
+const ogg = Buffer.from(fs.readFileSync(path.join(__dirname, 'assets/empty-packet.ogg.b64'), 'utf8'), 'base64');
+const m4a = Buffer.from(fs.readFileSync(path.join(__dirname, 'assets/short-audio.m4a.b64'), 'utf8'), 'base64');
+const files = [wav, ogg, m4a].map((plain, index) => {
+  const output = Buffer.concat([Buffer.from('5250474d560000000003010000000000', 'hex'), plain]);
+  for (let i = 0; i < 16; ++i) output[16 + i] ^= key[i];
+  const file = path.join(root, index + '.ogg_'); fs.writeFileSync(file, output); return file;
+});
+const result = spawnSync(process.argv[2], files, { input: key.toString('hex'), encoding: 'utf8' });
+assert.equal(result.status, 0, result.stderr);
+assert.equal(JSON.parse(result.stdout).files, 3);
+console.log(result.stdout.trim());

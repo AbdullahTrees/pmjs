@@ -53,7 +53,9 @@ native.initialize({ gameRoot, assetRoot: '', width: 128, height: 128, windowTitl
 
 async function main() {
   const pageCodec = process.argv[4] || 'png';
-  const options = { gameRoot, cacheRoot: path.join(root, 'cache'), native, pageCodec };
+  // Materialized aliases remain supported for addons without audio-view capability.
+  const options = { gameRoot, cacheRoot: path.join(root, 'cache'),
+    native: { assets: native.assets, fs: native.fs }, pageCodec };
   assert.match(native.assets.preparationLz4Version, /^lz4-1\.10\.0-rgba-v1$/);
   assert.equal(native.assets.preparationWorkspaceVersion, 1);
   for (const workspaceBytes of [-1, 0.5, 268435457])

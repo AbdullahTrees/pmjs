@@ -302,6 +302,78 @@ napi_value loadAudio(napi_env env, napi_callback_info info) try {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
 
+std::optional<std::string> audioViewPath(const std::string& input) {
+  if (input.find('\0') != std::string::npos || input.find('\\') != std::string::npos) return std::nullopt;
+  const auto path = std::filesystem::path(input).lexically_normal();
+  if (path.is_absolute()) return std::nullopt;
+  for (const auto& part : path) if (part == "..") return std::nullopt;
+  auto key = path.generic_string();
+  std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 'a' - 'A') : static_cast<char>(c);
+  });
+  return key.starts_with("audio/") ? std::optional{key} : std::nullopt;
+}
+
+napi_value installAudioViews(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  auto& value = host(env);
+  std::uint32_t count = 0;
+  check(env, napi_get_array_length(env, args.at(0), &count), "audio views must be an array");
+  if (count > 100000) throw std::runtime_error("too many audio views");
+  std::unordered_map<std::string, AudioView> views;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    napi_value entry;
+    check(env, napi_get_element(env, args[0], i, &entry), "invalid audio view");
+    const auto logical = audioViewPath(asString(env, property(env, entry, "logicalSource")));
+    const auto source = audioViewPath(asString(env, property(env, entry, "source")));
+    const auto hex = asString(env, property(env, entry, "key"));
+    if (!logical || !source || !logical->starts_with("audio/") || !source->starts_with("audio/") || hex.size() != 32)
+      throw std::runtime_error("invalid audio view mapping");
+    AudioEncryptionKey key{};
+    const auto digit = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      throw std::runtime_error("invalid audio encryption key");
+    };
+    for (std::size_t j = 0; j < key.size(); ++j) key[j] = static_cast<std::uint8_t>(digit(hex[j * 2]) * 16 + digit(hex[j * 2 + 1]));
+    const auto file = value.vfs.resolve(*source);
+    if (!file) continue;
+    try { EncryptedAudioFile checked(*file, key); }
+    catch (const std::exception&) { continue; }
+    if (!views.emplace(*logical, AudioView{*source, key}).second)
+      throw std::runtime_error("duplicate audio view");
+  }
+  value.audioViews = std::move(views);
+  return number(env, value.audioViews.size());
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
+napi_value loadAudioView(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 2);
+  auto& value = host(env);
+  const auto logical = audioViewPath(asString(env, args.at(0)));
+  if (!logical) return null(env);
+  const auto found = value.audioViews.find(*logical);
+  if (found == value.audioViews.end()) return null(env);
+  const auto options = args.size() > 1 ? audioLoadOptions(env, value, args[1]) : AudioLoadOptions{};
+  std::string error;
+  std::uint32_t handle = 0;
+  if (const auto plaintext = value.vfs.resolve(*logical))
+    handle = value.core.media().loadAudio(plaintext->string(), &error, options);
+  else if (const auto source = value.vfs.resolve(found->second.source))
+    handle = value.core.media().loadEncryptedAudio(*source, found->second.key, &error, options);
+  if (!handle) throw std::runtime_error(error.empty() ? "audio view is unavailable" : error);
+  syncExternalMemory(env);
+  napi_value result; napi_create_object(env, &result);
+  napi_set_named_property(env, result, "handle", uint32(env, handle));
+  napi_set_named_property(env, result, "duration", number(env, value.core.media().duration(handle)));
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value loadVideoAsync(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 2);
   State& value = host(env);
@@ -356,7 +428,7 @@ napi_value audioStats(napi_env env, napi_callback_info) try {
   check(env, napi_set_named_property(env, result, "diagnostics", boolean(env, stats.diagnostics)),
         "cannot set audio diagnostics state");
   if (stats.diagnostics) {
-    AUDIO_STAT(loads); AUDIO_STAT(decoderOpens); AUDIO_STAT(preparations);
+    AUDIO_STAT(loads); AUDIO_STAT(decoderOpens); AUDIO_STAT(preparations); AUDIO_STAT(encryptedLoads);
     AUDIO_STAT(admissions); AUDIO_STAT(evictions); AUDIO_STAT(rejections);
     AUDIO_STAT(sampleLoads); AUDIO_STAT(streamLoads); AUDIO_STAT(prepareUs); AUDIO_STAT(decoderOpenUs);
     AUDIO_STAT(workerDecodeCalls); AUDIO_STAT(workerDecodeUs); AUDIO_STAT(workerCpuUs);
@@ -681,6 +753,8 @@ napi_value releaseAudioGain(napi_env env, napi_callback_info info) try {
 void registerMediaBindings(napi_env env, napi_value exports) {
   napi_value media = moduleObject(env);
   method(env, media, "loadAudio", loadAudio);
+  method(env, media, "installAudioViews", installAudioViews);
+  method(env, media, "loadAudioView", loadAudioView);
   method(env, media, "audioStats", audioStats);
   method(env, media, "loadAudioBytes", loadAudioBytes);
   method(env, media, "playAudio", playAudio);

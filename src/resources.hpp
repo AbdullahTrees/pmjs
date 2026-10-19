@@ -15,6 +15,9 @@
 
 namespace pmjs {
 
+using ImageEncryptionKey = std::array<std::uint8_t, 16>;
+ImageEncryptionKey imageEncryptionKey(const std::string& hex);
+
 using ImageHandle = std::uint32_t;
 constexpr std::uint32_t canvasHandleTag = 0x80000000U;
 
@@ -132,6 +135,7 @@ class ImageFileSource {
   std::int64_t modifiedNanoseconds_ = 0;
   std::filesystem::path path_;
   std::string key_;
+  std::optional<ImageEncryptionKey> encryptionKey_;
 };
 
 class ImageStore {
@@ -149,7 +153,8 @@ class ImageStore {
 
   // Opening captures the file identity before async work; atomic replacement
   // cannot redirect an in-flight load to a different inode.
-  static std::unique_ptr<ImageFileSource> openFile(const std::filesystem::path& path);
+  static std::unique_ptr<ImageFileSource> openFile(const std::filesystem::path& path,
+      std::optional<ImageEncryptionKey> encryptionKey = std::nullopt);
   static std::size_t decodedStorageBytes(const ImagePixels& pixels);
   static std::optional<std::vector<std::uint8_t>> readCapturedBytes(const ImageFileSource& source);
   static std::optional<ImagePixels> decodeFile(const ImageFileSource& source,
