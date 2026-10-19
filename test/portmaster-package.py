@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import shlex
 import shutil
 import subprocess
@@ -102,6 +103,7 @@ class PortMasterPackage(unittest.TestCase):
             names = package.namelist()
             self.assertIn('Minimal Game.sh', names)
             self.assertIn('minimal-game/gamedata/', names)
+            self.assertEqual(package.read('minimal-game/minimal-game.ini'), b'[controls]\n')
             self.assertIn('minimal-game/runtime/lib/librequired.so.1', names)
             self.assertNotIn('minimal-game/runtime.squashfs', names)
             licenses = package.read('minimal-game/runtime/LICENSES.txt').decode()
@@ -140,6 +142,57 @@ class PortMasterPackage(unittest.TestCase):
         checksum = artifacts.digest(self.output)
         portmaster.portmaster(self.stage, self.bundle, self.output)
         self.assertEqual(artifacts.digest(self.output), checksum, 'deterministic ZIP')
+
+    def test_submission_metadata_and_licenses(self):
+        import struct
+        import zlib
+        submission = self.root / 'minimalgame'
+        submission.mkdir()
+        raw = b''.join(b'\x00' + b'\0' * (640 * 4) for _ in range(480))
+        def chunk(kind, data):
+            content = kind + data
+            return struct.pack('>I', len(data)) + content + struct.pack('>I', zlib.crc32(content))
+        (submission / 'screenshot.png').write_bytes(
+            b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 640, 480, 8, 6, 0, 0, 0)) +
+            chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+        (submission / 'README.md').write_text('## Notes\n\nThanks to the developer.\n\n## Controls\n\n## Compile\n')
+        (submission / 'gameinfo.xml').write_text('''<?xml version="1.0"?>
+<gameList><game><path>./Minimal Game.sh</path><name>Minimal Game</name>
+<image>./minimalgame/screenshot.png</image></game></gameList>''')
+        descriptor = {'version': 4, 'name': 'minimalgame.zip',
+                      'items': ['Minimal Game.sh', 'minimalgame'], 'items_opt': [],
+                      'attr': {'title': 'Minimal Game', 'porter': ['Test Porter'],
+                               'desc': 'A game & test', 'inst': 'Supply the game files.',
+                               'genres': ['rpg'], 'image': None, 'rtr': False,
+                               'runtime': [], 'arch': ['x86_64'], 'store': []}}
+        (submission / 'port.json').write_text(json.dumps(descriptor))
+        output = self.root / 'output/minimalgame.zip'
+        portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+        with zipfile.ZipFile(output) as package:
+            self.assertIsNone(package.testzip())
+            names = package.namelist()
+            for name in ('port.json', 'gameinfo.xml', 'screenshot.png', 'minimalgame.md', 'gamedata/'):
+                self.assertIn('minimalgame/' + name, names)
+            self.assertIn('Minimal Game.sh', names)
+            self.assertNotIn('minimalgame/runtime/LICENSES.txt', names)
+            self.assertIn('minimalgame/licenses/LICENSE.share_pmjs_notices_node_license.txt', names)
+            self.assertIn('minimalgame/licenses/LICENSE.license.txt', names)
+            self.assertEqual(json.loads(package.read('minimalgame/port.json')), descriptor)
+            self.assertEqual(package.read('minimalgame/gameinfo.xml'), (submission / 'gameinfo.xml').read_bytes())
+            self.assertNotIn(b'purchased bytes', b''.join(package.read(n) for n in names if n.endswith('.js')))
+        checksum = artifacts.digest(output)
+        portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+        self.assertEqual(artifacts.digest(output), checksum)
+        descriptor['attr']['arch'] = ['armhf']
+        (submission / 'port.json').write_text(json.dumps(descriptor))
+        with self.assertRaisesRegex(ValueError, 'architecture'):
+            portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+        self.assertEqual(artifacts.digest(output), checksum, 'invalid input must not replace existing package')
+        descriptor['attr']['arch'] = ['x86_64']
+        descriptor['items'][0] = 'Different.sh'
+        (submission / 'port.json').write_text(json.dumps(descriptor))
+        with self.assertRaisesRegex(ValueError, 'launcher'):
+            portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
 
     def test_adapter_configuration_and_mz(self):
         adapter = self.root / 'adapter.js'
@@ -364,7 +417,7 @@ class PortMasterPackage(unittest.TestCase):
     def test_package_cli_delegates_bundle_validation_to_python(self):
         bundle = self.create_bundle()
         # The CLI prefix needs its own packager; the minimal target fixture omits it.
-        for name in ('portmaster.py', 'runtime_artifact.py'):
+        for name in ('portmaster.py', 'portmaster_metadata.py', 'runtime_artifact.py'):
             shutil.copy2(ROOT / 'tools' / name, self.stage / 'share/pmjs/tools' / name)
         self.refresh_manifest()
         info = json.loads((self.stage / 'build-info.json').read_text())
@@ -498,14 +551,19 @@ class PortMasterLauncher(unittest.TestCase):
         self.port = self.root / 'storage/ports/minimal-game'
         (self.port / 'gamedata').mkdir(parents=True)
         (self.port / 'gamedata/index.html').touch()
+        (self.port / 'minimal-game.ini').write_text('[controls]\n')
         (self.port / 'saves').mkdir()
         (self.port / 'saves/existing.rpgsave').write_text('existing progress')
         (self.port / 'runtime/bin').mkdir(parents=True)
         self.launcher = self.root / 'menu/Minimal Game.sh'
         self.launcher.parent.mkdir()
-        self.launcher.write_text(portmaster.PORTMASTER_LAUNCHER.replace('@ID@', 'minimal-game'))
+        launcher = portmaster.PORTMASTER_LAUNCHER.replace('@ID@', 'minimal-game')
+        for location in ('/opt/system/Tools/PortMaster', '/opt/tools/PortMaster', '/roms/ports/PortMaster'):
+            launcher = launcher.replace(location, str(self.root / location.lstrip('/')))
+        self.launcher.write_text(launcher)
         self.events = self.root / 'events.txt'
         self.capture = self.root / 'node.json'
+        self.gpt_capture = self.root / 'gptokeyb2.json'
         node = self.port / 'runtime/bin/node'
         node.write_text('#!' + sys.executable + '\n' + '''import json, os, signal, sys
 from pathlib import Path
@@ -520,12 +578,28 @@ if 'READY_FD' in os.environ:
 sys.exit(int(os.environ.get('NODE_STATUS', '0')))
 ''')
         node.chmod(0o755)
+        helpers = self.root / 'helpers'
+        helpers.mkdir()
+        gptokeyb = helpers / 'gptokeyb2'
+        gptokeyb.write_text('#!' + sys.executable + '\n' + '''import json, os, signal, sys
+from pathlib import Path
+Path(os.environ['GPT_CAPTURE']).write_text(json.dumps({
+    'argv': sys.argv[1:], 'wrapper': os.environ.get('HELPER_WRAPPER'),
+    'controls': Path(sys.argv[3]).read_text()
+}))
+if 'KILL_TARGET_FD' in os.environ:
+    target = int(os.read(int(os.environ['KILL_TARGET_FD']), 32))
+    os.kill(target, signal.SIGKILL)
+''')
+        gptokeyb.chmod(0o755)
         shutil.copy2(ROOT / 'bin/pmjs', self.port / 'runtime/bin/pmjs')
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(('SDL_', 'PMJS_', 'PORTMASTER_')) and
                     key not in ('controlfolder', 'directory', 'HOTKEY', 'LD_LIBRARY_PATH')}
-        self.env.update(PORTMASTER_CONTROL_DIR=str(self.control), EVENTS=str(self.events),
-                        CAPTURE=str(self.capture), CFW_NAME='fixture')
+        self.env.update(XDG_DATA_HOME=str(self.root), EVENTS=str(self.events),
+                        CAPTURE=str(self.capture), GPT_CAPTURE=str(self.gpt_capture), CFW_NAME='fixture',
+                        GPTOKEYB2='env HELPER_WRAPPER=active gptokeyb2',
+                        PATH=str(helpers) + os.pathsep + os.environ['PATH'])
         (self.control / 'control.txt').write_text('export directory=' +
             shlex.quote(str(self.root / 'storage').lstrip('/')) + '\n' + r'''
 [ -z "${DIRECTORY_OVERRIDE:-}" ] || directory="$DIRECTORY_OVERRIDE"
@@ -536,12 +610,12 @@ get_controls() {
   HOTKEY=${FIRMWARE_HOTKEY:-}
   return "${CONTROLS_STATUS:-0}"
 }
-pm_platform_helper() { echo unexpected-base-helper >> "$EVENTS"; }
+pm_platform_helper() { echo base-helper >> "$EVENTS"; }
 pm_finish() {
+  wait
   printf 'finish:%s\n' "$LD_LIBRARY_PATH" >> "$EVENTS"
   return "${FINISH_STATUS:-0}"
 }
-trap 'echo unexpected-source-trap >> "$EVENTS"' EXIT
 return "${CONTROL_STATUS:-0}"
 ''')
         self.module = r'''
@@ -550,19 +624,18 @@ pm_platform_helper() {
   printf 'platform:%s\n' "$1" >> "$EVENTS"
   return "${PLATFORM_STATUS:-0}"
 }
-trap 'echo unexpected-module-trap >> "$EVENTS"' EXIT
 return "${MODULE_STATUS:-0}"
 '''
         (self.control / 'mod_fixture.txt').write_text(self.module)
 
-    def run_launcher(self, **values):
+    def run_launcher(self, expect_finish=True, **values):
         self.events.unlink(missing_ok=True)
         self.capture.unlink(missing_ok=True)
+        self.gpt_capture.unlink(missing_ok=True)
         result = subprocess.run(['bash', self.launcher], env={**self.env, **values},
                                 capture_output=True, text=True, timeout=5)
         events = self.events.read_text().splitlines() if self.events.exists() else []
-        self.assertEqual(events.count('finish:/firmware/lib'), 1, events)
-        self.assertFalse(any('unexpected' in event for event in events), events)
+        self.assertEqual(events.count('finish:/firmware/lib'), int(expect_finish), events)
         self.assertEqual((self.port / 'saves/existing.rpgsave').read_text(), 'existing progress')
         return result
 
@@ -591,102 +664,119 @@ return "${MODULE_STATUS:-0}"
                 self.assertIn(str(self.port / 'saves'), capture['argv'])
                 self.assertIn(str(self.port / '.cache'), capture['argv'])
 
-    def test_xdg_discovery_adjacent_game_and_absent_display_settings(self):
-        (self.control / 'control.txt').write_text((self.control / 'control.txt').read_text().replace(
-            'export directory=', 'unused_directory='))
-        self.launcher.rename(self.port.parent / 'Minimal Game.sh')
-        self.launcher = self.port.parent / 'Minimal Game.sh'
-        self.env.pop('PORTMASTER_CONTROL_DIR')
-        self.env.update(XDG_DATA_HOME=str(self.root))
+    def test_xdg_discovery_and_absent_display_settings(self):
         for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'SWAYSOCK'):
             self.env.pop(name, None)
         self.assertEqual(self.run_launcher().returncode, 0)
         env = json.loads(self.capture.read_text())['env']
-        for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'SWAYSOCK', 'PMJS_EXIT_HOTKEY'):
+        for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'SWAYSOCK'):
             self.assertNotIn(name, env)
         self.assertEqual(env['SDL_GAMECONTROLLERCONFIG'], 'firmware-map')
+        self.assertEqual(env['PMJS_EXIT_HOTKEY'], 'none')
 
-    def test_game_folder_layouts(self):
-        (self.port / 'gamedata/index.html').unlink()
-        for relative in ('gamedata', 'gamedata/www', 'gamedata/Game With Spaces/www'):
-            with self.subTest(layout=relative):
-                directory = self.port / relative
-                directory.mkdir(parents=True, exist_ok=True)
-                index = directory / 'index.html'
-                index.touch()
+    def test_standard_control_directory_priority(self):
+        locations = [self.root / 'opt/system/Tools/PortMaster',
+                     self.root / 'opt/tools/PortMaster', self.control,
+                     self.root / 'roms/ports/PortMaster']
+        for directory in locations:
+            if directory != self.control:
+                shutil.copytree(self.control, directory)
+        for directory in locations:
+            with self.subTest(directory=directory):
                 self.assertEqual(self.run_launcher().returncode, 0)
-                arguments = json.loads(self.capture.read_text())['argv']
-                self.assertEqual(arguments[arguments.index('--game') + 1], str(directory))
-                self.assertIn(str(self.port), arguments)
-                index.unlink()
+                env = json.loads(self.capture.read_text())['env']
+                self.assertEqual(env['SDL_GAMECONTROLLERCONFIG_FILE'], str(directory / 'gamecontrollerdb.txt'))
+                shutil.rmtree(directory)
 
-    def test_ambiguous_nested_games_are_rejected(self):
-        (self.port / 'gamedata/index.html').unlink()
-        for name in ('First Game', 'Second Game'):
-            directory = self.port / 'gamedata' / name / 'www'
-            directory.mkdir(parents=True)
-            (directory / 'index.html').touch()
-        self.assertEqual(self.run_launcher().returncode, 1)
-        self.assertFalse(self.capture.exists())
-        self.assertIn('Multiple games found', (self.port / 'log.txt').read_text())
+    def test_launcher_passes_bundle_and_writable_paths_to_pmjs(self):
+        self.assertEqual(self.run_launcher().returncode, 0)
+        arguments = json.loads(self.capture.read_text())['argv']
+        self.assertIn(str(self.port), arguments)
+        self.assertEqual(arguments[arguments.index('--save-root') + 1], str(self.port / 'saves'))
+        self.assertEqual(arguments[arguments.index('--asset-cache-root') + 1], str(self.port / '.cache'))
 
-    def test_firmware_exit_chords_and_explicit_override(self):
-        for hotkey, expected in (('l3', 'leftstick'), ('r3', 'rightstick'), ('select', 'back'),
-                                 ('back', 'back'), ('guide', 'guide')):
-            with self.subTest(hotkey=hotkey):
-                self.assertEqual(self.run_launcher(FIRMWARE_HOTKEY=hotkey).returncode, 0)
-                self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_EXIT_HOTKEY'], expected)
-        self.assertEqual(self.run_launcher(FIRMWARE_HOTKEY='l3', PMJS_EXIT_HOTKEY='none').returncode, 0)
-        self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_EXIT_HOTKEY'], 'none')
+    def test_firmware_storage_alias_uses_resolved_bundle_paths(self):
+        alias = self.root / 'storage alias'
+        alias.symlink_to(self.root / 'storage', target_is_directory=True)
+        self.assertEqual(self.run_launcher(DIRECTORY_OVERRIDE=str(alias)).returncode, 0)
+        arguments = json.loads(self.capture.read_text())['argv']
+        self.assertIn(str(self.port), arguments)
+        self.assertEqual(arguments[arguments.index('--save-root') + 1], str(self.port / 'saves'))
 
-    def test_setup_and_runtime_failures_restore_firmware(self):
+    def test_exit_helper_has_no_gameplay_bindings_and_honors_native_override(self):
+        self.assertEqual(self.run_launcher().returncode, 0)
+        helper = json.loads(self.gpt_capture.read_text())
+        self.assertEqual(helper['argv'], ['node', '-c', str(self.port / 'minimal-game.ini')])
+        self.assertEqual(helper['wrapper'], 'active', 'multiword GPTOKEYB2 is a command line')
+        self.assertEqual(helper['controls'], '[controls]\n')
+        self.assertEqual(self.run_launcher(PMJS_EXIT_HOTKEY='leftstick').returncode, 0)
+        self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_EXIT_HOTKEY'], 'leftstick')
+
+    def test_setup_failures_stop_and_started_helpers_are_cleaned_up(self):
         for setting, status in (('CONTROL_STATUS', 7), ('MODULE_STATUS', 8),
                                 ('CONTROLS_STATUS', 1), ('PLATFORM_STATUS', 1), ('NODE_STATUS', 23)):
             with self.subTest(setting=setting):
-                result = self.run_launcher(**{setting: str(status)})
+                started = setting in ('PLATFORM_STATUS', 'NODE_STATUS')
+                result = self.run_launcher(expect_finish=started, **{setting: str(status)})
                 self.assertEqual(result.returncode, status)
                 self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
-        (self.port / 'gamedata/index.html').unlink()
-        self.assertEqual(self.run_launcher().returncode, 1)
-        self.assertFalse(self.capture.exists())
 
     def test_cleanup_failure_retains_game_failure(self):
         self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)
-        self.assertIn('PortMaster cleanup failed', (self.port / 'log.txt').read_text())
         self.assertEqual(self.run_launcher(FINISH_STATUS='9', NODE_STATUS='23').returncode, 23)
 
     def test_unusable_log_directory_stops_before_startup(self):
         (self.port / 'log.txt').mkdir()
-        self.assertEqual(self.run_launcher().returncode, 1)
+        self.assertEqual(self.run_launcher(expect_finish=False).returncode, 1)
         self.assertFalse(self.capture.exists())
 
-    def test_termination_stops_owned_node_before_firmware_cleanup(self):
-        for ignore_term in ('0', '1'):
-            with self.subTest(ignore_term=ignore_term):
-                self.check_termination(ignore_term)
+    def test_missing_exit_helper_stops_before_runtime(self):
+        self.assertEqual(self.run_launcher(expect_finish=False, GPTOKEYB2='').returncode, 1)
+        self.assertFalse(self.capture.exists())
+        self.assertIn('gptokeyb2 is required', (self.port / 'log.txt').read_text())
 
-    def check_termination(self, ignore_term):
+    def test_exit_helper_stops_runtime_before_firmware_cleanup(self):
+        for stopped in (False, True):
+            with self.subTest(stopped=stopped):
+                self.check_exit_helper(stopped)
+
+    def check_exit_helper(self, stopped):
         read_fd, write_fd = os.pipe()
+        target_fd, target_write_fd = os.pipe()
+        process = None
+        node_pid = None
         try:
             process = subprocess.Popen(['bash', self.launcher],
-                                       env={**self.env, 'READY_FD': str(write_fd), 'IGNORE_TERM': ignore_term},
-                                       pass_fds=(write_fd,), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                       env={**self.env, 'READY_FD': str(write_fd),
+                                            'IGNORE_TERM': '1', 'KILL_TARGET_FD': str(target_fd)},
+                                       pass_fds=(write_fd, target_fd), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             os.close(write_fd)
             write_fd = None
-            self.addCleanup(lambda: process.kill() if process.poll() is None else None)
             self.assertTrue(select.select([read_fd], [], [], 5)[0], 'Node started')
             self.assertEqual(os.read(read_fd, 1), b'1')
             node_pid = json.loads(self.capture.read_text())['pid']
-            process.terminate()
+            if stopped:
+                os.kill(node_pid, signal.SIGSTOP)
+            os.write(target_write_fd, str(node_pid).encode())
             process.communicate(timeout=8)
-            self.assertEqual(process.returncode, 143)
+            self.assertEqual(process.returncode, 128 + signal.SIGKILL)
             with self.assertRaises(ProcessLookupError):
                 os.kill(node_pid, 0)
             self.assertEqual(self.events.read_text().splitlines()[-1], 'finish:/firmware/lib')
         finally:
             os.close(read_fd)
+            os.close(target_fd)
+            os.close(target_write_fd)
             if write_fd is not None:
                 os.close(write_fd)
+            if node_pid:
+                try:
+                    os.kill(node_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
 
 
 if __name__ == '__main__':

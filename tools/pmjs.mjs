@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { detectEngine, preparationInputs } from './game-inspect.mjs';
+import { preparationInputs, resolveGameDirectory as gameDirectory } from './game-inspect.mjs';
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
 import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
 import { measureStartup } from '../runner/startup-metrics.cjs';
@@ -26,6 +26,7 @@ Usage:
       [--config FILE] [--manifest FILE] [--patch FILE ...]
   pmjs BUNDLE [--game DIR]
   pmjs package BUNDLE --runtime DIR --output ZIP [--sources FILE --sources-url URL]
+      [--submission DIR]
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
@@ -58,15 +59,6 @@ function parse(values, names, requireGame = true) {
 
 function hash(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-}
-
-function gameDirectory(location) {
-  const directory = fs.realpathSync(location);
-  if (!fs.statSync(directory).isDirectory()) throw new Error('game must be a directory');
-  if (detectEngine(directory).engine !== 'unknown') return directory;
-  const web = path.join(directory, 'www');
-  if (fs.existsSync(web) && detectEngine(web).engine !== 'unknown') return fs.realpathSync(web);
-  throw new Error(`no RPG Maker MV/MZ game found in ${directory}`);
 }
 
 let verification;
@@ -159,11 +151,12 @@ async function main() {
     const sourceUrlAt = args.indexOf('--sources-url');
     const sourceUrl = sourceUrlAt < 0 ? undefined : args.splice(sourceUrlAt, 2)[1];
     if (sourceUrlAt >= 0 && !sourceUrl) throw new Error('--sources-url requires a URL');
-    const options = parse(args, ['--runtime', '--output', '--sources'], false);
+    const options = parse(args, ['--runtime', '--output', '--sources', '--submission'], false);
     if (!options['--runtime'] || !options['--output']) throw new Error('package requires --runtime and --output');
     const result = spawnSync('python3', [path.join(share, 'tools/portmaster.py'),
       '--stage', options['--runtime'], '--bundle', path.resolve(bundleArgument), '--output', options['--output'],
       ...(options['--sources'] ? ['--sources', options['--sources']] : []),
+      ...(options['--submission'] ? ['--submission', options['--submission']] : []),
       ...(sourceUrl ? ['--sources-url', sourceUrl] : [])],
     { stdio: 'inherit', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
     if (result.error) throw result.error;

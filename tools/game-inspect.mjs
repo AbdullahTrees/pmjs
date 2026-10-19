@@ -83,6 +83,23 @@ export function detectEngine(gameDir) {
   return { engine: 'unknown', engineVersion: null, mvVersion: null };
 }
 
+export function resolveGameDirectory(location) {
+  const directory = fs.realpathSync(location);
+  if (!fs.statSync(directory).isDirectory()) throw new Error('game must be a directory');
+  if (detectEngine(directory).engine !== 'unknown') return directory;
+  const web = path.join(directory, 'www');
+  if (detectEngine(web).engine !== 'unknown') return fs.realpathSync(web);
+
+  // PortMaster game data may contain one nested game, with or without www.
+  const nested = fs.readdirSync(directory, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .flatMap(entry => [path.join(directory, entry.name), path.join(directory, entry.name, 'www')])
+    .filter(candidate => detectEngine(candidate).engine !== 'unknown');
+  if (nested.length === 1) return fs.realpathSync(nested[0]);
+  if (nested.length > 1) throw new Error(`Multiple games found in ${directory}; keep only one game folder`);
+  throw new Error(`no RPG Maker MV/MZ game found in ${directory}`);
+}
+
 export function detectPixiVersion(gameDir) {
   for (const relative of [path.join('js', 'libs', 'pixi.js'), path.join('js', 'pixi.js')]) {
     const file = path.join(gameDir, relative);

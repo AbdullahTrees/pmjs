@@ -11,114 +11,43 @@ import zipfile
 from pathlib import Path
 
 from runtime_artifact import checked_runtime, digest, elf, inventory, static_audit, strip_binary, write_json, source_reference, payload_digest
+from portmaster_metadata import read_submission, stage_submission
 
 
 PORTMASTER_LAUNCHER = '''#!/bin/bash
-entry_dir=$(cd -- "$(dirname -- "$0")" && pwd) || exit 1
-runtime_pid=""
-finish() {
-  local status=$? child watchdog_pid
-  trap - EXIT HUP INT TERM
-  if [ -n "$runtime_pid" ]; then
-    # A completed child PID may have been reused; signal only a current job.
-    for child in $(jobs -p); do
-      if [ "$child" = "$runtime_pid" ]; then
-        kill -TERM "$child" 2>/dev/null || true
-        (
-          trap - EXIT HUP INT TERM
-          delay_pid=""
-          trap '[ -z "$delay_pid" ] || { kill "$delay_pid" 2>/dev/null; wait "$delay_pid" 2>/dev/null; }; exit 0' HUP INT TERM
-          sleep 2 &
-          delay_pid=$!
-          wait "$delay_pid"
-          kill -KILL "$child" 2>/dev/null || true
-        ) &
-        watchdog_pid=$!
-        wait "$child" 2>/dev/null || true
-        kill -TERM "$watchdog_pid" 2>/dev/null || true
-        wait "$watchdog_pid" 2>/dev/null || true
-        break
-      fi
-    done
-    wait "$runtime_pid" 2>/dev/null || true
-  fi
-  if type pm_finish >/dev/null 2>&1 && ! pm_finish; then
-    echo 'PortMaster cleanup failed' >&2
-    [ "$status" -ne 0 ] || status=1
-  fi
-  exit "$status"
-}
-trap finish EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-controlfolder=${PORTMASTER_CONTROL_DIR:-${controlfolder:-}}
-for candidate in "$controlfolder" /PortMaster /opt/system/Tools/PortMaster /opt/tools/PortMaster \\
-  "${XDG_DATA_HOME:-$HOME/.local/share}/PortMaster" /mnt/mmc/MUOS/PortMaster \\
-  /mnt/SDCARD/Persistent/portmaster/PortMaster /roms/ports/PortMaster /roms2/ports/PortMaster; do
-  if [ -f "$candidate/control.txt" ]; then controlfolder=$candidate; break; fi
-done
-[ -f "$controlfolder/control.txt" ] || { echo 'PortMaster control.txt not found' >&2; exit 1; }
-source "$controlfolder/control.txt"
-setup_status=$?
-if [ "$setup_status" -eq 0 ] && [ -f "$controlfolder/mod_${CFW_NAME:-}.txt" ]; then
-  source "$controlfolder/mod_${CFW_NAME}.txt"
-  setup_status=$?
+XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+
+if [ -d "/opt/system/Tools/PortMaster/" ]; then
+  controlfolder="/opt/system/Tools/PortMaster"
+elif [ -d "/opt/tools/PortMaster/" ]; then
+  controlfolder="/opt/tools/PortMaster"
+elif [ -d "$XDG_DATA_HOME/PortMaster/" ]; then
+  controlfolder="$XDG_DATA_HOME/PortMaster"
+else
+  controlfolder="/roms/ports/PortMaster"
 fi
-# PortMaster replaces EXIT traps while loading its helpers.
-trap finish EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-[ "$setup_status" -eq 0 ] || exit "$setup_status"
+
+source "$controlfolder/control.txt" || exit $?
+[ ! -f "$controlfolder/mod_${CFW_NAME}.txt" ] || source "$controlfolder/mod_${CFW_NAME}.txt" || exit $?
 get_controls || exit 1
 
-port="$entry_dir/@ID@"
-[ -z "${directory:-}" ] || port="/${directory#/}/ports/@ID@"
-cd "$port" || exit 1
-exec > "$port/log.txt" 2>&1 || exit 1
-game="$port/gamedata"
-if [ -f "$game/index.html" ]; then
-  :
-elif [ -f "$game/www/index.html" ]; then
-  game="$game/www"
-else
-  found=""
-  for entry in "$game"/*/www/index.html; do
-    [ -f "$entry" ] || continue
-    [ -z "$found" ] || { echo 'Multiple games found in gamedata; keep only one game folder'; exit 1; }
-    found="${entry%/index.html}"
-  done
-  [ -n "$found" ] || { echo 'Missing game: copy the game folder, www folder, or its contents into gamedata'; exit 1; }
-  game="$found"
-fi
-mkdir -p saves || exit 1
-[ -w saves ] || { echo 'Save directory is not writable'; exit 1; }
-[ -x "$port/runtime/bin/pmjs" ] && [ -x "$port/runtime/bin/node" ] || {
-  echo 'PMJS runtime is incomplete' >&2
-  exit 1
-}
+GAMEDIR="/${directory#/}/ports/@ID@"
+BINARY=node
+cd "$GAMEDIR" || exit 1
+GAMEDIR=$(pwd -P)
+exec > "$GAMEDIR/log.txt" 2>&1 || exit 1
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
-if [ "${PMJS_EXIT_HOTKEY+x}" != x ]; then
-  case "${HOTKEY:-}" in
-    l3) export PMJS_EXIT_HOTKEY=leftstick ;;
-    r3) export PMJS_EXIT_HOTKEY=rightstick ;;
-    select|back) export PMJS_EXIT_HOTKEY=back ;;
-    guide) export PMJS_EXIT_HOTKEY=guide ;;
-  esac
-fi
-if type pm_platform_helper >/dev/null 2>&1; then
-  pm_platform_helper "$port/runtime/bin/node" || exit 1
-fi
-(
-  export XDG_CACHE_HOME="$port/.cache"
-  exec "$port/runtime/bin/pmjs" "$port" --game "$game" --save-root "$port/saves" --asset-cache-root "$port/.cache"
-) &
-runtime_pid=$!
-wait "$runtime_pid"
+export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
+
+[ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
+$GPTOKEYB2 "$BINARY" -c "$GAMEDIR/@ID@.ini" &
+pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY" || { pm_finish; exit 1; }
+
+XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
+  --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
 status=$?
-runtime_pid=""
+pm_finish || { [ "$status" -ne 0 ] || status=1; }
 exit "$status"
 '''
 
@@ -217,9 +146,11 @@ def checked_bundle(bundle):
     return descriptor
 
 
-def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), sources=None, sources_url=None):
+def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), sources=None, sources_url=None,
+               submission=None):
     original_info = checked_runtime(stage)
     info = original_info
+    submission_details = read_submission(submission)
     if sources is not None or sources_url is not None:
         if sources is None or sources_url is None:
             raise ValueError('--sources and --sources-url must be provided together')
@@ -238,13 +169,18 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         shutil.copytree(bundle, staged_bundle, symlinks=True)
         descriptor = checked_bundle(staged_bundle)
         if name is None:
-            name = descriptor.get('title')
+            name = submission_details['launcher'][:-3] if submission_details else descriptor.get('title')
         if not isinstance(name, str) or not name.strip() or re.search(r'[/\\\x00-\x1f]', name) or name.strip() in ('.', '..'):
             raise ValueError('Use a nonempty game name without path separators or control characters')
         name = name.strip()
-        identifier = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+        identifier = (submission_details['portname'] if submission_details else
+                      re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-'))
         if not identifier:
             raise ValueError('Game name must contain an ASCII letter or number')
+        if submission_details and name + '.sh' != submission_details['launcher']:
+            raise ValueError('Submission launcher must match package game name')
+        if submission_details and output.name != identifier + '.zip':
+            raise ValueError('Submission ZIP name must match port directory')
         payload.mkdir()
         port = payload / identifier
         staged_bundle.rename(port)
@@ -284,15 +220,19 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
             shutil.copy2(stage / 'share/pmjs/tools' / tool_name, tools / tool_name)
         notices = [stage / 'LICENSE', stage / 'THIRD_PARTY_NOTICES.md',
                    *sorted(file for file in (stage / 'share/pmjs/notices').rglob('*') if file.is_file())]
-        with (runtime / 'LICENSES.txt').open('w') as licenses:
-            for notice in notices:
-                licenses.write(f'===== {notice.relative_to(stage)} =====\n\n{notice.read_text().rstrip()}\n\n')
-            for notice in extra_notices:
-                licenses.write(f'===== {notice.name} =====\n\n{notice.read_text().rstrip()}\n\n')
-            if info.get('dependencySources'):
-                licenses.write('FFmpeg source and build materials: ' + info['dependencySources']['url'] + '\n')
+        if submission_details is None:
+            # Standalone packages retain their historical combined notice file.
+            with (runtime / 'LICENSES.txt').open('w') as licenses:
+                for notice in notices:
+                    licenses.write(f'===== {notice.relative_to(stage)} =====\n\n{notice.read_text().rstrip()}\n\n')
+                for notice in extra_notices:
+                    licenses.write(f'===== {notice.name} =====\n\n{notice.read_text().rstrip()}\n\n')
+                if info.get('dependencySources'):
+                    licenses.write('FFmpeg source and build materials: ' + info['dependencySources']['url'] + '\n')
         if any(file.name.startswith('libav') for file in copied) and not info.get('dependencySources'):
             raise ValueError('Bundled FFmpeg requires a source archive reference; specify --sources and --sources-url')
+        if submission_details is not None:
+            stage_submission(port, submission_details, stage, info, notices, extra_notices)
         package_info = {key: value for key, value in info.items()
                         if key not in ('files', 'compiledInputs', 'configuration', 'environment', 'loader')}
         package_info['source'] = {key: value for key, value in info['source'].items()
@@ -309,6 +249,7 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         write_json(runtime / 'build-info.json', package_info)
         launcher = payload / (name + '.sh')
         launcher.write_text(PORTMASTER_LAUNCHER.replace('@ID@', identifier))
+        (port / (identifier + '.ini')).write_text('[controls]\n')
         launcher.chmod(0o755)
         subprocess.run(['bash', '-n', launcher], check=True)
         epoch = info['source']['sourceDateEpoch']
@@ -329,12 +270,14 @@ def main():
     parser.add_argument('--strip', help='Target-capable strip executable')
     parser.add_argument('--sources', type=Path, help='Corresponding FFmpeg source archive, distributed separately')
     parser.add_argument('--sources-url', help='Permanent HTTP(S) download URL for that archive')
+    parser.add_argument('--submission', type=Path, help='Directory containing authored PortMaster metadata')
     parser.add_argument('--notice', type=Path, action='append', default=[], help='Add a port-specific license notice')
     args = parser.parse_args()
     try:
         portmaster(args.stage.resolve(), args.bundle.resolve(), args.output.resolve(), args.name,
                    args.strip, [file.resolve() for file in args.notice],
-                   args.sources.resolve() if args.sources else None, args.sources_url)
+                   args.sources.resolve() if args.sources else None, args.sources_url,
+                   args.submission.resolve() if args.submission else None)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 
