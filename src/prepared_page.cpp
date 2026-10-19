@@ -10,7 +10,9 @@
 namespace pmjs {
 namespace {
 constexpr std::size_t headerBytes = 32;
+constexpr std::size_t artifactHeaderBytes = 24;
 constexpr std::uint32_t maximumExtent = 2048;
+constexpr std::size_t maximumArtifactBytes = 64U * 1024U * 1024U;
 std::uint32_t checksum(std::span<const std::uint8_t> bytes) {
   return static_cast<std::uint32_t>(crc32(0, bytes.data(), static_cast<uInt>(bytes.size())));
 }
@@ -58,5 +60,39 @@ std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> enco
         reinterpret_cast<char*>(pixels.rgba.data()), static_cast<int>(length), static_cast<int>(decoded)) !=
         static_cast<int>(decoded) || checksum(pixels.rgba) != get(encoded, 24)) return std::nullopt;
   return pixels;
+}
+std::vector<std::uint8_t> compressLz4Artifact(std::span<const std::uint8_t> bytes) {
+  if (bytes.empty() || bytes.size() > maximumArtifactBytes)
+    throw std::runtime_error("invalid prepared artifact size");
+  const auto bound = static_cast<std::size_t>(LZ4_compressBound(static_cast<int>(bytes.size())));
+  std::vector<std::uint8_t> encoded(artifactHeaderBytes + bound);
+  std::memcpy(encoded.data(), "PMA1", 4);
+  put(encoded, 4, 1);
+  put(encoded, 8, static_cast<std::uint32_t>(bytes.size()));
+  const int length = LZ4_compress_default(reinterpret_cast<const char*>(bytes.data()),
+    reinterpret_cast<char*>(encoded.data() + artifactHeaderBytes),
+    static_cast<int>(bytes.size()), static_cast<int>(bound));
+  if (length <= 0) throw std::runtime_error("cannot compress prepared artifact");
+  put(encoded, 12, static_cast<std::uint32_t>(length));
+  put(encoded, 16, checksum(bytes));
+  put(encoded, 20, checksum(std::span(encoded).subspan(artifactHeaderBytes,
+    static_cast<std::size_t>(length))));
+  encoded.resize(artifactHeaderBytes + static_cast<std::size_t>(length));
+  return encoded;
+}
+std::optional<std::vector<std::uint8_t>> decompressLz4Artifact(
+    std::span<const std::uint8_t> encoded, std::size_t maxDecodedBytes) {
+  if (encoded.size() < artifactHeaderBytes || std::memcmp(encoded.data(), "PMA1", 4) ||
+      get(encoded, 4) != 1) return std::nullopt;
+  const auto decoded = get(encoded, 8), length = get(encoded, 12);
+  if (!decoded || decoded > maximumArtifactBytes || decoded > maxDecodedBytes || !length ||
+      length > static_cast<unsigned>(LZ4_compressBound(static_cast<int>(decoded))) ||
+      encoded.size() != artifactHeaderBytes + static_cast<std::size_t>(length) ||
+      checksum(encoded.subspan(artifactHeaderBytes)) != get(encoded, 20)) return std::nullopt;
+  std::vector<std::uint8_t> bytes(decoded);
+  if (LZ4_decompress_safe(reinterpret_cast<const char*>(encoded.data() + artifactHeaderBytes),
+        reinterpret_cast<char*>(bytes.data()), static_cast<int>(length), static_cast<int>(decoded)) !=
+        static_cast<int>(decoded) || checksum(bytes) != get(encoded, 16)) return std::nullopt;
+  return bytes;
 }
 }

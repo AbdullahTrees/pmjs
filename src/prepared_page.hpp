@@ -16,4 +16,7 @@ void writeLz4Page(const std::filesystem::path& path, int width, int height,
                   std::span<const std::uint8_t> rgba);
 std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> encoded,
                                            std::size_t maxDecodedBytes);
+std::vector<std::uint8_t> compressLz4Artifact(std::span<const std::uint8_t> bytes);
+std::optional<std::vector<std::uint8_t>> decompressLz4Artifact(
+    std::span<const std::uint8_t> encoded, std::size_t maxDecodedBytes);
 }

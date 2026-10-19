@@ -9,6 +9,7 @@ import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
 import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
 import { measureStartup } from '../runner/startup-metrics.cjs';
 import { installConsoleLogging } from '../runner/logging.cjs';
+import portPreparation from '../runner/port-preparation.cjs';
 
 const root = path.resolve(process.argv[2]);
 const share = path.join(root, 'share/pmjs');
@@ -24,6 +25,7 @@ Usage:
   pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...] [-- GAME_ARGUMENT ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
       [--config FILE] [--manifest FILE] [--patch FILE ...]
+      [--include-port-assets]
   pmjs BUNDLE [--game DIR]
   pmjs package BUNDLE --runtime DIR --output ZIP [--sources FILE --sources-url URL]
       [--submission DIR]
@@ -42,15 +44,17 @@ function invoke(file, arguments_) {
 }
 
 function parse(values, names, requireGame = true) {
-  const result = { adapters: [] };
+  const result = { adapters: [], portPreparers: [] };
   for (let index = 0; index < values.length; index += 2) {
     const key = values[index];
-    if (!names.includes(key) || (key !== '--adapter' && key !== '--patch' && result[key]) ||
+    if (!names.includes(key) || (key !== '--adapter' && key !== '--patch' &&
+        key !== '--port-preparer' && result[key]) ||
         !values[index + 1] || values[index + 1].startsWith('--')) {
       throw new Error(`invalid argument: ${key}`);
     }
     const value = path.resolve(values[index + 1]);
     if (key === '--adapter' || key === '--patch') result.adapters.push(value);
+    else if (key === '--port-preparer') result.portPreparers.push(value);
     else result[key] = value;
   }
   if (requireGame && !result['--game']) throw new Error('--game is required');
@@ -67,6 +71,28 @@ const runtimeIdentity = () => measureStartup('runtime-identity', () =>
   computeRuntimeIdentity(share, verifiedHash), verification?.stats);
 const gameInputs = (game, config, manifest, adapters) => measureStartup('game-inputs', () =>
   preparationInputs(game, config, manifest, adapters, verifiedHash), verification?.stats);
+
+function preparePortArtifacts({ game, bundle, adapters, cacheRoot }) {
+  const descriptors = bundle?.descriptor.portPreparation;
+  const processors = bundle ? portPreparation.discoverBundledProcessors(bundle.root) :
+    portPreparation.discoverAdapterProcessors(adapters);
+  if (!processors.length && !descriptors?.length) return new Map();
+  let assets;
+  try { assets = require(path.join(root, 'lib/pmjs_native.node')).assets; }
+  catch (error) {
+    console.warn(`[pmjs] port preparation codec unavailable: ${error.message}; original game path retained`);
+    return new Map();
+  }
+  if (typeof assets.compressPortArtifact !== 'function' ||
+      typeof assets.decompressPortArtifact !== 'function') {
+    console.warn('[pmjs] port preparation requires the generic LZ4 artifact codec; original game path retained');
+    return new Map();
+  }
+  return portPreparation.prepareForRun({ gameRoot: game, bundleRoot: bundle?.root,
+    cacheRoot, descriptors, adapters,
+    compressArtifact: assets.compressPortArtifact,
+    decompressArtifact: assets.decompressPortArtifact });
+}
 
 function matches(record, context) {
   try {
@@ -128,17 +154,20 @@ async function main() {
     const gameArgument = args.shift();
     if (!gameArgument || gameArgument.startsWith('--')) throw new Error('bundle requires a game directory');
     const includeAssets = args.includes('--include-assets');
+    const includePortAssets = args.includes('--include-port-assets');
     const index = !args.includes('--no-index');
     if (args.filter(value => value === '--include-assets').length > 1 ||
+        args.filter(value => value === '--include-port-assets').length > 1 ||
         args.filter(value => value === '--no-index').length > 1) throw new Error('duplicate bundle option');
-    const options = parse(args.filter(value => value !== '--include-assets' && value !== '--no-index'),
-      ['--output', '--config', '--manifest', '--patch', '--adapter'], false);
+    const options = parse(args.filter(value => !['--include-assets', '--include-port-assets', '--no-index'].includes(value)),
+      ['--output', '--config', '--manifest', '--patch', '--adapter', '--port-preparer'], false);
     if (!options['--output']) throw new Error('--output is required');
     const game = gameDirectory(gameArgument);
     if (includeAssets) console.warn('[pmjs] Generated pages can contain game artwork. Share this bundle only when allowed.');
+    if (includePortAssets) console.warn('[pmjs] Port-generated data may reproduce game content. Confirm redistribution rights.');
     await createBundle({ root, share, game, output: options['--output'], config: options['--config'],
       manifest: options['--manifest'], adapters: options.adapters, runtimeIdentity: runtimeIdentity(),
-      index, includeAssets });
+      index, includeAssets, portProcessors: options.portPreparers, includePortAssets });
     console.log(`Bundle created: ${options['--output']}`);
     return;
   }
@@ -196,6 +225,8 @@ async function main() {
   const game = gameDirectory(options['--game']);
   const id = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   const state = options['--state'] || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmjs', id);
+  const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
+  const portCacheRoot = options['--asset-cache-root'] || path.join(saveRoot, 'asset-cache');
   const prepared = path.join(state, 'prepared.json');
   let previous;
   try { previous = JSON.parse(fs.readFileSync(prepared, 'utf8')); } catch { previous = null; }
@@ -217,10 +248,14 @@ async function main() {
   }
   let record = command === 'prepare' || !previous || !matches(previous, context) ? prepare(context) : previous;
   verification.save();
-  if (command === 'prepare') { console.log(`Prepared ${game}`); return; }
-  const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
+  if (command === 'prepare') {
+    preparePortArtifacts({ game, bundle, adapters, cacheRoot: portCacheRoot });
+    console.log(`Prepared ${game}`); return;
+  }
   const { runSupervised } = await import('../runner/supervisor.cjs');
   const result = await runSupervised(() => {
+    const portArtifacts = Object.fromEntries(preparePortArtifacts({
+      game, bundle, adapters, cacheRoot: portCacheRoot }));
     context.inputs = gameInputs(game, config, manifest, adapters);
     context.runtimeIdentity = runtimeIdentity();
     if (bundle) context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
@@ -229,7 +264,8 @@ async function main() {
     verification.save();
     return { addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
     bootstrap: path.join(state, record.bootstrap), saveRoot, config: record.config || undefined,
-    assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'], guestArguments };
+    assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'],
+    portArtifacts, guestArguments };
   });
   if (result.signal) process.kill(process.pid, result.signal);
   else process.exitCode = result.code;

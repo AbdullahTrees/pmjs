@@ -67,7 +67,7 @@ export function readBundle(directory) {
 }
 
 export async function createBundle({ root, share, game, output, config, manifest, adapters = [],
-  runtimeIdentity, index = true, includeAssets = false }) {
+  runtimeIdentity, index = true, includeAssets = false, portProcessors = [], includePortAssets = false }) {
   if (includeAssets && !index) throw new Error('--include-assets requires an asset index');
   output = path.resolve(output);
   if (fs.existsSync(output) && (fs.lstatSync(output).isSymbolicLink() ||
@@ -131,6 +131,19 @@ export async function createBundle({ root, share, game, output, config, manifest
     const result = spawnSync(process.execPath, args, { stdio: 'inherit' });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`bootstrap generation failed (${result.signal || result.status})`);
+    const { buildPortPreparation } = require(path.join(share, 'runner/port-preparation.cjs'));
+    let addon = null;
+    if (includePortAssets) {
+      try { addon = require(path.join(root, 'lib/pmjs_native.node')); }
+      catch (error) {
+        console.warn(`[pmjs] Port assets not generated because the LZ4 codec is unavailable: ${error.message}`);
+      }
+    }
+    const includePreparedPortAssets = includePortAssets &&
+      typeof addon?.assets?.compressPortArtifact === 'function';
+    const portPreparation = buildPortPreparation({ gameRoot: game, bundleRoot: stage,
+      processors: portProcessors, adapters, include: includePreparedPortAssets,
+      compressArtifact: addon?.assets?.compressPortArtifact });
     if (index) {
       console.log('[pmjs] Preparing asset index; this may take a few minutes for a large game.');
       const { generateAssetIndex } = require(path.join(share, 'runner/asset-index.cjs'));
@@ -154,7 +167,8 @@ export async function createBundle({ root, share, game, output, config, manifest
       config: configName, manifest: manifestName, patches: patchNames,
       assetIndex: index ? 'asset-index.json' : null,
       assetIndexSha256: index ? sha256(path.join(stage, 'asset-index.json')) : null,
-      assets: includeAssets ? 'assets' : null };
+      assets: includeAssets ? 'assets' : null,
+      ...(portPreparation.length ? { portPreparation } : {}) };
     fs.writeFileSync(path.join(stage, 'pmjs.json'), JSON.stringify(descriptor, null, 2) + '\n');
     if (fs.existsSync(output)) fs.rmdirSync(output);
     fs.renameSync(stage, output);

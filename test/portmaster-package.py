@@ -364,6 +364,27 @@ class PortMasterPackage(unittest.TestCase):
                     portmaster.portmaster(self.stage, bundle, self.output)
                 self.assertFalse(self.output.exists())
 
+    def test_bundle_refreshes_stale_preparation_manifest_from_sidecars(self):
+        bundle = self.root / 'stale-preparation-bundle'
+        shutil.copytree(self.bundle, bundle)
+        processor_dir = bundle / 'preparation' / 'fixture-processor'
+        processor_dir.mkdir(parents=True)
+        processor = processor_dir / 'fixture-processor.pmjs-processor.cjs'
+        processor.write_text('module.exports = {};')
+        stale_output = bundle / 'assets/ports/fixture-processor/old.pma1'
+        stale_output.parent.mkdir(parents=True)
+        stale_output.write_bytes(b'old generated output')
+        descriptor_path = bundle / 'pmjs.json'
+        descriptor = json.loads(descriptor_path.read_text())
+        descriptor['portPreparation'] = [{'id': 'removed-processor'}]
+        descriptor_path.write_text(json.dumps(descriptor))
+
+        refreshed = portmaster.checked_bundle(bundle)
+
+        self.assertEqual([item['id'] for item in refreshed['portPreparation']], ['fixture-processor'])
+        self.assertEqual(refreshed['portPreparation'][0]['outputs'], [])
+        self.assertFalse(stale_output.exists())
+
     def test_bundle_rejects_symlinks_before_reading_descriptor(self):
         bundle = self.create_bundle()
         for name in ('pmjs.json', 'bootstrap.js', 'gamedata'):

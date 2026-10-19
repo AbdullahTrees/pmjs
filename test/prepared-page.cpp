@@ -22,6 +22,18 @@ int main() {
   const auto root = std::filesystem::temp_directory_path() / ("pmjs-lz4-test-" + std::to_string(getpid()));
   std::filesystem::create_directories(root);
   try {
+    const std::vector<std::uint8_t> artifact{'P','M','C','O','L','1',0,0,1,2,3,4,5,6,7,8};
+    auto packedArtifact = pmjs::compressLz4Artifact(artifact);
+    require(pmjs::decompressLz4Artifact(packedArtifact, artifact.size()) == artifact);
+    require(!pmjs::decompressLz4Artifact(packedArtifact, artifact.size() - 1));
+    auto brokenArtifact = packedArtifact; brokenArtifact.back() ^= 0x80;
+    require(!pmjs::decompressLz4Artifact(brokenArtifact, artifact.size()));
+    brokenArtifact = packedArtifact; brokenArtifact.push_back(0);
+    require(!pmjs::decompressLz4Artifact(brokenArtifact, artifact.size()));
+    bool refusedArtifact = false;
+    try { pmjs::compressLz4Artifact({}); }
+    catch (const std::runtime_error&) { refusedArtifact = true; }
+    require(refusedArtifact);
     for (const auto [width, height] : {std::pair{1,1}, {37,19}, {2048,3}, {2048,2048}}) {
       std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * height * 4);
       std::uint32_t state = 0x12345678;

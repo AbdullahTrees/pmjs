@@ -1,5 +1,6 @@
 #include "node_addon_internal.hpp"
 #include "asset_processor.hpp"
+#include "prepared_page.hpp"
 #include "tile_assets.hpp"
 
 #include <cmath>
@@ -18,6 +19,44 @@ struct PreparationLock {
   ~PreparationLock() { release(); }
 };
 constexpr napi_type_tag preparationLockTag{0x83fd418168e74ea4ULL, 0xa105b95063b2803eULL};
+std::span<const std::uint8_t> artifactBytes(napi_env env, napi_value value) {
+  bool typed = false;
+  check(env, napi_is_typedarray(env, value, &typed), "invalid prepared artifact bytes");
+  if (!typed) throw std::invalid_argument("prepared artifact must be a Uint8Array");
+  napi_typedarray_type type;
+  std::size_t length = 0, offset = 0;
+  void* data = nullptr;
+  napi_value buffer;
+  check(env, napi_get_typedarray_info(env, value, &type, &length, &data, &buffer, &offset),
+    "invalid prepared artifact bytes");
+  if ((type != napi_uint8_array && type != napi_uint8_clamped_array) || !data)
+    throw std::invalid_argument("prepared artifact must be a Uint8Array");
+  return {static_cast<const std::uint8_t*>(data), length};
+}
+napi_value byteBuffer(napi_env env, std::span<const std::uint8_t> bytes) {
+  napi_value result;
+  check(env, napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &result),
+    "cannot create prepared artifact buffer");
+  return result;
+}
+napi_value compressPortArtifact(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  return byteBuffer(env, compressLz4Artifact(artifactBytes(env, args.at(0))));
+} catch (const std::exception& error) {
+  napi_throw_range_error(env, nullptr, error.what()); return nullptr;
+}
+napi_value decompressPortArtifact(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 2);
+  const auto requestedLimit = args.size() > 1 ? asNumber(env, args[1]) : 64.0 * 1024.0 * 1024.0;
+  if (!std::isfinite(requestedLimit) || requestedLimit < 0 ||
+      requestedLimit > 64.0 * 1024.0 * 1024.0 || std::floor(requestedLimit) != requestedLimit)
+    throw std::invalid_argument("invalid prepared artifact size limit");
+  const auto limit = static_cast<std::size_t>(requestedLimit);
+  const auto decoded = decompressLz4Artifact(artifactBytes(env, args.at(0)), limit);
+  return decoded ? byteBuffer(env, *decoded) : null(env);
+} catch (const std::exception& error) {
+  napi_throw_range_error(env, nullptr, error.what()); return nullptr;
+}
 napi_value tryAcquirePreparationLock(napi_env env, napi_callback_info info) try {
   const auto args = arguments(env, info, 1);
   const auto file = std::filesystem::path(asString(env, args.at(0))) / ".prepare.lock";
@@ -480,6 +519,8 @@ napi_value tileSlot(napi_env env, napi_callback_info info) try {
 }
 void registerAssetMethods(napi_env env, napi_value exports) {
   const auto assets = property(env, exports, "assets");
+  method(env, assets, "compressPortArtifact", compressPortArtifact);
+  method(env, assets, "decompressPortArtifact", decompressPortArtifact);
   method(env, assets, "tryAcquirePreparationLock", tryAcquirePreparationLock);
   method(env, assets, "releasePreparationLock", releasePreparationLock);
   method(env, assets, "consumePreparationInvalidations", consumePreparationInvalidations);

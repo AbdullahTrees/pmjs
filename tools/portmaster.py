@@ -95,6 +95,96 @@ def checked_bundle(bundle):
     if not isinstance(patches, list):
         raise ValueError('Bundle patches must be an array')
     expected = {'pmjs.json'}
+    port_records = descriptor.get('portPreparation', [])
+    preparation_root = bundle / 'preparation'
+    discovered = []
+    if preparation_root.exists():
+        for processor_file in sorted(preparation_root.rglob('*.pmjs-processor.cjs')):
+            ident = processor_file.parent.name
+            if not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', ident) or \
+               processor_file.name != f'{ident}.pmjs-processor.cjs':
+                raise ValueError('Invalid PMJS processor sidecar name')
+            relative_processor = processor_file.relative_to(bundle).as_posix()
+            packaged_files = []
+            for helper in sorted(processor_file.parent.glob('*.cjs')):
+                if helper == processor_file:
+                    continue
+                packaged_files.append({'path': helper.relative_to(bundle).as_posix(),
+                                       'sha256': digest(helper)})
+            discovered.append({'id': ident, 'processor': relative_processor,
+                               'processorSha256': digest(processor_file),
+                               'files': packaged_files, 'outputs': []})
+    by_id = {record['id']: record for record in discovered}
+    existing = {record.get('id'): record for record in port_records
+                if isinstance(record, dict)} if isinstance(port_records, list) else {}
+    stale = set(existing) != set(by_id) or any(
+        existing[ident].get('processor') != current['processor'] or
+        existing[ident].get('processorSha256') != current['processorSha256'] or
+        existing[ident].get('files', []) != current['files']
+        for ident, current in by_id.items() if ident in existing)
+    if stale:
+        # A stale manifest is only a lost optimization. Rebuild the sidecar
+        # inventory and let the device discover game-specific outputs.
+        shutil.rmtree(bundle / 'assets' / 'ports', ignore_errors=True)
+        port_records = discovered
+        descriptor['portPreparation'] = discovered
+        (bundle / 'pmjs.json').write_text(json.dumps(descriptor, indent=2) + '\n')
+        actual = {file.relative_to(bundle).as_posix()
+                  for file in bundle.rglob('*') if file.is_file()}
+    if not isinstance(port_records, list) or len(port_records) > 32:
+        raise ValueError('Invalid port preparation list')
+    seen_ports = set()
+    for port in port_records:
+        ident = port.get('id') if isinstance(port, dict) else None
+        if not isinstance(ident, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', ident) or ident in seen_ports:
+            raise ValueError('Invalid or duplicate port preparation ID')
+        seen_ports.add(ident)
+        if port.get('version') is not None and (not isinstance(port.get('version'), int) or port['version'] < 1):
+            raise ValueError('Invalid port preparation version')
+        processor = port.get('processor')
+        if processor != f'preparation/{ident}/{ident}.pmjs-processor.cjs' or not re.fullmatch(r'[a-f0-9]{64}', str(port.get('processorSha256'))):
+            raise ValueError('Invalid port processor path/hash')
+        expected.add(processor)
+        if digest(bundle / processor) != port['processorSha256']:
+            raise ValueError('Port processor checksum differs from pmjs.json')
+        packaged_files = port.get('files', [])
+        if not isinstance(packaged_files, list) or len(packaged_files) > 32:
+            raise ValueError('Invalid port processor file list')
+        expected_processor_files = {processor}
+        for packaged in packaged_files:
+            packaged_path = packaged.get('path') if isinstance(packaged, dict) else None
+            if not isinstance(packaged_path, str) or '\\' in packaged_path or not packaged_path or \
+               any(part in ('', '.', '..') for part in packaged_path.split('/')) or \
+               not packaged_path.startswith(f'preparation/{ident}/') or \
+               not packaged_path.endswith('.cjs') or packaged_path in expected_processor_files:
+                raise ValueError('Invalid port processor file')
+            expected_processor_files.add(packaged_path)
+            if not re.fullmatch(r'[a-f0-9]{64}', str(packaged.get('sha256'))):
+                raise ValueError('Invalid port processor file checksum')
+            expected.add(packaged_path)
+            if digest(bundle / packaged_path) != packaged['sha256']:
+                raise ValueError('Port processor file checksum differs from pmjs.json')
+        outputs = port.get('outputs')
+        if not isinstance(outputs, list) or len(outputs) > 4096:
+            raise ValueError('Invalid port output list')
+        seen_outputs = set()
+        for item in outputs:
+            oid = item.get('id') if isinstance(item, dict) else None
+            if not isinstance(oid, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,63}', oid) or oid in seen_outputs:
+                raise ValueError('Invalid or duplicate port output ID')
+            seen_outputs.add(oid)
+            source = item.get('source')
+            if not isinstance(source, str) or '\\' in source or not source or any(part in ('', '.', '..') for part in source.split('/')):
+                raise ValueError('Invalid port source path')
+            if not re.fullmatch(r'[a-f0-9]{64}', str(item.get('sourceSha256'))):
+                raise ValueError('Invalid port source checksum')
+            if 'file' in item or 'sha256' in item:
+                output_name = f'assets/ports/{ident}/{oid}.pma1'
+                if item.get('file') != output_name or not re.fullmatch(r'[a-f0-9]{64}', str(item.get('sha256'))):
+                    raise ValueError('Invalid port generated data reference')
+                expected.add(output_name)
+                if (bundle / output_name).stat().st_size > 65 * 1024 * 1024 or digest(bundle / output_name) != item['sha256']:
+                    raise ValueError('Port output checksum differs from pmjs.json')
     for name in (descriptor.get('bootstrap'), descriptor.get('config'), descriptor.get('manifest'),
                  *patches, descriptor.get('assetIndex')):
         if name is not None:

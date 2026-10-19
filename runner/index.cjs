@@ -1,6 +1,7 @@
 'use strict';
 
 const { createSubprocesses } = require('./subprocess.cjs');
+const { reader: portArtifactReader } = require('./port-preparation.cjs');
 
 const { prepareMaps } = require('./map-preparation.cjs');
 
@@ -572,6 +573,9 @@ async function run(input) {
         return physical;
       }, openExternal: url => native.runtime.openExternal(url) });
     native.runtime.childProcess = subprocesses.api;
+    // Guest adapters may request only declared, validated port assets.
+    native.assets.portArtifact = portArtifactReader(options.portArtifacts || {},
+      native.assets.decompressPortArtifact);
     const hostSetTimeout = hostTimers.setTimeout;
     const hostSetImmediate = hostTimers.setImmediate;
     native.runtime.scheduling = { ...hostTimers };
