@@ -68,6 +68,21 @@ int main() try {
   require(!vfs.exists("data/Broken.alias"),
           "broken symlink was exposed");
 
+  TemporaryDirectory scanFixture("scan");
+  const auto scanRoot = scanFixture.path() / "game";
+  std::filesystem::create_directories(scanRoot / "nested");
+  std::filesystem::create_directories(scanFixture.path() / "outside");
+  write(scanFixture.path() / "outside/hidden.txt", "outside");
+  for (int i = 0; i < 128; ++i) write(scanRoot / "nested" / (std::to_string(i) + ".txt"), "data");
+  std::filesystem::create_directory_symlink("nested", scanRoot / "alias");
+  std::filesystem::create_directory_symlink(scanFixture.path() / "outside", scanRoot / "escaped");
+  pmjs::Vfs scanned(scanRoot);
+  require(scanned.isDirectory("alias") && !scanned.exists("alias/0.txt"), "directory symlink traversal changed");
+  require(!scanned.exists("escaped") && !scanned.exists("escaped/hidden.txt"), "directory symlink escaped containment");
+  require(scanned.scanStats().paths == 131 && scanned.scanStats().canonicalizations == 4,
+          "ordinary files must not require individual canonicalization");
+  require(scanned.readText("NESTED/127.TXT") == "data", "scan lost an ordinary file");
+
   const auto overlay = fixture.path() / "overlay";
   std::filesystem::create_directories(overlay / "files" / "data");
   std::filesystem::create_directories(overlay / "deleted");
@@ -107,6 +122,10 @@ int main() try {
   require(!vfs.exists("nested/child/new.txt") && vfs.readText("moved/child/new.txt") == "nested",
           "incremental directory rename left stale descendants");
   require(!snapshot.exists("moved"), "directory publication mutated a retained snapshot");
+
+  std::filesystem::create_directory_symlink(scanFixture.path() / "outside", overlay / "files/escaped");
+  vfs.updateWritableOverlay({"escaped/hidden.txt"}, {});
+  require(!vfs.exists("escaped/hidden.txt"), "incremental scan trusted an escaped parent");
   write(overlay / "deleted" / std::string(64, 'b'), "data");
   std::filesystem::remove_all(overlay / "files" / "data");
   vfs.updateWritableOverlay({"data"}, {std::string(64, 'b')});

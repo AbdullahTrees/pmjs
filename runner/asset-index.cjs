@@ -67,11 +67,13 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
   const nativeAddon = require(path.join(root, 'lib/pmjs_native.node'));
   const cacheRoot = path.join(output, '.preparation');
   if (!options.assetPreparation.enabled) {
-    const empty = { schema: 1, kind: 'pmjs-asset-index',
+    const empty = { schema: 2, kind: 'pmjs-asset-index',
+      sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
+      pageCodec: options.assetPreparation.pageCodec,
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
-      recipesIdentity: identity(options.assetPreparation.recipes), images: [], maps: null };
+      recipesIdentity: identity(options.assetPreparation.recipes), images: [], negativeHints: [], maps: null };
     fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(empty) + '\n');
     return { images: 0, preparedImages: 0, maps: 0, warnings: [], warningCount: 0 };
   }
@@ -121,12 +123,16 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
       });
       return { ...decision, outputs };
     });
-    const index = { schema: 1, kind: 'pmjs-asset-index',
+    const index = { schema: 2, kind: 'pmjs-asset-index',
+      sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
+      pageCodec: options.assetPreparation.pageCodec,
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
       recipesIdentity: identity(options.assetPreparation.recipes),
-      images: imageRecords, maps: maps && portableMaps(maps, cacheRoot, includeAssets, output) };
+      images: imageRecords, negativeHints: imageRecords.filter(record => record.descriptor === null &&
+        record.recipe === null && record.encryptionSettingsSha256 === null && record.source.endsWith('.png'))
+        .map(record => record.source), maps: maps && portableMaps(maps, cacheRoot, includeAssets, output) };
     fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(index) + '\n');
     return { images: images.total, preparedImages: images.prepared,
       maps: maps?.selected || 0, warnings: warnings.slice(0, 3), warningCount: warnings.length };
@@ -139,14 +145,23 @@ function loadAssetIndex(file, native, options) {
   try {
     if (!file || fs.statSync(file).size > 64 * 1024 * 1024) return null;
     const index = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (index.schema !== 1 || index.kind !== 'pmjs-asset-index' ||
-        JSON.stringify(index.processor) !== JSON.stringify(native.assets.preparationVersion) ||
-        index.tileProcessor !== native.assets.tilePreparationVersion ||
-        index.configSha256 !== (options.config ? hash(options.config) : null) ||
-        index.width !== options.width || index.height !== options.height ||
-        index.recipesIdentity !== identity(options.assetPreparation.recipes) ||
-        !Array.isArray(index.images) || index.images.length > 100000) return null;
-    return index;
+    if (![1, 2].includes(index.schema) || index.kind !== 'pmjs-asset-index') return null;
+    const legacy = index.schema === 1;
+    const imageCompatible = (legacy || index.sections?.images === 1) &&
+      Array.isArray(index.images) && index.images.length <= 100000 &&
+      JSON.stringify(index.processor) === JSON.stringify(native.assets.preparationVersion) &&
+      index.recipesIdentity === identity(options.assetPreparation.recipes) &&
+      (legacy || index.pageCodec === options.assetPreparation.pageCodec);
+    const compilationCompatible = (legacy || index.sections?.mapCompilation === 1) &&
+      index.maps?.compiler === COMPILER_VERSION;
+    const tilesCompatible = (legacy || index.sections?.tileOutputs === 1) &&
+      index.tileProcessor === native.assets.tilePreparationVersion &&
+      index.width === options.width && index.height === options.height;
+    return { ...index, images: imageCompatible ? index.images.filter(record => record && typeof record.source === 'string') : [],
+      negativeHints: !legacy && index.sections?.negativeHints === 1 &&
+        Array.isArray(index.negativeHints) && index.negativeHints.length <= 100000 ? index.negativeHints : [],
+      maps: compilationCompatible ? { ...index.maps,
+        entries: tilesCompatible && Array.isArray(index.maps.entries) ? index.maps.entries : [] } : null };
   } catch { return null; }
 }
 

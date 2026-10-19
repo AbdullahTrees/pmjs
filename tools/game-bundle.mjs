@@ -12,8 +12,8 @@ function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-export function gameDeclarations(game) {
-  return Object.fromEntries(Object.entries(preparationInputs(game)).map(([file, digest]) =>
+export function gameDeclarations(game, hash) {
+  return Object.fromEntries(Object.entries(preparationInputs(game, null, null, [], hash)).map(([file, digest]) =>
     [path.relative(game, file).split(path.sep).join('/'), digest]));
 }
 

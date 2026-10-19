@@ -26,11 +26,12 @@ async function preparationFiles(directory, verifyHashes = false) {
     }
   } catch (_) { /* Missing or interrupted receipts require full verification. */ }
   const files = {}, known = new Map(), jsonValues = new Map();
-  const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, jsonReads: 0, jsonReuses: 0 };
+  const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, jsonReads: 0, jsonReuses: 0,
+    copiedFiles: 0, copiedBytes: 0, publicationReuses: 0, hashedBytesByCategory: {} };
   function identity(stat) {
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':');
   }
-  async function inspect(file) {
+  async function inspect(file, category = 'other') {
     file = path.resolve(file);
     const before = await fsp.lstat(file, { bigint: true });
     if (!before.isFile()) throw new Error('preparation input is not a regular file');
@@ -51,6 +52,7 @@ async function preparationFiles(directory, verifyHashes = false) {
       }
       checksum = hasher.digest('hex');
       ++stats.hashedFiles; stats.hashedBytes += Number(before.size);
+      stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + Number(before.size);
       const after = await fsp.lstat(file, { bigint: true });
       if (!after.isFile() || identity(after) !== signature) throw new Error('preparation input changed while verifying');
     }
@@ -58,7 +60,60 @@ async function preparationFiles(directory, verifyHashes = false) {
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, reused, size: Number(before.size), header };
   }
-  async function hash(file) { return (await inspect(file)).hash; }
+  async function hash(file, category) { return (await inspect(file, category)).hash; }
+  async function copyVerified(source, target, expectedHash, category = 'import') {
+    if (!HASH.test(expectedHash)) throw new Error('invalid expected copy checksum');
+    const input = await fsp.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let output, created = false;
+    try {
+      const before = await input.stat({ bigint: true });
+      if (!before.isFile()) throw new Error('copy input is not a regular file');
+      output = await fsp.open(target, 'wx'); created = true;
+      const hasher = crypto.createHash('sha256'), buffer = Buffer.alloc(256 * 1024);
+      let header = Buffer.alloc(0), size = 0;
+      for (;;) {
+        const { bytesRead } = await input.read(buffer, 0, buffer.length, null);
+        if (!bytesRead) break;
+        const chunk = buffer.subarray(0, bytesRead);
+        hasher.update(chunk); size += bytesRead;
+        if (header.length < 32) header = Buffer.concat([header, chunk.subarray(0, 32 - header.length)]);
+        await output.writeFile(chunk);
+      }
+      ++stats.hashedFiles; stats.hashedBytes += size;
+      stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + size;
+      const checksum = hasher.digest('hex');
+      if (checksum !== expectedHash) throw new Error('copied input checksum differs');
+      if (identity(before) !== identity(await input.stat({ bigint: true })) ||
+          identity(before) !== identity(await fsp.lstat(source, { bigint: true })))
+        throw new Error('copy input changed while copying');
+      const written = await output.stat({ bigint: true });
+      if (!written.isFile() || Number(written.size) !== size ||
+          identity(written) !== identity(await fsp.lstat(target, { bigint: true })))
+        throw new Error('copy output changed while copying');
+      const signature = identity(written);
+      files[path.resolve(target)] = { identity: signature, hash: checksum };
+      known.set(signature, { hash: checksum, header });
+      ++stats.copiedFiles; stats.copiedBytes += size;
+      return { hash: checksum, header, size };
+    } catch (error) {
+      if (created) await fsp.rm(target, { force: true });
+      throw error;
+    } finally { try { await output?.close(); } finally { await input.close(); } }
+  }
+  async function publish(source, target) {
+    const from = path.resolve(source), to = path.resolve(target), receipt = files[from];
+    const before = receipt && await fsp.lstat(from, { bigint: true }).catch(() => null);
+    await fsp.rename(source, target);
+    // Directory renames preserve child identities, so inspect can reuse them directly.
+    if (!before?.isFile() || identity(before) !== receipt.identity) return;
+    const after = await fsp.lstat(to, { bigint: true });
+    // A directly renamed file may acquire a new ctime; retain the other identity fields.
+    if (!after.isFile() || ['dev', 'ino', 'size', 'mtimeNs', 'birthtimeNs'].some(key => before[key] !== after[key])) return;
+    const signature = identity(after);
+    files[to] = { ...receipt, identity: signature };
+    known.set(signature, known.get(receipt.identity) || { hash: receipt.hash });
+    ++stats.publicationReuses;
+  }
   async function validatedJson(file, validate) {
     file = path.resolve(file);
     const before = await fsp.lstat(file, { bigint: true });
@@ -87,7 +142,7 @@ async function preparationFiles(directory, verifyHashes = false) {
       await fsp.rename(temporary, index);
     } finally { await fsp.rm(temporary, { force: true }); }
   }
-  return { hash, inspect, validatedJson, save, stats };
+  return { hash, inspect, copyVerified, publish, validatedJson, save, stats };
 }
 
 module.exports = { preparationFiles, writeJson };

@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <system_error>
 #include <limits>
+#include <chrono>
 
 namespace pmjs {
 
@@ -66,23 +67,44 @@ std::unique_ptr<FileReader> Vfs::openRead(const std::string& path, std::uint64_t
 }
 
 Vfs::Vfs(std::filesystem::path root) : root_(std::filesystem::canonical(root)) {
-  const auto options = std::filesystem::directory_options::skip_permission_denied;
-  for (const auto& entry :
-       std::filesystem::recursive_directory_iterator(root_, options)) {
-    indexPath(entry.path());
+  const auto started = std::chrono::steady_clock::now();
+  scanDirectory(root_);
+  scanStats_.durationMs = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+}
+
+void Vfs::scanDirectory(const std::filesystem::path& path) {
+  std::error_code error;
+  ++scanStats_.canonicalizations;
+  const auto target = std::filesystem::canonical(path, error);
+  if (error || !isContainedBy(root_, target)) return;
+  ++scanStats_.directories;
+  for (const auto& entry : std::filesystem::directory_iterator(
+         path, std::filesystem::directory_options::skip_permission_denied)) {
+    ++scanStats_.paths;
+    const auto status = entry.symlink_status(error);
+    if (error) continue;
+    if (std::filesystem::is_symlink(status)) indexPath(entry.path());
+    else {
+      indexEntry(entry.path(), status);
+      if (std::filesystem::is_directory(status)) scanDirectory(entry.path());
+    }
   }
 }
 
 void Vfs::indexPath(const std::filesystem::path& path) {
-  const auto relative = path.lexically_relative(root_).generic_string();
-  const auto key = normalize(relative);
-  if (!key) return;
-
   std::error_code error;
+  ++scanStats_.canonicalizations;
   const auto target = std::filesystem::canonical(path, error);
   if (error || !isContainedBy(root_, target)) return;
   const auto status = std::filesystem::status(path, error);
   if (error) return;
+  indexEntry(path, status);
+}
+
+void Vfs::indexEntry(const std::filesystem::path& path, std::filesystem::file_status status) {
+  const auto key = normalize(path.lexically_relative(root_).generic_string());
+  if (!key) return;
 
   auto insert = [&](auto& entries) {
     const auto logicalPath = path.lexically_normal();

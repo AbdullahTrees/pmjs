@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { discoverAchievements } from './achievement-discovery.mjs';
 
-export function preparationInputs(gameDir, config, manifest, adapters = []) {
+export function preparationInputs(gameDir, config, manifest, adapters = [], hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')) {
   const candidates = ['js/rpg_core.js', 'js/rpg_managers.js', 'js/rmmz_core.js',
     'js/libs/pixi.js', 'js/pixi.js', 'js/libs/pixi-tilemap.js', 'js/pixi-tilemap.js', 'js/plugins.js',
     'lib/steam_settings/achievements.json'];
@@ -15,7 +15,7 @@ export function preparationInputs(gameDir, config, manifest, adapters = []) {
   if (manifest) files.push(manifest);
   files.push(...adapters);
   return Object.fromEntries(files.map(file => [file, fs.existsSync(file) ?
-    crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null]));
+    hash(file) : null]));
 }
 
 export function prepareGameConfig(gameDir, config = {}) {

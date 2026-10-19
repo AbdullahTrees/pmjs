@@ -28,6 +28,10 @@ class FileReader {
 
 class Vfs {
  public:
+  struct ScanStats {
+    std::size_t paths = 0, directories = 0, canonicalizations = 0;
+    double durationMs = 0;
+  };
   struct DerivedFile {
     std::string logical, source, settings;
     std::filesystem::path file;
@@ -57,11 +61,14 @@ class Vfs {
   bool exists(const std::string& path) const;
   bool isDirectory(const std::string& path) const;
   const std::filesystem::path& root() const { return root_; }
+  const ScanStats& scanStats() const { return scanStats_; }
 
  private:
   static std::optional<std::string> normalize(const std::string& path);
   std::optional<std::filesystem::path> resolveOriginal(const std::string& path) const;
   void indexPath(const std::filesystem::path& path);
+  void scanDirectory(const std::filesystem::path& path);
+  void indexEntry(const std::filesystem::path& path, std::filesystem::file_status status);
 
   struct Overlay {
     std::shared_ptr<const Vfs> files;
@@ -72,6 +79,7 @@ class Vfs {
   std::shared_ptr<const Overlay> overlay_;
   std::shared_ptr<const std::unordered_map<std::string, DerivedFile>> derived_;
   std::filesystem::path root_;
+  ScanStats scanStats_;
   std::unordered_map<std::string, std::filesystem::path> files_;
   std::unordered_map<std::string, std::filesystem::path> directories_;
 };

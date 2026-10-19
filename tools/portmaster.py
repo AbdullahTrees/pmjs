@@ -184,7 +184,7 @@ def checked_bundle(bundle):
         if digest(index_file) != descriptor.get('assetIndexSha256'):
             raise ValueError('Bundle asset index checksum differs from pmjs.json')
         index = json.loads(index_file.read_text())
-        if index.get('schema') != 1 or index.get('kind') != 'pmjs-asset-index':
+        if index.get('schema') not in (1, 2) or index.get('kind') != 'pmjs-asset-index':
             raise ValueError('Unsupported bundle asset index')
         images = index.get('images')
         map_index = index.get('maps')

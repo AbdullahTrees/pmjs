@@ -6,6 +6,8 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { detectEngine, preparationInputs } from './game-inspect.mjs';
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
+import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
+import { measureStartup } from '../runner/startup-metrics.cjs';
 import { installConsoleLogging } from '../runner/logging.cjs';
 
 const root = path.resolve(process.argv[2]);
@@ -67,27 +69,12 @@ function gameDirectory(location) {
   throw new Error(`no RPG Maker MV/MZ game found in ${directory}`);
 }
 
-function runtimeIdentity() {
-  const digest = crypto.createHash('sha256');
-  for (const folder of ['js', 'profiles']) {
-    const visit = directory => {
-      for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-        const file = path.join(directory, entry.name);
-        if (entry.isDirectory()) visit(file);
-        else if (entry.isFile()) {
-          digest.update(path.relative(share, file));
-          digest.update(hash(file));
-        }
-      }
-    };
-    visit(path.join(share, folder));
-  }
-  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
-    digest.update(name);
-    digest.update(hash(path.join(share, 'tools', name)));
-  }
-  return digest.digest('hex');
-}
+let verification;
+const verifiedHash = file => verification ? verification.hash(file) : hash(file);
+const runtimeIdentity = () => measureStartup('runtime-identity', () =>
+  computeRuntimeIdentity(share, verifiedHash), verification?.stats);
+const gameInputs = (game, config, manifest, adapters) => measureStartup('game-inputs', () =>
+  preparationInputs(game, config, manifest, adapters, verifiedHash), verification?.stats);
 
 function matches(record, context) {
   try {
@@ -97,7 +84,7 @@ function matches(record, context) {
       record.bundleBootstrapSha256 === context.bundleBootstrapSha256 &&
       JSON.stringify(record.adapters) === JSON.stringify(context.adapters) &&
       /^bootstrap-[a-f0-9]{64}\.js$/.test(record.bootstrap) &&
-      hash(path.join(context.state, record.bootstrap)) === record.bootstrapSha256 &&
+      verifiedHash(path.join(context.state, record.bootstrap)) === record.bootstrapSha256 &&
       JSON.stringify(record.inputs) === JSON.stringify(context.inputs);
   } catch { return false; }
 }
@@ -116,7 +103,7 @@ function prepare(context) {
     } else {
       invoke(path.join(share, 'tools/build-js-runtime.mjs'), buildArgs);
     }
-    if (JSON.stringify(context.inputs) !== JSON.stringify(preparationInputs(context.game,
+    if (JSON.stringify(context.inputs) !== JSON.stringify(gameInputs(context.game,
       context.config, context.manifest, context.adapters)) ||
       context.runtimeIdentity !== runtimeIdentity()) {
       throw new Error('preparation inputs changed during generation; retry');
@@ -223,25 +210,30 @@ async function main() {
   const manifest = options['--manifest'] || (command === 'run' && previous?.game === game ? previous.manifest : null);
   const adapters = options.adapters.length ? options.adapters :
     (command === 'run' && previous?.game === game && Array.isArray(previous.adapters) ? previous.adapters : []);
+  verification = startupFiles(path.join(state, 'bootstrap-files.json'), packageSha256,
+    process.env.PMJS_VERIFY_BOOTSTRAP === '1' || command === 'prepare');
   const context = { game, state, packageSha256,
     runtimeIdentity: runtimeIdentity(), config, manifest, adapters,
-    inputs: preparationInputs(game, config, manifest, adapters) };
+    inputs: gameInputs(game, config, manifest, adapters) };
   if (bundle) {
     context.bundleBootstrap = path.join(bundle.root, bundle.descriptor.bootstrap);
     context.bundleBootstrapSha256 = bundle.descriptor.bootstrapSha256;
     context.bundleRuntimeIdentity = bundle.descriptor.runtimeIdentity;
     context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
-      JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game));
+      JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game, verifiedHash));
   }
   let record = command === 'prepare' || !previous || !matches(previous, context) ? prepare(context) : previous;
+  verification.save();
   if (command === 'prepare') { console.log(`Prepared ${game}`); return; }
   const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
   const { runSupervised } = await import('../runner/supervisor.cjs');
   const result = await runSupervised(() => {
-    context.inputs = preparationInputs(game, config, manifest, adapters);
+    context.inputs = gameInputs(game, config, manifest, adapters);
+    context.runtimeIdentity = runtimeIdentity();
     if (bundle) context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
-      JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game));
+      JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game, verifiedHash));
     if (!matches(record, context)) record = prepare(context);
+    verification.save();
     return { addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
     bootstrap: path.join(state, record.bootstrap), saveRoot, config: record.config || undefined,
     assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'], guestArguments };

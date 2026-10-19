@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
+const { readIo, ioDelta, measureStartup } = require('./startup-metrics.cjs');
 const { createStorage, createGameFilesystem } = require('./storage.cjs');
 const { prepareAssets, validRecipes } = require('./asset-preparation.cjs');
 const hostTimers = require('node:timers');
@@ -78,7 +79,7 @@ function resolveDefaults(input) {
   if (!assetPreparation || typeof assetPreparation !== 'object' || Array.isArray(assetPreparation)) {
     throw new Error('assetPreparation must be an object');
   }
-  assetPreparation = { enabled: true, maps: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 64 * 1024 * 1024, ...assetPreparation,
+  assetPreparation = { enabled: true, maps: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 256 * 1024 * 1024, ...assetPreparation,
     ...(typeof input.assetPreparation === 'object' ? input.assetPreparation : {}) };
   if (input.assetPreparation === 'on' || input.assetPreparation === 'off') {
     assetPreparation.enabled = input.assetPreparation === 'on';
@@ -305,7 +306,7 @@ function progressLines(progress) {
 }
 
 function createPreparationLog(details, { log = message => console.log(message), now = () => performance.now() } = {}) {
-  const started = now();
+  const started = now(), io = readIo();
   let updated = started, phaseStarted = started, progressAt = started, finished = false;
   let current = { phase: 'start', source: '', completed: 0, total: 0, generated: 0, hits: 0, fallback: 0 };
   const phases = {};
@@ -354,6 +355,10 @@ function createPreparationLog(details, { log = message => console.log(message), 
         `installed=${result.installed || 0} failed_files=${result.failedFiles || 0} install_failures=${result.installFailures || 0} ` +
         `hashed_files=${result.validation?.hashedFiles || 0} ` +
         `hashed_bytes=${result.validation?.hashedBytes || 0} reused_files=${result.validation?.reusedFiles || 0} ` +
+        `io=${JSON.stringify(ioDelta(io))} copied_bytes=${result.validation?.copiedBytes || 0} ` +
+        `hash_categories=${JSON.stringify(result.validation?.hashedBytesByCategory || {})} ` +
+        `snapshot_bytes=${result.additionalSnapshotBytes || 0} processing_ms=${(result.processingMs || 0).toFixed(1)} ` +
+        `early_refusals=${result.earlyRefusals || 0} ` +
         `phase_ms=${JSON.stringify(Object.fromEntries(Object.entries(phases).map(([phase, ms]) => [phase, Number(elapsed(ms))])))} ` +
         `error=${JSON.stringify(error?.message || result.error || result.catalogError || '')}`);
     }
@@ -485,13 +490,15 @@ async function run(input) {
     console.log('[pmjs] uncapped render: defaulting PMJS_SWAP_INTERVAL=0 (was unset)');
   }
   const native = require(options.addon);
-  native.initialize({ gameRoot: options.gameRoot, assetRoot: options.assetRoot,
+  measureStartup('native-initialize', () => native.initialize({ gameRoot: options.gameRoot, assetRoot: options.assetRoot,
     width: options.width, height: options.height, windowTitle: options.title,
     ...(options.imageWarmCacheBytes === undefined ? {} :
       { imageWarmCacheBytes: options.imageWarmCacheBytes }),
     preparedFrameCacheBytes: options.preparedFrameCacheBytes,
     preparedCompactSampling: options.preparedCompactSampling,
-    preparedCropUploads: options.preparedCropUploads });
+    preparedCropUploads: options.preparedCropUploads }));
+  const scan = native.runtime.vfsIndexStats?.();
+  if (scan) console.log(`[pmjs] startup stage=vfs-index statistics=${JSON.stringify(scan)}`);
   console.log(`[pmjs] startup stage=host-initialized elapsed_ms=${(performance.now() - startupStarted).toFixed(1)}`);
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidateImages, invalidateMaps;

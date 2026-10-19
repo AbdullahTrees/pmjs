@@ -505,7 +505,7 @@ int main() {
     };
     const auto reference = result;
     const auto referencePng = bytes(root / "output" / result.pages.front().path);
-    for (const std::size_t budget : {0U, 2048U, 64U * 1024U * 1024U, 128U * 1024U * 1024U}) {
+    for (const std::size_t budget : {0U, 2048U, 64U * 1024U * 1024U, 128U * 1024U * 1024U, 256U * 1024U * 1024U}) {
       const auto destination = root / ("workspace-" + std::to_string(budget));
       pmjs::AssetPreparationStats stats;
       const auto actual = pmjs::prepareAssetImage(source, destination, {9,6,std::nullopt,{}}, nullptr, {budget,&stats});

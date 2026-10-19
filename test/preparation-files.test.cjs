@@ -1,0 +1,80 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const test = require('node:test');
+const { temporaryDirectory } = require('./helpers/temp.cjs');
+const { preparationFiles } = require('../runner/preparation-files.cjs');
+const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
+test('verified copies publish without rereading staged or published bytes and invalidate on edits', async () => {
+  const root = temporaryDirectory('verified-copy-'), source = path.join(root, 'source');
+  const stage = path.join(root, 'stage'), published = path.join(root, 'published');
+  fs.mkdirSync(stage);
+  const bytes = Buffer.alloc(700 * 1024, 73); fs.writeFileSync(source, bytes);
+  const files = await preparationFiles(root), expected = hash(bytes);
+  const checked = await files.copyVerified(source, path.join(stage, 'page'), expected);
+  assert.equal(checked.size, bytes.length);
+  assert.equal(await files.hash(path.join(stage, 'page')), expected);
+  await files.publish(stage, published);
+  assert.equal(await files.hash(path.join(published, 'page')), expected);
+  assert.equal(files.stats.hashedBytes, bytes.length, 'one streaming pass across copy and publication');
+  assert.equal(files.stats.copiedBytes, bytes.length);
+  fs.appendFileSync(path.join(published, 'page'), 'damage');
+  assert.notEqual(await files.hash(path.join(published, 'page')), expected);
+});
+
+test('replacement of a staged object cannot inherit its verification receipt', async () => {
+  const root = temporaryDirectory('copy-replacement-'), source = path.join(root, 'source');
+  const stage = path.join(root, 'stage'), published = path.join(root, 'published');
+  fs.writeFileSync(source, 'original');
+  const files = await preparationFiles(root), expected = hash('original');
+  await files.copyVerified(source, stage, expected);
+  fs.writeFileSync(stage + '.replacement', 'replaced'); fs.renameSync(stage + '.replacement', stage);
+  await files.publish(stage, published);
+  assert.notEqual(await files.hash(published), expected);
+  assert.equal(files.stats.publicationReuses, 0);
+});
+
+test('checksum mismatch and failed publication never create a verified published object', async () => {
+  const root = temporaryDirectory('copy-failure-'), source = path.join(root, 'source');
+  const stage = path.join(root, 'stage'); fs.writeFileSync(source, 'original');
+  const files = await preparationFiles(root);
+  await assert.rejects(files.copyVerified(source, stage, hash('wrong')), /checksum differs/);
+  assert.equal(fs.existsSync(stage), false);
+  await files.copyVerified(source, stage, hash('original'));
+  await assert.rejects(files.publish(stage, path.join(root, 'missing', 'published')), /ENOENT/);
+  assert.equal(fs.existsSync(stage), true);
+  const destination = path.join(root, 'destination'); fs.writeFileSync(destination, 'keep');
+  await assert.rejects(files.copyVerified(source, destination, hash('original')), /EEXIST/);
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'keep');
+});
+
+for (const mode of ['mutate', 'replace', 'interrupt', 'replace-output']) test('copy rejects ' + mode + ' during streaming', async t => {
+  const root = temporaryDirectory('copy-mutation-'), source = path.join(root, 'source'), target = path.join(root, 'stage');
+  const bytes = Buffer.alloc(700 * 1024, 73); fs.writeFileSync(source, bytes);
+  const files = await preparationFiles(root), open = fs.promises.open;
+  let changed = false;
+  t.mock.method(fs.promises, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === target) {
+      const write = handle.writeFile.bind(handle);
+      handle.writeFile = async chunk => {
+        await write(chunk);
+        if (changed) return;
+        changed = true;
+        if (mode === 'interrupt') throw new Error('interrupted');
+        if (mode === 'mutate') fs.appendFileSync(source, 'mutation');
+        else {
+          const file = mode === 'replace' ? source : target;
+          fs.writeFileSync(file + '.replacement', bytes); fs.renameSync(file + '.replacement', file);
+        }
+      };
+    }
+    return handle;
+  });
+  await assert.rejects(files.copyVerified(source, target, hash(bytes)), /changed|differs|interrupted/);
+  assert.equal(fs.existsSync(target), false);
+});

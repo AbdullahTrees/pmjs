@@ -187,9 +187,9 @@ class Workspace {
   AssetPreparationStats& stats;
  private:
   static std::size_t availableAllowance() try {
-    constexpr std::uint64_t reserve = 256U * 1024U * 1024U;
+    constexpr std::uint64_t reserve = 200U * 1024U * 1024U;
     const auto available = memoryHeadroom();
-    return available && *available > reserve ? std::min<std::uint64_t>((*available - reserve) / 4, SIZE_MAX) : 0;
+    return available && *available > reserve ? std::min<std::uint64_t>(*available - reserve, SIZE_MAX) : 0;
   } catch (const std::bad_alloc&) { return 0; }
   inline static std::mutex mutex_;
   inline static std::size_t processBytes_ = 0;

@@ -76,6 +76,19 @@ napi_value initialize(napi_env env, napi_callback_info info) try {
   return nullptr;
 }
 
+napi_value vfsIndexStats(napi_env env, napi_callback_info) try {
+  const auto& scan = host(env).vfs.scanStats();
+  const auto result = moduleObject(env);
+  check(env, napi_set_named_property(env, result, "paths", number(env, scan.paths)), "cannot set scan statistics");
+  check(env, napi_set_named_property(env, result, "directories", number(env, scan.directories)), "cannot set scan statistics");
+  check(env, napi_set_named_property(env, result, "canonicalizations", number(env, scan.canonicalizations)), "cannot set scan statistics");
+  check(env, napi_set_named_property(env, result, "durationMs", number(env, scan.durationMs)), "cannot set scan statistics");
+  return result;
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what());
+  return nullptr;
+}
+
 napi_value pollEvents(napi_env env, napi_callback_info) try {
   return boolean(env, host(env).core.pollEvents());
 } catch (const std::exception& error) {
@@ -679,6 +692,7 @@ void registerRuntimeBindings(napi_env env, napi_value exports) {
   method(env, exports, "swapFrame", swapFrame);
   napi_value runtime = moduleObject(env);
   method(env, runtime, "quit", quit);
+  method(env, runtime, "vfsIndexStats", vfsIndexStats);
   method(env, runtime, "preparationProgress", preparationProgress);
   method(env, runtime, "env", environment);
   method(env, runtime, "monotonicNow", monotonicNow);

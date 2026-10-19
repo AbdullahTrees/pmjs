@@ -13,6 +13,17 @@ const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64');
+
+test('optional negative hints skip source hashing even after artwork changes; explicit verification still processes', async () => {
+  const f = fixture(), portableIndex = { negativeHints: [f.source, '../unsafe.png', null] };
+  const cold = await prepareAssets({ ...f, portableIndex });
+  assert.equal(cold.indexedNegative, 1); assert.equal(cold.validation.hashedBytes, 0); assert.equal(f.jobs, 0);
+  fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
+  const changed = await prepareAssets({ ...f, portableIndex });
+  assert.equal(changed.indexedNegative, 1); assert.equal(changed.validation.hashedBytes, 0); assert.equal(f.jobs, 0);
+  const verified = await prepareAssets({ ...f, portableIndex, verifyHashes: true });
+  assert.equal(verified.indexedNegative, 0); assert.ok(verified.validation.hashedBytes > 0); assert.equal(f.jobs, 1);
+});
 function fixture() {
   const root = temporaryDirectory('pmjs-preparation-');
   const gameRoot = path.join(root, 'game');
@@ -58,6 +69,12 @@ function assertProgress(progress, result, terminalPhase) {
 
 test('first preparation installs logical backing; unchanged launch reuses verified content without transforms', async () => {
   const f = fixture();
+  const processImage = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => {
+    assert.deepEqual(args[5], { workspaceBytes: 256 * 1024 * 1024 });
+    return processImage(...args);
+  };
   const progress = [];
   const first = await prepareAssets({ ...f, onProgress: value => progress.push(value) });
   assert.equal(first.generated, 1);

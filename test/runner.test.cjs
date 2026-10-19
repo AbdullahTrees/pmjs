@@ -595,7 +595,7 @@ test('preparation workspace accepts bounded byte limits', () => {
   assert.equal(validate({ ...options, assetPreparation: { pageCodec: 'png' } }).assetPreparation.pageCodec, 'png');
   assert.equal(validate({ ...options, assetPreparation: { pageCodec: 'lz4' } }).assetPreparation.pageCodec, 'lz4');
   assert.throws(() => validate({ ...options, assetPreparation: { pageCodec: 'lz4hc3' } }), /pageCodec must be png or lz4/);
-  assert.equal(validate(options).assetPreparation.workspaceBytes, 64 * 1024 * 1024);
+  assert.equal(validate(options).assetPreparation.workspaceBytes, 256 * 1024 * 1024);
   for (const workspaceBytes of [0, 64 * 1024 * 1024, 128 * 1024 * 1024, 256 * 1024 * 1024])
     assert.equal(validate({ ...options, assetPreparation: { workspaceBytes } }).assetPreparation.workspaceBytes, workspaceBytes);
   for (const workspaceBytes of [-1, 0.5, 268435457, NaN, '64'])

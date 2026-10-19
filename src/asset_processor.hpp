@@ -50,7 +50,7 @@ struct AssetPreparationStats {
   std::size_t workspaceLimitBytes = 0, peakWorkspaceBytes = 0, liveWorkspaceBytes = 0;
 };
 struct AssetPreparationOptions {
-  std::size_t workspaceBytes = 64U * 1024U * 1024U;
+  std::size_t workspaceBytes = 256U * 1024U * 1024U;
   AssetPreparationStats* statistics = nullptr;
   bool lz4Pages = false;
 };

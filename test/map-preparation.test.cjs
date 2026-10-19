@@ -213,6 +213,20 @@ test('missing sources and cancellation report individual failures and never inst
   assert.equal(cancelled.cancelled,true);assert.equal(cancelled.installed,0);
   assert.equal(fs.readdirSync(path.join(g.cacheRoot,'maps/entries')).length,0);
 });
+test('provably unprofitable geometry avoids native packing and snapshots; uncertain cases retain exact admission', async t => {
+  const f = fixture(t);
+  for (const name of ['B', 'C']) fs.writeFileSync(path.join(f.gameRoot, 'img/tilesets', name + '.png'),
+    png(48, 48, Buffer.alloc(48 * 48 * 4, 73)));
+  const map = { ...f.map, width: 20, height: 20, data: [...Array(400).fill(1), ...Array(2000).fill(0)] };
+  fs.writeFileSync(path.join(f.gameRoot, 'data/Map001.json'), JSON.stringify(map));
+  const rejected = await prepareMaps(f);
+  assert.equal(rejected.earlyRefusals, 1); assert.equal(f.jobs, 0); assert.equal(rejected.installed, 0);
+  assert.equal(fs.readdirSync(path.join(f.cacheRoot, 'maps/sources')).length, 0);
+  assert.equal((await prepareMaps(f)).negativeHits, 1);
+  const ordinary = fixture(t), accepted = await prepareMaps(ordinary);
+  assert.equal(accepted.earlyRefusals, 0); assert.equal(ordinary.jobs, 1); assert.equal(accepted.installed, 1);
+});
+
 test('unprofitable and unsupported decisions are cached without adding source snapshots',async t=>{
   const f=fixture(t);let attempts=0;
   f.native.assets.processTiles=async()=>{attempts++;throw Object.assign(new Error('unsupported rectangle'),{code:'PMJS_TILE_UNSUPPORTED'});};

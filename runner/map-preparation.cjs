@@ -21,6 +21,21 @@ const HASH = /^[a-f0-9]{64}$/;
 const installedLeases = new WeakMap();
 async function readJson(file) { return JSON.parse(await fsp.readFile(file, 'utf8')); }
 
+async function ordinaryUpperBound(inputs, renderer, files) {
+  if (renderer === 'mz') return inputs.length * 1024 * 1024 * 4;
+  let bytes = 0;
+  for (const input of inputs) {
+    const { header } = await files.inspect(input.file, 'map-source');
+    if (!header || header.length < 24 || header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
+        header.readUInt32BE(8) !== 13 || header.toString('ascii', 12, 16) !== 'IHDR') return Infinity;
+    const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
+    if (!width || !height || width > 8192 || height > 8192) return Infinity;
+    // Decoded sources use at most four bytes per pixel; grayscale can use less.
+    bytes += width * height * 4;
+  }
+  return bytes;
+}
+
 function validTileDescriptor(d) {
   const rect = r => Array.isArray(r) && r.length === 4 && r.every(Number.isSafeInteger) && r[0] >= 0 && r[1] >= 0 && r[2] > 0 && r[3] > 0;
   if (!d || d.version !== 1 || !Number.isInteger(d.halo) || d.halo < 1 || d.halo > 32 || !Array.isArray(d.pages) || !d.pages.length || d.pages.length > 4096 ||
@@ -55,7 +70,7 @@ async function validateEntry(directory, key, files) {
     for (const page of manifest.outputs) {
       if (!/^tiles-\d+\.png$/.test(page.path) || !HASH.test(page.hash)) return false;
       const file = path.join(directory, page.path);
-      const checked = files ? await files.inspect(file) : { hash: await digest(file), reused: false };
+      const checked = files ? await files.inspect(file, 'output') : { hash: await digest(file), reused: false };
       if (checked.hash !== page.hash) return false;
       if (reused && checked.reused) continue;
       let bytes = checked.header;
@@ -130,13 +145,13 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
   }
   const started = performance.now(), root = path.join(cacheRoot, 'maps');
   const result = { enabled: true, selected: 0, refused: 0, generated: 0, hits: 0, negativeHits: 0,
-    installed: 0, compilationHits: 0, indexedCopies: 0, nativePacks: 0,
+    installed: 0, compilationHits: 0, indexedCopies: 0, nativePacks: 0, earlyRefusals: 0, processingMs: 0,
     verifiedRegions: 0, identityRefreshes: 0, snapshotBytes: 0, additionalSnapshotBytes: 0, pageBytes: 0, durationMs: 0, cancelled: false, maps: [], index: {} };
   const catalogFile = path.join(root, 'catalog-'+checksum(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
   let files;
-  const digest = file => files.hash(file);
+  const digest = file => files.hash(file, 'map-input');
   const entries = [], keys = [], snapshots = new Map(), sourceDependencies = new Map();
   async function captureSnapshot(input) {
     let snapshot = snapshots.get(input.sourceHash);
@@ -146,11 +161,10 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     else {
       snapshot = path.join(root, 'sources', input.sourceHash+'.png');
       if (await digest(snapshot).catch(() => null) !== input.sourceHash) {
-        const temporary = snapshot+'.stage-'+process.pid;
+        const temporary = snapshot+'.stage-'+crypto.randomBytes(6).toString('hex');
         try {
-          await fsp.copyFile(input.file, temporary);
-          if (await digest(temporary) !== input.sourceHash) throw new Error('source snapshot changed while copying');
-          await fsp.rename(temporary, snapshot);
+          await files.copyVerified(input.file, temporary, input.sourceHash, 'snapshot');
+          await files.publish(temporary, snapshot);
           await digest(snapshot);
         } finally { await fsp.rm(temporary, { force: true }); }
         result.additionalSnapshotBytes += (await fsp.stat(snapshot)).size;
@@ -400,10 +414,15 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           report('pack', filename, index, data.length);
           stage = await fsp.mkdtemp(path.join(root, 'entries', '.stage-'));
           let descriptor, reason;
+          const geometryBytes = geometryEstimate(demand, width, height);
           const missing = inputs.filter(input => !input.file);
           if (missing.length) reason = 'missing tile source '+missing.map(input => input.source).join(', ');
           else if (inputs.every(input => !input.rectangles.length)) reason = 'no visual tile demand';
-          else if (portableAssetRoot && Array.isArray(portableIndex?.entries)) {
+          if (!reason && geometryBytes >= await ordinaryUpperBound(inputs, demand.renderer, files)) {
+            reason = 'packed allocations and geometry are not smaller';
+            ++result.earlyRefusals;
+          }
+          if (!reason && portableAssetRoot && Array.isArray(portableIndex?.entries)) {
             const indexed = indexedMaps.get(key);
             if (indexed && validTileDescriptor(indexed.descriptor) &&
                 indexed.descriptor.sources.length === inputs.length &&
@@ -415,18 +434,11 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
                       path.basename(page.path) !== expected.path || !HASH.test(page.hash))
                     throw new Error('invalid indexed map page');
                   const source = path.join(portableAssetRoot, page.path);
-                  if (await digest(source) !== page.hash) throw new Error('indexed map page checksum differs');
-                  const handle = await fsp.open(source, 'r');
-                  const header = Buffer.alloc(24);
-                  let bytesRead;
-                  try { ({ bytesRead } = await handle.read(header, 0, 24, 0)); }
-                  finally { await handle.close(); }
-                  if (bytesRead !== 24 || header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
+                  const checked = await files.copyVerified(source, path.join(stage, expected.path), page.hash, 'map-import');
+                  const header = checked.header;
+                  if (header.length < 24 || header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
                       header.readUInt32BE(16) !== expected.width || header.readUInt32BE(20) !== expected.height)
                     throw new Error('indexed map page header differs');
-                  await fsp.copyFile(source, path.join(stage, expected.path));
-                  if (await digest(path.join(stage, expected.path)) !== page.hash)
-                    throw new Error('indexed map page changed while copying');
                 }
                 descriptor = indexed.descriptor;
                 ++result.indexedCopies;
@@ -436,13 +448,16 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
               }
             }
           }
-          if (!reason && !descriptor) try { ++result.nativePacks; descriptor = await native.assets.processTiles(inputs, stage); }
-          catch (error) { if (error.code !== 'PMJS_TILE_UNSUPPORTED') throw error; reason = error.message; }
+          if (!reason && !descriptor) {
+            const processingStarted = performance.now();
+            try { ++result.nativePacks; descriptor = await native.assets.processTiles(inputs, stage); }
+            catch (error) { if (error.code !== 'PMJS_TILE_UNSUPPORTED') throw error; reason = error.message; }
+            finally { result.processingMs += performance.now() - processingStarted; }
+          }
           if (descriptor && (!validTileDescriptor(descriptor) || descriptor.sources.length !== inputs.length)) throw new Error('invalid tile descriptor');
           const pageBytes = descriptor ? descriptor.pages.reduce((n, p) => n+p.width*p.height*4, 0) : 0;
           // Both straight and premultiplied pages are prewarmed. Retained CPU
           // geometry and four additional vertex attributes are included in admission.
-          const geometryBytes = geometryEstimate(demand, width, height);
           const metadataBytes = descriptor ? descriptor.sources.reduce((sum,source)=>sum+192+source.regions.length*36,256)+descriptor.pages.length*128 : 0;
           const ordinaryBytes = demand.renderer === 'mz' ? inputs.length*1024*1024*4 : descriptor?.ordinaryBytes || 0;
           const compactBytes = pageBytes*2+geometryBytes+metadataBytes;
@@ -452,7 +467,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
             descriptor = null;
           }
           const outputs = [];
-          for (const page of descriptor ? descriptor.pages : []) outputs.push({ path: page.path, hash: await digest(path.join(stage, page.path)) });
+          for (const page of descriptor ? descriptor.pages : []) outputs.push({ path: page.path, hash: await files.hash(path.join(stage, page.path), 'output') });
           manifest = { compiler: COMPILER_VERSION, key, descriptor, descriptorHash: identity(descriptor), outputs,
             reason, estimates: { pageBytes, geometryBytes, metadataBytes, ordinaryBytes, compactBytes } };
           // Disposable entries are validated on reuse; durable publication belongs to the final index/catalog.
