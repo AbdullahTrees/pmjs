@@ -1,5 +1,5 @@
-name: Build development runtime
-run-name: Build PMJS development candidate (${{ github.ref_name }})
+name: Build runtime
+run-name: Build PMJS runtime (${{ github.ref_name }})
 
 on:
   workflow_dispatch:
@@ -13,11 +13,12 @@ defaults:
 
 jobs:
   build:
-    name: Build Linux ARM64 development candidate
+    name: Build Linux ARM64 runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
       build-id: ${{ steps.identity.outputs.build-id }}
+      title: ${{ steps.identity.outputs.title }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,9 +29,13 @@ jobs:
         id: identity
         run: |
           build_date=$(date -u +%Y-%m-%d)
-          build_id="build-$build_date-${GITHUB_SHA:0:7}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          build_id="build-$build_date-${GITHUB_SHA:0:7}-$GITHUB_RUN_NUMBER"
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            build_id="$build_id-$GITHUB_RUN_ATTEMPT"
+          fi
           echo "PMJS_BUILD_ID=$build_id" >> "$GITHUB_ENV"
           echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "title=PMJS build-$build_date-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         run: |
@@ -96,7 +101,7 @@ jobs:
             --report dist/static-arm64.json --static
 
       # Hosted runners cannot supply the handheld hardware graphics receipt.
-      - name: Archive development candidate
+      - name: Archive runtime
         run: |
           python3 tools/release.py archive --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json \
@@ -118,7 +123,7 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish development download
+    name: Publish release
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -130,10 +135,11 @@ jobs:
           name: pmjs-linux-arm64
           path: dist
 
-      - name: Publish development prerelease
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_ID: ${{ needs.build.outputs.build-id }}
+          TITLE: ${{ needs.build.outputs.title }}
         run: |
           previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts \
             --limit 1 --json tagName --jq '.[0].tagName // empty')
@@ -147,17 +153,14 @@ jobs:
             changelog="https://github.com/$GITHUB_REPOSITORY/commits/$GITHUB_SHA"
           fi
           {
-            printf '%s\n\n' 'Development build: not production qualified. No handheld graphics or gameplay acceptance is claimed.'
             printf '%s\n' "$changes"
             printf '\n**Full Changelog**: %s\n' "$changelog"
           } > release-notes.md
           release_url=$(gh release create "$BUILD_ID" \
             "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" \
-            "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz.release.json" \
-            "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz.verification.json" \
             "dist/pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "PMJS development $BUILD_ID" \
-            --notes-file release-notes.md --prerelease --latest=false)
+            --title "$TITLE" \
+            --notes-file release-notes.md)
           printf 'Build download: %s\n\nRelease assets have no automatic expiration.\n' \
             "$release_url" >> "$GITHUB_STEP_SUMMARY"
