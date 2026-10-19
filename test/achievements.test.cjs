@@ -18,7 +18,7 @@ function harness(initial, catalog) {
   const context = {
     console, Buffer, __pmjsBuiltinRequire: require,
     PMJS_GAME_CONFIG: {
-      achievements: { catalog: catalog || [] },
+      ...(catalog === undefined ? {} : { achievements: { catalog } }),
       steam: { provider: 'portable', appId: 42 },
     },
     NativeHost: { storage: {
@@ -184,6 +184,44 @@ test('Greenworks and steamworks.js adapters share the portable store', () => {
   assert.equal(greenworks.getStatInt('steps'), 7);
   assert.equal(client.stats.store(), true);
   assert.equal(JSON.parse(h.files.get('achievements.json')).stats.steps, 7);
+});
+
+test('both Steam APIs learn computed IDs without a catalog and restore them before metadata is added', () => {
+  function session(initial, catalog) {
+    const h = harness(initial, catalog);
+    const modules = {};
+    h.context.registerCommonJsModule = (names, value) => {
+      for (const name of Array.isArray(names) ? names : [names]) modules[name] = value;
+    };
+    vm.runInContext(greenworksCode, h.context);
+    vm.runInContext(steamworksCode, h.context);
+    return { ...h, greenworks: modules.greenworks, client: modules['steamworks.js'].init() };
+  }
+  const h = session();
+  assert.deepEqual(Array.from(h.greenworks.getAchievementNames()), []);
+  const ids = ['GREEN', 'CLIENT'].map(prefix => prefix + '_' + 17);
+  assert.equal(h.client.achievement.isActivated('UNKNOWN'), false);
+  assert.equal(h.greenworks.activateAchievement(ids[0]), true);
+  assert.equal(h.client.achievement.activate(ids[1]), true);
+  // Unlocks must reach storage before callbacks, explicit flush or shutdown.
+  const saved = JSON.parse(h.files.get('achievements.json'));
+  assert.deepEqual(Object.keys(saved.achievements), ids);
+  for (const id of ids) {
+    assert.equal(saved.achievements[id].name, id);
+    assert.equal(saved.achievements[id].unlocked, true);
+    assert.ok(saved.achievements[id].unlockedAt);
+  }
+  const restarted = session({ 'achievements.json': h.files.get('achievements.json') });
+  assert.deepEqual(Array.from(restarted.greenworks.getAchievementNames()), ids);
+  for (const id of ids) assert.equal(restarted.client.achievement.isActivated(id), true);
+  const enriched = session({ 'achievements.json': restarted.files.get('achievements.json') },
+    [{ id: ids[0], name: 'Optional title', description: 'Optional detail' }]);
+  const after = JSON.parse(enriched.files.get('achievements.json'));
+  assert.equal(after.achievements[ids[0]].name, 'Optional title');
+  for (const id of ids) {
+    assert.equal(enriched.client.achievement.isActivated(id), true);
+    assert.equal(after.achievements[id].unlockedAt, saved.achievements[id].unlockedAt);
+  }
 });
 
 test('an explicitly disabled provider does not advertise Steam modules', () => {

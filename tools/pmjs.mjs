@@ -82,7 +82,7 @@ function runtimeIdentity() {
     };
     visit(path.join(share, folder));
   }
-  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs']) {
+  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
     digest.update(name);
     digest.update(hash(path.join(share, 'tools', name)));
   }

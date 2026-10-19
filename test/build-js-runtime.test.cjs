@@ -399,7 +399,7 @@ test('a standalone source copy builds without the surrounding workspace', () => 
   const clone = path.join(root, 'runtime');
   for (const directory of ['js', 'profiles']) fs.cpSync(path.join(__dirname, '..', directory), path.join(clone, directory), { recursive: true });
   fs.mkdirSync(path.join(clone, 'tools'));
-  for (const file of ['build-js-runtime.mjs', 'game-inspect.mjs']) fs.copyFileSync(path.join(__dirname, '../tools', file), path.join(clone, 'tools', file));
+  for (const file of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) fs.copyFileSync(path.join(__dirname, '../tools', file), path.join(clone, 'tools', file));
   const game = writeMvGame(root, { plugins: [{ name: 'YED_Tiled', status: true }] });
   const output = path.join(root, 'standalone.js');
   childProcess.execFileSync(process.execPath, [path.join(clone, 'tools/build-js-runtime.mjs'), '--game', game, '--output', output], { cwd: root });
@@ -429,7 +429,7 @@ test('primitive recording ships with the selected Terrax adapter', () => {
 test('explicit adapter files execute in supplied order before engine bootstrap', () => {
   const root = temporaryDirectory('pmjs-explicit-adapters-');
   fs.mkdirSync(path.join(root, 'tools'));
-  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs']) {
+  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
     fs.copyFileSync(path.resolve(__dirname, '../tools', name), path.join(root, 'tools', name));
   }
   fs.mkdirSync(path.join(root, 'profiles'));

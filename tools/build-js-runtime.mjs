@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inspectGame, loadAdapterRegistry, resolveAdapters } from './game-inspect.mjs';
+import { inspectGame, loadAdapterRegistry, resolveAdapters, prepareGameConfig } from './game-inspect.mjs';
 
 const args = process.argv.slice(2);
 const values = new Map();
@@ -263,19 +263,24 @@ if (detectedRuntime) {
     `globalThis.PMJS_RUNTIME_GAME = ${JSON.stringify(detectedRuntime)};\n` });
 }
 
+let parsedConfig = {};
+let configLabel = 'game-config';
 if (configArgument) {
   const resolvedConfig = path.resolve(process.cwd(), configArgument);
   if (!fs.existsSync(resolvedConfig)) {
     console.error(`error: config file not found: ${resolvedConfig}`);
     process.exit(1);
   }
-  let parsed;
-  try { parsed = JSON.parse(fs.readFileSync(resolvedConfig, 'utf8')); }
+  try { parsedConfig = JSON.parse(fs.readFileSync(resolvedConfig, 'utf8')); }
   catch (error) { throw new Error(`invalid JSON in config file ${resolvedConfig}: ${error.message}`); }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('configuration must be an object');
-  assertDisableOptimizationsShape(parsed.disableOptimizations, resolvedConfig);
-  bundleItems.push({ label: path.basename(resolvedConfig), inlineSource:
-    `globalThis.PMJS_GAME_CONFIG = ${JSON.stringify(parsed, null, 2)};\n` });
+  if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) throw new Error('configuration must be an object');
+  assertDisableOptimizationsShape(parsedConfig.disableOptimizations, resolvedConfig);
+  configLabel = path.basename(resolvedConfig);
+}
+if (gameArgument) parsedConfig = prepareGameConfig(path.resolve(gameArgument), parsedConfig);
+if (configArgument || Object.keys(parsedConfig).length) {
+  bundleItems.push({ label: configLabel, inlineSource:
+    `globalThis.PMJS_GAME_CONFIG = ${JSON.stringify(parsedConfig, null, 2)};\n` });
 }
 for (const item of rawModules) {
   bundleItems.push({ label: item.module, module: item.module, file: item.file, baseDir: root });

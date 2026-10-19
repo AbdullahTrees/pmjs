@@ -10,6 +10,42 @@ async function loadInspect() {
   return import('../tools/game-inspect.mjs');
 }
 
+test('optional achievement metadata imports display fields and invalidates prepared inputs', async () => {
+  const { prepareGameConfig, preparationInputs } = await loadInspect();
+  const game = temporaryDirectory('pmjs-achievement-metadata-');
+  const config = Object.freeze({ steam: Object.freeze({ provider: 'portable' }) });
+  assert.equal(prepareGameConfig(game, config), config);
+  const before = preparationInputs(game);
+  fs.mkdirSync(path.join(game, 'lib/steam_settings'), { recursive: true });
+  const metadata = path.join(game, 'lib/steam_settings/achievements.json');
+  fs.writeFileSync(metadata, JSON.stringify([{ name: 'FIRST', displayName: 'First achievement',
+    description: 'Description', hidden: '1', icon: 'icons/first.png' }]));
+  const prepared = prepareGameConfig(game, config);
+  assert.deepEqual(prepared.achievements.catalog, [{ id: 'FIRST', name: 'First achievement',
+    description: 'Description', hidden: true, icon: 'lib/steam_settings/icons/first.png' }]);
+  assert.equal(config.achievements, undefined);
+  assert.notDeepEqual(preparationInputs(game), before);
+  const explicit = { achievements: { catalog: [] } };
+  assert.equal(prepareGameConfig(game, explicit), explicit);
+});
+
+test('invalid optional achievement metadata warns and leaves runtime learning available', async t => {
+  const { prepareGameConfig } = await loadInspect();
+  const game = temporaryDirectory('pmjs-invalid-achievement-metadata-');
+  fs.mkdirSync(path.join(game, 'lib/steam_settings'), { recursive: true });
+  const file = path.join(game, 'lib/steam_settings/achievements.json');
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  for (const contents of ['invalid JSON', '{}']) {
+    fs.writeFileSync(file, contents);
+    assert.deepEqual(prepareGameConfig(game), {});
+  }
+  fs.writeFileSync(file, '[null,{"name":"A"},{"name":"A"},{}]');
+  assert.deepEqual(prepareGameConfig(game).achievements.catalog, [
+    { id: 'A', name: 'A', description: '', hidden: false, icon: null }]);
+  assert.equal(warnings.length, 5);
+});
+
 function writeGame(dir, { pluginsJs, rpgCore, pixi } = {}) {
   fs.mkdirSync(path.join(dir, 'js', 'plugins'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'js', 'libs'), { recursive: true });

@@ -3,16 +3,49 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { discoverAchievements } from './achievement-discovery.mjs';
 
 export function preparationInputs(gameDir, config, manifest, adapters = []) {
   const candidates = ['js/rpg_core.js', 'js/rpg_managers.js', 'js/rmmz_core.js',
-    'js/libs/pixi.js', 'js/pixi.js', 'js/libs/pixi-tilemap.js', 'js/pixi-tilemap.js', 'js/plugins.js'];
+    'js/libs/pixi.js', 'js/pixi.js', 'js/libs/pixi-tilemap.js', 'js/pixi-tilemap.js', 'js/plugins.js',
+    'lib/steam_settings/achievements.json'];
   const files = candidates.map(name => path.join(gameDir, name));
   if (config) files.push(config);
   if (manifest) files.push(manifest);
   files.push(...adapters);
   return Object.fromEntries(files.map(file => [file, fs.existsSync(file) ?
     crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') : null]));
+}
+
+export function prepareGameConfig(gameDir, config = {}) {
+  if (Array.isArray(config.achievements?.catalog)) return config;
+  const file = path.join(gameDir, 'lib/steam_settings/achievements.json');
+  let records;
+  try {
+    records = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(records)) throw new Error('expected an array');
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn('[pmjs-build] Cannot import achievement metadata: ' + error.message);
+    records = null;
+  }
+  if (records === null) return config;
+  const seen = new Set();
+  const catalog = [];
+  for (const record of records) {
+    if (!record || typeof record.name !== 'string' || !record.name || seen.has(record.name)) {
+      console.warn('[pmjs-build] Ignoring achievement metadata with a missing or duplicate name');
+      continue;
+    }
+    seen.add(record.name);
+    catalog.push({ id: record.name,
+      name: typeof record.displayName === 'string' ? record.displayName : record.name,
+      description: typeof record.description === 'string' ? record.description : '',
+      hidden: record.hidden === true || record.hidden === '1' || record.hidden === 1,
+      icon: typeof record.icon === 'string' && record.icon ?
+        path.posix.join('lib/steam_settings', record.icon.replaceAll('\\', '/')) : null });
+  }
+  return { ...config, achievements: { ...config.achievements, catalog } };
 }
 
 export function detectEngine(gameDir) {
@@ -208,4 +241,15 @@ export function inspectGame(gameDir, registryPath) {
     matchedAdapters: matched,
     unmatchedEnabledPlugins: unknown,
   };
+}
+
+export function inspectAchievements(gameDir) {
+  return discoverAchievements(gameDir, readPluginManifest(gameDir).plugins);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.length !== 4 || process.argv[2] !== '--achievements') {
+    throw new Error('usage: game-inspect.mjs --achievements GAME_DIRECTORY');
+  }
+  console.log(JSON.stringify(inspectAchievements(path.resolve(process.argv[3])), null, 2));
 }

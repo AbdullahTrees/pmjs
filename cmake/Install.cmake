@@ -15,7 +15,7 @@ endif()
 install(PROGRAMS bin/pmjs DESTINATION bin)
 install(DIRECTORY js runner profiles DESTINATION share/pmjs
   FILES_MATCHING PATTERN "*.js" PATTERN "*.cjs" PATTERN "*.json" PATTERN "*.ttf" PATTERN "*.LICENSE")
-install(FILES tools/build-js-runtime.mjs tools/game-inspect.mjs tools/game-bundle.mjs tools/pmjs.mjs
+install(FILES tools/build-js-runtime.mjs tools/game-inspect.mjs tools/achievement-discovery.mjs tools/game-bundle.mjs tools/pmjs.mjs
   tools/package-self-test.cjs DESTINATION share/pmjs/tools)
 install(FILES tools/portmaster.py tools/runtime_artifact.py
   DESTINATION share/pmjs/tools COMPONENT host-tools)
