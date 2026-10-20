@@ -735,12 +735,18 @@ return "${MODULE_STATUS:-0}"
 
     def test_setup_failures_stop_and_started_helpers_are_cleaned_up(self):
         for setting, status in (('CONTROL_STATUS', 7), ('MODULE_STATUS', 8),
-                                ('CONTROLS_STATUS', 1), ('PLATFORM_STATUS', 1), ('NODE_STATUS', 23)):
+                                ('CONTROLS_STATUS', 1), ('NODE_STATUS', 23)):
             with self.subTest(setting=setting):
-                started = setting in ('PLATFORM_STATUS', 'NODE_STATUS')
+                started = setting == 'NODE_STATUS'
                 result = self.run_launcher(expect_finish=started, **{setting: str(status)})
                 self.assertEqual(result.returncode, status)
                 self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
+
+        result = self.run_launcher(PLATFORM_STATUS='1')
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(self.capture.exists())
+        self.assertIn('platform helper returned 1; continuing',
+                      (self.port / 'log.txt').read_text())
 
     def test_cleanup_failure_retains_game_failure(self):
         self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)

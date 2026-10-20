@@ -36,14 +36,22 @@ GAMEDIR="/${directory#/}/ports/@ID@"
 BINARY=node
 cd "$GAMEDIR" || exit 1
 GAMEDIR=$(pwd -P)
-exec > "$GAMEDIR/log.txt" 2>&1 || exit 1
+LOGFILE="$GAMEDIR/log.txt"
+rm -f "$LOGFILE" || { echo 'Failed to remove the previous PortMaster log' >&2; exit 1; }
+exec >> "$LOGFILE" 2>&1 || exit 1
+echo '[pmjs-port] launcher started'
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
 export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
 
 [ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
 $GPTOKEYB2 "$BINARY" -c "$GAMEDIR/@ID@.ini" &
-pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY" || { pm_finish; exit 1; }
+pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY"
+platform_status=$?
+if [ "$platform_status" -ne 0 ]; then
+  echo "[pmjs-port] PortMaster platform helper returned $platform_status; continuing"
+fi
 
+echo '[pmjs-port] starting runtime'
 XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
   --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
 status=$?
