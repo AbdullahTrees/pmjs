@@ -11,7 +11,7 @@ const { acquireLock, createLease, retainLeases } = require('./preparation-lifeti
 const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 
 const CACHE_VERSION = 1;
-const PROCESSOR_IDENTITY = { processor: 'images-v11-pixel-facts-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
+const PROCESSOR_IDENTITY = { processor: 'images-v13-battler-grids-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
 const HASH = /^[a-f0-9]{64}$/;
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ENCRYPTED_HEADER = Buffer.from('5250474d560000000003010000000000', 'hex');
@@ -138,6 +138,12 @@ async function automaticRecipe(file, source, sourceHash, header) {
     header = Buffer.alloc(24);
     try { if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24) return undefined; }
     finally { await handle.close(); }
+  }
+  if (!filenameGrid && source.startsWith('img/sv_actors/') &&
+      header.length >= 24 && header.subarray(0, 8).equals(PNG)) {
+    const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
+    grid = [[9, 6], [4, 6], [4, 8], [4, 1], [3, 4]].find(
+      ([columns, rows]) => width > 0 && height > 0 && width % columns === 0 && height % rows === 0);
   }
   if (!grid && header.length >= 24 && header.subarray(0, 8).equals(PNG)) {
     const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
