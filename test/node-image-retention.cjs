@@ -16,8 +16,8 @@ async function main() {
   if (native.images.acquireCached('not-present.png') !== null ||
       native.images.memory(20).decodeJobs !== decodeJobs) throw new Error('cache-only lookup started decoding');
   let mem = native.images.memory(20);
-  if (mem.warmBudgetBytes !== 4 * 1024 * 1024) {
-    throw new Error(`expected default warm budget to be 4 MiB, got ${mem.warmBudgetBytes}`);
+  if (mem.warmBudgetBytes !== 32 * 1024 * 1024) {
+    throw new Error(`expected default warm budget to be 32 MiB, got ${mem.warmBudgetBytes}`);
   }
   let ordinaryEntry = mem.largest.find(e => e.handle === ordinary.handle);
   if (!ordinaryEntry) throw new Error('ordinary image entry missing from memory list');

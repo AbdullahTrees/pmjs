@@ -169,6 +169,7 @@ test('supervisor memory snapshot captures separate V8 and native allocation cate
           spaces: [{ name: 'old_space', usedBytes: 40 * MiB }] } };
     },
     getNative: () => ({
+      runtime: { allocatorStats: () => ({ arenaBytes: 100 * MiB, freeArenaBytes: 60 * MiB }) },
       images: { memory(limit) { imageLimits.push(limit); return {
         liveCount: 20, cpuBytes: 25 * MiB, gpuBytes: 40 * MiB,
         preparedFrameCacheBytes: 2 * MiB,
@@ -188,6 +189,7 @@ test('supervisor memory snapshot captures separate V8 and native allocation cate
   assert.equal(snapshot.context.mapId, 5);
   assert.equal(snapshot.memory.v8Heap.spaces[0].usedBytes, 40 * MiB);
   assert.equal(snapshot.native.images.cpuBytes, 25 * MiB);
+  assert.equal(snapshot.native.allocator.freeArenaBytes, 60 * MiB);
   assert.equal('largest' in snapshot.native.images, false);
   const criticalSnapshot = monitor.supervisorMemorySnapshot({ reason: 'memory-critical', critical: true });
   assert.deepEqual(imageLimits, [0, 5]);

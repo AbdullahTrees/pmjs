@@ -1703,8 +1703,8 @@ CanvasContext2D.prototype.getImageData = function(x, y, width, height) {
   width = size[0]; height = size[1];
   if (!this.canvas.width || !this.canvas.height) return new ImageData(width, height);
   var canvas = this.canvas._ensureNativeCanvas();
-  return new ImageData(new Uint8ClampedArray(NativeHost.canvas.readPixels(
-    canvas.handle, x, y, width, height)), width, height);
+  var pixels = NativeHost.canvas.readPixels(canvas.handle, x, y, width, height);
+  return new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height);
 };
 CanvasContext2D.prototype.putImageData = function(imageData, x, y) {
   if (!imageData || !imageData.data) throw new TypeError('invalid ImageData');

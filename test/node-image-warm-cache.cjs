@@ -1,8 +1,15 @@
 'use strict';
 
+const fs = require('node:fs');
 const path = require('node:path');
+const { png } = require('./helpers/png.cjs');
+const { temporaryDirectory } = require('./helpers/temp.cjs');
 const native = require(path.resolve(process.argv[2]));
-native.initialize({ gameRoot: path.resolve(process.argv[3]), assetRoot: '',
+const root = temporaryDirectory('warm-cache-');
+const pixels = [17, 31, 49, 63, 79, 97, 113, 127, 139, 151, 173, 191, 211, 223, 239, 251];
+for (const name of ['fixture.png', 'lease.png', 'retained-fixture.png'])
+  fs.writeFileSync(path.join(root, name), png(2, 2, pixels));
+native.initialize({ gameRoot: root, assetRoot: '',
   width: 640, height: 480, windowTitle: 'pmjs test', imageWarmCacheBytes: 16 });
 
 function entry(handle) {

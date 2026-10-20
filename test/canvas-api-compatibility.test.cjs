@@ -54,6 +54,28 @@ test('image-data regions use signed integer conversion, negative-size normalizat
   assert.throws(() => context.createImageData(1n, 2), { name: 'TypeError' });
 });
 
+test('getImageData uses each fresh native buffer without copying or sharing separate reads', () => {
+  const { realm, context } = harness();
+  const buffers = [];
+  realm.NativeHost.canvas.readPixels = (_handle, _x, _y, width, height) => {
+    const buffer = new ArrayBuffer(width * height * 4 + 8);
+    const pixels = new Uint8Array(buffer, 4, width * height * 4);
+    pixels.fill(37);
+    buffers.push(buffer);
+    return pixels;
+  };
+  const first = context.getImageData(0, 0, 2, 3);
+  const second = context.getImageData(0, 0, 2, 3);
+  assert.equal(first.data.buffer, buffers[0]);
+  assert.equal(first.data.byteOffset, 4);
+  assert.equal(first.data.byteLength, 24);
+  assert.ok(vm.runInContext('Uint8ClampedArray', realm).prototype.isPrototypeOf(first.data));
+  assert.equal(second.data.buffer, buffers[1]);
+  first.data[0] = 999;
+  assert.equal(first.data[0], 255);
+  assert.equal(second.data[0], 37);
+});
+
 test('createImageData returns independent transparent data for both overloads', () => {
   const { context, calls } = harness();
   const source = context.createImageData(-3, -2); source.data.fill(255);

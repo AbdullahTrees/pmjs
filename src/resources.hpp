@@ -172,7 +172,7 @@ class ImageFileSource {
 
 class ImageStore {
  public:
-  static constexpr std::size_t defaultWarmBudgetBytes = 4U * 1024U * 1024U;
+  static constexpr std::size_t defaultWarmBudgetBytes = 32U * 1024U * 1024U;
   static constexpr std::size_t defaultPreparedFrameCacheBytes = 4U * 1024U * 1024U;
   static constexpr std::size_t warmEntryLimit = 256;
   static constexpr std::size_t warmFileLimit = 128;
@@ -495,7 +495,7 @@ class ImageStore {
   const ImageStorageDecision* storageDecision(const std::string& key) const;
   std::shared_ptr<PaletteBacking> makePalette(const ImagePixels& pixels,
       const ImageStorageDecision* decision = nullptr);
-  std::optional<ImagePixels> readPalettePixels(const Slot& slot) const;
+  std::optional<ImagePixels> readPalettePixels(const Slot& slot, std::optional<std::array<int, 4>> region = std::nullopt) const;
   bool materializePalette(Slot& slot);
   std::size_t paletteGpuBytes(const Slot& slot) const;
   std::size_t paletteCpuBytes(const Slot& slot) const;

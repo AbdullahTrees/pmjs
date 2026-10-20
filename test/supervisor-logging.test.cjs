@@ -288,3 +288,40 @@ test('after a disk logging failure output is no longer rate-limited at the termi
   assert.equal(limiter.write('stderr', bytes).length, bytes.length);
   limiter.finish({ abnormal: true });
 });
+
+test('Linux workers get a bounded mmap threshold without overriding explicit allocator settings',
+  { skip: process.platform !== 'linux' }, async () => {
+    const dir = temporaryDirectory('worker-allocator-');
+    const worker = path.join(dir, 'worker.cjs');
+    fs.writeFileSync(worker, [
+      "process.once('message', options => {",
+      "  require('node:fs').writeFileSync(options.output, JSON.stringify({",
+      "    threshold: process.env.MALLOC_MMAP_THRESHOLD_ ?? null,",
+      "    tunables: process.env.GLIBC_TUNABLES ?? null",
+      "  }));",
+      "  process.exit(0);",
+      "});"
+    ].join('\n'));
+    const previous = { threshold: process.env.MALLOC_MMAP_THRESHOLD_, tunables: process.env.GLIBC_TUNABLES };
+    try {
+      for (const settings of [{}, { threshold: '4194304' }, { threshold: '' },
+        { tunables: 'glibc.malloc.mmap_threshold=4194304' }]) {
+        delete process.env.MALLOC_MMAP_THRESHOLD_; delete process.env.GLIBC_TUNABLES;
+        if (settings.threshold !== undefined) process.env.MALLOC_MMAP_THRESHOLD_ = settings.threshold;
+        if (settings.tunables !== undefined) process.env.GLIBC_TUNABLES = settings.tunables;
+        const output = path.join(dir, 'environment.json');
+        const result = await runSupervised({ saveRoot: path.join(dir, 'saves'), output }, { worker });
+        assert.equal(result.code, 0);
+        const actual = JSON.parse(fs.readFileSync(output, 'utf8'));
+        assert.equal(actual.threshold, settings.threshold ?? (settings.tunables ? null : '1048576'));
+        assert.equal(actual.tunables, settings.tunables ?? null);
+        assert.equal(process.env.MALLOC_MMAP_THRESHOLD_, settings.threshold);
+        assert.equal(process.env.GLIBC_TUNABLES, settings.tunables);
+      }
+    } finally {
+      if (previous.threshold === undefined) delete process.env.MALLOC_MMAP_THRESHOLD_;
+      else process.env.MALLOC_MMAP_THRESHOLD_ = previous.threshold;
+      if (previous.tunables === undefined) delete process.env.GLIBC_TUNABLES;
+      else process.env.GLIBC_TUNABLES = previous.tunables;
+    }
+  });

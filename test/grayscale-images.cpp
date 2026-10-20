@@ -4,14 +4,28 @@
 #include "resources.hpp"
 
 #include <GLES3/gl3.h>
+#include <dlfcn.h>
 #include <png.h>
 #include <unistd.h>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+
+namespace {
+std::array<int, 4> lastReadRect{};
+}
+
+extern "C" void GL_APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+    GLenum format, GLenum type, void* pixels) {
+  static const auto read = reinterpret_cast<decltype(&glReadPixels)>(dlsym(RTLD_NEXT, "glReadPixels"));
+  if (!read) throw std::runtime_error("cannot resolve GL readback");
+  lastReadRect = {x, y, width, height};
+  read(x, y, width, height, format, type, pixels);
+}
 
 namespace {
 void require(bool value, const char* message) {
@@ -378,6 +392,31 @@ int main() {
       }), "palette index width did not match its color count");
       const auto roundtrip = images.readPixelsRegion(indexed->handle, 0, 0, width, height);
       require(roundtrip && roundtrip->rgba == pixels.rgba, "16-bit palette readback changed RGBA bytes");
+      for (const pmjs::AssetRect rect : {pmjs::AssetRect{0, 0, 1, 1},
+          {width - 1, height - 1, 1, 1}, {13, 7, 17, 9}, {0, height - 1, width, 1}}) {
+        glPixelStorei(GL_PACK_ALIGNMENT, 8);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 29);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 3);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 2);
+        const auto region = images.readPixelsRegion(indexed->handle, rect[0], rect[1], rect[2], rect[3]);
+        require(region && region->rgba.size() == std::size_t(rect[2]) * rect[3] * 4,
+          "palette region extent differs");
+        require(lastReadRect == rect, "palette region read unrelated source texels");
+        for (int y = 0; y < rect[3]; ++y)
+          require(std::memcmp(region->rgba.data() + std::size_t(y) * rect[2] * 4,
+            pixels.rgba.data() + (std::size_t(y + rect[1]) * width + rect[0]) * 4,
+            std::size_t(rect[2]) * 4) == 0, "palette region changed source pixels");
+        GLint value = 0;
+        for (const auto parameter : {GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_PIXELS, GL_PACK_SKIP_ROWS}) {
+          glGetIntegerv(parameter, &value);
+          require(value == (parameter == GL_PACK_ALIGNMENT ? 8 : parameter == GL_PACK_ROW_LENGTH ? 29 :
+            parameter == GL_PACK_SKIP_PIXELS ? 3 : 2), "palette region changed pixel pack state");
+        }
+        glPixelStorei(GL_PACK_ALIGNMENT, 4); glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0); glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+      }
+      require(!images.readPixelsRegion(indexed->handle, -1, 0, 1, 1) &&
+        !images.readPixelsRegion(indexed->handle, width, 0, 1, 1), "palette region accepted invalid bounds");
       const auto control = images.createRgba(width, height, pixels.rgba.data());
       for (int variant : {1, 3, 5, 7, 9, 13, 17, 21, 25, 29}) {
         require(render(renderer, indexed->handle, width, height, variant) ==

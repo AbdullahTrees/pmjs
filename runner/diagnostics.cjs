@@ -286,6 +286,7 @@ function createDiagnostics({ logger = console, getNative = () => null,
     const native = getNative();
     if (!native) return undefined;
     const extra = {};
+    try { if (native.runtime?.allocatorStats) extra.allocator = native.runtime.allocatorStats(); } catch (_) {}
     try { if (native.images?.memory) {
       const info = native.images.memory(includeLargestImages ? 5 : 0);
       extra.images = { liveCount: info.liveCount, gpuBytes: info.gpuBytes,

@@ -460,7 +460,12 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
           active = null;
         }
         try {
-        child = active = fork(worker, [], { stdio: ['inherit', 'pipe', 'pipe', 'ipc'] });
+        const environment = { ...process.env };
+        // Large transient buffers should release their mappings when freed.
+        if (process.platform === 'linux' && environment.MALLOC_MMAP_THRESHOLD_ === undefined &&
+            !/(^|:)glibc\.malloc\.mmap_threshold=/.test(environment.GLIBC_TUNABLES || ''))
+          environment.MALLOC_MMAP_THRESHOLD_ = '1048576';
+        child = active = fork(worker, [], { stdio: ['inherit', 'pipe', 'pipe', 'ipc'], env: environment });
         workerCgroup = workerCgroupDirectory(child.pid);
         oomBefore = oomCounter(fs, workerCgroup);
         } catch (error) {
