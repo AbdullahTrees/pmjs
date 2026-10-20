@@ -81,6 +81,61 @@ function processMemoryDetails(pid, reader = fs) {
     return Object.keys(result).length ? result : null;
   } catch (_) { return null; }
 }
+function processMappingDetails(pid, reader = fs, largestLimit = 8) {
+  if (!Number.isInteger(pid)) return null;
+  try {
+    const text = reader.readFileSync('/proc/' + pid + '/smaps', 'utf8');
+    const totals = { mappingCount: 0, rssBytes: 0, anonymousBytes: 0, swapBytes: 0 };
+    const anonymousByKind = { processHeapBytes: 0, threadStackBytes: 0,
+      namedAnonymousBytes: 0, unnamedMappingBytes: 0, fileMappingBytes: 0,
+      otherNamedMappingBytes: 0 };
+    const mappings = [];
+    let current = null;
+    const finish = () => {
+      if (!current) return;
+      totals.mappingCount++;
+      totals.rssBytes += current.rssBytes;
+      totals.anonymousBytes += current.anonymousBytes;
+      totals.swapBytes += current.swapBytes;
+      if (current.anonymousBytes > 0) {
+        const name = current.name;
+        if (name === '[heap]') anonymousByKind.processHeapBytes += current.anonymousBytes;
+        else if (/^\[stack(?::|\])/.test(name)) anonymousByKind.threadStackBytes += current.anonymousBytes;
+        else if (/^\[anon(?:_shmem)?:/.test(name)) anonymousByKind.namedAnonymousBytes += current.anonymousBytes;
+        else if (!name) anonymousByKind.unnamedMappingBytes += current.anonymousBytes;
+        else if (name[0] === '/') anonymousByKind.fileMappingBytes += current.anonymousBytes;
+        else anonymousByKind.otherNamedMappingBytes += current.anonymousBytes;
+        mappings.push(current);
+      }
+    };
+    for (const line of text.split('\n')) {
+      const header = /^([\da-f]+)-([\da-f]+)\s+\S+\s+\S+\s+\S+\s+\d+\s*(.*)$/.exec(line);
+      if (header) {
+        finish();
+        current = { range: header[1] + '-' + header[2], name: header[3].trim(),
+          sizeBytes: 0, rssBytes: 0, anonymousBytes: 0, privateDirtyBytes: 0, swapBytes: 0 };
+        continue;
+      }
+      if (!current) continue;
+      const field = /^(Size|Rss|Anonymous|Private_Dirty|Swap):\s+(\d+)\s+kB$/.exec(line);
+      if (!field) continue;
+      const value = Number(field[2]) * 1024;
+      if (field[1] === 'Size') current.sizeBytes = value;
+      else if (field[1] === 'Rss') current.rssBytes = value;
+      else if (field[1] === 'Anonymous') current.anonymousBytes = value;
+      else if (field[1] === 'Private_Dirty') current.privateDirtyBytes = value;
+      else current.swapBytes = value;
+    }
+    finish();
+    mappings.sort((a, b) => b.anonymousBytes - a.anonymousBytes);
+    return { ...totals, anonymousByKind,
+      largestAnonymousMappings: mappings.slice(0, Math.max(0, largestLimit)).map(mapping => ({
+        range: mapping.range, name: mapping.name || '[unnamed]', sizeBytes: mapping.sizeBytes,
+        rssBytes: mapping.rssBytes, anonymousBytes: mapping.anonymousBytes,
+        privateDirtyBytes: mapping.privateDirtyBytes, swapBytes: mapping.swapBytes
+      })) };
+  } catch (_) { return null; }
+}
 function v8HeapDetails(v8Object = v8) {
   try {
     const statistics = v8Object.getHeapStatistics();
@@ -150,6 +205,7 @@ function memoryState({ reader = fs, processObject = HOST_PROCESS, osObject = os,
     externalBytes: usage.external, arrayBufferBytes: usage.arrayBuffers,
     v8Heap: detailed ? v8HeapDetails() : undefined,
     process: processMemoryDetails(processObject.pid, reader),
+    processMappings: detailed ? processMappingDetails(processObject.pid, reader) : undefined,
     host: detailed ? hostMemoryDetails(reader) : undefined,
     totalBytes: limitBytes, availableBytes, hostAvailableBytes: hostAvailable,
     cgroupLimitBytes: bounded ? cgroupLimit : null,
@@ -283,7 +339,9 @@ function createDiagnostics({ logger = console, getNative = () => null,
         if (level === 'warn') message.memoryAccounting =
           'RSS, V8 heap, external memory, native CPU resources, and estimated GPU resources are ' +
           'separate measurements and may overlap. externalBytes includes arrayBufferBytes; some ' +
-          'native, video, and streamed allocations may not be classified. GPU byte counts are estimates.';
+          'native, video, and streamed allocations may not be classified. processMappings partitions ' +
+          'Linux anonymous resident pages by mapping label; V8 and native counters describe owners ' +
+          'that can overlap those pages. GPU byte counts are estimates.';
       }
       // An error while allocating a diagnostic object must not mask OOM.
       if (level === 'warn' && (reason === 'memory-pressure' || reason === 'memory-critical' ||
@@ -456,4 +514,5 @@ function createDiagnostics({ logger = console, getNative = () => null,
   };
 }
 
-module.exports = { readCgroupFile, numericFile, memAvailable, memoryEvents, memoryPressure, memoryState, gameContext, createDiagnostics };
+module.exports = { readCgroupFile, numericFile, memAvailable, memoryEvents, memoryPressure,
+  processMappingDetails, memoryState, gameContext, createDiagnostics };

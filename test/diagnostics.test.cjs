@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { memoryState, memoryPressure, gameContext, createDiagnostics } = require('../runner/diagnostics.cjs');
+const { memoryState, memoryPressure, processMappingDetails, gameContext, createDiagnostics } = require('../runner/diagnostics.cjs');
 
 const MiB = 1024 * 1024;
 
@@ -48,6 +48,32 @@ test('Linux memory PSI reports stalls independently of remaining memory', () => 
     throw new Error('missing');
   } };
   assert.deepEqual(memoryPressure(reader), { someAvg10: 11.5, fullAvg10: 1.25 });
+});
+
+test('detailed Linux memory snapshot partitions anonymous RSS by mapping and lists the largest regions', () => {
+  const smaps = [
+    '1000-3000 rw-p 00000000 00:00 0 [heap]\nSize: 8 kB\nRss: 8 kB\nAnonymous: 8 kB\nPrivate_Dirty: 8 kB\nSwap: 0 kB',
+    '4000-5000 rw-p 00000000 00:00 0 [stack]\nSize: 4 kB\nRss: 4 kB\nAnonymous: 4 kB\nPrivate_Dirty: 4 kB\nSwap: 0 kB',
+    '6000-a000 rw-p 00000000 00:00 0\nSize: 16 kB\nRss: 12 kB\nAnonymous: 12 kB\nPrivate_Dirty: 12 kB\nSwap: 0 kB',
+    'b000-f000 rw-p 00000000 00:00 0 /dev/dri/renderD128\nSize: 16 kB\nRss: 8 kB\nAnonymous: 4 kB\nPrivate_Dirty: 4 kB\nSwap: 0 kB',
+    '10000-11000 rw-p 00000000 00:00 0 [anon:V8-heap]\nSize: 4 kB\nRss: 4 kB\nAnonymous: 4 kB\nPrivate_Dirty: 4 kB\nSwap: 0 kB'
+  ].join('\n') + '\n';
+  const reader = { readFileSync(file) {
+    if (file === '/proc/77/smaps') return smaps;
+    throw new Error('ENOENT');
+  } };
+  const result = processMappingDetails(77, reader, 3);
+  assert.equal(result.mappingCount, 5);
+  assert.equal(result.anonymousBytes, 32 * 1024);
+  assert.deepEqual(result.anonymousByKind, {
+    processHeapBytes: 8 * 1024, threadStackBytes: 4 * 1024,
+    namedAnonymousBytes: 4 * 1024, unnamedMappingBytes: 12 * 1024,
+    fileMappingBytes: 4 * 1024, otherNamedMappingBytes: 0
+  });
+  assert.equal(result.largestAnonymousMappings.length, 3);
+  assert.equal(result.largestAnonymousMappings[0].name, '[unnamed]');
+  assert.equal(result.largestAnonymousMappings[1].name, '[heap]');
+  assert.equal(processMappingDetails(77, { readFileSync() { throw Error('unavailable'); } }), null);
 });
 
 test('map snapshot avoids guest getters and falls back to map metadata name', () => {
