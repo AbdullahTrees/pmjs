@@ -442,7 +442,7 @@ class PortMasterPackage(unittest.TestCase):
             shutil.copy2(ROOT / 'tools' / name, self.stage / 'share/pmjs/tools' / name)
         self.refresh_manifest()
         info = json.loads((self.stage / 'build-info.json').read_text())
-        info.update(version='fixture', source={**info['source'], 'commit': '0' * 40})
+        info.update(source={**info['source'], 'commit': '0' * 40})
         artifacts.write_json(self.stage / 'build-info.json', info)
         command = ['node', self.stage / 'share/pmjs/tools/pmjs.mjs', self.stage, 'package', bundle,
                    '--runtime', self.stage, '--output', self.output]

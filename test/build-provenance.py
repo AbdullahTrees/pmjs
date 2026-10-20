@@ -356,7 +356,7 @@ endif()
         with self.assertRaisesRegex(ValueError, 'different release record'):
             release.archive(stage, report, output, development=True)
         self.assertEqual(output.read_bytes(), before)
-        info['version'] = 'different runtime'
+        info['architecture'] = 'different runtime'
         release.write_json(stage / 'build-info.json', info)
         with self.assertRaisesRegex(ValueError, 'different runtime'):
             release.checked_manifest(stage)

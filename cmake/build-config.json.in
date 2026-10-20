@@ -1,5 +1,4 @@
 {
-  "version": "@PROJECT_VERSION@-experimental",
   "architecture": "@CMAKE_SYSTEM_PROCESSOR@",
   "compiler": {"id": "@CMAKE_CXX_COMPILER_ID@", "version": "@CMAKE_CXX_COMPILER_VERSION@"},
   "buildType": "@CMAKE_BUILD_TYPE@",

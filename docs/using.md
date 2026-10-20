@@ -93,7 +93,7 @@ For additional logging:
 - `PMJS_COMPAT_VERBOSE=1`: log unsupported operations.
 - `PMJS_STRICT_COMPAT=1`: stop at the first unsupported operation.
 
-When reporting a problem, include `--version`, the log, firmware and kernel
-versions, self-test output, and the game's engine and plugin versions. Missing
+When reporting a problem, include `pmjs --build-info`, the log, firmware and
+kernel versions, self-test output, and the game's engine and plugin versions. Missing
 shared libraries must come from the supported system environment; keep
 graphics drivers matched to the firmware.

@@ -8,9 +8,14 @@ import { preparationInputs, resolveGameDirectory as gameDirectory } from './game
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
 import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
 import { measureStartup } from '../runner/startup-metrics.cjs';
-import { installConsoleLogging } from '../runner/logging.cjs';
+import { installConsoleLogging, startLauncherLog } from '../runner/logging.cjs';
 import portPreparation from '../runner/port-preparation.cjs';
 
+const action = process.argv[3];
+if (!['--build-info', '--help', 'help', 'self-test', 'bundle', 'package'].includes(action)) {
+  installConsoleLogging();
+  startLauncherLog();
+}
 const root = path.resolve(process.argv[2]);
 const share = path.join(root, 'share/pmjs');
 const info = JSON.parse(fs.readFileSync(path.join(root, 'build-info.json'), 'utf8'));
@@ -19,8 +24,9 @@ const guestDelimiter = args.indexOf('--');
 const guestArguments = guestDelimiter < 0 ? [] : args.splice(guestDelimiter).slice(1);
 
 const first = args.shift();
-const version = `PMJS ${info.version}${info.buildId ? ` build=${info.buildId}` : ''} (${info.source.commit.slice(0, 12)}${info.source.dirty ? ', modified' : ''})`;
-const help = `${version}
+const buildInfo = `PMJS${info.buildId ? ` build=${info.buildId}` : ''} ` +
+  `source=${info.source.dirty ? 'dirty' : info.source.commit.slice(0, 12)}`;
+const help = `${buildInfo}
 Usage:
   pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...] [-- GAME_ARGUMENT ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
@@ -32,7 +38,7 @@ Usage:
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
-  pmjs --version
+  pmjs --build-info
 Game paths may contain a www/ directory. Prepared files use the user cache;
 saves use the user data directory. Game JavaScript runs with Node capabilities.
 Only run games you trust.`;
@@ -143,7 +149,7 @@ function prepare(context) {
 }
 
 async function main() {
-  if (first === '--version') { console.log(version); return; }
+  if (first === '--build-info') { console.log(buildInfo); return; }
   if (first === '--help' || first === 'help') { console.log(help); return; }
   if (first === 'self-test') {
     if (args.some(value => value !== '--graphics') || args.length > 1) throw new Error('invalid self-test arguments');
@@ -219,9 +225,12 @@ async function main() {
     options.adapters = bundle.adapters;
   }
   const packageSha256 = hash(path.join(root, 'build-info.json'));
-  installConsoleLogging();
-  console.log(`[pmjs] version=${info.version} build=${info.buildId || info.source.commit} ` +
-    `source=${info.source.commit}${info.source.dirty ? ',modified' : ''} package=${packageSha256}`);
+  const identity = [
+    info.buildId && `build=${info.buildId}`,
+    `source=${info.source.dirty ? 'dirty' : info.source.commit}`,
+    `package=${packageSha256}`
+  ].filter(Boolean).join(' ');
+  console.log(`[pmjs] ${identity}`);
   const game = gameDirectory(options['--game']);
   const id = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   const state = options['--state'] || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmjs', id);
