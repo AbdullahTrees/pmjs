@@ -535,7 +535,11 @@ bool Renderer::queueTiled(ImageHandle image,
 bool Renderer::prepareFourTileBatches(TileLayerResource& layer) {
   if (layer.batchReady) return true;
   layer.fourBatches.clear();
-  std::vector<float> attributes;
+  std::size_t attributeCount = 0;
+  for (const auto& run : layer.batches)
+    attributeCount += static_cast<std::size_t>(run.count) * 4;
+  std::vector<float> attributes(attributeCount);
+  std::size_t attributeOffset = 0;
   for (const auto& run : layer.batches) {
     if (layer.fourBatches.empty()) layer.fourBatches.emplace_back();
     auto* batch = &layer.fourBatches.back();
@@ -547,9 +551,12 @@ bool Renderer::prepareFourTileBatches(TileLayerResource& layer) {
     if (slot == batch->textureCount) batch->textures[batch->textureCount++] = run;
     if (!batch->count) batch->first = run.first;
     batch->count += run.count;
-    for (int vertex = 0; vertex < run.count; ++vertex)
-      attributes.insert(attributes.end(), {static_cast<float>(slot), static_cast<float>(run.textureWidth),
-        static_cast<float>(run.textureHeight), run.premultiplied ? 1.0F : 0.0F});
+    for (int vertex = 0; vertex < run.count; ++vertex) {
+      attributes[attributeOffset++] = static_cast<float>(slot);
+      attributes[attributeOffset++] = static_cast<float>(run.textureWidth);
+      attributes[attributeOffset++] = static_cast<float>(run.textureHeight);
+      attributes[attributeOffset++] = run.premultiplied ? 1.0F : 0.0F;
+    }
   }
   if (!layer.batchBuffer) glGenBuffers(1, &layer.batchBuffer);
   glBindVertexArray(layer.vertexArray);
