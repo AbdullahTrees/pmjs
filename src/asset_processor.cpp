@@ -967,7 +967,6 @@ void validateLayout(PreparationSource& source, const AssetRecipe& recipe, const 
   if (covered != static_cast<std::uint64_t>(width) * height)
     throw AssetPreparationUnsupported("indexed pieces do not cover the source");
   std::uint64_t totalBytes = sourceBytes;
-  std::uint64_t pagePixels = 0;
   for (std::size_t index = 0; index < layout.pages.size(); ++index) {
     const auto& page = layout.pages[index];
     if ((page.path != "page-" + std::to_string(index) + ".png" &&
@@ -975,13 +974,10 @@ void validateLayout(PreparationSource& source, const AssetRecipe& recipe, const 
         page.width <= 0 || page.height <= 0 || page.width > pageLimit || page.height > pageLimit)
       throw AssetPreparationUnsupported("invalid indexed page");
     const auto area = static_cast<std::uint64_t>(page.width) * page.height;
-    pagePixels += area;
     totalBytes += area * 5;
     if (totalBytes > replayMemoryLimit)
       throw AssetPreparationUnsupported("indexed pages exceed replay memory limit");
   }
-  if (pagePixels >= static_cast<std::uint64_t>(width) * height)
-    throw AssetPreparationUnsupported("indexed pages do not reduce decoded storage");
   for (std::size_t index = 0; index < layout.cells.size(); ++index) {
     const auto& cell = layout.cells[index];
     if (recipe.crop) {
@@ -1268,27 +1264,48 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
     return asset;
   };
   std::optional<PreparedAsset> selected;
-  if (recipe.crop) selected = prepareAssetCells(source, staging, recipe);
-  else {
-    std::exception_ptr unsupported;
-    try { selected = prepareAssetCells(source, staging, recipe); }
-    catch (const AssetPreparationUnsupported&) { unsupported = std::current_exception(); }
-    if (selected && selected->uniform) return *selected;
-    std::vector<AssetColor> fills;
-    if (selected) optionalPreparation([&] { fills = modalFills(source, recipe); });
-    else fills = modalFills(source, recipe);
-    if (std::any_of(fills.begin(), fills.end(), [](const auto& fill) { return fill != AssetColor{}; })) {
-      const auto tryModal = [&] {
-        std::optional<PreparedAsset> candidate;
-        try { candidate = prepareAssetCells(source, staging, recipe, fills); }
-        catch (const AssetPreparationUnsupported&) { return; }
-        if (candidate && (!selected || area(*candidate) < area(*selected))) selected = std::move(candidate);
-      };
-      if (selected) optionalPreparation(tryModal);
-      else tryModal();
+  try {
+    if (recipe.crop) selected = prepareAssetCells(source, staging, recipe);
+    else {
+      std::exception_ptr unsupported;
+      try { selected = prepareAssetCells(source, staging, recipe); }
+      catch (const AssetPreparationUnsupported&) { unsupported = std::current_exception(); }
+      if (selected && selected->uniform) return *selected;
+      std::vector<AssetColor> fills;
+      if (selected) optionalPreparation([&] { fills = modalFills(source, recipe); });
+      else fills = modalFills(source, recipe);
+      if (std::any_of(fills.begin(), fills.end(), [](const auto& fill) { return fill != AssetColor{}; })) {
+        const auto tryModal = [&] {
+          std::optional<PreparedAsset> candidate;
+          try { candidate = prepareAssetCells(source, staging, recipe, fills); }
+          catch (const AssetPreparationUnsupported&) { return; }
+          if (candidate && (!selected || area(*candidate) < area(*selected))) selected = std::move(candidate);
+        };
+        if (selected) optionalPreparation(tryModal);
+        else tryModal();
+      }
+      if (!selected) std::rethrow_exception(unsupported);
+      selected = optimize(std::move(*selected));
     }
-    if (!selected) std::rethrow_exception(unsupported);
-    selected = optimize(std::move(*selected));
+  } catch (const AssetPreparationUnsupported&) {
+    if (!options.lz4Pages || recipe.crop || recipe.columns <= 0 || recipe.rows <= 0 ||
+        recipe.columns > 4096 || recipe.rows > 4096 / recipe.columns ||
+        source.width % recipe.columns || source.height % recipe.rows) throw;
+    PreparedAsset flat;
+    flat.width = source.width; flat.height = source.height;
+    flat.halo = (std::max(flat.width, flat.height) + 1023) / 1024 + 2;
+    const int extent = pageLimit - 2 * flat.halo;
+    for (int y = 0; y < flat.height; y += extent) for (int x = 0; x < flat.width; x += extent) {
+      const int width = std::min(extent, flat.width - x), height = std::min(extent, flat.height - y);
+      PreparedAssetCell cell;
+      cell.rect = {x, y, width, height}; cell.crop = {0, 0, width, height};
+      cell.page = static_cast<int>(flat.pages.size());
+      cell.atlas = {flat.halo, flat.halo, width, height};
+      flat.pages.push_back({"page-" + std::to_string(cell.page) + ".pml4",
+        width + 2 * flat.halo, height + 2 * flat.halo});
+      flat.cells.push_back(cell);
+    }
+    selected = std::move(flat);
   }
   if (!selected->uniform) emitLayout(source, staging, *selected, recipe, options.lz4Pages);
   return std::move(*selected);

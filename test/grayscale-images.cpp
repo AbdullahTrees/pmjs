@@ -345,7 +345,8 @@ int main() {
     }
     // Exercise index-width selection and every 16-bit address, including hidden RGB and odd dimensions.
     for (const unsigned colorCount : {256U, 257U, 65536U}) for (const bool opaque : {false, true}) {
-      constexpr int width = 2049, height = 2048;
+      const int width = colorCount == 256 ? 1280 : colorCount == 257 ? 1920 : 2049;
+      const int height = colorCount == 256 ? 720 : colorCount == 257 ? 1080 : 2048;
       pmjs::ImagePixels pixels{width, height, std::vector<std::uint8_t>(width * height * 4)};
       for (std::size_t i = 0; i < pixels.rgba.size() / 4; ++i) {
         const unsigned color = i % colorCount;

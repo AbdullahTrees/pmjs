@@ -901,7 +901,7 @@ ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) {
     result.allZero &= !(pixels.rgba[i] || pixels.rgba[i+1] || pixels.rgba[i+2] || pixels.rgba[i+3]);
   }
   result.sparseRegions = sparseImageRegions(pixels.rgba.data(), pixels.width, pixels.height, false);
-  if (pixels.width < 2048 || pixels.height < 2048 || result.channels.channels == 1) return result;
+  if (result.channels.channels == 1) return result;
   const std::size_t limit = result.channels.channels == 2 ? 256 : 65536;
   std::unordered_set<std::uint32_t> colors;
   for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
@@ -910,7 +910,10 @@ ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) {
     colors.insert(key);
     if (colors.size() > limit) return result;
   }
-  result.paletteBits = colors.size() <= 256 ? 8 : 16;
+  const int bits = colors.size() <= 256 ? 8 : 16;
+  if (pixels.rgba.size()/4*(result.channels.channels - bits/8) <=
+      ((colors.size()+255)/256)*1024) return result;
+  result.paletteBits = bits;
   result.channels = {};
   return result;
 }
@@ -921,7 +924,7 @@ bool ImageStore::installStorageDecision(const std::filesystem::path& path,
       decision.width > 8192 || decision.height > 8192 ||
       (decision.paletteBits != 0 && decision.paletteBits != 8 && decision.paletteBits != 16) ||
       (decision.channels.channels != 1 && decision.channels.channels != 2 && decision.channels.channels != 4)) return false;
-  if (decision.paletteBits && (decision.width < 2048 || decision.height < 2048 || decision.channels.channels != 4)) return false;
+  if (decision.paletteBits && decision.channels.channels != 4) return false;
   for (auto c : decision.channels.source) if (c > 3) return false;
   for (auto c : decision.channels.swizzle)
     if (c >= decision.channels.channels && c != 4 && c != 5) return false;
@@ -962,7 +965,6 @@ std::optional<ImageInfo> ImageStore::createDecoded(const ImagePixels& pixels,
 }
 
 std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makePalette(const ImagePixels& pixels, const ImageStorageDecision* decision) {
-  if (pixels.width < 2048 || pixels.height < 2048) return {};
   if (decision && !decision->paletteBits) return {};
   const auto channels = decision ? 4 : imageStorage(pixels).channels;
   if (channels == 1) return {};
@@ -984,6 +986,8 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makePalette(const ImageP
     indices[i * 2] = found->second & 255;
     indices[i * 2 + 1] = found->second >> 8;
   }
+  const int indexChannels = decision ? decision->paletteBits / 8 : colors.size() <= 256 ? 1 : 2;
+  if (count * (channels - indexChannels) <= ((colors.size()+255)/256)*1024) return {};
   auto result = std::make_shared<PaletteBacking>();
   result->owner = this;
   result->height = static_cast<int>((colors.size() + 255) / 256);
@@ -1016,8 +1020,7 @@ std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle ha
   auto info = inspect(handle);
   if (!info) return std::nullopt;
   auto& slot = slots_[(handle & indexMask) - 1U];
-  if (!slot.paletteChecked && !slot.texture && !slot.astc &&
-      slot.width >= 2048 && slot.height >= 2048) {
+  if (!slot.paletteChecked && !slot.texture && !slot.astc) {
     slot.paletteChecked = true;
     const auto* decision = storageDecision(slot.cacheKey);
     if (decision && (decision->width != slot.width || decision->height != slot.height)) decision = nullptr;

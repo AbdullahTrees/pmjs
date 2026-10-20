@@ -1487,8 +1487,8 @@ test('storage decisions bind to source hashes and survive warm catalog installat
   f.native.assets.installDerivedCatalog = () => {};
   let installed = [];
   f.native.assets.installImageStorage = entries => { installed = entries; return entries.length; };
-  const storage = { version: 1, width: 1, height: 1, channels: 4,
-    paletteBits: 0, source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] };
+  const storage = { version: 1, width: 1280, height: 720, channels: 4,
+    paletteBits: 8, source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] };
   const portableIndex = { negativeHints: [f.source], images: [{
     source: f.source, sourceHash: crypto.createHash('sha256').update(PNG).digest('hex'),
     recipe: null, encryptionSettingsSha256: null, descriptor: null, outputs: [], storage

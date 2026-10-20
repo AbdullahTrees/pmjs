@@ -191,7 +191,7 @@ function validStorageDecision(value) {
     value.source.every(n => Number.isInteger(n) && n >= 0 && n < 4) &&
     Array.isArray(value.swizzle) && value.swizzle.length === 4 &&
     value.swizzle.every(n => Number.isInteger(n) && (n >= 0 && n < value.channels || n === 4 || n === 5)) &&
-    (!value.paletteBits || value.channels === 4 && value.width >= 2048 && value.height >= 2048) &&
+    (!value.paletteBits || value.channels === 4) &&
     (value.pixelFactsVersion === undefined || value.pixelFactsVersion === 1 &&
       typeof value.opaque === 'boolean' && typeof value.allZero === 'boolean' &&
       !(value.opaque && value.allZero) &&

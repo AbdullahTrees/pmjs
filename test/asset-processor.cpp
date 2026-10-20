@@ -591,6 +591,22 @@ int main() {
     try { pmjs::prepareAssetImage(source, root / "dense"); }
     catch (const pmjs::AssetPreparationUnsupported&) { refused = true; }
     require(refused && !std::filesystem::exists(root / "dense"));
+    {
+      pmjs::AssetPreparationOptions options;
+      options.lz4Pages = true;
+      for (const int width : {1280, 3376}) {
+        write(source, width, 720, [](int x, int y) {
+          return AssetColor{static_cast<std::uint8_t>(x), static_cast<std::uint8_t>(y), 31, 255};
+        });
+        const auto output = root / ("standalone-" + std::to_string(width));
+        const auto standalone = pmjs::prepareAssetImage(source, output, {}, nullptr, options);
+        require(!standalone.pages.empty());
+        for (const auto& page : standalone.pages) require(page.path.extension() == ".pml4");
+        verify(source, output, standalone);
+        const auto replay = pmjs::prepareAssetImage(source, output, {}, &standalone, options);
+        verify(source, output, replay);
+      }
+    }
     result = check(128, 96, [](int x, int y) {
       return AssetColor{static_cast<std::uint8_t>(x + 1), static_cast<std::uint8_t>(y + 1), 31, 255};
     }, {2,2,std::nullopt,{}});
