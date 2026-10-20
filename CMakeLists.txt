@@ -594,6 +594,11 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-pixi-precision.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-pixi-precision PROPERTIES ENVIRONMENT
     "LIBGL_ALWAYS_SOFTWARE=1")
+  add_test(NAME node-multitexture-sprite-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-multitexture-sprite-pixels.cjs"
+    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  set_tests_properties(node-multitexture-sprite-pixels PROPERTIES ENVIRONMENT
+    "LIBGL_ALWAYS_SOFTWARE=1")
   function(pmjs_add_presentation_test name game window scale expect)
     add_test(NAME ${name} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
       "${CMAKE_CURRENT_SOURCE_DIR}/test/node-presentation.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")

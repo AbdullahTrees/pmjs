@@ -174,6 +174,7 @@ struct RendererStats {
   std::uint64_t scaledPresentationFrames = 0;
   std::uint64_t presentationLetterboxedFrames = 0;
   std::uint64_t spriteDrawCalls = 0;
+  std::uint64_t spriteTextureChangesBatched = 0;
   std::uint64_t tilingSpriteDrawCalls = 0;
   std::uint64_t sparseTilingCommands = 0;
   std::uint64_t sparseTilingDrawCalls = 0;
@@ -528,6 +529,13 @@ class Renderer {
     int contentBounds = -1, fill = -1;
   };
   CompactSpriteProgram compactSprite_, compactFill_;
+  struct MultiTextureSpriteProgram {
+    std::uint32_t program = 0;
+    int projection = -1, targetYDown = -1, vertices = -1;
+    int packing = -1, premultiplied = -1;
+    std::array<int, 4> images{-1, -1, -1, -1};
+  };
+  MultiTextureSpriteProgram multiTextureSprite_;
   int simpleDerivedImageUniform_ = -1;
   int simpleDerivedNearestUniform_ = -1;
   int simpleDerivedAtlasOffsetUniform_ = -1;

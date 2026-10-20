@@ -344,6 +344,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   };
   GLuint filter = 0;
   GLuint simple = 0;
+  GLuint multiTextureSprite = 0;
   GLuint compact = 0, compactFill = 0;
   GLuint tile = 0, fourTile = 0;
   GLuint nearestTile = 0, nearestFourTile = 0;
@@ -352,6 +353,8 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   try {
     filter = linkPixiProgram(vertexSource, fragmentSource);
     simple = linkPixiProgram(vertexSource, simpleFragmentSource);
+    multiTextureSprite = linkPixiProgram(vertexSource,
+      multiTextureSpriteFragmentSource);
     compact = linkPixiProgram(vertexSource, compactSpriteFragmentSource);
     std::string fillSource(compactSpriteFragmentSource);
     fillSource.insert(fillSource.find('\n') + 1, "#define PMJS_COMPACT_FILL\n");
@@ -388,6 +391,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   } catch (...) {
     if (filter) glDeleteProgram(filter);
     if (simple) glDeleteProgram(simple);
+    if (multiTextureSprite) glDeleteProgram(multiTextureSprite);
     if (compact) glDeleteProgram(compact);
     if (compactFill) glDeleteProgram(compactFill);
     if (tile) glDeleteProgram(tile);
@@ -400,6 +404,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   }
   if (program_) glDeleteProgram(program_);
   if (simpleProgram_) glDeleteProgram(simpleProgram_);
+  if (multiTextureSprite_.program) glDeleteProgram(multiTextureSprite_.program);
   if (compactSprite_.program) glDeleteProgram(compactSprite_.program);
   if (compactFill_.program) glDeleteProgram(compactFill_.program);
   if (tileProgram_) glDeleteProgram(tileProgram_);
@@ -410,6 +415,18 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   if (canvasTriangleBitmapProgram_) glDeleteProgram(canvasTriangleBitmapProgram_);
   program_ = filter;
   simpleProgram_ = simple;
+  multiTextureSprite_.program = multiTextureSprite;
+  multiTextureSprite_.projection = glGetUniformLocation(multiTextureSprite, "spriteProjection");
+  multiTextureSprite_.targetYDown = glGetUniformLocation(multiTextureSprite, "targetYDown");
+  multiTextureSprite_.vertices = glGetUniformLocation(multiTextureSprite, "spriteWorldVertices");
+  multiTextureSprite_.packing = glGetUniformLocation(multiTextureSprite, "pixiSpritePacking");
+  multiTextureSprite_.premultiplied = glGetUniformLocation(multiTextureSprite, "texturePremultiplied");
+  glUseProgram(multiTextureSprite);
+  for (std::size_t slot = 0; slot < multiTextureSprite_.images.size(); ++slot) {
+    const std::string name = "image" + std::to_string(slot);
+    multiTextureSprite_.images[slot] = glGetUniformLocation(multiTextureSprite, name.c_str());
+    glUniform1i(multiTextureSprite_.images[slot], static_cast<GLint>(slot));
+  }
   const auto compactUniforms = [](GLuint program) {
     CompactSpriteProgram result;
     result.program = program;
@@ -702,6 +719,7 @@ Renderer::~Renderer() {
   if (vertexArray_) glDeleteVertexArrays(1, &vertexArray_);
   if (program_) glDeleteProgram(program_);
   if (simpleProgram_) glDeleteProgram(simpleProgram_);
+  if (multiTextureSprite_.program) glDeleteProgram(multiTextureSprite_.program);
   if (compactSprite_.program) glDeleteProgram(compactSprite_.program);
   if (compactFill_.program) glDeleteProgram(compactFill_.program);
   if (generatedTextureProgram_) glDeleteProgram(generatedTextureProgram_);

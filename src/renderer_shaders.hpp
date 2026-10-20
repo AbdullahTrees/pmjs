@@ -1146,6 +1146,29 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
     outputColor.rgb *= pixiSpritePacking ? (texturePremultiplied ? 1.0 : sampleColor.a) : (texturePremultiplied ? vertexColor.a : outputColor.a);
   }
 )";
+constexpr const char* multiTextureSpriteFragmentSource = R"(#version 300 es
+  precision mediump float;
+  uniform highp sampler2D image0, image1, image2, image3;
+  uniform bool pixiSpritePacking;
+  uniform bool texturePremultiplied;
+  in highp vec2 vertexUv;
+  in highp vec4 vertexColor;
+  in vec4 vertexUvClamp;
+  out highp vec4 outputColor;
+  highp vec4 sampleSpriteTexture(highp vec2 coord, highp float slot) {
+    if (slot < 0.5) return texture(image0, coord);
+    if (slot < 1.5) return texture(image1, coord);
+    if (slot < 2.5) return texture(image2, coord);
+    return texture(image3, coord);
+  }
+  void main() {
+    highp vec4 sampleColor = sampleSpriteTexture(vertexUv, vertexUvClamp.x);
+    outputColor = sampleColor * vertexColor;
+    outputColor.rgb *= pixiSpritePacking ?
+      (texturePremultiplied ? 1.0 : sampleColor.a) :
+      (texturePremultiplied ? vertexColor.a : outputColor.a);
+  }
+)";
 constexpr const char* compactSpriteFragmentSource = R"(#version 300 es
   precision mediump float;
   uniform highp sampler2D image, indexX, indexY, phaseX, phaseY;

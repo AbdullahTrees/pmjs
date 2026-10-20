@@ -621,11 +621,15 @@ void Renderer::renderScene() {
     float blur = 0;
     ImageHandle maskImage = 0;
     std::array<float, 6> maskTransform{};
+    std::uint32_t lastTexture = 0;
     const RenderCommand* matrixCommand = nullptr;
     RenderCommand::Action action = RenderCommand::Action::draw;
     bool appliesSpriteColor = false;
     bool pixiSpritePacking = false;
     bool standaloneBitmapRegion = false;
+    bool multiTextureSprite = false;
+    std::array<std::uint32_t, 4> textures{};
+    std::uint8_t textureCount = 0;
     bool spriteWorldVertices = false;
     bool premultipliedSpriteTexture = false;
     bool clampedTilingSampling = false;
@@ -1028,6 +1032,12 @@ void Renderer::renderScene() {
     const auto sampleBounds = vertexBitmapFrame ? std::array<float, 4>{
       command.source[0], command.source[1], command.source[0] + command.source[2] - 1,
       command.source[1] + command.source[3] - 1} : std::array<float, 4>{u0, v0, u1, v1};
+    const bool multiTextureSprite = command.primitive == RenderCommand::Primitive::sprite &&
+        !command.repeat && !command.mipmap && !command.clampedTilingSampling &&
+        !command.atlasTilingSampling && !command.maskImage && command.blur <= 0 &&
+        !command.appliesSpriteColor && !command.appliesColorMatrix &&
+        !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
+        !inlineFilterMatrix[commandIndex] && !derived && !block && !compact;
     const std::array<float, 72> vertices = {
       vertex0[0], vertex0[1], uv0[0], uv0[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
       vertex1[0], vertex1[1], uv1[0], uv1[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
@@ -1072,38 +1082,55 @@ void Renderer::renderScene() {
         }
       }
     }
-    if (operations.empty() || block || operations.back().block || compact || operations.back().compact || operations.back().tileLayer != 0 ||
-        operations.back().sparse || sparseClips.has_value() ||
-        operations.back().derivedImage != derived.has_value() ||
-        operations.back().derivedUvTransform != derivedUvTransform ||
-        operations.back().derivedSampleBounds != derivedSampleBounds ||
-        operations.back().derivedAtlasOffset != derivedAtlasOffset ||
-        operations.back().texture != texture ||
-        operations.back().blendMode != command.blendMode ||
-        operations.back().repeat != (command.repeat && !sceneryWindow) ||
-        operations.back().nearest != command.nearest ||
-        operations.back().mipmap != mipmap ||
-        operations.back().clampedTilingSampling != command.clampedTilingSampling ||
-        operations.back().atlasTilingSampling != command.atlasTilingSampling ||
-        operations.back().tilingUvTransform != command.tilingUvTransform ||
-        operations.back().tilingAtlasMapping != command.tilingAtlasMapping ||
-        operations.back().tilingAtlasBounds != command.tilingAtlasBounds ||
-        operations.back().blur != command.blur ||
-        operations.back().maskImage != command.maskImage ||
-        operations.back().maskTransform != command.maskTransform ||
-        operations.back().appliesSpriteColor != command.appliesSpriteColor ||
-        operations.back().pixiSpritePacking != command.pixiSpritePacking ||
-        operations.back().standaloneBitmapRegion != command.standaloneBitmapRegion ||
-        operations.back().spriteWorldVertices != worldVertices ||
-        operations.back().premultipliedSpriteTexture != texturePremultiplied ||
-        ((command.appliesSpriteColor || command.standaloneBitmapRegion) && !vertexBitmapFrame &&
-         operations.back().spriteFrame != command.source) ||
-        operations.back().colorTone != command.colorTone ||
-        operations.back().blendColor != command.blendColor ||
-        operations.back().inlineMatrix != inlineFilterMatrix[commandIndex] ||
-        operations.back().primitive != command.primitive ||
-        operations.back().clipped != operationClipped ||
-        (operationClipped && operations.back().clip != operationClip)) {
+    const bool operationStateMatches = !operations.empty() &&
+        !block && !operations.back().block && !compact && !operations.back().compact &&
+        operations.back().tileLayer == 0 && !operations.back().sparse &&
+        !sparseClips.has_value() &&
+        operations.back().derivedImage == derived.has_value() &&
+        operations.back().derivedUvTransform == derivedUvTransform &&
+        operations.back().derivedSampleBounds == derivedSampleBounds &&
+        operations.back().derivedAtlasOffset == derivedAtlasOffset &&
+        operations.back().blendMode == command.blendMode &&
+        operations.back().repeat == (command.repeat && !sceneryWindow) &&
+        operations.back().nearest == command.nearest &&
+        operations.back().mipmap == mipmap &&
+        operations.back().clampedTilingSampling == command.clampedTilingSampling &&
+        operations.back().atlasTilingSampling == command.atlasTilingSampling &&
+        operations.back().tilingUvTransform == command.tilingUvTransform &&
+        operations.back().tilingAtlasMapping == command.tilingAtlasMapping &&
+        operations.back().tilingAtlasBounds == command.tilingAtlasBounds &&
+        operations.back().blur == command.blur &&
+        operations.back().maskImage == command.maskImage &&
+        operations.back().maskTransform == command.maskTransform &&
+        operations.back().appliesSpriteColor == command.appliesSpriteColor &&
+        operations.back().pixiSpritePacking == command.pixiSpritePacking &&
+        operations.back().standaloneBitmapRegion == command.standaloneBitmapRegion &&
+        operations.back().multiTextureSprite == multiTextureSprite &&
+        operations.back().spriteWorldVertices == worldVertices &&
+        operations.back().premultipliedSpriteTexture == texturePremultiplied &&
+        !((command.appliesSpriteColor || command.standaloneBitmapRegion) && !vertexBitmapFrame &&
+          operations.back().spriteFrame != command.source) &&
+        operations.back().colorTone == command.colorTone &&
+        operations.back().blendColor == command.blendColor &&
+        operations.back().inlineMatrix == inlineFilterMatrix[commandIndex] &&
+        operations.back().primitive == command.primitive &&
+        operations.back().clipped == operationClipped &&
+        (!operationClipped || operations.back().clip == operationClip);
+    std::uint8_t multiTextureSlot = 0;
+    bool canAppendTexture = false;
+    if (operationStateMatches && multiTextureSprite &&
+        operations.back().multiTextureSprite) {
+      while (multiTextureSlot < operations.back().textureCount &&
+          operations.back().textures[multiTextureSlot] != texture) {
+        ++multiTextureSlot;
+      }
+      canAppendTexture = multiTextureSlot < operations.back().textureCount ||
+          operations.back().textureCount < operations.back().textures.size();
+    }
+    const bool textureChangeBatched = operationStateMatches && canAppendTexture &&
+        operations.back().lastTexture != texture;
+    if (!operationStateMatches ||
+        (operations.back().texture != texture && !canAppendTexture)) {
       operations.push_back({0, texture, command.blendMode,
         command.repeat && !sceneryWindow,
         command.nearest,
@@ -1113,6 +1140,10 @@ void Renderer::renderScene() {
       operations.back().appliesSpriteColor = command.appliesSpriteColor;
       operations.back().pixiSpritePacking = command.pixiSpritePacking;
       operations.back().standaloneBitmapRegion = command.standaloneBitmapRegion;
+      operations.back().multiTextureSprite = multiTextureSprite;
+      operations.back().textures[0] = texture;
+      operations.back().textureCount = 1;
+      operations.back().lastTexture = texture;
       operations.back().spriteWorldVertices = worldVertices;
       operations.back().mipmap = mipmap;
       operations.back().premultipliedSpriteTexture = texturePremultiplied;
@@ -1150,6 +1181,26 @@ void Renderer::renderScene() {
     } else {
       operations.back().count += 6;
     }
+    auto& operation = operations.back();
+    if (operation.multiTextureSprite) {
+      multiTextureSlot = 0;
+      while (multiTextureSlot < operation.textureCount &&
+          operation.textures[multiTextureSlot] != texture) {
+        ++multiTextureSlot;
+      }
+      if (multiTextureSlot == operation.textureCount) {
+        operation.textures[operation.textureCount++] = texture;
+      }
+      const auto vertexStart = vertices_.size() - 72U;
+      for (std::size_t vertex = 0; vertex < 6; ++vertex) {
+        vertices_[vertexStart + vertex * 12U + 8U] = static_cast<float>(multiTextureSlot);
+        vertices_[vertexStart + vertex * 12U + 9U] = 0;
+        vertices_[vertexStart + vertex * 12U + 10U] = 0;
+        vertices_[vertexStart + vertex * 12U + 11U] = 0;
+      }
+    }
+    operation.lastTexture = texture;
+    if (textureChangeBatched && diagnostics_) ++stats_.spriteTextureChangesBatched;
   }
 
   if (!vertices_.empty()) {
@@ -2178,6 +2229,48 @@ void Renderer::renderScene() {
     const bool simpleSprite = operation.blur <= 0 && operation.maskImage == 0 &&
                               !operation.appliesSpriteColor && !operation.standaloneBitmapRegion &&
                               operation.inlineMatrix == nullptr;
+    if (operation.multiTextureSprite && operation.textureCount > 1) {
+      const auto& program = multiTextureSprite_;
+      if (activeProgram != program.program) {
+        glUseProgram(program.program);
+        glBindVertexArray(vertexArray_);
+        activeProgram = program.program;
+      }
+      projectTarget(program.program, operation.primitive != RenderCommand::Primitive::screenFill);
+      glUniformMatrix3fv(program.projection, 1, GL_FALSE, projection.data());
+      glUniform1i(program.targetYDown, targetYDown);
+      glUniform1i(program.vertices, operation.spriteWorldVertices);
+      glUniform1i(program.packing, operation.pixiSpritePacking);
+      glUniform1i(program.premultiplied, operation.premultipliedSpriteTexture);
+      for (std::size_t slot = 0; slot < program.images.size(); ++slot) {
+        const auto texture = operation.textures[
+          std::min<std::size_t>(slot, operation.textureCount - 1)];
+        glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(slot));
+        glBindTexture(GL_TEXTURE_2D, texture);
+        const auto nearest = textureNearestState_.find(texture);
+        if (nearest == textureNearestState_.end() || nearest->second != operation.nearest) {
+          textureNearestState_[texture] = operation.nearest;
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+            operation.nearest ? GL_NEAREST : GL_LINEAR);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+            operation.nearest ? GL_NEAREST : GL_LINEAR);
+        }
+        const auto repeat = textureRepeatState_.find(texture);
+        if (repeat == textureRepeatState_.end() || repeat->second) {
+          textureRepeatState_[texture] = false;
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+          glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+      }
+      glActiveTexture(GL_TEXTURE0);
+      glDrawArrays(GL_TRIANGLES, operation.first, operation.count);
+      if (diagnostics_) {
+        ++stats_.drawCalls;
+        ++stats_.spriteDrawCalls;
+        ++stats_.baseSpriteDrawCalls;
+      }
+      continue;
+    }
     const auto& spriteEffect = operation.standaloneBitmapRegion && operation.blur <= 0 &&
         !operation.appliesSpriteColor ? bitmapRegion_ : spriteEffect_;
     const std::uint32_t spriteProgram = simpleSprite ? simpleProgram_ : spriteEffect.program;

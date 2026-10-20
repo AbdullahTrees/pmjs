@@ -383,6 +383,9 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
   check(env, napi_set_named_property(env, result, "baseSpriteDrawCalls",
     number(env, static_cast<double>(stats.baseSpriteDrawCalls))),
     "cannot set renderer base sprite draws");
+  check(env, napi_set_named_property(env, result, "spriteTextureChangesBatched",
+    number(env, static_cast<double>(stats.spriteTextureChangesBatched))),
+    "cannot set renderer batched sprite texture changes");
   check(env, napi_set_named_property(env, result, "effectSpriteDrawCalls",
     number(env, static_cast<double>(stats.effectSpriteDrawCalls))),
     "cannot set renderer effect sprite draws");
