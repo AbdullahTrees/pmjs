@@ -168,8 +168,59 @@ bool validBlockGrid(const PreparedImageDescriptor& descriptor) {
   return true;
 }
 
-std::uint32_t uploadTexture(int width, int height, const void* rgba, int channels,
+ImageChannelStorage grayscaleStorage(int channels) {
+  if (channels == 1) return {1, {0, 1, 2, 3}, {0, 0, 0, 5}};
+  if (channels == 2) return {2, {0, 3, 1, 2}, {0, 0, 0, 1}};
+  return {};
+}
+
+ImageChannelStorage imageStorage(const ImagePixels& pixels) {
+  if (pixels.width == 1 && pixels.height == 1) return {};
+  const int grayscale = grayscaleChannels(pixels);
+  if (grayscale != 4) return grayscaleStorage(grayscale);
+  std::array<bool, 3> zero{true, true, true}, one{true, true, true};
+  std::array<std::array<bool, 3>, 3> equal{{{true, true, true}, {true, true, true}, {true, true, true}}};
+  bool opaque = true;
+  for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
+    const auto* pixel = pixels.rgba.data() + i;
+    for (int c = 0; c < 3; ++c) {
+      zero[c] &= pixel[c] == 0;
+      one[c] &= pixel[c] == 255;
+      for (int previous = 0; previous < c; ++previous)
+        equal[previous][c] &= pixel[previous] == pixel[c];
+    }
+    if (!zero[0] && !zero[1] && !zero[2] && !one[0] && !one[1] && !one[2] &&
+        !equal[0][1] && !equal[0][2] && !equal[1][2]) return {};
+    opaque &= pixel[3] == 255;
+  }
+  ImageChannelStorage result{0};
+  for (int c = 0; c < 3; ++c) {
+    if (zero[c]) result.swizzle[c] = 4;
+    else if (opaque && one[c]) result.swizzle[c] = 5;
+    else {
+      int component = 0;
+      for (; component < result.channels; ++component) {
+        const int previous = result.source[component];
+        if (equal[previous][c]) break;
+      }
+      if (component == result.channels) result.source[result.channels++] = static_cast<std::uint8_t>(c);
+      result.swizzle[c] = static_cast<std::uint8_t>(component);
+    }
+  }
+  if (opaque) result.swizzle[3] = 5;
+  else {
+    // Keep alpha separate: an RGB/alpha equality need not survive premultiplication.
+    result.source[result.channels] = 3;
+    result.swizzle[3] = static_cast<std::uint8_t>(result.channels++);
+  }
+  if (result.channels > 2) return {};
+  result.channels = std::max(1, result.channels);
+  return result;
+}
+
+std::uint32_t uploadTexture(int width, int height, const void* rgba, ImageChannelStorage storage,
                             std::uint32_t texture = 0) {
+  const int channels = storage.channels;
   if (eglGetCurrentContext() == EGL_NO_CONTEXT) return 0;
   for (int attempt = 0; ; ++attempt) {
     const auto error = glGetError();
@@ -182,8 +233,8 @@ std::uint32_t uploadTexture(int width, int height, const void* rgba, int channel
   if (channels != 4) {
     compact.resize(count * channels);
     for (std::size_t i = 0; i < count; ++i) {
-      compact[i * channels] = bytes[i * 4];
-      if (channels == 2) compact[i * 2 + 1] = bytes[i * 4 + 3];
+      for (int c = 0; c < channels; ++c)
+        compact[i * channels + c] = bytes[i * 4 + storage.source[c]];
     }
     bytes = compact.data();
   }
@@ -195,14 +246,16 @@ std::uint32_t uploadTexture(int width, int height, const void* rgba, int channel
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (channels != 4) {
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, channels == 1 ? GL_ONE : GL_GREEN);
+      constexpr std::array<GLenum, 4> parameters{GL_TEXTURE_SWIZZLE_R, GL_TEXTURE_SWIZZLE_G,
+        GL_TEXTURE_SWIZZLE_B, GL_TEXTURE_SWIZZLE_A};
+      constexpr std::array<GLint, 6> components{GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE};
+      for (std::size_t c = 0; c < parameters.size(); ++c)
+        glTexParameteri(GL_TEXTURE_2D, parameters[c], components[storage.swizzle[c]]);
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     const auto format = channels == 1 ? GL_RED : channels == 2 ? GL_RG : GL_RGBA;
-    const auto storage = channels == 1 ? GL_R8 : channels == 2 ? GL_RG8 : GL_RGBA;
-    glTexImage2D(GL_TEXTURE_2D, 0, storage, width, height, 0, format, GL_UNSIGNED_BYTE, bytes);
+    const auto internalFormat = channels == 1 ? GL_R8 : channels == 2 ? GL_RG8 : GL_RGBA;
+    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, bytes);
     if (!texture || glGetError() != GL_NO_ERROR) {
       if (texture) glDeleteTextures(1, &texture);
       return 0;
@@ -336,7 +389,7 @@ std::optional<ImagePixels> decodeMemory(const void* data, std::size_t size,
   return std::nullopt;
 }
 
-std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, int channels = 4) {
+std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, ImageChannelStorage storage = {}) {
   const auto extent = checkedImageExtent(image.width, image.height);
   if (!extent) return std::nullopt;
   ImagePixels pixels{image.width, image.height,
@@ -369,10 +422,10 @@ std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, int channel
     glReadPixels(0, 0, image.width, image.height, GL_RGBA,
                  GL_UNSIGNED_BYTE, pixels.rgba.data());
     // Texture swizzles do not apply to framebuffer reads.
-    if (channels != 4) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
-      const auto alpha = channels == 1 ? 255 : pixels.rgba[i + 1];
-      pixels.rgba[i + 1] = pixels.rgba[i + 2] = pixels.rgba[i];
-      pixels.rgba[i + 3] = static_cast<std::uint8_t>(alpha);
+    if (storage.channels != 4) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
+      const std::array<std::uint8_t, 6> components{pixels.rgba[i], pixels.rgba[i + 1],
+        pixels.rgba[i + 2], pixels.rgba[i + 3], 0, 255};
+      for (int c = 0; c < 4; ++c) pixels.rgba[i + c] = components[storage.swizzle[c]];
     }
   }
   const bool readSucceeded = complete && glGetError() == GL_NO_ERROR;
@@ -445,7 +498,7 @@ struct ImageStore::SharedTexture {
   ImageStore* owner = nullptr;
   std::uint32_t texture = 0;
   std::size_t bytes = 0;
-  int channels = 4;
+  ImageChannelStorage storage;
   bool mipmapsReady = false;
   std::size_t mipmapBytes = 0;
   ~SharedTexture() {
@@ -467,7 +520,7 @@ struct ImageStore::PreparedBacking {
     std::shared_ptr<SharedPreparedPage> shared;
     std::shared_ptr<SharedTexture> sharedTexture, sharedPremultipliedTexture;
     std::uint32_t texture = 0, premultipliedTexture = 0, compactTexture = 0;
-    int channels = 0;
+    ImageChannelStorage storage{0};
     std::filesystem::path path;
     std::string identity, expectedHash;
     bool verifyHash = false;
@@ -520,12 +573,12 @@ std::uint64_t ImageStore::preparedSharedPageHits() const {
 }
 
 std::shared_ptr<ImageStore::SharedTexture> ImageStore::shareTexture(
-    const std::string& key, std::uint32_t texture, std::size_t bytes, int channels) {
+    const std::string& key, std::uint32_t texture, std::size_t bytes, ImageChannelStorage storage) {
   try {
     auto result = std::make_shared<SharedTexture>();
     preparedTextures_[key] = result;
     result->owner = this; result->texture = texture; result->bytes = bytes;
-    result->channels = channels;
+    result->storage = storage;
     return result;
   } catch (const std::bad_alloc&) {
     // A failed optional sharing record leaves the existing private owner intact.
@@ -559,15 +612,15 @@ std::string ImageStore::preparedTextureKey(PreparedBacking& backing, bool premul
 
 bool ImageStore::detachSharedTexture(Slot& slot) {
   if (!slot.sharedTexture) return true;
-  auto pixels = readTexturePixels(ImageInfo{0, slot.width, slot.height, slot.texture}, slot.channels);
+  auto pixels = readTexturePixels(ImageInfo{0, slot.width, slot.height, slot.texture}, slot.storage);
   if (!pixels) return false;
-  const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), 4);
+  const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), {});
   if (!texture) return false;
   const auto bytes = static_cast<std::size_t>(slot.width)*slot.height*4U;
   gpuBytes_ += bytes; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
   clearPremultipliedTexture(slot);
   slot.sharedTexture.reset();
-  slot.texture = texture; slot.channels = 4;
+  slot.texture = texture; slot.storage = {};
   slot.mipmapBytes = 0; slot.mipmapsReady = false;
   ++textureEpoch_; ++textureCreates_; textureUploadBytes_ += bytes;
   return true;
@@ -759,7 +812,7 @@ std::optional<ImageInfo> ImageStore::installDecoded(
     auto& slot = slots_[index];
     ++slot.contentRevision;
     slot.width = pixels.width; slot.height = pixels.height;
-    slot.channels = 4; slot.texture = 0; slot.premultipliedTexture = 0;
+    slot.storage = {}; slot.texture = 0; slot.premultipliedTexture = 0;
     slot.sharedTexture.reset(); slot.sharedPremultipliedTexture.reset();
     slot.prepared.reset(); slot.tiles.reset();
     slot.mipmapsReady = slot.premultipliedMipmapsReady = false;
@@ -835,7 +888,7 @@ bool ImageStore::retainCpuPixels(ImageHandle handle) {
   if (slot.cacheKey.empty() && !slot.tiles && !slot.deferredScenery) return false;
   slot.cachedPixels = (slot.prepared || slot.tiles || slot.deferredScenery) ?
     readPixelsRegion(handle, 0, 0, info->width, info->height) :
-    readTexturePixels(*info, slot.channels);
+    readTexturePixels(*info, slot.storage);
   if (!slot.cachedPixels) return false;
   slot.retainCpuPixels = true;
   slot.cpuPixelFrames = 0;
@@ -881,27 +934,28 @@ const ImagePixels* ImageStore::readPixels(ImageHandle handle) const {
   if (slot.cacheKey.empty() && !slot.tiles && !slot.deferredScenery) return nullptr;
   slot.cachedPixels = (slot.prepared || slot.tiles || slot.deferredScenery) ?
     readPixelsRegion(handle, 0, 0, info->width, info->height) :
-    readTexturePixels(*info, slot.channels);
+    readTexturePixels(*info, slot.storage);
   if (!slot.retainCpuPixels) slot.cpuPixelFrames = 60;
   return slot.cachedPixels ? &*slot.cachedPixels : nullptr;
 }
 
 std::optional<ImageInfo> ImageStore::createRgba(int width, int height,
                                                  const void* pixels, bool premultiplied) {
-  return createImage(width, height, pixels, premultiplied, 4);
+  return createImage(width, height, pixels, premultiplied, {});
 }
 
 std::size_t ImageStore::decodedStorageBytes(const ImagePixels& pixels) {
-  return pixels.rgba.size()/4*grayscaleChannels(pixels);
+  return pixels.rgba.size()/4*imageStorage(pixels).channels;
 }
 
 std::optional<ImageInfo> ImageStore::createDecoded(const ImagePixels& pixels) {
   return createImage(pixels.width, pixels.height, pixels.rgba.data(), false,
-                     grayscaleChannels(pixels));
+                     imageStorage(pixels));
 }
 
 std::optional<ImageInfo> ImageStore::createImage(int width, int height,
-    const void* pixels, bool premultiplied, int channels) {
+    const void* pixels, bool premultiplied, ImageChannelStorage storage) {
+  const int channels = storage.channels;
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
   std::size_t index = 0;
@@ -911,7 +965,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   auto sparseRegions = sparseTiling_ && pixels
     ? sparseImageRegions(pixels, width, height, premultiplied)
     : decltype(slots_[index].sparseRegions){};
-  const auto texture = uploadTexture(width, height, pixels, channels);
+  const auto texture = uploadTexture(width, height, pixels, storage);
   if (!texture) return std::nullopt;
   ++textureCreates_;
   ++textureEpoch_;
@@ -928,7 +982,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   slot.mipmapBytes = slot.premultipliedMipmapBytes = 0;
   slot.width = width;
   slot.height = height;
-  slot.channels = channels;
+  slot.storage = storage;
   slot.references = 1;
   slot.inFlight.store(0, std::memory_order_relaxed);
   slot.pins = 0;
@@ -1153,7 +1207,7 @@ bool ImageStore::updateRgba(ImageHandle handle, const void* pixels) {
   if (!detachSharedTexture(slot)) return false;
   clearPrepared(slot);
   if (!slot.astc) clearPremultipliedTexture(slot);
-  const bool compact = slot.channels != 4;
+  const bool compact = slot.storage.channels != 4;
   bool ok = false;
   if (compact) {
     ok = promoteToRgba(slot, pixels);
@@ -1196,7 +1250,7 @@ bool ImageStore::updateRgbaRegion(ImageHandle handle, int x, int y, int width,
   if (!detachSharedTexture(slot)) return false;
   clearPrepared(slot);
   if (!slot.astc) clearPremultipliedTexture(slot);
-  if (slot.channels != 4 && !promoteToRgba(slot)) return false;
+  if (slot.storage.channels != 4 && !promoteToRgba(slot)) return false;
   while (glGetError() != GL_NO_ERROR) {}
   glBindTexture(GL_TEXTURE_2D, slot.texture);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -1312,7 +1366,7 @@ bool ImageStore::promoteAstc(Slot& slot, const void* replacement) {
   if (!replacement && !pixels) return false;
   GLint binding = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
   const auto texture = uploadTexture(slot.width, slot.height,
-    replacement ? replacement : pixels->rgba.data(), 4);
+    replacement ? replacement : pixels->rgba.data(), {});
   if (!texture) { glBindTexture(GL_TEXTURE_2D, binding); return false; }
   slot.retiredTextures = {slot.texture,
     slot.premultipliedTexture != slot.texture ? slot.premultipliedTexture : 0U};
@@ -1320,7 +1374,7 @@ bool ImageStore::promoteAstc(Slot& slot, const void* replacement) {
     ((slot.retiredTextures[0] ? 1U : 0U) + (slot.retiredTextures[1] ? 1U : 0U));
   slot.premultipliedTexture = 0;
   ++textureCreates_;
-  slot.texture = texture; slot.channels = 4; slot.compressedBytes = 0; slot.astc.reset();
+  slot.texture = texture; slot.storage = {}; slot.compressedBytes = 0; slot.astc.reset();
   slot.mipmapBytes = 0; slot.mipmapsReady = false;
   gpuBytes_ += slot.textureBytes();
   peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
@@ -1342,7 +1396,7 @@ bool ImageStore::promoteToRgba(Slot& slot, const void* replacement) {
   if (slot.astc) return promoteAstc(slot, replacement);
   std::optional<ImagePixels> snapshot;
   if (!replacement) {
-    snapshot = readTexturePixels(ImageInfo{0, slot.width, slot.height, slot.texture}, slot.channels);
+    snapshot = readTexturePixels(ImageInfo{0, slot.width, slot.height, slot.texture}, slot.storage);
     if (!snapshot) return false;
     replacement = snapshot->rgba.data();
   }
@@ -1359,10 +1413,10 @@ bool ImageStore::promoteToRgba(Slot& slot, const void* replacement) {
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ALPHA);
   clearPremultipliedTexture(slot);
   const auto count = static_cast<std::size_t>(slot.width) * slot.height;
-  gpuBytes_ -= count * slot.channels + slot.mipmapBytes;
+  gpuBytes_ -= count * slot.storage.channels + slot.mipmapBytes;
   slot.mipmapBytes = 0;
   slot.mipmapsReady = false;
-  slot.channels = 4; slot.compressedBytes = 0;
+  slot.storage = {}; slot.compressedBytes = 0;
   gpuBytes_ += count * 4;
   peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
   ++textureEpoch_;
@@ -1467,7 +1521,7 @@ std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
         slot.cachedPixels->width == info->width &&
         slot.cachedPixels->height == info->height
       ? std::optional<ImagePixels>(*slot.cachedPixels)
-      : readTexturePixels(*info, slot.channels);
+      : readTexturePixels(*info, slot.storage);
     if (!pixels) return std::nullopt;
     bool changed = false;
     for (std::size_t offset = 0; offset < pixels->rgba.size(); offset += 4) {
@@ -1482,9 +1536,9 @@ std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
     if (!changed) {
       slot.premultipliedTexture = slot.texture;
     } else {
-      const auto texture = uploadTexture(info->width, info->height, pixels->rgba.data(), slot.channels);
+      const auto texture = uploadTexture(info->width, info->height, pixels->rgba.data(), slot.storage);
       if (!texture) return std::nullopt;
-      const auto bytes = static_cast<std::size_t>(info->width) * info->height * slot.channels;
+      const auto bytes = static_cast<std::size_t>(info->width) * info->height * slot.storage.channels;
       slot.premultipliedTexture = texture;
       ++textureCreates_;
       ++textureEpoch_;
@@ -1521,7 +1575,7 @@ bool ImageStore::ensureMipmaps(ImageHandle handle, bool premultiplied) {
   if (!bytes) {
     for (int w = info->width, h = info->height; w > 1 || h > 1;) {
       w = std::max(1, w / 2); h = std::max(1, h / 2);
-      bytes += static_cast<std::size_t>(w) * h * slot.channels;
+      bytes += static_cast<std::size_t>(w) * h * slot.storage.channels;
     }
     gpuBytes_ += bytes;
     peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
@@ -1991,7 +2045,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
     auto& slot = slots_[(image->handle & indexMask)-1U];
     glDeleteTextures(1, &slot.texture); slot.texture = 0; gpuBytes_ -= 4;
     slot.width = load->backing->descriptor.width; slot.height = load->backing->descriptor.height;
-    slot.channels = 1; slot.compressedBytes = astc4x4Bytes(slot.width, slot.height);
+    slot.storage = grayscaleStorage(1); slot.compressedBytes = astc4x4Bytes(slot.width, slot.height);
     slot.astc = std::make_shared<Slot::AstcBacking>();
     slot.astc->original = load->original;
     for (const auto& page : load->backing->pages) slot.astc->pages.push_back(page.source);
@@ -2013,7 +2067,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
   auto& slot = slots_[index];
   slot.prepared = std::move(backing);
   slot.width = descriptor.width; slot.height = descriptor.height;
-  slot.channels = 4;
+  slot.storage = {};
   ++slot.contentRevision;
   slot.texture = slot.premultipliedTexture = 0;
   slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
@@ -2082,11 +2136,11 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
   if (!slot.prepared) {
     // Mutable GPU surfaces are read on demand; never retain a stale CPU copy.
     std::optional<ImagePixels> gpuPixels;
-    if (slot.gpuOnly || slot.renderTarget) gpuPixels = readTexturePixels(*info, slot.channels);
+    if (slot.gpuOnly || slot.renderTarget) gpuPixels = readTexturePixels(*info, slot.storage);
     auto* full = (slot.gpuOnly || slot.renderTarget) ?
       (gpuPixels ? &*gpuPixels : nullptr) : readPixels(handle);
     if (!full && !slot.gpuOnly && !slot.renderTarget) {
-      slot.cachedPixels = readTexturePixels(*info, slot.channels);
+      slot.cachedPixels = readTexturePixels(*info, slot.storage);
       full = slot.cachedPixels ? &*slot.cachedPixels : nullptr;
     }
     if (!full) return std::nullopt;
@@ -2597,7 +2651,7 @@ ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t in
         page.shared->pixels = page.pixels;
       } else backing.pool->hits.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!page.channels) page.channels = grayscaleChannels(*page.pixels);
+    if (!page.storage.channels) page.storage = imageStorage(*page.pixels);
   }
   page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1,
     std::memory_order_relaxed);
@@ -2623,22 +2677,22 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
     const auto& pixels = *decoded;
     std::vector<std::uint8_t> converted;
     const auto* bytes = pixels.rgba.data();
-    if (premultiplied && page.channels != 1) {
+    if (premultiplied && page.storage.channels != 1) {
       converted = pixels.rgba;
       for (std::size_t i = 0; i < converted.size(); i += 4)
         for (std::size_t channel = 0; channel < 3; ++channel)
           converted[i + channel] = static_cast<std::uint8_t>((converted[i + channel] * converted[i + 3] + 127) / 255);
       bytes = converted.data();
     }
-    texture = uploadTexture(pixels.width, pixels.height, bytes, page.channels);
+    texture = uploadTexture(pixels.width, pixels.height, bytes, page.storage);
     if (!texture) {
       if (acquired) trimPreparedPages();
       return std::nullopt;
     }
-    const auto uploaded = static_cast<std::size_t>(pixels.width) * pixels.height * page.channels;
+    const auto uploaded = static_cast<std::size_t>(pixels.width) * pixels.height * page.storage.channels;
     ++textureCreates_; ++textureEpoch_; textureUploadBytes_ += uploaded;
     gpuBytes_ += uploaded; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
-    shared = shareTexture(key, texture, uploaded, page.channels);
+    shared = shareTexture(key, texture, uploaded, page.storage);
     if (!shared) backing.gpuBytes += uploaded;
     if (acquired) trimPreparedPages();
   }
@@ -2786,8 +2840,8 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
       for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
         for (std::size_t c = 0; c < 3; ++c)
           pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c]*pixels.rgba[i+3]+127)/255);
-    int channels = grayscaleChannels(pixels);
-    auto bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channels;
+    auto channelStorage = imageStorage(pixels);
+    auto bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
     if (bytes > preparedFrameBudgetBytes_) {
       int x0 = pixels.width, y0 = pixels.height, x1 = 0, y1 = 0;
       for (int row = 0; row < pixels.height; ++row) for (int column = 0; column < pixels.width; ++column) {
@@ -2813,12 +2867,12 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
         storage = {storage[0]+x0, storage[1]+y0, cropped.width, cropped.height};
         pixels = std::move(cropped);
       }
-      channels = grayscaleChannels(pixels);
-      bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channels;
+      channelStorage = imageStorage(pixels);
+      bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
       if (bytes > preparedFrameBudgetBytes_) return std::nullopt;
     }
     trimPreparedFrames(preparedFrameBudgetBytes_-bytes);
-    auto created = createImage(pixels.width, pixels.height, pixels.rgba.data(), targetPremultiplied, channels);
+    auto created = createImage(pixels.width, pixels.height, pixels.rgba.data(), targetPremultiplied, channelStorage);
     if (!created) return std::nullopt;
     image = created->handle;
     slots_[(image & indexMask)-1U].preparedFrameBytes = bytes;
@@ -2971,7 +3025,7 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
     textureUploadBytes_ += bytes;
     if (sharedAtlas) ++preparedSharedTextureHits_;
     else {
-      sharedAtlas = shareTexture(atlasKey, created[0], atlas.size(), channels);
+      sharedAtlas = shareTexture(atlasKey, created[0], atlas.size(), grayscaleStorage(channels));
       if (!sharedAtlas) backing.gpuBytes += atlas.size();
     }
     textures = {created[0], created[1], channels, std::move(sharedAtlas)};
@@ -3256,7 +3310,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   const auto sharedKey = slot.prepared ? preparedTextureKey(*slot.prepared, premultiplied) : std::string{};
   auto& shared = premultiplied && !slot.premultiplied ? slot.sharedPremultipliedTexture : slot.sharedTexture;
   if (!sharedKey.empty()) if (auto existing = preparedTextures_[sharedKey].lock()) {
-    shared = std::move(existing); texture = shared->texture; slot.channels = shared->channels;
+    shared = std::move(existing); texture = shared->texture; slot.storage = shared->storage;
     ++preparedSharedTextureHits_; ++textureEpoch_;
     return true;
   }
@@ -3270,7 +3324,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   const auto cropUpload = preparedCropUploadsEnabled_ ? uploadPreparedCrops(slot, texture) :
     std::optional<std::size_t>{};
   if (cropUpload) {
-    slot.channels = 1;
+    slot.storage = grayscaleStorage(1);
     ++preparedCropUploads_;
     preparedCropUploadBytes_ += *cropUpload;
   }
@@ -3285,7 +3339,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     const auto preparePixels = [premultiplied, &slot](ImagePixels& pixels) {
-      if (premultiplied && slot.channels != 1) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
+      if (premultiplied && slot.storage.channels != 1) for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
         for (std::size_t c = 0; c < 3; ++c)
           pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c] * pixels.rgba[i+3] + 127) / 255);
     };
@@ -3294,9 +3348,9 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
       auto pixels = readPixelsRegion(handle, 0, 0, slot.width, slot.height);
       ok = ok && pixels.has_value();
       if (ok) {
-        slot.channels = grayscaleChannels(*pixels);
+        slot.storage = imageStorage(*pixels);
         preparePixels(*pixels);
-        texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), slot.channels, texture);
+        texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), slot.storage, texture);
         ok = texture != 0;
       }
     } else {
@@ -3320,7 +3374,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   const auto uploaded = cropUpload.value_or(bytes);
   textureUploadBytes_ += uploaded;
   gpuBytes_ += bytes; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
-  if (!sharedKey.empty()) shared = shareTexture(sharedKey, texture, bytes, slot.channels);
+  if (!sharedKey.empty()) shared = shareTexture(sharedKey, texture, bytes, slot.storage);
   if (tileDiagnostics_) {
     const auto elapsedMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
@@ -3371,7 +3425,7 @@ std::optional<ImageInfo> ImageStore::lookup(ImageHandle handle,
     const auto* pixels = slot.cachedPixels ? &*slot.cachedPixels :
       decoded ? &*decoded : nullptr;
     if (!pixels) return std::nullopt;
-    const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), 4);
+    const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), {});
     if (!texture) return std::nullopt;
     const auto bytes = static_cast<std::size_t>(slot.width) * slot.height * 4;
     slot.texture = texture;

@@ -36,6 +36,13 @@ struct ImagePixels {
   std::vector<std::uint8_t> rgba;
 };
 
+struct ImageChannelStorage {
+  int channels = 4;
+  std::array<std::uint8_t, 4> source{0, 1, 2, 3};
+  // Stored component indices, followed by constant zero and one.
+  std::array<std::uint8_t, 4> swizzle{0, 1, 2, 3};
+};
+
 // A deferred reader keeps its crop alive at the revision it observed. Pixel
 // storage is captured only if the image changes before the reader executes.
 struct ImagePixelSnapshot {
@@ -344,7 +351,7 @@ class ImageStore {
   std::shared_ptr<PreparedPool> preparedPool_;
   std::unordered_map<std::string, std::weak_ptr<SharedTexture>> preparedTextures_;
   std::shared_ptr<SharedTexture> shareTexture(const std::string& key, std::uint32_t texture,
-      std::size_t bytes, int channels);
+      std::size_t bytes, ImageChannelStorage storage);
   std::string preparedTextureKey(PreparedBacking& backing, bool premultiplied);
 
   struct PreparedFrame {
@@ -386,7 +393,7 @@ class ImageStore {
     std::array<std::uint32_t, 2> retiredTextures{};
     std::size_t retiredTextureBytes = 0;
     std::size_t textureBytes() const {
-      return compressedBytes ? compressedBytes : static_cast<std::size_t>(width) * height * channels;
+      return compressedBytes ? compressedBytes : static_cast<std::size_t>(width) * height * storage.channels;
     };
 
     std::uint16_t generation = 1;
@@ -400,7 +407,7 @@ class ImageStore {
     std::shared_ptr<TileBacking> tiles;
     int width = 0;
     int height = 0;
-    int channels = 4;
+    ImageChannelStorage storage;
     std::uint32_t references = 0;
     std::atomic<std::uint32_t> inFlight{0};
     std::uint32_t pins = 0;
@@ -502,7 +509,7 @@ class ImageStore {
   void clearPremultipliedTexture(Slot& slot);
   std::optional<ImageInfo> createDecoded(const ImagePixels& pixels);
   std::optional<ImageInfo> createImage(int width, int height, const void* pixels,
-                                     bool premultiplied, int channels);
+                                     bool premultiplied, ImageChannelStorage storage);
   bool detachSharedTexture(Slot& slot);
   bool promoteToRgba(Slot& slot, const void* replacement = nullptr);
   std::deque<Slot> slots_;

@@ -90,25 +90,33 @@ int main() {
     pmjs::ImageStore images;
     images.setWarmBudgetBytes(0);
     pmjs::Renderer renderer(64, 48, images);
-    for (const bool opaque : {false, true}) {
+    for (int color = 0; color < 3; ++color) for (const bool opaque : {false, true}) {
+      if (color == 2 && !opaque) continue;
       pmjs::ImagePixels pixels{256, 256, std::vector<std::uint8_t>(256 * 256 * 4)};
       for (int alpha = 0; alpha < 256; ++alpha) for (int gray = 0; gray < 256; ++gray) {
         const auto i = static_cast<std::size_t>(alpha * 256 + gray) * 4;
         pixels.rgba[i] = pixels.rgba[i + 1] = pixels.rgba[i + 2] = gray;
         pixels.rgba[i + 3] = opaque ? 255 : alpha;
+        if (color == 1) {
+          pixels.rgba[i] = 0;
+          pixels.rgba[i + 1] = opaque ? 255 : 0;
+        } else if (color == 2) {
+          pixels.rgba[i + 1] = pixels.rgba[i + 2] = alpha;
+        }
       }
-      const auto path = root / (opaque ? "opaque.png" : "alpha.png");
+      const auto path = root / (std::to_string(color) + (opaque ? "opaque.png" : "alpha.png"));
       writePng(path, pixels);
       const auto before = images.gpuBytes(), uploads = images.textureUploadBytes();
       const auto compact = images.loadPng(path);
-      const auto bytes = static_cast<std::size_t>(256 * 256 * (opaque ? 1 : 2));
+      const int channels = color == 2 ? 2 : opaque ? 1 : 2;
+      const auto bytes = static_cast<std::size_t>(256 * 256 * channels);
       require(compact && images.gpuBytes() - before == bytes &&
         images.textureUploadBytes() - uploads == bytes, "decoded storage or upload accounting wrong");
       const auto cached = images.loadPng(path);
       require(cached && cached->handle == compact->handle, "cached owners lost shared identity");
       std::filesystem::remove(path);
       const auto* read = images.readPixels(compact->handle);
-      require(read && read->rgba == pixels.rgba, "grayscale GPU readback lost hidden RGB or alpha");
+      require(read && read->rgba == pixels.rgba, "compact GPU readback lost hidden RGB or alpha");
       for (int frame = 0; frame < 65; ++frame) images.update();
       require(!images.hasCpuPixels(compact->handle), "CPU snapshot failed to expire");
       require(images.readPixels(compact->handle)->rgba == pixels.rgba, "expired snapshot reconstructed incorrectly");
@@ -116,7 +124,7 @@ int main() {
       require(control.has_value(), "RGBA control failed");
       for (int variant = 0; variant < 48; ++variant) {
         require(render(renderer, compact->handle, 256, 256, variant) ==
-          render(renderer, control->handle, 256, 256, variant), "grayscale rendering differs from RGBA control");
+          render(renderer, control->handle, 256, 256, variant), "compact rendering differs from RGBA control");
         ++comparisons;
       }
       // Sample every gray/alpha pair at native resolution through the unchanged shader.
@@ -126,10 +134,10 @@ int main() {
           1, 0xffffff, pmjs::BlendMode::normal), "full image draw failed");
         return renderer.renderToRgba(256, 256, 0, pmjs::AlphaMode::premultiplied);
       };
-      require(full(compact->handle) == full(control->handle), "full-resolution grayscale sampling differs");
+      require(full(compact->handle) == full(control->handle), "full-resolution compact sampling differs");
       ++comparisons;
       require(images.ensureMipmaps(compact->handle, false), "compact mipmaps failed");
-      const auto mipBytes = static_cast<std::size_t>((65536 - 1) / 3 * (opaque ? 1 : 2));
+      const auto mipBytes = static_cast<std::size_t>((65536 - 1) / 3 * channels);
       const auto entries = images.memoryEntries();
       const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.handle == compact->handle; });
       require(entry != entries.end() && entry->gpuBytes == (bytes + mipBytes) * (opaque ? 1 : 2),
@@ -181,6 +189,25 @@ int main() {
     images.release(colour->handle);
     images.update();
 
+    // Constant white RGB channels cannot remain constant after premultiplication.
+    pmjs::ImagePixels whiteChannels{256, 1, std::vector<std::uint8_t>(256 * 4)};
+    for (int value = 0; value < 256; ++value) {
+      const auto i = static_cast<std::size_t>(value) * 4;
+      whiteChannels.rgba[i] = whiteChannels.rgba[i + 2] = 255;
+      whiteChannels.rgba[i + 1] = whiteChannels.rgba[i + 3] = value;
+    }
+    const auto white = images.installDecodedMemory(whiteChannels);
+    require(white && images.gpuBytes() == whiteChannels.rgba.size(),
+      "translucent constant channels bypassed premultiplication requirements");
+    const auto whiteControl = images.createRgba(256, 1, whiteChannels.rgba.data());
+    require(whiteControl.has_value(), "constant-channel RGBA control failed");
+    for (int variant : {0, 1, 3, 5}) {
+      require(render(renderer, white->handle, 256, 1, variant) ==
+        render(renderer, whiteControl->handle, 256, 1, variant), "constant-channel fallback differs");
+      ++comparisons;
+    }
+    images.release(white->handle); images.release(whiteControl->handle); images.update();
+
     // Odd row widths, full replacement, retained CPU bytes and recycled slots.
     pmjs::ImagePixels odd{3, 5, std::vector<std::uint8_t>(3 * 5 * 4, 73)};
     auto oddImage = images.installDecodedMemory(odd);
@@ -210,84 +237,90 @@ int main() {
     images.update();
 
     // A prepared physical page includes multiple cells; classify the whole page.
-    pmjs::ImagePixels page{16, 8, std::vector<std::uint8_t>(16 * 8 * 4)};
-    for (int y = 1; y < 7; ++y) for (int x = 0; x < 16; ++x) {
-      if (x % 8 == 0 || x % 8 == 7) continue;
-      const auto i = static_cast<std::size_t>(y * 16 + x) * 4;
-      page.rgba[i] = page.rgba[i + 1] = page.rgba[i + 2] = y * 16 + x;
-      page.rgba[i + 3] = y * 16 + x;
+    for (const bool colored : {false, true}) {
+      pmjs::ImagePixels page{16, 8, std::vector<std::uint8_t>(16 * 8 * 4)};
+      for (int y = 1; y < 7; ++y) for (int x = 0; x < 16; ++x) {
+        if (x % 8 == 0 || x % 8 == 7) continue;
+        const auto i = static_cast<std::size_t>(y * 16 + x) * 4;
+        page.rgba[i] = page.rgba[i + 1] = page.rgba[i + 2] = y * 16 + x;
+        if (colored) page.rgba[i + 1] = 0;
+        page.rgba[i + 3] = y * 16 + x;
+      }
+      writePng(root / "source.png", page); writePng(root / "page.png", page);
+      pmjs::PreparedImageDescriptor descriptor;
+      descriptor.width = 16; descriptor.height = 8;
+      descriptor.pages.push_back({"page.png", 16, 8});
+      descriptor.cells.push_back({{0, 0, 8, 8}, {1, 1, 6, 6}, {1, 1, 6, 6}, {}, 0});
+      descriptor.cells.push_back({{8, 0, 8, 8}, {1, 1, 6, 6}, {9, 1, 6, 6}, {}, 0});
+      require(images.installPrepared(root / "source.png", root, descriptor), "prepared grayscale install failed");
+      const auto pageDecodes = images.preparedPageDecodes();
+      const auto logical = images.loadPng(root / "source.png");
+      const auto region = images.resolveSpriteRegion(logical->handle, 0, 0, 8, 8, false);
+      require(region && images.gpuBytes() == 256, "prepared grayscale page not compressed");
+      require(images.resolveSpriteRegion(logical->handle, 8, 0, 8, 8, true) && images.gpuBytes() == 512,
+        "prepared premultiplied page accounting wrong");
+      require(images.preparedPageDecodes() - pageDecodes == 1,
+        "straight and premultiplied uploads repeated the validation decode");
+      auto pageControl = images.createRgba(16, 8, page.rgba.data());
+      for (int variant : {0, 1, 3, 5}) {
+        require(render(renderer, logical->handle, 8, 8, variant) ==
+          render(renderer, pageControl->handle, 8, 8, variant), "prepared grayscale page differs from RGBA");
+        ++comparisons;
+      }
+      images.release(logical->handle); images.release(pageControl->handle); images.update();
+      require(images.gpuBytes() == 0, "prepared grayscale allocations leaked");
+      // Hidden colour in another cell prevents compression of the shared page.
+      page.rgba[(1 * 16 + 9) * 4] = 93;
+      page.rgba[(1 * 16 + 9) * 4 + 3] = 0;
+      writePng(root / "source.png", page); writePng(root / "page.png", page);
+      require(images.installPrepared(root / "source.png", root, descriptor), "mixed page install failed");
+      const auto mixed = images.loadPng(root / "source.png");
+      require(mixed && images.resolveSpriteRegion(mixed->handle, 0, 0, 8, 8, false) &&
+        images.gpuBytes() == 512, "mixed prepared page compressed only the reached grayscale cell");
+      images.release(mixed->handle); images.update();
+      require(images.gpuBytes() == 0, "mixed page allocations leaked");
     }
-    writePng(root / "source.png", page); writePng(root / "page.png", page);
-    pmjs::PreparedImageDescriptor descriptor;
-    descriptor.width = 16; descriptor.height = 8;
-    descriptor.pages.push_back({"page.png", 16, 8});
-    descriptor.cells.push_back({{0, 0, 8, 8}, {1, 1, 6, 6}, {1, 1, 6, 6}, {}, 0});
-    descriptor.cells.push_back({{8, 0, 8, 8}, {1, 1, 6, 6}, {9, 1, 6, 6}, {}, 0});
-    require(images.installPrepared(root / "source.png", root, descriptor), "prepared grayscale install failed");
-    const auto pageDecodes = images.preparedPageDecodes();
-    const auto logical = images.loadPng(root / "source.png");
-    const auto region = images.resolveSpriteRegion(logical->handle, 0, 0, 8, 8, false);
-    require(region && images.gpuBytes() == 256, "prepared grayscale page not compressed");
-    require(images.resolveSpriteRegion(logical->handle, 8, 0, 8, 8, true) && images.gpuBytes() == 512,
-      "prepared premultiplied page accounting wrong");
-    require(images.preparedPageDecodes() - pageDecodes == 1,
-      "straight and premultiplied uploads repeated the validation decode");
-    auto pageControl = images.createRgba(16, 8, page.rgba.data());
-    for (int variant : {0, 1, 3, 5}) {
-      require(render(renderer, logical->handle, 8, 8, variant) ==
-        render(renderer, pageControl->handle, 8, 8, variant), "prepared grayscale page differs from RGBA");
-      ++comparisons;
-    }
-    images.release(logical->handle); images.release(pageControl->handle); images.update();
-    require(images.gpuBytes() == 0, "prepared grayscale allocations leaked");
-    // Hidden colour in another cell prevents compression of the shared page.
-    page.rgba[(1 * 16 + 9) * 4] = 93;
-    page.rgba[(1 * 16 + 9) * 4 + 3] = 0;
-    writePng(root / "source.png", page); writePng(root / "page.png", page);
-    require(images.installPrepared(root / "source.png", root, descriptor), "mixed page install failed");
-    const auto mixed = images.loadPng(root / "source.png");
-    require(mixed && images.resolveSpriteRegion(mixed->handle, 0, 0, 8, 8, false) &&
-      images.gpuBytes() == 512, "mixed prepared page compressed only the reached grayscale cell");
-    images.release(mixed->handle); images.update();
-    require(images.gpuBytes() == 0, "mixed page allocations leaked");
 
     // Logical tile views share compressed pages until the last owner releases them.
-    pmjs::ImagePixels tile{6, 6, std::vector<std::uint8_t>(6 * 6 * 4)};
-    for (std::size_t i = 0; i < tile.rgba.size(); i += 4) {
-      tile.rgba[i] = tile.rgba[i + 1] = tile.rgba[i + 2] = 17 + i / 4;
-      tile.rgba[i + 3] = 63 + i / 4;
+    for (const bool colored : {false, true}) {
+      pmjs::ImagePixels tile{6, 6, std::vector<std::uint8_t>(6 * 6 * 4)};
+      for (std::size_t i = 0; i < tile.rgba.size(); i += 4) {
+        tile.rgba[i] = tile.rgba[i + 1] = tile.rgba[i + 2] = 17 + i / 4;
+        if (colored) tile.rgba[i + 1] = 0;
+        tile.rgba[i + 3] = 63 + i / 4;
+      }
+      pmjs::ImagePixels tilePage{8, 8, std::vector<std::uint8_t>(8 * 8 * 4)};
+      for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        std::copy_n(tile.rgba.data() + (std::clamp(y - 1, 0, 5) * 6 + std::clamp(x - 1, 0, 5)) * 4,
+          4, tilePage.rgba.data() + (y * 8 + x) * 4);
+      writePng(root / "tile-page.png", tilePage);
+      pmjs::PreparedTileSet tiles;
+      tiles.identity = "grayscale-tiles"; tiles.directory = root;
+      tiles.pages.push_back({"tile-page.png", 8, 8});
+      for (const char* name : {"tile-a.png", "tile-b.png"}) {
+        const auto path = root / name;
+        writePng(path, tile);
+        tiles.sources.push_back({path, path, pmjs::ImageStore::openFile(path)->key(), 6, 6,
+          {{{0, 0, 6, 6}, {1, 1, 6, 6}, 0}}});
+      }
+      require(images.installTileSet(tiles), "grayscale tile set rejected");
+      const auto firstTile = images.loadPng(root / "tile-a.png", false, tiles.identity);
+      const auto secondTile = images.loadPng(root / "tile-b.png", false, tiles.identity);
+      require(firstTile && secondTile && images.gpuBytes() == 256, "tile owners duplicated compressed pages");
+      const auto tileControl = images.createRgba(6, 6, tile.rgba.data());
+      for (int variant : {0, 1, 3, 5}) {
+        require(render(renderer, secondTile->handle, 6, 6, variant) ==
+          render(renderer, tileControl->handle, 6, 6, variant), "shared grayscale tile pixels differ");
+        ++comparisons;
+      }
+      images.release(tileControl->handle); images.release(firstTile->handle); images.update();
+      require(images.inspect(secondTile->handle) && images.readPixels(secondTile->handle)->rgba == tile.rgba,
+        "releasing a tile view damaged another owner");
+      images.release(secondTile->handle); images.update();
+      require(images.gpuBytes() == 0, "shared compressed tile pages leaked");
     }
-    pmjs::ImagePixels tilePage{8, 8, std::vector<std::uint8_t>(8 * 8 * 4)};
-    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
-      std::copy_n(tile.rgba.data() + (std::clamp(y - 1, 0, 5) * 6 + std::clamp(x - 1, 0, 5)) * 4,
-        4, tilePage.rgba.data() + (y * 8 + x) * 4);
-    writePng(root / "tile-page.png", tilePage);
-    pmjs::PreparedTileSet tiles;
-    tiles.identity = "grayscale-tiles"; tiles.directory = root;
-    tiles.pages.push_back({"tile-page.png", 8, 8});
-    for (const char* name : {"tile-a.png", "tile-b.png"}) {
-      const auto path = root / name;
-      writePng(path, tile);
-      tiles.sources.push_back({path, path, pmjs::ImageStore::openFile(path)->key(), 6, 6,
-        {{{0, 0, 6, 6}, {1, 1, 6, 6}, 0}}});
-    }
-    require(images.installTileSet(tiles), "grayscale tile set rejected");
-    const auto firstTile = images.loadPng(root / "tile-a.png", false, tiles.identity);
-    const auto secondTile = images.loadPng(root / "tile-b.png", false, tiles.identity);
-    require(firstTile && secondTile && images.gpuBytes() == 256, "tile owners duplicated compressed pages");
-    const auto tileControl = images.createRgba(6, 6, tile.rgba.data());
-    for (int variant : {0, 1, 3, 5}) {
-      require(render(renderer, secondTile->handle, 6, 6, variant) ==
-        render(renderer, tileControl->handle, 6, 6, variant), "shared grayscale tile pixels differ");
-      ++comparisons;
-    }
-    images.release(tileControl->handle); images.release(firstTile->handle); images.update();
-    require(images.inspect(secondTile->handle) && images.readPixels(secondTile->handle)->rgba == tile.rgba,
-      "releasing a tile view damaged another owner");
-    images.release(secondTile->handle); images.update();
-    require(images.gpuBytes() == 0, "shared compressed tile pages leaked");
     require(glGetError() == GL_NO_ERROR, "grayscale operations left a GL error");
   }
   std::filesystem::remove_all(root);
-  std::cout << comparisons << " exact RGBA/grayscale rendering comparisons; exhaustive gray/alpha readback and ownership passed\n";
+  std::cout << comparisons << " exact RGBA/compact rendering comparisons; exhaustive channel/alpha readback and ownership passed\n";
 }

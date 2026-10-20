@@ -243,7 +243,7 @@ std::optional<ImageInfo> ImageStore::insertTileView(std::shared_ptr<TileBacking>
   if (index == slots_.size()) slots_.emplace_back();
   auto& slot = slots_[index];
   slot.tiles = std::move(backing); slot.width = width; slot.height = height;
-  slot.texture = slot.premultipliedTexture = 0; slot.channels = 4;
+  slot.texture = slot.premultipliedTexture = 0; slot.storage = {};
   slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
   slot.cacheKey = std::move(key); slot.sourcePath = std::move(sourcePath);
   slot.gpuOnly = slot.renderTarget = slot.premultiplied = slot.knownAllZero = false;
