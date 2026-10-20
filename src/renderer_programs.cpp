@@ -151,7 +151,8 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     glGetUniformLocation(presentationProgram_, "upperCanvasPremultiplied");
   spriteEffect_.program = linkProgram(vertexSource, withBlockSpriteSampling(spriteEffectFragmentSource).c_str());
   bitmapRegion_.program = linkProgram(bitmapRegionVertexSource().c_str(), withBlockSpriteSampling(bitmapRegionFragmentSource()).c_str());
-  for (auto* entry : {&spriteEffect_, &bitmapRegion_}) {
+  directSprite_.program = linkProgram(vertexSource, directSpriteFragmentSource);
+  for (auto* entry : {&spriteEffect_, &bitmapRegion_, &directSprite_}) {
     auto& effect = *entry;
     effect.targetYDown = glGetUniformLocation(effect.program, "targetYDown");
     effect.vertices = glGetUniformLocation(effect.program, "spriteWorldVertices");
@@ -744,6 +745,7 @@ Renderer::~Renderer() {
   if (presentationProgram_) glDeleteProgram(presentationProgram_);
   if (spriteEffect_.program) glDeleteProgram(spriteEffect_.program);
   if (bitmapRegion_.program) glDeleteProgram(bitmapRegion_.program);
+  if (directSprite_.program) glDeleteProgram(directSprite_.program);
   if (tileProgram_) glDeleteProgram(tileProgram_);
   if (fourTileProgram_) glDeleteProgram(fourTileProgram_);
   if (nearestTileProgram_) glDeleteProgram(nearestTileProgram_);

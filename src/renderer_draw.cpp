@@ -2140,9 +2140,13 @@ void Renderer::renderScene() {
       continue;
     }
 
-    const bool simpleSprite = operation.blur <= 0 && operation.maskImage == 0 &&
-                              !operation.appliesSpriteColor && !operation.standaloneBitmapRegion &&
-                              operation.inlineMatrix == nullptr;
+    const bool unfilteredSprite = operation.blur <= 0 && operation.maskImage == 0 &&
+      !operation.appliesSpriteColor && !operation.standaloneBitmapRegion &&
+      operation.inlineMatrix == nullptr;
+    // Keep ordinary sampling separate from the larger decoding programs.
+    const bool directSprite = unfilteredSprite && !operation.derivedImage && !operation.block &&
+      (!operation.paletteTable || (operation.nearest && !operation.paletteBlocks));
+    const bool simpleSprite = unfilteredSprite && !directSprite;
     if (operation.multiTextureSprite && operation.textureCount > 1) {
       const auto& program = multiTextureSprite_;
       if (activeProgram != program.program) {
@@ -2185,7 +2189,8 @@ void Renderer::renderScene() {
       }
       continue;
     }
-    const auto& spriteEffect = operation.standaloneBitmapRegion && operation.blur <= 0 &&
+    const auto& spriteEffect = directSprite ? directSprite_ :
+      operation.standaloneBitmapRegion && operation.blur <= 0 &&
         !operation.appliesSpriteColor ? bitmapRegion_ : spriteEffect_;
     const std::uint32_t spriteProgram = simpleSprite ? simpleProgram_ : spriteEffect.program;
     if (activeProgram != spriteProgram) {
@@ -2341,7 +2346,7 @@ void Renderer::renderScene() {
       if (operation.primitive == RenderCommand::Primitive::tilingSprite) stats_.tilingSpriteDrawCalls += drawCount;
       else if (operation.primitive == RenderCommand::Primitive::screenFill) stats_.screenFillDrawCalls += drawCount;
       else stats_.spriteDrawCalls += drawCount;
-      if (simpleSprite) stats_.baseSpriteDrawCalls += drawCount;
+      if (simpleSprite || directSprite) stats_.baseSpriteDrawCalls += drawCount;
       else stats_.effectSpriteDrawCalls += drawCount;
     }
   }

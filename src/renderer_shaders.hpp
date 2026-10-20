@@ -1095,6 +1095,38 @@ inline std::string withBlockSpriteSampling(std::string source) {
   return source;
 }
 
+constexpr const char* directSpriteFragmentSource = R"(#version 300 es
+  precision mediump float;
+  uniform highp sampler2D image, paletteTable;
+  uniform int paletteImage;
+  uniform bool pixiSpritePacking, texturePremultiplied;
+  uniform bool clampedTilingSampling, atlasTilingSampling;
+  uniform highp vec4 tilingAtlasMapping, tilingAtlasBounds;
+  uniform highp vec2 imageDimensions;
+  in highp vec2 vertexUv;
+  in highp vec4 vertexColor;
+  out highp vec4 outputColor;
+  void main() {
+    highp vec2 coord = vertexUv;
+    if (clampedTilingSampling) {
+      highp vec2 margin = vec2(0.5) / imageDimensions;
+      coord = coord + ceil(-coord);
+      if (atlasTilingSampling) {
+        coord = clamp(coord * tilingAtlasMapping.xy + tilingAtlasMapping.zw,
+          tilingAtlasBounds.xy, tilingAtlasBounds.zw);
+      } else coord = clamp(coord, margin, vec2(1.0) - margin);
+    }
+    highp vec4 sampleColor;
+    if (paletteImage != 0) {
+      highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
+      sampleColor = texelFetch(paletteTable, ivec2(bytes), 0);
+    } else sampleColor = texture(image, coord);
+    outputColor = sampleColor * vertexColor;
+    outputColor.rgb *= pixiSpritePacking ?
+      (texturePremultiplied ? 1.0 : sampleColor.a) :
+      (texturePremultiplied ? vertexColor.a : outputColor.a);
+  }
+)";
 constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
