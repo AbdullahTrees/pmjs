@@ -1,9 +1,12 @@
 'use strict';
 
 (function() {
-  var id = 'mz.menu-background-cache';
-  PMJS.optimizations.register({ id: id, owner: 'pmjs-mz',
+  var menuId = 'mz.menu-background-cache';
+  var battleId = 'mz.battle-background-cache';
+  PMJS.optimizations.register({ id: menuId, owner: 'pmjs-mz',
     fallback: 'render the original menu snapshot and filters each frame' });
+  PMJS.optimizations.register({ id: battleId, owner: 'pmjs-mz',
+    fallback: 'render the original battle snapshot and filters each frame' });
   var records = new WeakMap();
   var stock = new PIXI.filters.BlurFilter();
   var spriteMethods = ['render', '_render', 'renderAdvanced', 'calculateVertices']
@@ -16,23 +19,24 @@
       node.skew.x === 0 && node.skew.y === 0 && !node.mask && !node.filterArea;
   }
 
-  function signature(renderer, stage, sprite) {
+  function signature(renderer, stage, sprite, id) {
+    var name = id === menuId ? 'menu' : 'battle';
     var width = renderer.screen.width, height = renderer.screen.height;
     if (!sprite || !sprite.visible || !sprite.renderable) return null;
     if (renderer.resolution !== 1 || width <= 0 || height <= 0 ||
-        width > 2048 || height > 2048) return unsupported('renderer resolution or menu background dimensions unsupported');
+        width > 2048 || height > 2048) return unsupported(id, 'renderer resolution or ' + name + ' background dimensions unsupported');
     if (sprite.constructor !== Sprite ||
         !(sprite.alpha > 0 && sprite.alpha <= 1) || !identity(sprite, sprite.alpha) ||
         sprite.anchor.x !== 0 || sprite.anchor.y !== 0 || sprite.children.length ||
         sprite.cacheAsBitmap || sprite.blendMode !== PIXI.BLEND_MODES.NORMAL ||
         sprite.tint !== 0xffffff || sprite._colorFilter ||
         spriteMethods.some(function(entry) { return sprite[entry[0]] !== entry[1]; })) {
-      return unsupported('menu background sprite geometry, effects or render methods unsupported');
+      return unsupported(id, name + ' background sprite geometry, effects or render methods unsupported');
     }
     for (var ancestor = sprite; ancestor !== stage;) {
       ancestor = ancestor.parent;
       if (!ancestor || !identity(ancestor, 1) || ancestor.cacheAsBitmap) {
-        return unsupported('menu background ancestor transform, alpha or cache unsupported');
+        return unsupported(id, name + ' background ancestor transform, alpha or cache unsupported');
       }
     }
     var bitmap = sprite.bitmap;
@@ -46,7 +50,7 @@
         !frame || frame.x !== 0 || frame.y !== 0 || frame.width !== width || frame.height !== height ||
         !orig || orig.width !== width || orig.height !== height || texture.trim || texture.rotate ||
         base.resolution !== 1 || base.wrapMode !== PIXI.WRAP_MODES.CLAMP) {
-      return unsupported('menu snapshot dimensions, texture sampling or content revision unsupported');
+      return unsupported(id, name + ' snapshot dimensions, texture sampling or content revision unsupported');
     }
     if (!filters || filters.length !== 1 || !filter || filter.constructor !== PIXI.filters.BlurFilter ||
         filter.enabled !== true || filter.blurX !== filter.blurY || filter.resolution !== 1 ||
@@ -57,14 +61,15 @@
         filter.blurYFilter.apply !== stock.blurYFilter.apply ||
         filter.blurXFilter.program !== stock.blurXFilter.program ||
         filter.blurYFilter.program !== stock.blurYFilter.program) {
-      return unsupported('menu background blur filter composition or parameters unsupported');
+      return unsupported(id, name + ' background blur filter composition or parameters unsupported');
     }
     return [sprite, bitmap, texture, base, source, source.__pmjsContentRevision,
       base._updateID, texture._updateID, base.scaleMode, width, height, sprite.alpha,
-      filter, filter.blur, filter.quality, filter.blurYFilter.quality, renderer.roundPixels];
+      filter, filter.blur, filter.quality, filter.blurXFilter.quality,
+      filter.blurYFilter.quality, sprite.roundPixels, renderer.roundPixels];
   }
 
-  function unsupported(reason) {
+  function unsupported(id, reason) {
     PMJS.optimizations.reportFallback(id, reason);
     return null;
   }
@@ -77,12 +82,28 @@
   }
 
   PMJS.pixi5.registerRenderPreparation(function(renderer, stage, offscreen, prepared) {
-    if (!PMJS.optimizations.isEnabled(id) || offscreen) return;
-    var sprite = stage instanceof Scene_MenuBase && stage._backgroundSprite;
-    var state = sprite && signature(renderer, stage, sprite);
+    if (offscreen) return;
+    var battle = typeof Scene_Battle === 'function' && stage instanceof Scene_Battle;
+    var id = stage instanceof Scene_MenuBase ? menuId : battle ? battleId : null;
+    if (!id || !PMJS.optimizations.isEnabled(id)) { release(renderer); return; }
+    var sprite;
+    if (battle) {
+      var spriteset = stage._spriteset;
+      // Only the stock battle snapshot, in its stock position in the display tree.
+      // The enclosing color/tone/fade filters must remain live after substitution.
+      if (typeof Spriteset_Battle === 'function' &&
+          spriteset instanceof Spriteset_Battle && spriteset.parent === stage &&
+          spriteset._baseSprite && spriteset._baseSprite.parent === spriteset) {
+        sprite = spriteset._backgroundSprite;
+        if (sprite && sprite.parent !== spriteset._baseSprite) sprite = null;
+      }
+    } else {
+      sprite = stage._backgroundSprite;
+    }
+    var state = sprite && signature(renderer, stage, sprite, id);
     var record = records.get(renderer);
     if (!state) { release(renderer); return; }
-    if (!record || state.some(function(value, index) { return value !== record.signature[index]; })) {
+    if (!record || record.id !== id || state.some(function(value, index) { return value !== record.signature[index]; })) {
       release(renderer);
       try {
         NativeHost.render.setRenderTargetSize(renderer.width, renderer.height);
@@ -90,11 +111,12 @@
         // Preserve packed premultiplied texels and bake the sprite's alpha once.
         var image = trackNativeResource(NativeHost.render.renderToImage(renderer.width,
           renderer.height, { alphaMode: 'premultiplied' }), 'image');
-        record = { image: image, signature: state };
+        record = { image: image, signature: state, id: id };
         records.set(renderer, record);
       } catch (error) {
         if (error.code !== 'PMJS_RENDER_IMAGE_ALLOCATION') throw error;
-        PMJS.optimizations.reportFallback(id, 'menu background image allocation failed', error);
+        PMJS.optimizations.reportFallback(id, (battle ? 'battle' : 'menu') +
+          ' background image allocation failed', error);
         return;
       } finally {
         NativeHost.render.setScreenRenderSize(renderer.width, renderer.height);
