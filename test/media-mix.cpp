@@ -469,6 +469,45 @@ void testContextAutomation() {
   CHECK(near(resumed[0], 0.4F), "recovery consumes pending advancement before interpolation");
 }
 
+void testSteadyAutomationTransitions() {
+  using Kind = pmjs::GainAutomation::Kind;
+  pmjs::GainAutomation gain(0.8);
+  CHECK(gain.renderBlock(0, 0).empty(), "empty blocks do not process the first gain sample");
+  gain.setValue(0.2, 0);
+  const auto& steady = gain.renderBlock(37, 259);
+  CHECK(std::all_of(steady.begin(), steady.end(), [](double value) {
+    return value == static_cast<float>(0.2);
+  }) && gain.value() == 0.2, "steady blocks round output to float without replacing the intrinsic double");
+  gain.schedule(Kind::set, 1, 1, 0);
+  gain.cancel(0);
+  const auto& cancelled = gain.renderBlock(512, 128);
+  CHECK(gain.eventCount() == 0 && cancelled.front() == static_cast<float>(0.2) &&
+    cancelled.back() == static_cast<float>(0.2), "cancelled pending events return to the settled value");
+
+  gain.setValue(0.8, 640.0 / 48000);
+  const double first = gain.renderBlock(640, 1).front();
+  CHECK(first == static_cast<float>(0.2F + (0.8F - 0.2F) * 0.005F) && gain.value() == 0.8,
+    "an intrinsic change after steady playback still begins with dezippering");
+  CHECK(gain.renderBlock(640, 1).front() == first, "a shared block does not advance dezippering twice");
+  gain.renderBlock(641, 2048);
+  gain.schedule(Kind::set, 0.25, 4352.0 / 48000, 4096.0 / 48000);
+  const auto& scheduled = gain.renderBlock(4096, 512);
+  for (std::size_t frame = 0; frame < scheduled.size(); ++frame) {
+    CHECK(scheduled[frame] == (frame < 256 ? static_cast<float>(0.8) : 0.25),
+      "a newly scheduled event interrupts steady playback at its exact sample");
+  }
+  gain.cancel(0);
+  const auto& final = gain.renderBlock(5000, 1024);
+  CHECK(std::all_of(final.begin(), final.end(), [](double value) { return value == 0.25; }),
+    "a completed transition can return to a steady block");
+
+  pmjs::GainAutomation large(1.0e30);
+  const auto& amplified = large.renderBlock(0, 256);
+  CHECK(std::all_of(amplified.begin(), amplified.end(), [](double value) {
+    return value == static_cast<float>(1.0e30);
+  }) && large.value() == 1.0e30, "large finite intrinsic gain retains float output and double state");
+}
+
 void testAutomationHistory() {
   using Kind = pmjs::GainAutomation::Kind;
   pmjs::GainAutomation gain;
@@ -592,6 +631,7 @@ int main(int argc, char** argv) {
   testPreparedSampleParity();
   testPreparedHighPitchEof();
   testContextAutomation();
+  testSteadyAutomationTransitions();
   testAutomationHistory();
   testTerminalFrames();
   testAutomationReference();

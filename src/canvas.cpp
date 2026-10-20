@@ -770,9 +770,22 @@ void CanvasStore::fillRectNow(Content& surface, int x, int y, int width, int hei
   const int y1 = static_cast<int>(std::clamp<std::int64_t>(
     static_cast<std::int64_t>(y) + height, 0, surface.height));
   if (!(rgba & 255)) return;
-  for (int py = y0; py < y1; ++py) {
-    for (int px = x0; px < x1; ++px) {
-      blendPixel(surface, px, py, rgba, 255);
+  if ((rgba & 255) == 255) {
+    const std::array<std::uint8_t, 4> pixel = {
+      static_cast<std::uint8_t>(rgba >> 8), static_cast<std::uint8_t>(rgba >> 16),
+      static_cast<std::uint8_t>(rgba >> 24), 255};
+    for (int py = y0; py < y1; ++py) {
+      auto* row = surface.pixels.data() +
+        (static_cast<std::size_t>(py) * surface.width + x0) * 4;
+      for (int px = x0; px < x1; ++px, row += 4) {
+        std::memcpy(row, pixel.data(), pixel.size());
+      }
+    }
+  } else {
+    for (int py = y0; py < y1; ++py) {
+      for (int px = x0; px < x1; ++px) {
+        blendPixel(surface, px, py, rgba, 255);
+      }
     }
   }
   markDirty(surface, x0, y0, x1 - x0, y1 - y0);
@@ -817,6 +830,7 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
   auto [source, canvas, snapshot, sourceX, sourceY, sourceWidth, sourceHeight,
                destinationX, destinationY, destinationWidth, destinationHeight, alpha, smoothing] = command;
   if (alpha == 0) return true;
+  const bool destinationKnownAllZero = destinationSurface.knownAllZero;
   destinationSurface.knownAllZero = false;
   struct SourcePixels {
     int width;
@@ -897,7 +911,7 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
       destinationY + destinationHeight <= destinationSurface.height &&
       std::all_of(geometry.begin(), geometry.end(), [](float value) { return value == std::floor(value); })) {
     bool transparent = true;
-    for (int y = 0; y < destinationHeight && transparent; ++y) for (int x = 0; x < destinationWidth; ++x) {
+    for (int y = 0; !destinationKnownAllZero && y < destinationHeight && transparent; ++y) for (int x = 0; x < destinationWidth; ++x) {
       const size_t index = (static_cast<size_t>(destinationY + y) * destinationSurface.width + destinationX + x) * 4;
       uint32_t pixel;
       std::memcpy(&pixel, destinationSurface.pixels.data() + index, sizeof(pixel));

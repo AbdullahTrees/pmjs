@@ -110,15 +110,15 @@ struct MediaService::Impl {
     if (worker.joinable()) worker.join();
     if (device) SDL_CloseAudioDevice(device);
   }
-  std::vector<std::shared_ptr<Voice>> snapshot(bool streamsOnly = false) const {
+  void snapshot(std::vector<std::shared_ptr<Voice>>& result,
+                bool streamsOnly = false) const {
+    result.clear();
     std::lock_guard lock(mutex);
-    std::vector<std::shared_ptr<Voice>> result;
-    result.reserve(voices.size());
+    if (!streamsOnly) result.reserve(voices.size());
     for (const auto& [handle, voice] : voices) {
       (void)handle;
       if (!streamsOnly || voice->decoder) result.push_back(voice);
     }
-    return result;
   }
   std::shared_ptr<Voice> voice(std::uint32_t handle) const {
     std::lock_guard lock(mutex);
@@ -135,7 +135,8 @@ struct MediaService::Impl {
       const bool suspended = self.contextSuspended.load(std::memory_order_acquire);
       const auto contextFrame = self.contextFrames.load(std::memory_order_relaxed);
       const float master = self.masterVolume.load(std::memory_order_relaxed);
-      for (const auto& voice : self.snapshot()) {
+      self.snapshot(self.callbackVoices);
+      for (const auto& voice : self.callbackVoices) {
         std::lock_guard lock(voice->mutex);
         if (suspended && voice->contextOwned) continue;
         if (voice->automation) {
@@ -145,9 +146,11 @@ struct MediaService::Impl {
           voice->mix.automation = nullptr;
         } else mixVoiceInto(voice->mix, output, frames, master, contextFrame);
       }
+      self.callbackVoices.clear();
       clampStereoMix(output, frames);
       if (!suspended) self.contextFrames.fetch_add(frames, std::memory_order_release);
     } catch (...) {
+      self.callbackVoices.clear();
       std::fill(output, output + frames * 2, 0.0F);
       std::lock_guard lock(self.mutex);
       self.serviceFailure = std::current_exception();
@@ -220,8 +223,11 @@ struct MediaService::Impl {
     }
   }
   void decodeLoop() {
+    std::vector<std::shared_ptr<Voice>> workerVoices;
     while (!shuttingDown && !serviceFailed) {
-      for (const auto& voice : snapshot(true)) fill(voice);
+      snapshot(workerVoices, true);
+      for (const auto& voice : workerVoices) fill(voice);
+      workerVoices.clear();
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   }
@@ -349,6 +355,8 @@ struct MediaService::Impl {
   SDL_AudioSpec obtained{};
   mutable std::mutex mutex;
   std::unordered_map<std::uint32_t, std::shared_ptr<Voice>> voices;
+  // SDL invokes this device's callbacks serially; the decoder has its own buffer.
+  std::vector<std::shared_ptr<Voice>> callbackVoices;
   std::uint32_t nextHandle = 1;
   std::atomic<bool> shuttingDown{false}, serviceFailed{false};
   std::exception_ptr serviceFailure;

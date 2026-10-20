@@ -26,6 +26,21 @@ try {
     assert.deepEqual(Buffer.from(native.canvas.readPixels(all.handle, 0, 0, 256, 256)), Buffer.from(reference.straight), 'fixed-point browser export');
     assert.deepEqual(read(all), premultiplied, 'observation cannot mutate content');
   }
+  const clippedFill = create(5, 3), beforeFill = create(5, 3);
+  const rawBackground = Uint8Array.from({ length: 5 * 3 * 4 }, (_, i) => [251, 193, 137, 0][i % 4]);
+  native.canvas.writePremultipliedPixels(clippedFill.handle, 0, 0, 5, 3, rawBackground);
+  native.canvas.drawImage(beforeFill.handle, clippedFill.handle, 0, 0, 5, 3, 0, 0, 5, 3, 1);
+  native.canvas.fillRect(clippedFill.handle, -1, 1, 4, 3, 0x123456ff);
+  const expectedFill = Buffer.from(rawBackground);
+  for (let y = 1; y < 3; y++) for (let x = 0; x < 3; x++) expectedFill.set([18, 52, 86, 255], (y * 5 + x) * 4);
+  assert.deepEqual(read(clippedFill), expectedFill, 'clipped opaque fill replaces all channels and preserves untouched raw pixels');
+  assert.deepEqual(read(beforeFill), Buffer.alloc(5 * 3 * 4), 'opaque fill preserves the prior captured source version');
+  const clearCopy = create(256, 256);
+  native.canvas.fillRect(clearCopy.handle, 0, 0, 256, 256, 0x123456ff);
+  read(clearCopy);
+  native.canvas.clear(clearCopy.handle);
+  native.canvas.drawImage(clearCopy.handle, all.handle, 0, 0, 256, 256, 0, 0, 256, 256, 1);
+  assert.deepEqual(read(clearCopy), premultiplied, 'copy after full clear preserves every ordinary premultiplied channel/alpha pair');
   for (const item of reference.overAlpha) {
     const source = create(item.width, 1);
     const bytes = new Uint8Array(item.width * 4);

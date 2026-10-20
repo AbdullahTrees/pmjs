@@ -17,7 +17,7 @@ function fixture(t, clock = performance) {
   return { context, errors, fatals };
 }
 
-for (const count of [2, 130]) test('FIFO callbacks checkpoint chained Promises, count=' + count, async t => {
+for (const count of [2, 130, 1024]) test('FIFO callbacks checkpoint chained Promises, count=' + count, async t => {
   const { context } = fixture(t), trace = [];
   for (let i = 0; i < count; i++) context.PMJS.tasks.enqueue(() => {
     trace.push('task:' + i);
@@ -142,4 +142,16 @@ test('fatal callbacks stop delivery and discard retained results', async t => {
   assert.deepEqual(trace, ['released']);
   assert.equal(context.PMJS.tasks.enqueue(() => trace.push('late'), { discard: () => trace.push('late release') }), false);
   assert.deepEqual(trace, ['released', 'late release']);
+});
+
+for (const stopAfter of [70, 600]) test('stopping a partially drained large queue discards only pending results, after=' + stopAfter, async t => {
+  const { context, fatals } = fixture(t), delivered = [], discarded = [];
+  for (let i = 0; i < 1024; i++) context.PMJS.tasks.enqueue(() => {
+    delivered.push(i);
+    if (i === stopAfter) context.PMJS.tasks.stop();
+  }, { discard: () => discarded.push(i) });
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(delivered, Array.from({ length: stopAfter + 1 }, (_, i) => i));
+  assert.deepEqual(discarded, Array.from({ length: 1023 - stopAfter }, (_, i) => i + stopAfter + 1));
+  assert.deepEqual(fatals, []);
 });

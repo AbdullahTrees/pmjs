@@ -87,7 +87,9 @@
       });
       return;
     }
-    var entry = rendering ? continuations.shift() : tasks[head++];
+    var entry;
+    if (rendering) entry = continuations.shift();
+    else if (head < tasks.length) { entry = tasks[head]; tasks[head++] = null; }
     if (!entry) {
       if (!rendering) {
         tasks = []; head = 0;
@@ -105,7 +107,8 @@
       else { fatal(error); return; }
     }
     if (!rendering && head >= tasks.length) { tasks = []; head = 0; }
-    else if (!rendering && head > 64) { tasks.splice(0, head); head = 0; }
+    // Amortize compaction across the queue; consumed slots release callbacks above.
+    else if (!rendering && head > 64 && head * 2 >= tasks.length) { tasks.splice(0, head); head = 0; }
     // Return to Node even when the last callback only queues Promise work.
     wake();
   }

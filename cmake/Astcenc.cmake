@@ -33,4 +33,13 @@ if(PMJS_OFFLINE AND PMJS_ASTCENC_ARCHIVE)
   set(FETCHCONTENT_FULLY_DISCONNECTED OFF)
 endif()
 FetchContent_MakeAvailable(pmjs_astcenc)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  # precise enables contraction, conflicting with the encoder's explicit
+  # contraction setting on Clang 20. Keep strict math without selecting it twice.
+  get_target_property(astcenc_compile_options astcenc-${astcenc_isa}-static COMPILE_OPTIONS)
+  string(REPLACE "-ffp-model=precise" "-fno-fast-math"
+    astcenc_compile_options "${astcenc_compile_options}")
+  set_property(TARGET astcenc-${astcenc_isa}-static PROPERTY
+    COMPILE_OPTIONS "${astcenc_compile_options}")
+endif()
 add_library(pmjs_astcenc ALIAS astcenc-${astcenc_isa}-static)

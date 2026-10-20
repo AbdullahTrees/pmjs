@@ -79,7 +79,14 @@ class GainAutomation {
       cursor_ = 0;
     }
     block_.resize(frames);
-    for (int frame = 0; frame < frames; ++frame) {
+    const float firstGain = processed_ ? lastGain_ : static_cast<float>(current_);
+    if (frames > 0 && events_.empty() && std::abs(firstGain - current_) < 0.001F) {
+      automated_ = false;
+      dezipper_ = false;
+      lastGain_ = static_cast<float>(current_);
+      std::fill(block_.begin(), block_.end(), lastGain_);
+      processed_ = true;
+    } else for (int frame = 0; frame < frames; ++frame) {
       const auto outputFrame = firstFrame + frame;
       const double time = static_cast<double>(outputFrame) / 48000;
       if (frame == 0 || outputFrame % 128 == 0) {

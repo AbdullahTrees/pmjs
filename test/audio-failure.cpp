@@ -69,12 +69,16 @@ int main(int argc, char** argv) try {
         "independent audio did not advance after worker failure");
       media.release(healthy);
     }
+  }
+  {
+    // A fresh service must grow its snapshot buffers on the first voice.
+    pmjs::MediaService media(std::filesystem::path(argv[1]).parent_path());
     std::string error;
-    const auto voice = media.loadAudio(argv[1], &error);
-    require(voice && media.play(voice, true, 0), "cannot start snapshot failure fixture");
     fault = 5;
+    const auto voice = media.loadAudio(argv[1], &error);
+    require(voice && error.empty(), "cannot load snapshot failure fixture");
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (media.isPlaying(voice) && std::chrono::steady_clock::now() < deadline) SDL_Delay(5);
+    while (media.audioError(voice).empty() && std::chrono::steady_clock::now() < deadline) SDL_Delay(5);
     require(!media.isPlaying(voice) && !media.audioError(voice).empty(),
       "audio snapshot allocation failure escaped its callback or worker boundary");
     require(!media.play(voice, true, 0), "failed audio service accepted unreachable work");
