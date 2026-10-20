@@ -37,6 +37,11 @@ async function prepare(name, palette) {
   const descriptor = await native.assets.processImage('sheet.png', directory,
     { grid: [6, 2], backdrop: [0, 0, 0, 0] });
   assert.ok(descriptor, 'fixture must use prepared image storage');
+  // Keep this fixture on ordinary storage so it exercises the frame cache.
+  native.assets.installImageStorage([{ source: 'sheet.png',
+    sourceIdentity: native.assets.sourceIdentity('sheet.png'),
+    storage: { version: 1, width: 96, height: 24, paletteBits: 0, channels: 4,
+      source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] } }]);
   native.assets.installPrepared([{ source: 'sheet.png', directory, descriptor,
     sourceIdentity: native.assets.sourceIdentity('sheet.png') }]);
   return native.images.loadAsync('sheet.png');

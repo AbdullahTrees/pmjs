@@ -39,7 +39,7 @@ void writePng(const std::filesystem::path& path, const pmjs::ImagePixels& pixels
   require(png_image_write_to_file(&png, path.c_str(), 0, pixels.rgba.data(), 0, nullptr), "PNG fixture failed");
 }
 std::vector<std::uint8_t> render(pmjs::Renderer& renderer, pmjs::ImageHandle handle,
-    int width, int height, int variant) {
+    int width, int height, int variant, std::array<int, 4> crop = {}) {
   namespace packet = pmjs::scene_packet;
   const bool filter = variant % 3 != 0;
   const auto nodes = filter ? 3U : 1U;
@@ -54,15 +54,30 @@ std::vector<std::uint8_t> render(pmjs::Renderer& renderer, pmjs::ImageHandle han
   const auto sprite = filter ? 1U : 0U;
   auto* m = metadata.data() + sprite * packet::metadataStride;
   auto* v = values.data() + sprite * packet::valueStride;
-  m[0] = 1; m[1] = filter ? 0 : packet::noParent; m[2] = handle;
+  m[0] = variant & 512 ? 2 : 1; m[1] = filter ? 0 : packet::noParent; m[2] = handle;
   m[4] = (variant / 12) % 4;
   m[5] = (variant & 1 ? packet::nearestSampling : 0) |
     (variant & 2 ? packet::premultipliedSpriteTexture : 0) |
     (variant & 4 ? packet::hasClipRectangle : 0) |
-    (variant & 32 ? packet::mipmapSampling : 0);
+    (variant & 32 ? packet::mipmapSampling : 0) |
+    (variant & (64 | 256) ? packet::hasSpriteColor : 0) |
+    (variant & 128 ? packet::standaloneBitmapRegion : 0) |
+    (variant & 1024 ? packet::clampedTilingSampling : 0);
+  if (variant & 64) {
+    v[37] = 0.8F; v[38] = 0.2F; v[39] = 0.4F; v[40] = 0.5F;
+  }
+  if (variant & 256) { v[33] = 0.13F; v[34] = -0.07F; v[35] = 0.04F; v[36] = 0.65F; }
   v[0] = 64.0F / width; v[3] = 48.0F / height; v[6] = 0.63F;
   v[11] = v[13] = static_cast<float>(width);
   v[12] = v[14] = static_cast<float>(height);
+  if (variant & 512) {
+    v[9] = -width * 0.25F; v[10] = -height * 0.125F;
+    v[11] = width * 1.5F; v[12] = height * 1.75F;
+  }
+  if (crop[2] > 0) {
+    v[0] = 64.0F / crop[2]; v[3] = 48.0F / crop[3];
+    v[9] = crop[0]; v[10] = crop[1]; v[11] = crop[2]; v[12] = crop[3];
+  }
   if (variant & 8) {
     v[0] *= -0.81F; v[1] = 0.027F; v[2] = 0.017F; v[3] *= 0.73F;
     v[4] = 60.25F; v[5] = 3.375F;
@@ -357,6 +372,80 @@ int main() {
       images.release(image->handle); images.update();
       images.clearStorageDecisions();
     }
+    // Each page fits a palette even when the complete logical image does not.
+    for (const bool wide : {false, true}) {
+      const int frameWidth = wide ? 511 : 512, frameHeight = wide ? 510 : 512;
+      pmjs::ImagePixels source{frameWidth * 2, frameHeight, std::vector<std::uint8_t>(frameWidth * 2 * frameHeight * 4)};
+      pmjs::PreparedImageDescriptor descriptor;
+      descriptor.width = source.width; descriptor.height = source.height;
+      std::size_t expectedBytes = 0;
+      for (int side = 0; side < 2; ++side) {
+        pmjs::ImagePixels page{frameWidth + 2, frameHeight + 2, std::vector<std::uint8_t>((frameWidth + 2) * (frameHeight + 2) * 4)};
+        for (int y = 0; y < page.height; ++y) for (int x = 0; x < page.width; ++x) {
+          const auto color = (std::clamp(y - 1, 0, frameHeight - 1) * frameWidth + std::clamp(x - 1, 0, frameWidth - 1)) % (wide ? 65536 : 256);
+          auto* p = page.rgba.data() + (y * page.width + x) * 4;
+          p[0] = color & 255; p[1] = color >> 8; p[2] = side ? 137 : 51;
+          p[3] = wide ? 255 : (color * 31) & 255;
+          if (x > 0 && x <= frameWidth && y > 0 && y <= frameHeight)
+            std::copy_n(p, 4, source.rgba.data() + ((y - 1) * source.width + side * frameWidth + x - 1) * 4);
+        }
+        const auto filename = std::string(wide ? "wide" : "narrow") + std::to_string(side) + "-page.png";
+        writePng(root / filename, page);
+        descriptor.pages.push_back({filename, page.width, page.height});
+        descriptor.pages.back().storage = pmjs::ImageStore::classifyStorage(page);
+        require(descriptor.pages.back().storage->paletteBits == (wide ? 16 : 8), "prepared page palette decision differs");
+        descriptor.cells.push_back({{side * frameWidth, 0, frameWidth, frameHeight}, {0, 0, frameWidth, frameHeight}, {1, 1, frameWidth, frameHeight}, {}, side});
+        expectedBytes += page.width * page.height * (wide ? 2 : 1) + (wide ? 256 : 2) * 1024;
+      }
+      const auto path = root / (wide ? "wide-pages.png" : "narrow-pages.png");
+      const auto aliasPath = root / (wide ? "wide-alias.png" : "narrow-alias.png");
+      writePng(path, source); writePng(aliasPath, source);
+      require(images.installPrepared(path, root, descriptor) && images.installPrepared(aliasPath, root, descriptor),
+        "page palette descriptor rejected");
+      const auto image = images.loadPng(path), alias = images.loadPng(aliasPath);
+      const auto control = images.createRgba(source.width, source.height, source.rgba.data());
+      require(image && alias && control, "page palette source load failed");
+      for (int side = 0; side < 2; ++side) {
+        const std::array<int, 4> crop{side * frameWidth, 0, frameWidth, frameHeight};
+        for (int variant : {0, 2, 3, 6, 65, 66, 68, 258, 321}) {
+          const auto actual = render(renderer, image->handle, source.width, source.height, variant, crop);
+          const auto expected = render(renderer, control->handle, source.width, source.height, variant, crop);
+          if (actual != expected) {
+            const auto at = std::mismatch(actual.begin(), actual.end(), expected.begin()).first - actual.begin();
+            std::fprintf(stderr, "page wide=%d side=%d variant=%d byte=%td actual=%u expected=%u\n", wide, side, variant, at, actual[at], expected[at]);
+          }
+          require(actual == expected, "prepared palette crop rendering differs");
+          ++comparisons;
+        }
+        const auto region = images.resolveSpriteRegion(image->handle, crop[0], 0, frameWidth, frameHeight, false, true);
+        const auto shared = images.resolveSpriteRegion(alias->handle, crop[0], 0, frameWidth, frameHeight, false, true);
+        require(region && shared && region->paletteTable && region->image.texture == shared->image.texture &&
+          region->paletteTable == shared->paletteTable, "prepared palette was not shared");
+      }
+      const auto memory = images.memoryEntries();
+      const auto controlOwner = std::find_if(memory.begin(), memory.end(), [&](const auto& entry) { return entry.handle == control->handle; });
+      require(controlOwner != memory.end() && images.gpuBytes() - controlOwner->gpuBytes == expectedBytes,
+        "prepared page palettes allocated RGBA or duplicated storage");
+      require(std::count_if(memory.begin(), memory.end(), [&](const auto& entry) {
+        return (entry.handle == image->handle || entry.handle == alias->handle) && entry.gpuBytes == expectedBytes && entry.palette && entry.paletteIndexBits == (wide ? 16 : 8);
+      }) == 2, "prepared page palette ownership accounting differs");
+      const auto view = images.resolveSpriteRegion(alias->handle, 0, 0, frameWidth, frameHeight, false, true);
+      images.setWarmBudgetBytes(64 * 1024 * 1024);
+      images.release(image->handle); images.update();
+      require(images.warmCount() == 1 && images.warmBytes() == 0, "warm palette charged storage retained by an active owner");
+      images.setWarmBudgetBytes(0); images.update();
+      require(glIsTexture(view->image.texture), "released owner deleted a shared palette page");
+      const auto read = images.readPixelsRegion(alias->handle, 513, 7, 9, 3);
+      require(read && std::equal(read->rgba.begin(), read->rgba.begin() + 36, source.rgba.begin() + (7 * source.width + 513) * 4),
+        "prepared palette region read changed source pixels");
+      const std::array<std::uint8_t, 4> replacement{11, 29, 73, 109};
+      require(images.updateRgbaRegion(alias->handle, 513, 7, 1, 1, replacement.data(), 1), "prepared palette mutation failed");
+      const auto changed = images.readPixelsRegion(alias->handle, 513, 7, 1, 1);
+      require(changed && std::equal(changed->rgba.begin(), changed->rgba.end(), replacement.begin()), "prepared palette mutation returned stale pixels");
+      require(!glIsTexture(view->image.texture), "mutation kept an unused immutable page palette");
+      images.release(alias->handle); images.release(control->handle); images.update();
+      require(images.gpuBytes() == 0 && images.cpuBytes() == 0, "prepared page palette resources leaked");
+    }
     // Exercise index-width selection and every 16-bit address, including hidden RGB and odd dimensions.
     for (const unsigned colorCount : {256U, 257U, 65536U}) for (const bool opaque : {false, true}) {
       const int width = colorCount == 256 ? 1280 : colorCount == 257 ? 1920 : 2049;
@@ -418,9 +507,11 @@ int main() {
       require(!images.readPixelsRegion(indexed->handle, -1, 0, 1, 1) &&
         !images.readPixelsRegion(indexed->handle, width, 0, 1, 1), "palette region accepted invalid bounds");
       const auto control = images.createRgba(width, height, pixels.rgba.data());
-      for (int variant : {1, 3, 5, 7, 9, 13, 17, 21, 25, 29}) {
-        require(render(renderer, indexed->handle, width, height, variant) ==
-          render(renderer, control->handle, width, height, variant), "palette nearest rendering differs from RGBA");
+      for (int variant : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29, 64, 65, 130, 131, 194, 195, 256, 257, 258, 259, 320, 321, 512, 513, 1536, 1537}) {
+        const auto actual = render(renderer, indexed->handle, width, height, variant);
+        const auto expected = render(renderer, control->handle, width, height, variant);
+        if (actual != expected) std::fprintf(stderr, "palette colors=%u opaque=%d variant=%d\n", colorCount, opaque, variant);
+        require(actual == expected, "palette rendering differs from RGBA");
         ++comparisons;
       }
       require(images.resolvePaletteImage(indexed->handle, false).has_value(),

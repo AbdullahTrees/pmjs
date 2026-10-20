@@ -21,8 +21,8 @@ const options = { width: 32, height: 24, assetPreparation: {
   astc: { enabled: false, quality: 'medium' }, workspaceBytes: 128 * 1024 * 1024
 } };
 const fixtures = [
-  { name: 'zero', width: 128, height: 128, count: 1, channels: 2, bits: 0 },
-  { name: 'sparse', width: 512, height: 256, count: 256, channels: 2, bits: 0 },
+  { name: 'zero', width: 128, height: 128, count: 1, channels: 4, bits: 8 },
+  { name: 'sparse', width: 512, height: 256, count: 256, channels: 4, bits: 8 },
   { name: 'gray', width: 16, height: 16, count: 256, channels: 1, bits: 0 },
   { name: 'rgba', width: 16, height: 16, count: 256, channels: 4, bits: 0 },
   { name: 'palette8', width: 2048, height: 2048, count: 256, channels: 4, bits: 8 },
@@ -88,7 +88,7 @@ const handles = [];
     assert.equal(cold.storageEntries.length, fixtures.length);
     assert.ok(cold.entries.find(e => e.source === sheet.source).descriptor.pages.every(p => p.storage),
       'regenerated pages preserve hash-bound offline layouts');
-    for (const f of fixtures.filter(f => f.bits)) {
+    for (const f of fixtures.filter(f => f.name.startsWith('palette'))) {
       const before = native.images.memory().storageDecisionHits;
       const image = native.images.load(f.source);
       handles.push(image.handle);
@@ -105,7 +105,7 @@ const handles = [];
       assert.equal(owner.paletteIndexBits, f.bits);
       assert.ok(memory.storageDecisionHits > before, 'draw consumes the precomputed decision');
     }
-    for (const f of fixtures.filter(f => !f.bits)) {
+    for (const f of fixtures.filter(f => !f.name.startsWith('palette'))) {
       const image = native.images.load(f.source);
       handles.push(image.handle);
       assert.equal(native.images.isOpaque(image.handle), !['zero', 'sparse', 'rgba'].includes(f.name));

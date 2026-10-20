@@ -28,8 +28,8 @@ const schema = native.scene.schema;
 
 function draw(image, { frame = 1, height = 24, tone = [0, 0, 0, 0],
   flash = [1, 1, 1, 0.25], blend = 0, alpha = 1, nearest = false,
-  packedUv = false, scaled = false, colored = true, source, transform } = {}) {
-  const flags = (colored ? 1 << 4 : 0) | (nearest ? 8 : 0) | (packedUv ? 0 : 1 << 17);
+  packedUv = false, scaled = false, colored = true, mipmap = false, source, transform } = {}) {
+  const flags = (colored ? 1 << 4 : 0) | (nearest ? 8 : 0) | (packedUv ? 0 : 1 << 17) | (mipmap ? 1 << 16 : 0);
   const values = new Float32Array(schema.valueStride);
   values.set(transform || (scaled ? [1.25, 0, 0, 1.25, 12.5, 8.5, alpha] :
     [1, 0, 0, 1, 12, 8, alpha]));
@@ -66,6 +66,7 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
     native.assets.installPrepared([{ source: 'sheet.png', directory, descriptor,
       sourceIdentity: native.assets.sourceIdentity('sheet.png') }]);
     original = native.images.loadBytes(sourceBytes);
+    draw(original, { mipmap: true }); // Force an ordinary RGBA reference.
     prepared = await native.images.loadAsync('sheet.png');
     const before = native.images.memory();
     for (const effect of [
@@ -86,11 +87,12 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
       const options = { frame: 1, scaled: true, packedUv, tone };
       compare(draw(prepared, options), draw(original, options), `halo: packed=${packedUv}, tone=${tone}`);
     }
-    const cached = native.images.memory();
+    const cached = native.images.memory(100);
     assert.equal(cached.preparedMaterializations, before.preparedMaterializations,
       'sprite color effects materialized the logical sheet');
-    assert.ok(cached.preparedFrameCacheHits > before.preparedFrameCacheHits);
-    assert.ok(cached.preparedFrameCacheBytes > 0);
+    assert.ok(cached.preparedFrameCacheHits > before.preparedFrameCacheHits ||
+      cached.largest.some(entry => entry.handle === prepared.handle && entry.palette),
+    'sprite effects must retain a reusable frame or indexed backing');
     assert.ok(cached.preparedFrameCacheBytes <= cached.preparedFrameCacheBudget);
     const options = { frame: 1, flash: [1, 1, 1, 0.25] };
     draw(prepared, options);
@@ -108,6 +110,7 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
     native.assets.installPrepared([{ source: 'oversized.png', directory: oversizedDirectory,
       descriptor: oversizedDescriptor, sourceIdentity: native.assets.sourceIdentity('oversized.png') }]);
     oversizedOriginal = native.images.loadBytes(oversizedBytes);
+    draw(oversizedOriginal, { mipmap: true });
     oversizedPrepared = await native.images.loadAsync('oversized.png');
     const beforeOversized = native.images.memory();
     for (const tone of [[0, 0, 0, 0], [0.13, -0.07, 0.04, 0.65]]) {

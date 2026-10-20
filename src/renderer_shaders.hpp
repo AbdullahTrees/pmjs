@@ -1099,11 +1099,26 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
   uniform highp sampler2D image;
-  uniform bool paletteImage;
+  // 1 selects nearest colors; 2 interpolates colors after index lookup.
+  uniform int paletteImage;
   uniform highp sampler2D paletteTable;
-  highp vec4 samplePalette(highp vec2 coord) {
+  highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
     return texelFetch(paletteTable, ivec2(bytes), 0);
+  }
+  highp vec4 samplePalette(highp vec2 coord) {
+    if (paletteImage == 1) return paletteColor(coord);
+    highp vec2 size = vec2(textureSize(image, 0));
+    highp vec2 position = roundEven((coord * size - vec2(0.5)) * 256.0) / 256.0;
+    highp vec2 pixel = floor(position), weight = fract(position);
+    highp ivec2 weights = ivec2(weight * 256.0);
+    highp ivec4 a = ivec4(floor(paletteColor((pixel + vec2(0.5)) / size) * 255.0 + 0.5));
+    highp ivec4 b = ivec4(floor(paletteColor((pixel + vec2(1.5, 0.5)) / size) * 255.0 + 0.5));
+    highp ivec4 c = ivec4(floor(paletteColor((pixel + vec2(0.5, 1.5)) / size) * 255.0 + 0.5));
+    highp ivec4 d = ivec4(floor(paletteColor((pixel + vec2(1.5)) / size) * 255.0 + 0.5));
+    highp ivec4 top = (a * (256 - weights.x) + b * weights.x + 128) / 256;
+    highp ivec4 bottom = (c * (256 - weights.x) + d * weights.x + 128) / 256;
+    return vec4((top * (256 - weights.y) + bottom * weights.y + 128) / 256) / 255.0;
   }
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
@@ -1142,11 +1157,13 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
       else if (derivedNearest) {
         highp vec2 pixel = clamp(floor(coord * imageDimensions), vec2(0.0), imageDimensions - vec2(1.0));
         highp ivec2 address = derivedUvTransform.x == 0.0 ? ivec2(0) : ivec2(pixel + derivedAtlasOffset);
-        sampleColor = texelFetch(image, address, 0);
-      } else sampleColor = texture(image,
-        coord * derivedUvTransform.xy + derivedUvTransform.zw);
+        sampleColor = paletteImage != 0 ? paletteColor((vec2(address) + vec2(0.5)) / vec2(textureSize(image, 0))) : texelFetch(image, address, 0);
+      } else {
+        highp vec2 atlasCoord = coord * derivedUvTransform.xy + derivedUvTransform.zw;
+        sampleColor = paletteImage != 0 ? samplePalette(atlasCoord) : texture(image, atlasCoord);
+      }
     } else {
-      sampleColor = paletteImage ? samplePalette(coord) : texture(image, coord);
+      sampleColor = paletteImage != 0 ? samplePalette(coord) : texture(image, coord);
     }
     outputColor = sampleColor * vertexColor;
     outputColor.rgb *= pixiSpritePacking ? (texturePremultiplied ? 1.0 : sampleColor.a) : (texturePremultiplied ? vertexColor.a : outputColor.a);
@@ -1303,11 +1320,26 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   precision mediump float;
   precision highp int;
   uniform highp sampler2D image;
-  uniform bool paletteImage;
+  // 1 selects nearest colors; 2 interpolates colors after index lookup.
+  uniform int paletteImage;
   uniform highp sampler2D paletteTable;
-  highp vec4 samplePalette(highp vec2 coord) {
+  highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
     return texelFetch(paletteTable, ivec2(bytes), 0);
+  }
+  highp vec4 samplePalette(highp vec2 coord) {
+    if (paletteImage == 1) return paletteColor(coord);
+    highp vec2 size = vec2(textureSize(image, 0));
+    highp vec2 position = roundEven((coord * size - vec2(0.5)) * 256.0) / 256.0;
+    highp vec2 pixel = floor(position), weight = fract(position);
+    highp ivec2 weights = ivec2(weight * 256.0);
+    highp ivec4 a = ivec4(floor(paletteColor((pixel + vec2(0.5)) / size) * 255.0 + 0.5));
+    highp ivec4 b = ivec4(floor(paletteColor((pixel + vec2(1.5, 0.5)) / size) * 255.0 + 0.5));
+    highp ivec4 c = ivec4(floor(paletteColor((pixel + vec2(0.5, 1.5)) / size) * 255.0 + 0.5));
+    highp ivec4 d = ivec4(floor(paletteColor((pixel + vec2(1.5)) / size) * 255.0 + 0.5));
+    highp ivec4 top = (a * (256 - weights.x) + b * weights.x + 128) / 256;
+    highp ivec4 bottom = (c * (256 - weights.x) + d * weights.x + 128) / 256;
+    return vec4((top * (256 - weights.y) + bottom * weights.y + 128) / 256) / 255.0;
   }
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
@@ -1348,6 +1380,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
           any(greaterThanEqual(address, vec2(textureSize(image, 0))))) return vec4(0.0);
     }
     highp vec4 texel = blockImage ? sampleBlockImage(address + vec2(0.5)) :
+      paletteImage != 0 ? paletteColor((address + vec2(0.5)) / vec2(textureSize(image, 0))) :
       texelFetch(image, ivec2(address), 0);
     highp vec3 premultiplied = texturePremultiplied ? texel.rgb : texel.rgb * texel.a;
     if (!spriteColorEnabled || spriteBlendColor.a <= 0.0) return vec4(premultiplied, texel.a);
@@ -1394,10 +1427,11 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       if (standaloneBitmapRegion) {
         highp vec2 position = vertexUv * (spriteFrame.zw - spriteFrame.xy + vec2(1.0));
         if (nearestSampling) {
-          sampleColor = texelFetch(image, ivec2(clamp(floor(position) + spriteFrame.xy, spriteFrame.xy, spriteFrame.zw)), 0);
+          highp vec2 address = clamp(floor(position) + spriteFrame.xy, spriteFrame.xy, spriteFrame.zw);
+          sampleColor = paletteImage != 0 ? paletteColor((address + vec2(0.5)) / imageDimensions) : texelFetch(image, ivec2(address), 0);
         } else {
           coord = (clamp(position, vec2(0.5), spriteFrame.zw - spriteFrame.xy + vec2(0.5)) + spriteFrame.xy) / imageDimensions;
-          sampleColor = paletteImage ? samplePalette(coord) : texture(image, coord);
+          sampleColor = paletteImage != 0 ? samplePalette(coord) : texture(image, coord);
         }
       } else {
       if (clampedTilingSampling && !derivedImage) {
@@ -1408,11 +1442,19 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
             tilingAtlasBounds.xy, tilingAtlasBounds.zw);
         } else coord = clamp(coord, margin, vec2(1.0) - margin);
       }
-      if (derivedImage) coord = coord * derivedUvTransform.xy + derivedUvTransform.zw;
-      bool outside = derivedImage && (any(lessThan(coord, vec2(0.0))) ||
-        any(greaterThan(coord, vec2(1.0))));
-      sampleColor = outside ? vec4(0.0) : blockImage ?
-        sampleBlockImage(coord * imageDimensions) : paletteImage ? samplePalette(coord) : texture(image, coord);
+      if (derivedImage && nearestSampling && paletteImage != 0) {
+        highp vec2 pixel = clamp(floor(coord * imageDimensions), vec2(0.0), imageDimensions - vec2(1.0));
+        highp vec2 address = pixel + derivedAtlasOffset;
+        highp vec2 size = vec2(textureSize(image, 0));
+        bool outside = any(lessThan(address, vec2(0.0))) || any(greaterThanEqual(address, size));
+        sampleColor = outside ? vec4(0.0) : paletteColor((address + vec2(0.5)) / size);
+      } else {
+        if (derivedImage) coord = coord * derivedUvTransform.xy + derivedUvTransform.zw;
+        bool outside = derivedImage && (any(lessThan(coord, vec2(0.0))) ||
+          any(greaterThan(coord, vec2(1.0))));
+        sampleColor = outside ? vec4(0.0) : blockImage ?
+          sampleBlockImage(coord * imageDimensions) : paletteImage != 0 ? samplePalette(coord) : texture(image, coord);
+      }
       }
     } else {
       highp vec2 coord = standaloneBitmapRegion ?

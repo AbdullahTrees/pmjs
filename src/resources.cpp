@@ -543,6 +543,8 @@ struct ImageStore::PreparedBacking {
     std::shared_ptr<SharedTexture> sharedTexture, sharedPremultipliedTexture;
     std::uint32_t texture = 0, premultipliedTexture = 0, compactTexture = 0;
     ImageChannelStorage storage{0};
+    std::shared_ptr<PaletteBacking> palette;
+    bool paletteChecked = false;
     std::filesystem::path path;
     std::string identity, expectedHash;
     bool verifyHash = false;
@@ -1036,7 +1038,14 @@ std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle ha
       for (auto& page : slot.prepared->pages) page.pixels.reset();
   }
   if (!slot.palette) return std::nullopt;
-  auto& palette = *slot.palette;
+  const auto table = paletteTable(*slot.palette, premultiplied);
+  if (!table) return std::nullopt;
+  info->texture = slot.palette->indices;
+  info->premultiplied = premultiplied;
+  return PaletteImageRegion{*info, table};
+}
+
+std::uint32_t ImageStore::paletteTable(PaletteBacking& palette, bool premultiplied) {
   auto table = palette.table;
   if (premultiplied && !palette.premultipliedReady) {
     bool changed = false;
@@ -1050,7 +1059,7 @@ std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle ha
     if (changed) {
       if (!palette.premultipliedTable) {
         palette.premultipliedTable = uploadTexture(256, palette.height, colors.data(), {});
-        if (!palette.premultipliedTable) return std::nullopt;
+        if (!palette.premultipliedTable) return 0;
         palette.bytes += colors.size();
         gpuBytes_ += colors.size();
         textureUploadBytes_ += colors.size();
@@ -1061,9 +1070,7 @@ std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle ha
     palette.premultipliedReady = true;
   }
   if (premultiplied && palette.premultipliedTable) table = palette.premultipliedTable;
-  info->texture = palette.indices;
-  info->premultiplied = premultiplied;
-  return PaletteImageRegion{*info, table};
+  return table;
 }
 
 std::optional<ImagePixels> ImageStore::readPalettePixels(const Slot& slot, std::optional<std::array<int, 4>> region) const {
@@ -1095,12 +1102,18 @@ bool ImageStore::materializePalette(Slot& slot) {
 }
 
 std::size_t ImageStore::paletteGpuBytes(const Slot& slot) const {
-  return (slot.palette ? slot.palette->bytes : 0U) +
+  std::size_t pages = 0;
+  if (slot.prepared) for (const auto& page : slot.prepared->pages)
+    if (page.palette) pages += page.palette->bytes;
+  return pages + (slot.palette ? slot.palette->bytes : 0U) +
     (slot.retiredPalette ? slot.retiredPalette->bytes : 0U);
 }
 
 std::size_t ImageStore::paletteCpuBytes(const Slot& slot) const {
-  return (slot.palette ? slot.palette->colors.capacity() : 0U) +
+  std::size_t pages = 0;
+  if (slot.prepared) for (const auto& page : slot.prepared->pages)
+    if (page.palette) pages += page.palette->colors.capacity();
+  return pages + (slot.palette ? slot.palette->colors.capacity() : 0U) +
     (slot.retiredPalette ? slot.retiredPalette->colors.capacity() : 0U);
 }
 
@@ -1175,10 +1188,14 @@ std::optional<ImageInfo> ImageStore::createRenderTarget(int width, int height,
 
 std::size_t ImageStore::cpuBytes() const {
   std::size_t result = 0;
-  std::unordered_set<const ImagePixels*> seen;
+  std::unordered_set<const void*> seen;
   for (const auto& slot : slots_) {
     if (slot.live && slot.cachedPixels) result += slot.cachedPixels->rgba.capacity();
-    if (slot.live) result += paletteCpuBytes(slot);
+    if (slot.live) {
+      result += paletteCpuBytes(slot);
+      if (slot.prepared) for (const auto& page : slot.prepared->pages)
+        if (page.palette && !seen.insert(page.palette.get()).second) result -= page.palette->colors.capacity();
+    }
     if (slot.live && slot.sparseRegions) result += slot.sparseRegions->capacity() * sizeof(std::array<int, 4>);
     if (slot.live && slot.prepared) for (const auto& page : slot.prepared->pages)
       if (page.pixels && seen.insert(page.pixels.get()).second) result += page.pixels->rgba.capacity();
@@ -1233,6 +1250,7 @@ std::size_t ImageStore::warmBytes() const {
       for (const auto& page : slot.prepared->pages) {
         if (page.pixels) shared(page.pixels.get(), page.pixels->rgba.capacity());
         texture(page.sharedTexture); texture(page.sharedPremultipliedTexture);
+        if (page.palette) shared(page.palette.get(), page.palette->bytes + page.palette->colors.capacity());
       }
       for (const auto& block : slot.prepared->blockTextures) texture(block.sharedAtlas);
     }
@@ -1335,6 +1353,10 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
     entry.fullTextureResident = slot.texture || slot.premultipliedTexture || slot.palette;
     entry.palette = bool(slot.palette);
     entry.paletteIndexBits = slot.palette ? slot.palette->indexChannels * 8 : 0;
+    if (slot.prepared) for (const auto& page : slot.prepared->pages) if (page.palette) {
+      entry.palette = true;
+      entry.paletteIndexBits = std::max(entry.paletteIndexBits, page.palette->indexChannels * 8);
+    }
 
   }
   return result;
@@ -1886,6 +1908,7 @@ void ImageStore::update() {
     }
   }
   std::erase_if(preparedTextures_, [](const auto& entry) { return entry.second.expired(); });
+  std::erase_if(preparedPalettes_, [](const auto& entry) { return entry.second.expired(); });
   {
     std::lock_guard lock(preparedPool_->mutex);
     std::erase_if(preparedPool_->pages, [](const auto& entry) { return entry.second.expired(); });
@@ -2432,9 +2455,33 @@ ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t in
   return &*page.pixels;
 }
 
-std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index, bool premultiplied) {
+std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index, bool premultiplied, std::uint32_t* table) {
   auto& backing = *slot.prepared;
   auto& page = backing.pages[index];
+  if (table) {
+    if (!page.paletteChecked) {
+      const auto* pixels = preparedPixels(backing, index);
+      if (!pixels) return std::nullopt;
+      const auto& decision = backing.descriptor.pages[index].storage;
+      if (!decision || decision->paletteBits) {
+        const auto key = page.shared->key + ":palette:" + std::to_string(decision ? decision->paletteBits : 0);
+        page.palette = preparedPalettes_[key].lock();
+        if (!page.palette) {
+          page.palette = makePalette(*pixels, decision ? &*decision : nullptr);
+          if (page.palette) preparedPalettes_[key] = page.palette;
+        } else ++preparedSharedTextureHits_;
+      }
+      page.paletteChecked = true;
+      trimPreparedPages();
+    }
+    if (page.palette) {
+      *table = paletteTable(*page.palette, premultiplied);
+      if (!*table) return std::nullopt;
+      const auto& d = backing.descriptor.pages[index];
+      return ImageInfo{0, d.width, d.height, page.palette->indices, premultiplied, false};
+    }
+    return std::nullopt;
+  }
   auto& texture = premultiplied ? page.premultipliedTexture : page.texture;
   auto& shared = premultiplied ? page.sharedPremultipliedTexture : page.sharedTexture;
   if (!texture) {
@@ -2486,15 +2533,17 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
 }
 
 std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle handle,
-    float x, float y, float width, float height, bool premultiplied) {
+    float x, float y, float width, float height, bool premultiplied, bool paletteOnly) {
   auto info = inspect(handle);
   if (!info || width <= 0 || height <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
       !std::isfinite(width) || !std::isfinite(height) || x < 0 || y < 0 ||
       x + width > info->width || y + height > info->height) return std::nullopt;
   auto& slot = slots_[(handle & indexMask) - 1U];
+  if (slot.tiles && paletteOnly) return std::nullopt;
   if (slot.tiles) return resolveTileRegion(slot, x, y, width, height, premultiplied);
   if (!slot.prepared) return std::nullopt;
   auto& backing = *slot.prepared;
+  if (backing.descriptor.uniform && paletteOnly) return std::nullopt;
   if (backing.descriptor.uniform) {
     auto& image = backing.cellImages.back();
     if (!image) {
@@ -2512,15 +2561,17 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
     if (x < r[0] || y < r[1] || x + width > r[0] + r[2] || y + height > r[1] + r[3]) continue;
     const bool zero = std::all_of(cell.fill.begin(), cell.fill.end(), [](std::uint8_t v) { return v == 0; });
     if (zero && cell.crop[2] && cell.crop[3]) {
-      auto physical = preparedPage(slot, cell.page, premultiplied);
+      std::uint32_t table = 0;
+      auto physical = preparedPage(slot, cell.page, premultiplied, paletteOnly ? &table : nullptr);
       if (!physical) return std::nullopt;
       ++preparedRegions_;
       return SpriteImageRegion{*physical,
         {static_cast<float>(r[0] + cell.crop[0]), static_cast<float>(r[1] + cell.crop[1]),
          static_cast<float>(cell.crop[2]), static_cast<float>(cell.crop[3])},
         {static_cast<float>(cell.atlas[0]), static_cast<float>(cell.atlas[1]),
-         static_cast<float>(cell.atlas[2]), static_cast<float>(cell.atlas[3])}, info->width, info->height, backing.descriptor.halo};
+         static_cast<float>(cell.atlas[2]), static_cast<float>(cell.atlas[3])}, info->width, info->height, backing.descriptor.halo, table};
     }
+    if (paletteOnly) return std::nullopt;
     auto& image = backing.cellImages[i];
     if (!image) {
       const int halo = backing.descriptor.halo;

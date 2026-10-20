@@ -103,6 +103,7 @@ struct SpriteImageRegion {
   ImageInfo image;
   std::array<float, 4> source{}, atlas{};
   int logicalWidth = 0, logicalHeight = 0, halo = 0;
+  std::uint32_t paletteTable = 0;
 };
 
 struct PaletteImageRegion {
@@ -240,7 +241,7 @@ class ImageStore {
   bool hasCpuPixels(ImageHandle handle) const;
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
-      bool premultiplied = true);
+      bool premultiplied = true, bool paletteOnly = false);
   std::optional<PaletteImageRegion> resolvePaletteImage(ImageHandle handle, bool premultiplied);
   std::uint64_t sceneryWindowHits() const { return sceneryWindowHits_; }
   std::uint64_t sceneryWindowUploads() const { return sceneryWindowUploads_; }
@@ -367,9 +368,11 @@ class ImageStore {
   struct SharedPreparedPage;
   struct PreparedPool;
   struct SharedTexture;
+  struct PaletteBacking;
   struct PreparedBacking;
   std::shared_ptr<PreparedPool> preparedPool_;
   std::unordered_map<std::string, std::weak_ptr<SharedTexture>> preparedTextures_;
+  std::unordered_map<std::string, std::weak_ptr<PaletteBacking>> preparedPalettes_;
   std::shared_ptr<SharedTexture> shareTexture(const std::string& key, std::uint32_t texture,
       std::size_t bytes, ImageChannelStorage storage);
   std::string preparedTextureKey(PreparedBacking& backing, bool premultiplied);
@@ -402,7 +405,6 @@ class ImageStore {
   struct TilePages;
   struct TileBacking;
   struct TileLoad;
-  struct PaletteBacking;
   struct Slot {
     std::shared_ptr<PaletteBacking> palette, retiredPalette;
     bool paletteChecked = false;
@@ -512,7 +514,9 @@ class ImageStore {
   static bool readPreparedRegionInto(PreparedBacking& backing, int x, int y,
       int width, int height, ImagePixels& destination, int destinationX,
       int destinationY, bool* acquired = nullptr);
-  std::optional<ImageInfo> preparedPage(Slot& slot, std::size_t page, bool premultiplied);
+  std::optional<ImageInfo> preparedPage(Slot& slot, std::size_t page, bool premultiplied,
+      std::uint32_t* paletteTable = nullptr);
+  std::uint32_t paletteTable(PaletteBacking& palette, bool premultiplied);
   static ImageHandle makeHandle(std::size_t index, std::uint16_t generation);
   void markUsed(Slot& slot);
   std::size_t residentBytes(const Slot& slot) const;

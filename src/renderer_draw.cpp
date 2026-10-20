@@ -764,13 +764,9 @@ void Renderer::renderScene() {
       if (left || right || above || below) continue;
     }
     const auto logicalInfo = images_.inspect(command.image);
-    const bool paletteEligible = command.nearest && !command.mipmap &&
-      !command.standaloneBitmapRegion && !command.appliesSpriteColor && command.blur <= 0 &&
+    const bool paletteEligible = !command.mipmap && command.blur <= 0 &&
       (command.primitive == RenderCommand::Primitive::sprite ||
        command.primitive == RenderCommand::Primitive::tilingSprite);
-    const auto palette = paletteEligible ? images_.resolvePaletteImage(command.image,
-      command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture)) :
-      std::optional<PaletteImageRegion>{};
     const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
     const bool exactNearestDimensions = logicalInfo && logicalInfo->width > 0 &&
       logicalInfo->height > 0 && (logicalInfo->width & (logicalInfo->width - 1)) == 0 &&
@@ -784,13 +780,20 @@ void Renderer::renderScene() {
       // A constant texture needs no UV remapping in the inline effect sampler.
       (inlineFilterMatrix[commandIndex] == nullptr || uniformPrepared);
     const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
-    const auto block = !palette && frameEligible ? images_.resolveBlockRegion(command.image,
+    auto derived = frameEligible && paletteEligible ? images_.resolveSpriteRegion(command.image,
+      command.source[0], command.source[1], command.source[2], command.source[3],
+      command.pixiSpritePacking && !command.premultipliedSpriteTexture, true) :
+      std::optional<SpriteImageRegion>{};
+    const auto palette = !derived && paletteEligible ? images_.resolvePaletteImage(command.image,
+      command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture)) :
+      std::optional<PaletteImageRegion>{};
+    const auto block = !palette && !derived && frameEligible ? images_.resolveBlockRegion(command.image,
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<BlockImageRegion>{};
-    auto derived = !palette && !block && derivedEligible ? images_.resolveSpriteRegion(command.image,
+    if (!palette && !block && !derived && derivedEligible) derived = images_.resolveSpriteRegion(command.image,
       command.source[0], command.source[1], command.source[2], command.source[3],
-      command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
-      std::optional<SpriteImageRegion>{};
+      command.pixiSpritePacking && !command.premultipliedSpriteTexture);
+    const std::uint32_t paletteTable = palette ? palette->table : derived ? derived->paletteTable : 0U;
     const bool compactEligible = logicalInfo && !palette && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
       command.source[1] == 0 && command.source[3] == logicalInfo->height &&
@@ -987,7 +990,7 @@ void Renderer::renderScene() {
       }
     }
     const bool operationStateMatches = !operations.empty() &&
-        operations.back().paletteTable == (palette ? palette->table : 0U) &&
+        operations.back().paletteTable == paletteTable &&
         !block && !operations.back().block && !compact && !operations.back().compact &&
         operations.back().tileLayer == 0 && !operations.back().sparse &&
         !sparseClips.has_value() &&
@@ -1067,7 +1070,7 @@ void Renderer::renderScene() {
       operations.back().derivedSampleBounds = derivedSampleBounds;
       operations.back().derivedAtlasOffset = derivedAtlasOffset;
       operations.back().block = block;
-      operations.back().paletteTable = palette ? palette->table : 0U;
+      operations.back().paletteTable = paletteTable;
       if (compact) {
         operations.back().compact = compact;
         const auto& bounds = compact->contentBounds;
@@ -2187,7 +2190,7 @@ void Renderer::renderScene() {
     }
     projectTarget(spriteProgram, operation.primitive != RenderCommand::Primitive::screenFill);
     glBindTexture(GL_TEXTURE_2D, operation.texture);
-    glUniform1i(simpleSprite ? simplePaletteUniform_ : spriteEffect.palette, operation.paletteTable != 0);
+    glUniform1i(simpleSprite ? simplePaletteUniform_ : spriteEffect.palette, operation.paletteTable ? (operation.nearest ? 1 : 2) : 0);
     if (operation.paletteTable) {
       glActiveTexture(GL_TEXTURE3);
       glBindTexture(GL_TEXTURE_2D, operation.paletteTable);
@@ -2195,12 +2198,12 @@ void Renderer::renderScene() {
     }
     const auto nearest = textureNearestState_.find(operation.texture);
     if (nearest == textureNearestState_.end() ||
-        nearest->second != operation.nearest) {
-      textureNearestState_[operation.texture] = operation.nearest;
+        nearest->second != (operation.nearest || operation.paletteTable)) {
+      textureNearestState_[operation.texture] = operation.nearest || operation.paletteTable;
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                      operation.nearest ? GL_NEAREST : GL_LINEAR);
+                      (operation.nearest || operation.paletteTable) ? GL_NEAREST : GL_LINEAR);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                      operation.nearest ? GL_NEAREST : GL_LINEAR);
+                      (operation.nearest || operation.paletteTable) ? GL_NEAREST : GL_LINEAR);
     }
     glUniform1i(simpleSprite ? simpleTargetYDownUniform_ : spriteEffect.targetYDown, targetYDown);
     glUniformMatrix3fv(simpleSprite ? simpleSpriteProjectionUniform_ : spriteEffect.projection, 1, GL_FALSE, projection.data());

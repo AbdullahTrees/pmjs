@@ -37,6 +37,13 @@ Set `assetPreparation.pageCodec` to `"png"` in your configuration to select
 PNG image pages. Changing codecs prepares the affected images again on the
 next launch; keep the cache directory so reusable maps can still be used.
 
+Eligible images and prepared sprite pages retain lossless 8-bit or 16-bit
+palette indices on the GPU. LINEAR sampling interpolates decoded colors;
+NEAREST sampling selects one decoded color. Sprite tint, tone, and blend colors
+use the same palette backing. Pixel reads return original RGBA bytes without
+promoting the GPU texture. Writes and unsupported samplers, including mipmaps
+and blur, use ordinary texture storage.
+
 Image and map preparation use kernel file locks in their cache directories. If
 a cache stays busy for 15 seconds, preparation falls back to the original assets.
 The lock releases automatically when its process exits; leave `.prepare.lock`
