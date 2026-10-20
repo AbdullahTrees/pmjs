@@ -198,16 +198,21 @@ int main() {
       require(cell.fill == AssetColor({1,200,0,0}));
       require(cell.crop == pmjs::AssetRect({16,0,32,64}));
     }
-    // Histogram limits include the modal background itself.
-    for (const int distinct : {4096,4097}) {
-      result = check(128,128,[distinct](int x,int y) {
-        const int index = y * 64 + x % 64;
-        if (index >= distinct - 1) return AssetColor{200,201,202,203};
-        return AssetColor{static_cast<std::uint8_t>(index),static_cast<std::uint8_t>(index >> 8),1,0};
-      }, {2,1,std::nullopt,{}});
-      require(result.cells.size() == 2);
-      for (const auto& cell : result.cells)
-        require(cell.fill == (distinct == 4096 ? AssetColor{200,201,202,203} : AssetColor{}));
+    // Painterly interiors cannot overflow the perimeter background probe.
+    for (const std::uint8_t alpha : {254,255}) {
+      result = check(256,256,[alpha](int x,int y) {
+        const int localX = x % 128, localY = y % 128;
+        const auto frame = static_cast<std::uint8_t>(y / 128 * 2 + x / 128 + 1);
+        if (localX < 16 || localX >= 112 || localY < 16 || localY >= 112)
+          return AssetColor{frame,37,71,0};
+        const int index = localY * 128 + localX;
+        return AssetColor{static_cast<std::uint8_t>(index),static_cast<std::uint8_t>(index >> 8),19,alpha};
+      }, {2,2,std::nullopt,{}});
+      require(result.cells.size() == 4);
+      for (std::size_t i = 0; i < result.cells.size(); ++i) {
+        require(result.cells[i].fill == AssetColor({static_cast<std::uint8_t>(i+1),37,71,0}));
+        require(result.cells[i].crop == pmjs::AssetRect({16,16,96,96}));
+      }
     }
     // Per-cell modes reset at both frame columns and frame rows.
     result = check(128,128,[](int x,int y) {

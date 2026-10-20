@@ -11,7 +11,7 @@ const { acquireLock, createLease, retainLeases } = require('./preparation-lifeti
 const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 
 const CACHE_VERSION = 1;
-const PROCESSOR_IDENTITY = { processor: 'images-v13-battler-grids-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
+const PROCESSOR_IDENTITY = { processor: 'images-v14-perimeter-fills-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
 const HASH = /^[a-f0-9]{64}$/;
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ENCRYPTED_HEADER = Buffer.from('5250474d560000000003010000000000', 'hex');

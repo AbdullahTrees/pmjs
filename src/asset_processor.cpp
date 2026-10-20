@@ -476,21 +476,23 @@ std::vector<AssetColor> modalFills(PreparationSource& source, const AssetRecipe&
   std::size_t distinctColors = 0;
   for (int y = 0; y < input.height; ++y) {
     input.read();
+    const bool perimeterRow = y % cellHeight == 0 || y % cellHeight == cellHeight - 1;
     for (int column = 0; column < recipe.columns; ++column) {
       if (overflow[column]) continue;
       auto& histogram = histograms[column];
       const auto* row = input.row.data() + static_cast<std::size_t>(column) * cellWidth * 4;
+      // Interior colors must not exhaust the background probe's bounded histogram.
       for (int x = 0; x < cellWidth;) {
         std::uint32_t word;
         std::memcpy(&word, row + static_cast<std::size_t>(x) * 4, 4);
         int end = x + 1;
-        for (; end < cellWidth; ++end) {
+        for (; perimeterRow && end < cellWidth; ++end) {
           std::uint32_t next;
           std::memcpy(&next, row + static_cast<std::size_t>(end) * 4, 4);
           if (next != word) break;
         }
         const auto count = static_cast<std::uint64_t>(end - x);
-        x = end;
+        x = perimeterRow ? end : (x == 0 && cellWidth > 1 ? cellWidth - 1 : cellWidth);
         const auto found = histogram.find(word);
         if (found != histogram.end()) { found->second += count; continue; }
         // High-color cells keep the ordinary fill; bound the entire active grid row.
