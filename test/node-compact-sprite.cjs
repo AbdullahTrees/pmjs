@@ -31,6 +31,8 @@ test('compact prepared sprites match full textures through filters, fades and cl
     const descriptor = await native.assets.processImage('source.png', directory,
       { grid: [columns, 1], crop: [0, 0, cellWidth, height], backdrop: [0, 0, 0, 255] });
     assert.ok(descriptor, 'fixture must retain prepared image storage');
+    assert.equal(descriptor.compactEligible, true, 'preparation certifies compact sampling');
+    if (process.argv.includes('--legacy-index')) delete descriptor.compactEligible;
     native.assets.installPrepared([{ source: 'source.png', directory, descriptor,
       sourceIdentity: native.assets.sourceIdentity('source.png') }]);
     const compact = await native.images.loadAsync('source.png');

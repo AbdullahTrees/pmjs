@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { png } = require('./helpers/png.cjs');
 const { generateAssetIndex, loadAssetIndex } = require('../runner/asset-index.cjs');
@@ -20,6 +21,8 @@ const options = { width: 32, height: 24, assetPreparation: {
   astc: { enabled: false, quality: 'medium' }, workspaceBytes: 128 * 1024 * 1024
 } };
 const fixtures = [
+  { name: 'zero', width: 128, height: 128, count: 1, channels: 2, bits: 0 },
+  { name: 'sparse', width: 512, height: 256, count: 256, channels: 2, bits: 0 },
   { name: 'gray', width: 16, height: 16, count: 256, channels: 1, bits: 0 },
   { name: 'rgba', width: 16, height: 16, count: 256, channels: 4, bits: 0 },
   { name: 'palette8', width: 2048, height: 2048, count: 256, channels: 4, bits: 8 },
@@ -34,9 +37,22 @@ for (const f of fixtures) {
     pixels[i * 4 + 2] = f.name === 'gray' ? color : (color * 17 + (color >> 8) * 7) & 255;
     pixels[i * 4 + 3] = f.name === 'rgba' ? (color * 31) & 255 : 255;
   }
+  if (f.name === 'zero') pixels.fill(0);
+  if (f.name === 'sparse') {
+    pixels.fill(0);
+    for (let y = 96; y < 112; ++y) for (let x = 96; x < 112; ++x) {
+      const i = (y * f.width + x) * 4;
+      pixels[i] = pixels[i+1] = pixels[i+2] = (x+y) & 255;
+      pixels[i+3] = 255;
+      pixels.copy(pixels, i + 256*4, i, i+4);
+    }
+  }
   f.source = 'img/pictures/' + f.name + '.png';
   fs.writeFileSync(path.join(gameRoot, f.source), png(f.width, f.height, pixels));
 }
+const sheet = fixtures.find(f => f.name === 'sparse');
+options.assetPreparation.recipes = [{ source: sheet.source,
+  sourceHash: createHash('sha256').update(fs.readFileSync(path.join(gameRoot, sheet.source))).digest('hex'), grid: [2, 1] }];
 const native = require(addon);
 let initialized = false;
 const handles = [];
@@ -53,14 +69,25 @@ const handles = [];
       assert.equal(record.storage.channels, f.channels, f.name);
       assert.equal(record.storage.width, f.width);
       assert.equal(record.storage.height, f.height);
+      assert.equal(record.storage.pixelFactsVersion, 1);
+      assert.equal(record.storage.allZero, f.name === 'zero');
+      assert.equal(record.storage.opaque, !['zero', 'sparse', 'rgba'].includes(f.name));
+      if (f.name === 'zero') assert.deepEqual(record.storage.sparseRegions, []);
+      if (f.name === 'sparse') {
+        assert.ok(record.storage.sparseRegions?.length > 0);
+        assert.ok(record.descriptor.pages.length > 0);
+        assert.ok(record.descriptor.pages.every(p => p.storage?.pixelFactsVersion === 1));
+      }
     }
     native.initialize({ gameRoot, width: 32, height: 24, windowTitle: 'Image storage index' });
     initialized = true;
     const preparation = { gameRoot, cacheRoot, native, portableIndex: index,
-      pageCodec: 'png', workspaceBytes: options.assetPreparation.workspaceBytes };
+      pageCodec: 'png', recipes: options.assetPreparation.recipes, workspaceBytes: options.assetPreparation.workspaceBytes };
     const cold = await prepareAssets(preparation);
     assert.equal(cold.error, undefined);
     assert.equal(cold.storageEntries.length, fixtures.length);
+    assert.ok(cold.entries.find(e => e.source === sheet.source).descriptor.pages.every(p => p.storage),
+      'regenerated pages preserve hash-bound offline layouts');
     for (const f of fixtures.filter(f => f.bits)) {
       const before = native.images.memory().storageDecisionHits;
       const image = native.images.load(f.source);
@@ -78,9 +105,24 @@ const handles = [];
       assert.equal(owner.paletteIndexBits, f.bits);
       assert.ok(memory.storageDecisionHits > before, 'draw consumes the precomputed decision');
     }
+    for (const f of fixtures.filter(f => !f.bits)) {
+      const image = native.images.load(f.source);
+      handles.push(image.handle);
+      assert.equal(native.images.isOpaque(image.handle), !['zero', 'sparse', 'rgba'].includes(f.name));
+    }
     const warm = await prepareAssets(preparation);
     assert.equal(warm.catalogHit, true);
     assert.equal(warm.storageEntries.length, fixtures.length);
+    assert.ok(warm.entries.find(e => e.source === sheet.source).descriptor.pages.every(p => p.storage),
+      'warm catalogs preserve page layouts');
+    const lz4Output = path.join(root, 'lz4-bundle');
+    fs.mkdirSync(lz4Output);
+    const lz4Options = { ...options, assetPreparation: { ...options.assetPreparation, pageCodec: 'lz4' } };
+    const lz4 = await generateAssetIndex({ root: runtime, gameRoot, config: null, options: lz4Options, output: lz4Output });
+    assert.equal(lz4.warningCount, 0);
+    const lz4Index = loadAssetIndex(path.join(lz4Output, 'asset-index.json'), native, lz4Options);
+    const pages = lz4Index.images.find(r => r.source === sheet.source).descriptor.pages;
+    assert.ok(pages.length && pages.every(p => p.path.endsWith('.pml4') && p.storage.channels === 2));
     console.log('Offline channel/8-bit/16-bit/RGBA decisions, native activation and warm catalog passed');
   } finally {
     for (const handle of handles) native.images.release(handle);

@@ -893,6 +893,14 @@ std::size_t ImageStore::decodedStorageBytes(const ImagePixels& pixels) {
 
 ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) {
   ImageStorageDecision result{pixels.width, pixels.height, 0, imageStorage(pixels)};
+  result.hasPixelFacts = true;
+  result.opaque = true;
+  result.allZero = true;
+  for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
+    result.opaque &= pixels.rgba[i+3] == 255;
+    result.allZero &= !(pixels.rgba[i] || pixels.rgba[i+1] || pixels.rgba[i+2] || pixels.rgba[i+3]);
+  }
+  result.sparseRegions = sparseImageRegions(pixels.rgba.data(), pixels.width, pixels.height, false);
   if (pixels.width < 2048 || pixels.height < 2048 || result.channels.channels == 1) return result;
   const std::size_t limit = result.channels.channels == 2 ? 256 : 65536;
   std::unordered_set<std::uint32_t> colors;
@@ -917,6 +925,16 @@ bool ImageStore::installStorageDecision(const std::filesystem::path& path,
   for (auto c : decision.channels.source) if (c > 3) return false;
   for (auto c : decision.channels.swizzle)
     if (c >= decision.channels.channels && c != 4 && c != 5) return false;
+  if (decision.hasPixelFacts) {
+    if (decision.opaque && decision.allZero) return false;
+    if (decision.sparseRegions) {
+      if (decision.sparseRegions->size() > 64) return false;
+      for (const auto& r : *decision.sparseRegions)
+        if (r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0 ||
+            r[2] > decision.width || r[3] > decision.height ||
+            r[0] > decision.width-r[2] || r[1] > decision.height-r[3]) return false;
+    }
+  }
   const auto source = openFile(path);
   if (!source || source->key() != sourceIdentity) return false;
   storageDecisions_[sourceIdentity] = decision;
@@ -937,7 +955,7 @@ std::optional<ImageInfo> ImageStore::createDecoded(const ImagePixels& pixels,
   if (decision && (decision->width != pixels.width || decision->height != pixels.height)) decision = nullptr;
   if (decision) ++storageDecisionHits_;
   auto result = createImage(pixels.width, pixels.height, pixels.rgba.data(), false,
-                     decision ? decision->channels : imageStorage(pixels), makePalette(pixels, decision));
+                     decision ? decision->channels : imageStorage(pixels), makePalette(pixels, decision), decision);
   if (!result && decision)
     return createImage(pixels.width, pixels.height, pixels.rgba.data(), false, {});
   return result;
@@ -1081,7 +1099,7 @@ std::size_t ImageStore::paletteCpuBytes(const Slot& slot) const {
 
 std::optional<ImageInfo> ImageStore::createImage(int width, int height,
     const void* pixels, bool premultiplied, ImageChannelStorage storage,
-    std::shared_ptr<PaletteBacking> palette) {
+    std::shared_ptr<PaletteBacking> palette, const ImageStorageDecision* decision) {
   const int channels = storage.channels;
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
@@ -1090,7 +1108,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   if (index >= indexMask) return std::nullopt;
   if (index == slots_.size()) slots_.emplace_back();
   auto sparseRegions = sparseTiling_ && pixels
-    ? sparseImageRegions(pixels, width, height, premultiplied)
+    ? (decision && decision->hasPixelFacts ? decision->sparseRegions : sparseImageRegions(pixels, width, height, premultiplied))
     : decltype(slots_[index].sparseRegions){};
   const auto texture = palette ? 0U : uploadTexture(width, height, pixels, storage);
   if (!texture && !palette) return std::nullopt;
@@ -1128,7 +1146,11 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
   slot.gpuOnly = pixels == nullptr;
   slot.renderTarget = false;
   slot.premultiplied = premultiplied;
-  slot.knownAllZero = pixels && allZeroRgba(pixels, width, height, width);
+  slot.knownAllZero = pixels && (decision && decision->hasPixelFacts ? decision->allZero : allZeroRgba(pixels, width, height, width));
+  if (decision && decision->hasPixelFacts) {
+    slot.opaque = decision->opaque;
+    slot.opacityRevision = slot.contentRevision;
+  }
   slot.live = true;
   ++liveCount_;
   if (texture) gpuBytes_ += static_cast<std::size_t>(width) * height * channels;
@@ -1955,6 +1977,7 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
       }
   }
   if (!validBlockGrid(descriptor)) return false;
+  if (descriptor.blockChannels && (!descriptor.blockGrid || *descriptor.blockChannels < 0 || *descriptor.blockChannels > 2)) return false;
   for (const auto& page : descriptor.pages) {
     if (page.width <= 0 || page.height <= 0 || page.width > (astc ? 8192 : 2048) || page.height > (astc ? 8192 : 2048) ||
         (astc && (page.width != descriptor.width || page.height != descriptor.height || page.path.extension() != ".astc")) ||
@@ -2165,6 +2188,12 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
                     return (cell.crop[2] == 0 || cell.crop[3] == 0) &&
                       std::all_of(cell.fill.begin(), cell.fill.end(), [](std::uint8_t v) { return v == 0; });
                   });
+  if (const auto* known = storageDecision(slot.cacheKey); known && known->hasPixelFacts &&
+      known->width == slot.width && known->height == slot.height) {
+    slot.knownAllZero = known->allZero;
+    slot.opaque = known->opaque;
+    slot.opacityRevision = slot.contentRevision;
+  }
   slot.retainCpuPixels = retainCpu; slot.cachedPixels = std::move(pixels); slot.cpuPixelFrames = 0;
   slot.mipmapsReady = slot.premultipliedMipmapsReady = false;
   slot.mipmapBytes = slot.premultipliedMipmapBytes = 0;
@@ -2394,7 +2423,10 @@ ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t in
         page.shared->pixels = page.pixels;
       } else backing.pool->hits.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!page.storage.channels) page.storage = imageStorage(*page.pixels);
+    if (!page.storage.channels) {
+      const auto& known = backing.descriptor.pages[index].storage;
+      page.storage = known ? known->channels : imageStorage(*page.pixels);
+    }
   }
   page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1,
     std::memory_order_relaxed);
@@ -2412,7 +2444,7 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
     if (!decoded) return std::nullopt;
     const auto key = "page:" + page.shared->key + (premultiplied ? "p" : "s");
     if (auto existing = preparedTextures_[key].lock()) {
-      shared = std::move(existing); texture = shared->texture; ++preparedSharedTextureHits_;
+      shared = std::move(existing); texture = shared->texture; page.storage = shared->storage; ++preparedSharedTextureHits_;
       const auto& d = backing.descriptor.pages[index];
       if (acquired) trimPreparedPages();
       return ImageInfo{0, d.width, d.height, texture, premultiplied, false};
@@ -2428,6 +2460,17 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
       bytes = converted.data();
     }
     texture = uploadTexture(pixels.width, pixels.height, bytes, page.storage);
+    if (!texture && page.storage.channels != 4) {
+      page.storage = {};
+      if (premultiplied && converted.empty()) {
+        converted = pixels.rgba;
+        for (std::size_t i = 0; i < converted.size(); i += 4)
+          for (std::size_t channel = 0; channel < 3; ++channel)
+            converted[i+channel] = static_cast<std::uint8_t>((converted[i+channel]*converted[i+3]+127)/255);
+        bytes = converted.data();
+      }
+      texture = uploadTexture(pixels.width, pixels.height, bytes, page.storage);
+    }
     if (!texture) {
       if (acquired) trimPreparedPages();
       return std::nullopt;
@@ -2647,7 +2690,8 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
   auto& backing = *slot.prepared;
   const auto& descriptor = backing.descriptor;
   if (!descriptor.blockGrid || descriptor.pages.size() != 1 ||
-      backing.blockRealizationFailed || (backing.blockEligible && !*backing.blockEligible)) return std::nullopt;
+      backing.blockRealizationFailed || (descriptor.blockChannels && !*descriptor.blockChannels) ||
+      (backing.blockEligible && !*backing.blockEligible)) return std::nullopt;
   const auto [block, frameWidth, frameHeight] = *descriptor.blockGrid;
   const int columns = (frameWidth+block-1)/block, rows = (frameHeight+block-1)/block;
   const int frameColumns = logical->width/frameWidth;
@@ -2661,7 +2705,7 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
     bool acquired = false;
     const auto* pixels = preparedPixels(backing, 0, &acquired);
     if (!pixels) return std::nullopt;
-    const int channels = grayscaleChannels(*pixels);
+    const int channels = descriptor.blockChannels ? *descriptor.blockChannels : grayscaleChannels(*pixels);
     if (channels > 2 || std::any_of(descriptor.cells.begin(), descriptor.cells.end(), [](const auto& cell) {
         return cell.fill[0] != cell.fill[1] || cell.fill[0] != cell.fill[2];
       })) {
@@ -2669,7 +2713,7 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
       if (acquired) trimPreparedPages();
       return std::nullopt;
     }
-    const bool validatePadding = !backing.blockEligible.has_value();
+    const bool validatePadding = !descriptor.blockChannels && !backing.blockEligible.has_value();
     std::vector<std::uint16_t> table(static_cast<std::size_t>(tableSize[0])*tableSize[1]*2U);
     for (const auto& cell : descriptor.cells) {
       const auto& r = cell.rect;
@@ -2807,6 +2851,10 @@ std::optional<CompactImageRegion> ImageStore::resolveCompactRegion(ImageHandle h
     return x >= cell.rect[0] && y >= cell.rect[1] &&
       x + width <= cell.rect[0] + cell.rect[2] && y + height <= cell.rect[1] + cell.rect[3];
   });
+  if (descriptor.compactEligible && !backing.compactEligible) {
+    GLint maximum = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+    backing.compactEligible = *descriptor.compactEligible && info->width <= maximum && info->height <= maximum;
+  }
   if (found == descriptor.cells.end() || !found->crop[2] || !found->crop[3] ||
       (backing.compactEligible && !*backing.compactEligible)) return std::nullopt;
   auto& page = backing.pages[found->page];

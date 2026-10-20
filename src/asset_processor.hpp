@@ -40,6 +40,8 @@ struct PreparedAsset {
   int halo = 0;
   std::optional<AssetColor> uniform;
   std::optional<std::array<int, 3>> blockGrid;
+  std::optional<int> blockChannels = std::nullopt;
+  std::optional<bool> compactEligible = std::nullopt;
   std::vector<PreparedAssetCell> cells;
   std::vector<PreparedAssetPage> pages;
   std::string compression;

@@ -707,6 +707,12 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
     if (hasProperty(env, object, "halo")) descriptor.halo = asInt32(env, property(env, object, "halo"));
     if (hasProperty(env, object, "uniform")) descriptor.uniform = preparedColor(env, object, "uniform");
     if (hasProperty(env, object, "blockGrid")) descriptor.blockGrid = preparedArray<3>(env, object, "blockGrid");
+    if (hasProperty(env, object, "blockChannels")) descriptor.blockChannels = asInt32(env, property(env, object, "blockChannels"));
+    if (hasProperty(env, object, "compactEligible")) {
+      bool eligible = false;
+      check(env, napi_get_value_bool(env, property(env, object, "compactEligible"), &eligible), "invalid compact eligibility");
+      descriptor.compactEligible = eligible;
+    }
     if (hasProperty(env, object, "pages")) {
       const auto pages = property(env, object, "pages"); std::uint32_t size = 0;
       check(env, napi_get_array_length(env, pages, &size), "invalid prepared pages");
@@ -715,6 +721,23 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
         napi_value page; check(env, napi_get_element(env, pages, j, &page), "invalid prepared page");
         descriptor.pages.push_back({asString(env, property(env, page, "path")),
           asInt32(env, property(env, page, "width")), asInt32(env, property(env, page, "height"))});
+        if (hasProperty(env, page, "storage")) {
+          auto storage = property(env, page, "storage");
+          ImageStorageDecision known;
+          known.width = asInt32(env, property(env, storage, "width"));
+          known.height = asInt32(env, property(env, storage, "height"));
+          known.channels.channels = asInt32(env, property(env, storage, "channels"));
+          const auto source = preparedArray<4>(env, storage, "source");
+          const auto swizzle = preparedArray<4>(env, storage, "swizzle");
+          bool valid = known.width == descriptor.pages.back().width && known.height == descriptor.pages.back().height &&
+            (known.channels.channels == 1 || known.channels.channels == 2 || known.channels.channels == 4);
+          for (int c = 0; c < 4; ++c) {
+            valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 &&
+              (swizzle[c] < known.channels.channels || swizzle[c] == 4 || swizzle[c] == 5);
+            known.channels.source[c] = source[c]; known.channels.swizzle[c] = swizzle[c];
+          }
+          if (valid) descriptor.pages.back().storage = known;
+        }
       }
     }
     if (hasProperty(env, object, "cells")) {

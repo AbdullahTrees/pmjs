@@ -46,6 +46,8 @@ struct ImageChannelStorage {
 struct ImageStorageDecision {
   int width = 0, height = 0, paletteBits = 0;
   ImageChannelStorage channels;
+  bool hasPixelFacts = false, opaque = false, allZero = false;
+  std::optional<std::vector<std::array<int, 4>>> sparseRegions = std::nullopt;
 };
 
 // A deferred reader keeps its crop alive at the revision it observed. Pixel
@@ -65,6 +67,7 @@ struct PreparedImageCell {
 struct PreparedImagePage {
   std::filesystem::path path;
   int width = 0, height = 0;
+  std::optional<ImageStorageDecision> storage = std::nullopt;
 };
 
 struct PreparedImageDescriptor {
@@ -73,6 +76,8 @@ struct PreparedImageDescriptor {
   std::vector<PreparedImageCell> cells;
   std::vector<PreparedImagePage> pages;
   std::optional<std::array<int, 3>> blockGrid;
+  std::optional<int> blockChannels = std::nullopt;
+  std::optional<bool> compactEligible = std::nullopt;
   std::string compression;
 };
 
@@ -518,7 +523,7 @@ class ImageStore {
       const ImageStorageDecision* decision = nullptr);
   std::optional<ImageInfo> createImage(int width, int height, const void* pixels,
                                      bool premultiplied, ImageChannelStorage storage,
-      std::shared_ptr<PaletteBacking> palette = {});
+      std::shared_ptr<PaletteBacking> palette = {}, const ImageStorageDecision* decision = nullptr);
   bool detachSharedTexture(Slot& slot);
   bool promoteToRgba(Slot& slot, const void* replacement = nullptr);
   std::deque<Slot> slots_;

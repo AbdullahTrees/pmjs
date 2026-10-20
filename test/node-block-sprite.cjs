@@ -38,7 +38,9 @@ test('block sprites share GPU storage across frames, effects and retained owners
     assert.ok(descriptor, 'repeated patterns must produce a prepared image');
     assert.deepEqual(descriptor.blockGrid, [64, frameWidth, frameHeight],
       'automatic preparation must select the smaller block representation');
+    assert.ok([1, 2].includes(descriptor.blockChannels), 'preparation certifies block eligibility');
     assert.equal(descriptor.pages.length, 1, 'fixture must fit the one-atlas path');
+    if (process.argv.includes('--legacy-index')) delete descriptor.blockChannels;
     native.assets.installPrepared([{ source: 'source.png', directory, descriptor,
       sourceIdentity: native.assets.sourceIdentity('source.png') }]);
     const derived = await native.images.loadAsync('source.png');

@@ -581,10 +581,43 @@ void emitLayout(PreparationSource& source, const std::filesystem::path& staging,
     }
     rows.finish();
   } else if (asset.pages.empty()) renderPage(source, asset, -1, true, &recipe);
+  const bool classifyCompact = !asset.compactEligible.has_value();
+  const bool classifyBlocks = !asset.blockChannels.has_value();
+  if (classifyCompact && !asset.uniform && !asset.cells.empty()) {
+    const auto fill = asset.cells.front().fill;
+    const int inset = std::max(2, asset.halo);
+    asset.compactEligible = fill[0] == fill[1] && fill[0] == fill[2] && fill[3] == 255 &&
+      std::all_of(asset.cells.begin(), asset.cells.end(), [&](const auto& cell) {
+        return cell.fill == fill && (!cell.crop[2] ||
+          (cell.crop[0] >= inset && cell.crop[1] >= inset &&
+           cell.crop[0]+cell.crop[2]+inset <= cell.rect[2] &&
+           cell.crop[1]+cell.crop[3]+inset <= cell.rect[3]));
+      });
+  }
   if (!asset.pages.empty()) std::filesystem::create_directories(staging);
   for (std::size_t index = 0; index < asset.pages.size(); ++index) {
     auto& page = asset.pages[index];
     auto bytes = renderPage(source, asset, static_cast<int>(index), index == 0, &recipe);
+    if (classifyCompact && asset.compactEligible.value_or(false)) {
+      for (const auto& cell : asset.cells) {
+        if (cell.page != static_cast<int>(index) || !cell.crop[2]) continue;
+        for (int y = 0; y < cell.crop[3]; ++y) for (int x = 0; x < cell.crop[2]; ++x) {
+          const auto offset = (static_cast<std::size_t>(cell.atlas[1]+y)*page.width+cell.atlas[0]+x)*4;
+          if (bytes[offset] != bytes[offset+1] || bytes[offset] != bytes[offset+2] || bytes[offset+3] != 255)
+            asset.compactEligible = false;
+        }
+      }
+    }
+    if (classifyBlocks && asset.blockGrid) {
+      int channels = asset.pages.size() == 1 ? 1 : 0;
+      for (std::size_t i = 0; channels && i < bytes.size(); i += 4) {
+        if (bytes[i] != bytes[i+1] || bytes[i] != bytes[i+2]) channels = 0;
+        else if (bytes[i+3] != 255) channels = 2;
+      }
+      for (const auto& cell : asset.cells)
+        if (cell.fill[0] != cell.fill[1] || cell.fill[0] != cell.fill[2]) channels = 0;
+      asset.blockChannels = channels;
+    }
     page.path.replace_extension(lz4Pages ? ".pml4" : ".png");
     if (lz4Pages) {
       writeLz4Page(staging / page.path, page.width, page.height, bytes);

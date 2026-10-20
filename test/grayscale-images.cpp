@@ -238,7 +238,7 @@ int main() {
     images.update();
 
     // A prepared physical page includes multiple cells; classify the whole page.
-    for (const bool colored : {false, true}) {
+    for (const bool colored : {false, true}) for (const bool indexed : {false, true}) {
       pmjs::ImagePixels page{16, 8, std::vector<std::uint8_t>(16 * 8 * 4)};
       for (int y = 1; y < 7; ++y) for (int x = 0; x < 16; ++x) {
         if (x % 8 == 0 || x % 8 == 7) continue;
@@ -251,6 +251,7 @@ int main() {
       pmjs::PreparedImageDescriptor descriptor;
       descriptor.width = 16; descriptor.height = 8;
       descriptor.pages.push_back({"page.png", 16, 8});
+      if (indexed) descriptor.pages.back().storage = pmjs::ImageStore::classifyStorage(page);
       descriptor.cells.push_back({{0, 0, 8, 8}, {1, 1, 6, 6}, {1, 1, 6, 6}, {}, 0});
       descriptor.cells.push_back({{8, 0, 8, 8}, {1, 1, 6, 6}, {9, 1, 6, 6}, {}, 0});
       require(images.installPrepared(root / "source.png", root, descriptor), "prepared grayscale install failed");
@@ -319,6 +320,28 @@ int main() {
         "releasing a tile view damaged another owner");
       images.release(secondTile->handle); images.update();
       require(images.gpuBytes() == 0, "shared compressed tile pages leaked");
+    }
+    {
+      pmjs::ImagePixels pixels{128, 128, std::vector<std::uint8_t>(128*128*4, 0)};
+      const auto path = root / "indexed-pixel-facts.png";
+      writePng(path, pixels);
+      const auto decision = pmjs::ImageStore::classifyStorage(pixels);
+      require(decision.hasPixelFacts && decision.allZero && !decision.opaque &&
+        decision.sparseRegions && decision.sparseRegions->empty(), "zero facts differ");
+      require(images.installStorageDecision(path, pmjs::ImageStore::openFile(path)->key(), decision),
+        "pixel facts rejected");
+      const auto image = images.loadPng(path);
+      require(image && images.inspect(image->handle)->knownAllZero && images.isOpaque(image->handle) == false,
+        "indexed zero/opacity facts not applied");
+      for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
+        pixels.rgba[i] = 17; pixels.rgba[i+1] = 33; pixels.rgba[i+2] = 65; pixels.rgba[i+3] = 255;
+      }
+      require(images.updateRgba(image->handle, pixels.rgba.data()) &&
+        !images.inspect(image->handle)->knownAllZero && images.isOpaque(image->handle) == true,
+        "mutation retained stale indexed facts");
+      require(images.readPixels(image->handle)->rgba == pixels.rgba, "mutated indexed pixels differ");
+      images.release(image->handle); images.update();
+      images.clearStorageDecisions();
     }
     // Exercise index-width selection and every 16-bit address, including hidden RGB and odd dimensions.
     for (const unsigned colorCount : {256U, 257U, 65536U}) for (const bool opaque : {false, true}) {

@@ -162,6 +162,8 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset) {
   if (!asset.compression.empty()) set(env, result, "compression", string(env, asset.compression));
   if (asset.uniform) set(env, result, "uniform", arrayValue(env, *asset.uniform));
   if (asset.blockGrid) set(env, result, "blockGrid", arrayValue(env, *asset.blockGrid));
+  if (asset.blockChannels) set(env, result, "blockChannels", number(env, *asset.blockChannels));
+  if (asset.compactEligible) set(env, result, "compactEligible", boolean(env, *asset.compactEligible));
   napi_value cells, pages;
   check(env, napi_create_array_with_length(env, asset.cells.size(), &cells), "cannot create prepared cells");
   for (std::size_t index = 0; index < asset.cells.size(); ++index) {
@@ -192,6 +194,18 @@ napi_value storageDescriptor(napi_env env, const ImageStorageDecision& decision)
   set(env, value, "channels", number(env, decision.channels.channels));
   set(env, value, "source", arrayValue(env, decision.channels.source));
   set(env, value, "swizzle", arrayValue(env, decision.channels.swizzle));
+  if (decision.hasPixelFacts) {
+    set(env, value, "pixelFactsVersion", number(env, 1));
+    set(env, value, "opaque", boolean(env, decision.opaque));
+    set(env, value, "allZero", boolean(env, decision.allZero));
+    napi_value regions = null(env);
+    if (decision.sparseRegions) {
+      check(env, napi_create_array_with_length(env, decision.sparseRegions->size(), &regions), "cannot create sparse regions");
+      for (std::size_t i = 0; i < decision.sparseRegions->size(); ++i)
+        check(env, napi_set_element(env, regions, i, arrayValue(env, (*decision.sparseRegions)[i])), "cannot write sparse region");
+    }
+    set(env, value, "sparseRegions", regions);
+  }
   return value;
 }
 struct AssetWork {
@@ -216,7 +230,13 @@ void executeAsset(napi_env, void* opaque) noexcept {
   auto& work = *static_cast<AssetWork*>(opaque);
   try {
     if (work.storageSource) {
-      const auto pixels = ImageStore::decodeFile(*work.storageSource);
+      const auto bytes = ImageStore::readCapturedBytes(*work.storageSource);
+      if (!bytes) throw std::runtime_error("cannot read storage classification source");
+      auto pixels = ImageStore::decodeMemory(bytes->data(), bytes->size());
+      if (!pixels && work.storageSource->path().extension() == ".pml4") {
+        if (auto page = readLz4Page(*bytes, 128*1024*1024))
+          pixels = ImagePixels{page->width, page->height, std::move(page->rgba)};
+      }
       if (!pixels) throw std::runtime_error("cannot decode image for storage classification");
       work.storage = ImageStore::classifyStorage(*pixels);
       return;
@@ -280,6 +300,16 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
       layout.uniform = color(env, property(env, value, "uniform"));
     if (hasProperty(env, value, "blockGrid"))
       layout.blockGrid = integers<3>(env, property(env, value, "blockGrid"));
+    if (hasProperty(env, value, "blockChannels")) {
+      const int channels = integer(env, property(env, value, "blockChannels"));
+      if (!layout.blockGrid || channels < 0 || channels > 2) throw std::runtime_error("invalid block channels");
+      layout.blockChannels = channels;
+    }
+    if (hasProperty(env, value, "compactEligible")) {
+      bool eligible = false;
+      check(env, napi_get_value_bool(env, property(env, value, "compactEligible"), &eligible), "invalid compact eligibility");
+      layout.compactEligible = eligible;
+    }
     const auto cells = property(env, value, "cells");
     for (std::uint32_t i = 0, n = arrayLength(env, cells, 4096); i < n; ++i) {
       const auto item = element(env, cells, i);
@@ -370,6 +400,23 @@ napi_value installImageStorage(napi_env env, napi_callback_info info) try {
     decision.channels.channels = integer(env, property(env, storage, "channels"));
     const auto source = integers<4>(env, property(env, storage, "source"));
     const auto swizzle = integers<4>(env, property(env, storage, "swizzle"));
+    if (hasProperty(env, storage, "pixelFactsVersion") && integer(env, property(env, storage, "pixelFactsVersion")) == 1) {
+      decision.hasPixelFacts = true;
+      check(env, napi_get_value_bool(env, property(env, storage, "opaque"), &decision.opaque), "invalid opacity fact");
+      check(env, napi_get_value_bool(env, property(env, storage, "allZero"), &decision.allZero), "invalid zero fact");
+      auto regions = property(env, storage, "sparseRegions");
+      bool isArray = false;
+      check(env, napi_is_array(env, regions, &isArray), "invalid sparse regions");
+      if (isArray) {
+        decision.sparseRegions.emplace();
+        for (std::uint32_t r = 0, regionCount = arrayLength(env, regions, 64); r < regionCount; ++r)
+          decision.sparseRegions->push_back(integers<4>(env, element(env, regions, r)));
+      } else {
+        napi_valuetype type;
+        check(env, napi_typeof(env, regions, &type), "invalid sparse regions");
+        if (type != napi_null) throw std::runtime_error("invalid sparse regions");
+      }
+    }
     bool valid = true;
     for (int c = 0; c < 4; ++c) {
       valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 && swizzle[c] < 6;
@@ -614,7 +661,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, property(env, exports, "images"), "tileSlot", tileSlot);
   set(env, assets, "tilePreparationVersion", string(env, "lossless-tile-sets-v3"));
   const auto version = moduleObject(env);
-  set(env, version, "processor", string(env, "images-v10-astc4x4-optional-astcenc4.7"));
+  set(env, version, "processor", string(env, "images-v11-pixel-facts-astcenc4.7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-v1"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);

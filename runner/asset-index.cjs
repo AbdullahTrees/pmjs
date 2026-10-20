@@ -147,7 +147,21 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
           warnings.push('[pmjs] image storage index unavailable ' + decision.source + ': ' + error.message);
         }
       }
-      imageRecords.push({ ...decision, ...(storage ? { storage } : {}), outputs });
+      let descriptor = decision.descriptor;
+      if (descriptor && !descriptor.compression) {
+        const pages = [];
+        for (const page of descriptor.pages) {
+          if (shouldCancel()) throw new Error('page storage indexing cancelled');
+          const pageStorage = await nativeAddon.assets.classifyImageStorage(path.join(entry.directory, page.path));
+          if (!validStorageDecision(pageStorage) || pageStorage.width !== page.width || pageStorage.height !== page.height)
+            throw new Error('invalid prepared page storage decision');
+          const expected = decision.outputs[page.path];
+          if (hash(path.join(entry.directory, page.path)) !== expected) throw new Error('prepared page changed during classification');
+          pages.push({ ...page, storage: pageStorage });
+        }
+        descriptor = { ...descriptor, pages };
+      }
+      imageRecords.push({ ...decision, descriptor, ...(storage ? { storage } : {}), outputs });
     }
     const index = { schema: 2, kind: 'pmjs-asset-index',
       sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
