@@ -652,6 +652,14 @@ void Renderer::renderScene() {
     std::uint64_t sparseFullPixels = 0;
   };
   std::vector<DrawOperation> operations;
+  struct SceneryWindowPinGuard {
+    ImageStore& images;
+    std::vector<ImageHandle> handles;
+    ~SceneryWindowPinGuard() {
+      for (const auto handle : handles) images.endUse(handle);
+    }
+  } sceneryWindowPins{images_, {}};
+  sceneryWindowPins.handles.reserve(frame_.commands.size());
   std::size_t preparingFilterDepth = 0;
   std::array<const RenderCommand*, scene_packet::maxFilterDepth> preparingFilters{};
   std::array<float, 4> viewportMapping{1, 1, 0, 0};
@@ -778,6 +786,103 @@ void Renderer::renderScene() {
       command.source[0], command.source[1], command.source[2], command.source[3],
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<SpriteImageRegion>{};
+    bool sceneryWindow = false;
+    const bool scenerySprite = command.primitive == RenderCommand::Primitive::sprite &&
+      !command.repeat;
+    const bool sceneryTiling = command.primitive == RenderCommand::Primitive::tilingSprite;
+    const bool sceneryBacking = !block && !derived &&
+      images_.hasWindowedScenery(command.image);
+    const bool sceneryWindowEligible = sceneryBacking &&
+        (scenerySprite || sceneryTiling) &&
+        !command.mipmap && (!command.clampedTilingSampling || sceneryTiling) &&
+        !command.atlasTilingSampling && !command.appliesColorMatrix &&
+        !command.appliesSpriteColor && !command.appliesMeshPostTintOverlay &&
+        !command.standaloneBitmapRegion &&
+        command.blur <= 0 && !command.maskImage && !command.textureRotation &&
+        !command.roundPixels && !inlineFilterMatrix[commandIndex] &&
+        preparingFilterDepth == 0 &&
+        sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
+        viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
+        p1[0] > p0[0] && p3[1] > p0[1] &&
+        // The corner checks also admit authored world vertices only when they
+        // describe the same axis-aligned rectangle used for source mapping.
+        p0[1] == p1[1] && p0[0] == p3[0] &&
+        p2[0] == p1[0] && p2[1] == p3[1] && logicalInfo &&
+        std::isfinite(command.source[0]) && std::isfinite(command.source[1]) &&
+        std::isfinite(command.source[2]) && std::isfinite(command.source[3]) &&
+        command.source[2] > 0 && command.source[3] > 0 &&
+        (sceneryTiling || (command.source[0] >= 0 && command.source[1] >= 0 &&
+          command.source[0] + command.source[2] <= logicalInfo->width &&
+          command.source[1] + command.source[3] <= logicalInfo->height));
+    if (sceneryWindowEligible) {
+      int clipX0 = 0, clipY0 = 0, clipX1 = width_, clipY1 = height_;
+      if (command.clipped) {
+        clipX0 = std::max(clipX0, command.clip[0]);
+        clipY0 = std::max(clipY0, command.clip[1]);
+        clipX1 = std::min(clipX1, command.clip[2]);
+        clipY1 = std::min(clipY1, command.clip[3]);
+      }
+      if (clipX0 < clipX1 && clipY0 < clipY1) {
+        const auto x0 = std::max(float(clipX0), p0[0]);
+        const auto y0 = std::max(float(clipY0), p0[1]);
+        const auto x1 = std::min(float(clipX1), p1[0]);
+        const auto y1 = std::min(float(clipY1), p3[1]);
+        if (x1 > x0 && y1 > y0) {
+          const auto sourceX = [&](float v) { return command.source[0] +
+            (v - p0[0]) * command.source[2] / (p1[0] - p0[0]); };
+          const auto sourceY = [&](float v) { return command.source[1] +
+            (v - p0[1]) * command.source[3] / (p3[1] - p0[1]); };
+          const double sourceLeft = std::floor(sourceX(x0)) - 3.0;
+          const double sourceTop = std::floor(sourceY(y0)) - 3.0;
+          const double sourceRight = std::ceil(sourceX(x1)) + 3.0;
+          const double sourceBottom = std::ceil(sourceY(y1)) + 3.0;
+          constexpr double intMin = static_cast<double>(std::numeric_limits<int>::min());
+          constexpr double intMax = static_cast<double>(std::numeric_limits<int>::max());
+          if (sourceLeft >= intMin && sourceTop >= intMin &&
+              sourceRight <= intMax && sourceBottom <= intMax) {
+            const int left = sceneryTiling ? int(sourceLeft) : std::max(0, int(sourceLeft));
+            const int top = sceneryTiling ? int(sourceTop) : std::max(0, int(sourceTop));
+            const int right = sceneryTiling ? int(sourceRight) :
+              std::min(logicalInfo->width, int(sourceRight));
+            const int bottom = sceneryTiling ? int(sourceBottom) :
+              std::min(logicalInfo->height, int(sourceBottom));
+            if (right > left && bottom > top) {
+              auto sceneryRegion = images_.resolveSceneryWindow(command.image, left, top,
+                right - left, bottom - top,
+                command.pixiSpritePacking && !command.premultipliedSpriteTexture,
+                sceneryTiling);
+              if (sceneryRegion) {
+                if (images_.beginUse(sceneryRegion->image.handle)) {
+                  sceneryWindowPins.handles.push_back(sceneryRegion->image.handle);
+                  derived = std::move(sceneryRegion);
+                }
+              }
+              sceneryWindow = derived.has_value() && sceneryTiling;
+            }
+          }
+        }
+      }
+    } else if (sceneryBacking) {
+      const char* reason = "source-geometry";
+      if (!(scenerySprite || sceneryTiling)) reason = "primitive";
+      else if (command.mipmap) reason = "mipmap";
+      else if (command.clampedTilingSampling && !sceneryTiling) reason = "clamped-non-tiling";
+      else if (command.atlasTilingSampling) reason = "atlas-tiling";
+      else if (command.appliesColorMatrix) reason = "color-matrix";
+      else if (command.appliesSpriteColor) reason = "sprite-color";
+      else if (command.appliesMeshPostTintOverlay) reason = "mesh-post-tint";
+      else if (command.standaloneBitmapRegion) reason = "standalone-bitmap-region";
+      else if (command.spriteWorldVertices) reason = "world-vertices";
+      else if (command.blur > 0) reason = "blur";
+      else if (command.maskImage) reason = "mask";
+      else if (command.textureRotation) reason = "texture-rotation";
+      else if (command.roundPixels) reason = "round-pixels";
+      else if (inlineFilterMatrix[commandIndex]) reason = "inline-filter";
+      else if (preparingFilterDepth > 0) reason = "filter-depth";
+      else if (sceneProjection_ != std::array<float, 6>{1, 0, 0, 1, 0, 0}) reason = "scene-projection";
+      else if (viewportMapping != std::array<float, 4>{1, 1, 0, 0}) reason = "viewport-mapping";
+      images_.noteSceneryWindowRejection(command.image, reason);
+    }
     const bool compactEligible = logicalInfo && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
       command.source[1] == 0 && command.source[3] == logicalInfo->height &&
@@ -816,7 +921,8 @@ void Renderer::renderScene() {
       derived ? std::optional<ImageInfo>{derived->image} :
       command.image == 0 ? std::optional<ImageInfo>{} :
       (command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture) ?
-        images_.lookupPremultiplied(command.image) : images_.lookup(command.image));
+        images_.lookupPremultiplied(command.image, "scene-draw") :
+        images_.lookup(command.image, "scene-draw"));
     if (command.image != 0 && !info) continue;
     // Raw premultiplied pixels can contain RGB even with zero alpha.
     // Preserve scene commands and filter bounds; omit only a proven no-op draw.
@@ -974,7 +1080,7 @@ void Renderer::renderScene() {
         operations.back().derivedAtlasOffset != derivedAtlasOffset ||
         operations.back().texture != texture ||
         operations.back().blendMode != command.blendMode ||
-        operations.back().repeat != command.repeat ||
+        operations.back().repeat != (command.repeat && !sceneryWindow) ||
         operations.back().nearest != command.nearest ||
         operations.back().mipmap != mipmap ||
         operations.back().clampedTilingSampling != command.clampedTilingSampling ||
@@ -998,7 +1104,8 @@ void Renderer::renderScene() {
         operations.back().primitive != command.primitive ||
         operations.back().clipped != operationClipped ||
         (operationClipped && operations.back().clip != operationClip)) {
-      operations.push_back({0, texture, command.blendMode, command.repeat,
+      operations.push_back({0, texture, command.blendMode,
+        command.repeat && !sceneryWindow,
         command.nearest,
         static_cast<GLsizei>(vertices_.size() / 12U - 6U), 6, nullptr,
         operationClip, operationClipped, textureWidth, textureHeight,

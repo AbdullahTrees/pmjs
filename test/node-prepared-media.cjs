@@ -65,7 +65,7 @@ async function main() {
   assert.ok(cold.entries[0].descriptor.pages.every(page => page.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')));
   assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-codec'), null,
     path.join(gameRoot, imageSource), null, { pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
-  assert.equal(native.assets.preparationVersion.processor, 'lossless-images-v6');
+  assert.equal(native.assets.preparationVersion.processor, 'lossless-images-v7');
   assert.equal(cold.decrypted, 3);
   assert.equal(cold.installed, 1);
   assert.equal(cold.fallback, 1, 'larger prepared representation keeps ordinary loading');

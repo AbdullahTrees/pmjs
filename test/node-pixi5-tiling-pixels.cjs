@@ -11,6 +11,19 @@ assert.equal(reference.mipmap, 'OFF');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 assert.equal(hash(path.join(__dirname, 'helpers/tiling-scenario.cjs')), reference.scenarioSha256);
 assert.equal(hash(path.join(__dirname, '../tools/generate-pixi5-tiling-reference.cjs')), reference.generatorSha256);
+const sceneryDirectory = path.join(assets, 'img', 'overlays');
+const sceneryFile = path.join(sceneryDirectory, `pmjs-scenery-window-${process.pid}.png`);
+let sceneryImage = null;
+fs.mkdirSync(sceneryDirectory, { recursive: true });
+const sceneryPixels = Buffer.alloc(3240 * 3240 * 4);
+for (let y = 0; y < 3240; y++) for (let x = 0; x < 3240; x++) {
+  const offset = (y * 3240 + x) * 4;
+  sceneryPixels[offset] = x & 0xe0;
+  sceneryPixels[offset + 1] = y & 0xe0;
+  sceneryPixels[offset + 2] = (x + y) & 0xe0;
+  sceneryPixels[offset + 3] = 255;
+}
+fs.writeFileSync(sceneryFile, png(3240, 3240, sceneryPixels));
 native.initialize({ gameRoot: assets, width: 32, height: 24, windowTitle: 'Pixi 5 tiling' });
 const handles = new Set();
 try {
@@ -138,12 +151,92 @@ try {
   assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied().subarray(0, 4)), [40, 80, 160, 255],
     'a queued draw retains its pixels after crop ownership is released');
   assert.equal(native.scene.schema.clampedTilingSampling, true);
+  sceneryImage = native.images.load(path.relative(assets, sceneryFile));
+  const sceneryBase = { resource: { source: { _nativeImage: sceneryImage } },
+    width: 3240, height: 3240, resolution: 1,
+    scaleMode: c.PIXI.SCALE_MODES.LINEAR };
+  const sceneryTexture = new c.PIXI.Texture(sceneryBase,
+    { x: 0, y: 0, width: 3240, height: 3240 });
+  const sceneryStage = new c.PIXI.Container();
+  const beforeScenery = native.images.memory(100);
+  native.render.setPresentationLayers(0, sceneryImage.handle, 0, 0, 0);
+  native.render.setPresentationLayers(0, 0, 0, 0, 0);
+  const afterFullFallback = native.images.memory(100);
+  assert.equal(afterFullFallback.sceneryFullFallbacks, beforeScenery.sceneryFullFallbacks + 1,
+    'an ordinary full-texture consumer records its materialization');
+  assert.ok(afterFullFallback.largest.some(entry => entry.handle === sceneryImage.handle &&
+    entry.sceneryBacking && entry.sceneryFullMaterialized &&
+    entry.sceneryFirstMaterializationCaller === 'image-lookup'),
+    'full materialization keeps and reports the compact source backing and caller');
+  const sceneryTiling = new c.PIXI.TilingSprite(sceneryTexture, 32, 24);
+  sceneryTiling.tilePosition.x = -1320.375;
+  sceneryTiling.tilePosition.y = -624.625;
+  sceneryStage.addChild(sceneryTiling);
+  sceneryStage.filters = [new c.PIXI.filters.AlphaFilter(1)];
+  sceneryStage.filterArea = new c.PIXI.Rectangle(0, 0, 32, 24);
+  native.beginFrame(); renderer.render(sceneryStage); native.renderScene();
+  const fullTexturePixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+  sceneryStage.filters = null;
+  sceneryStage.filterArea = null;
+  native.beginFrame(); renderer.render(sceneryStage); native.renderScene();
+  const afterScenery = native.images.memory(100);
+  assert.equal(afterScenery.sceneryWindowUploads, beforeScenery.sceneryWindowUploads + 1,
+    'clamped non-power-of-two TilingSprites return to bounded windows after a full fallback');
+  assert.equal(afterScenery.sceneryFullFallbacks, afterFullFallback.sceneryFullFallbacks,
+    'a later windowed draw reuses the retained compact backing');
+  assert.ok(afterScenery.gpuBytes - afterFullFallback.gpuBytes < 10 * 1024 * 1024,
+    'returning to a windowed draw must not allocate another full texture');
+  const windowedPixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+  let maxSceneryDelta = 0;
+  for (let i = 0; i < fullTexturePixels.length; i++)
+    maxSceneryDelta = Math.max(maxSceneryDelta,
+      Math.abs(fullTexturePixels[i] - windowedPixels[i]));
+  assert.ok(maxSceneryDelta <= 1,
+    `windowed fractional scrolling matches clamped full-texture sampling (delta ${maxSceneryDelta})`);
+  native.beginFrame();
+  const afterFullTextureEviction = native.images.memory(100);
+  const sceneryEntry = afterFullTextureEviction.largest.find(entry =>
+    entry.handle === sceneryImage.handle);
+  assert.equal(sceneryEntry.gpuBytes, 0,
+    'after a successful windowed frame, the unused full texture is evicted at the next frame boundary');
+  const scenerySprite = new c.PIXI.Sprite(sceneryTexture);
+  scenerySprite.vertexData = new Float32Array([
+    -1320.375, -624.625, 1919.625, -624.625,
+    1919.625, 2615.375, -1320.375, 2615.375,
+  ]);
+  scenerySprite.calculateVertices = function() {};
+  const scenerySpriteStage = new c.PIXI.Container();
+  scenerySpriteStage.addChild(scenerySprite);
+  scenerySpriteStage.filters = [new c.PIXI.filters.AlphaFilter(1)];
+  scenerySpriteStage.filterArea = new c.PIXI.Rectangle(0, 0, 32, 24);
+  native.beginFrame(); renderer.render(scenerySpriteStage); native.renderScene();
+  const fullSpritePixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+  const beforeSpriteWindow = native.images.memory(100);
+  scenerySpriteStage.filters = null;
+  scenerySpriteStage.filterArea = null;
+  native.beginFrame(); renderer.render(scenerySpriteStage); native.renderScene();
+  const afterSpriteWindow = native.images.memory(100);
+  assert.equal(afterSpriteWindow.sceneryWindowUploads + afterSpriteWindow.sceneryWindowHits,
+    beforeSpriteWindow.sceneryWindowUploads + beforeSpriteWindow.sceneryWindowHits + 1,
+    'axis-aligned Sprites with authored world vertices use bounded scenery windows');
+  assert.equal(afterSpriteWindow.sceneryFullFallbacks, beforeSpriteWindow.sceneryFullFallbacks,
+    'the world-vertex window reuses the retained compact backing');
+  const windowedSpritePixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+  let maxSpriteDelta = 0;
+  for (let i = 0; i < fullSpritePixels.length; i++)
+    maxSpriteDelta = Math.max(maxSpriteDelta,
+      Math.abs(fullSpritePixels[i] - windowedSpritePixels[i]));
+  assert.ok(maxSpriteDelta <= 1,
+    `world-vertex window sampling matches the full texture (delta ${maxSpriteDelta})`);
   const invalidMetadata = new Uint32Array([0, 0xffffffff, 0, 0xffffff, 0, 32768, 0]);
   const invalidValues = new Float32Array(41); invalidValues.set([1, 0, 0, 1, 0, 0, 1]);
   assert.throws(() => native.scene.submit(native.scene.schema.version, invalidMetadata, invalidValues, 1), /invalid|rejected/,
     'tiling clamp flags are rejected on another node kind');
   assert.equal(failures, 0, 'stock Pixi tiling pixel mismatches retained under test-assets/mismatches');
 } finally {
+  if (sceneryImage) native.images.release(sceneryImage.handle);
+  fs.rmSync(sceneryFile, { force: true });
+  try { fs.rmdirSync(sceneryDirectory); } catch {}
   for (const handle of handles) native.canvas.release(handle);
   native.runtime.quit();
 }

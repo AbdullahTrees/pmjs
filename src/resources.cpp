@@ -1,5 +1,6 @@
 #include "log.hpp"
 #include "resources.hpp"
+#include "scenery_window.hpp"
 #include <EGL/egl.h>
 #include "prepared_page.hpp"
 #include "file_identity.hpp"
@@ -35,6 +36,7 @@ extern "C" {
 #include <jpeglib.h>
 #include <webp/decode.h>
 #include <png.h>
+#include <lz4.h>
 
 namespace pmjs {
 
@@ -709,6 +711,82 @@ std::optional<ImageInfo> ImageStore::installDecoded(
   }
   const std::string& cacheKey = source.key();
 
+  // Large images may later be sampled through a bounded scrolling window.
+  // Keep a compact region-readable backing independent of their asset path;
+  // the renderer, which knows the image's actual use, decides whether to use it.
+  const bool sceneryCandidate = pixels.width >= 2048 && pixels.height >= 2048;
+  bool scenery = sceneryCandidate && !retainCpuPixels;
+  const char* sceneryRejection = sceneryCandidate && retainCpuPixels
+    ? "cpu-pixels-retained" : "not-large-enough";
+  constexpr int sceneryTileSize = 512;
+  std::vector<Slot::SceneryTile> sceneryTiles;
+  if (scenery) {
+    constexpr std::size_t budget = 32U * 1024U * 1024U;
+    std::size_t total = 0;
+    for (int top = 0; top < pixels.height && scenery; top += sceneryTileSize) {
+      for (int left = 0; left < pixels.width; left += sceneryTileSize) {
+        Slot::SceneryTile tile;
+        tile.width = std::min(sceneryTileSize, pixels.width - left);
+        tile.height = std::min(sceneryTileSize, pixels.height - top);
+        const auto bytes = static_cast<std::size_t>(tile.width) * tile.height * 4;
+        std::vector<std::uint8_t> raw(bytes);
+        for (int y = 0; y < tile.height; ++y)
+          std::memcpy(raw.data() + static_cast<std::size_t>(y) * tile.width * 4,
+            pixels.rgba.data() + (static_cast<std::size_t>(top + y) * pixels.width + left) * 4,
+            static_cast<std::size_t>(tile.width) * 4);
+        std::vector<std::uint8_t> encoded(
+          static_cast<std::size_t>(LZ4_compressBound(static_cast<int>(bytes))));
+        const int compressed = LZ4_compress_default(reinterpret_cast<const char*>(raw.data()),
+          reinterpret_cast<char*>(encoded.data()), static_cast<int>(bytes),
+          static_cast<int>(encoded.size()));
+        if (compressed <= 0) { scenery = false; sceneryRejection = "compression-failed"; break; }
+        if (static_cast<std::size_t>(compressed) >= bytes) {
+          tile.data = std::move(raw); tile.raw = true;
+        } else tile.data.assign(encoded.begin(), encoded.begin() + compressed);
+        total += tile.data.size();
+        if (total > budget) { scenery = false; sceneryRejection = "backing-budget"; break; }
+        sceneryTiles.push_back(std::move(tile));
+      }
+    }
+  }
+  if (scenery) {
+    std::size_t index = 0;
+    while (index < slots_.size() && slots_[index].live) ++index;
+    if (index >= indexMask) return std::nullopt;
+    if (index == slots_.size()) slots_.emplace_back();
+    auto& slot = slots_[index];
+    ++slot.contentRevision;
+    slot.width = pixels.width; slot.height = pixels.height;
+    slot.channels = 4; slot.texture = 0; slot.premultipliedTexture = 0;
+    slot.sharedTexture.reset(); slot.sharedPremultipliedTexture.reset();
+    slot.prepared.reset(); slot.tiles.reset();
+    slot.mipmapsReady = slot.premultipliedMipmapsReady = false;
+    slot.mipmapBytes = slot.premultipliedMipmapBytes = 0;
+    slot.references = 1; slot.pins = 0; slot.inFlight.store(0);
+    slot.gpuOnly = slot.renderTarget = slot.premultiplied = false;
+    slot.opaque = false; slot.opacityRevision = 0;
+    slot.lastPreparedFallbackReason.clear();
+    slot.knownAllZero = allZeroRgba(pixels.rgba.data(), pixels.width, pixels.height, pixels.width);
+    slot.deferredScenery = true;
+    slot.sceneryFullMaterialized = false;
+    slot.sceneryFirstMaterializationCaller.clear();
+    slot.sceneryFullRequestedFrame = slot.sceneryWindowFrame = 0;
+    slot.sceneryColumns = (pixels.width + sceneryTileSize - 1) / sceneryTileSize;
+    slot.sceneryTiles = std::move(sceneryTiles);
+    slot.cachedPixels.reset(); slot.sparseRegions.reset();
+    slot.retainCpuPixels = false; slot.cpuPixelFrames = 0;
+    slot.sceneryWindows.clear();
+    slot.cacheKey = cacheKey; slot.sourcePath = source.path();
+    slot.live = true; markUsed(slot); ++liveCount_;
+    const auto created = inspect(makeHandle(index, slot.generation));
+    if (!created) return std::nullopt;
+    try { pathCache_.emplace(cacheKey, created->handle); }
+    catch (...) { destroySlot(index); throw; }
+    return created;
+  }
+
+  if (sceneryCandidate) ++sceneryBackingRejections_[sceneryRejection];
+
   auto created = createDecoded(pixels);
   if (!created) return std::nullopt;
   const std::size_t index = (created->handle & indexMask) - 1U;
@@ -751,8 +829,10 @@ bool ImageStore::retainCpuPixels(ImageHandle handle) {
     if (slot.prepared) for (auto& page : slot.prepared->pages) page.pixels.reset();
     return true;
   }
-  if (slot.cacheKey.empty() && !slot.tiles) return false;
-  slot.cachedPixels = (slot.prepared || slot.tiles) ? readPixelsRegion(handle, 0, 0, info->width, info->height) : readTexturePixels(*info, slot.channels);
+  if (slot.cacheKey.empty() && !slot.tiles && !slot.deferredScenery) return false;
+  slot.cachedPixels = (slot.prepared || slot.tiles || slot.deferredScenery) ?
+    readPixelsRegion(handle, 0, 0, info->width, info->height) :
+    readTexturePixels(*info, slot.channels);
   if (!slot.cachedPixels) return false;
   slot.retainCpuPixels = true;
   slot.cpuPixelFrames = 0;
@@ -794,8 +874,10 @@ const ImagePixels* ImageStore::readPixels(ImageHandle handle) const {
     if (!slot.retainCpuPixels && !slot.cacheKey.empty()) slot.cpuPixelFrames = 60;
     return &*slot.cachedPixels;
   }
-  if (slot.cacheKey.empty() && !slot.tiles) return nullptr;
-  slot.cachedPixels = (slot.prepared || slot.tiles) ? readPixelsRegion(handle, 0, 0, info->width, info->height) : readTexturePixels(*info, slot.channels);
+  if (slot.cacheKey.empty() && !slot.tiles && !slot.deferredScenery) return nullptr;
+  slot.cachedPixels = (slot.prepared || slot.tiles || slot.deferredScenery) ?
+    readPixelsRegion(handle, 0, 0, info->width, info->height) :
+    readTexturePixels(*info, slot.channels);
   if (!slot.retainCpuPixels) slot.cpuPixelFrames = 60;
   return slot.cachedPixels ? &*slot.cachedPixels : nullptr;
 }
@@ -880,6 +962,7 @@ std::size_t ImageStore::cpuBytes() const {
   std::unordered_set<const ImagePixels*> seen;
   for (const auto& slot : slots_) {
     if (slot.live && slot.cachedPixels) result += slot.cachedPixels->rgba.capacity();
+    if (slot.live) for (const auto& tile : slot.sceneryTiles) result += tile.data.capacity();
     if (slot.live && slot.sparseRegions) result += slot.sparseRegions->capacity() * sizeof(std::array<int, 4>);
     if (slot.live && slot.prepared) for (const auto& page : slot.prepared->pages)
       if (page.pixels && seen.insert(page.pixels.get()).second) result += page.pixels->rgba.capacity();
@@ -909,6 +992,7 @@ std::size_t ImageStore::residentBytes(const Slot& slot) const {
       (slot.prepared ? slot.prepared->gpuBytes : 0U) +
       slot.mipmapBytes + slot.premultipliedMipmapBytes +
       (slot.cachedPixels ? slot.cachedPixels->rgba.capacity() : 0U) +
+      [&] { std::size_t bytes = 0; for (const auto& tile : slot.sceneryTiles) bytes += tile.data.capacity(); return bytes; }() +
       (slot.sparseRegions ? slot.sparseRegions->capacity() * sizeof(std::array<int, 4>) : 0U) +
       (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) if (page.pixels) bytes += page.pixels->rgba.capacity(); return bytes; }() : 0U);
 }
@@ -1011,6 +1095,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
       }
       for (const auto& block : slot.prepared->blockTextures) addTexture(block.sharedAtlas, true);
     }
+    const bool sceneryBacking = slot.deferredScenery || slot.prepared || slot.tiles;
     result.push_back({makeHandle(index, slot.generation), slot.width, slot.height,
       slot.references, slot.inFlight.load(std::memory_order_acquire), slot.pins,
       static_cast<std::size_t>(slot.width) * slot.height * slot.channels *
@@ -1018,12 +1103,15 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
         (slot.prepared ? slot.prepared->gpuBytes : 0U) +
         slot.mipmapBytes + slot.premultipliedMipmapBytes + sharedGpuBytes,
       (slot.cachedPixels ? slot.cachedPixels->rgba.capacity() : 0U) +
+        [&] { std::size_t bytes = 0; for (const auto& tile : slot.sceneryTiles) bytes += tile.data.capacity(); return bytes; }() +
         (slot.sparseRegions ? slot.sparseRegions->capacity() * sizeof(std::array<int, 4>) : 0U) +
         (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) if (page.pixels) bytes += page.pixels->rgba.capacity(); return bytes; }() : 0U),
       slot.lastUsedSerial,
       slot.references == 0 && slot.pins == 0 &&
         slot.inFlight.load(std::memory_order_acquire) == 0 &&
         !slot.cacheKey.empty(),
+      sceneryBacking, slot.sceneryFullMaterialized,
+      slot.sceneryFirstMaterializationCaller,
       slot.sourcePath.generic_string()});
   }
   return result;
@@ -1232,13 +1320,28 @@ bool ImageStore::isRenderTarget(ImageHandle handle) const {
   return slots_[(handle & indexMask) - 1U].renderTarget;
 }
 
-std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle) {
+std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
+    const char* caller) {
   auto info = inspect(handle);
   if (!info) return info;
-  if (info->premultiplied) return info->texture ? info : lookup(handle);
   auto& slot = slots_[(handle & indexMask) - 1U];
+  if (info->texture && hasWindowedScenery(handle))
+    slot.sceneryFullRequestedFrame = sceneryFrame_;
+  if (info->premultiplied) return info->texture ? info : lookup(handle, caller);
+  if (slot.deferredScenery && !info->texture) {
+    info = lookup(handle, caller);
+    if (!info) return std::nullopt;
+    return lookupPremultiplied(handle, caller);
+  }
   if (slot.prepared || slot.tiles) {
+    const bool sceneryBacking = slot.deferredScenery || slot.prepared || slot.tiles;
     if (!materialize(slot, true)) return std::nullopt;
+    if (sceneryBacking && !slot.sceneryFullMaterialized) {
+      slot.sceneryFullMaterialized = true;
+      slot.sceneryFirstMaterializationCaller = caller ? caller : "unknown";
+      ++sceneryFullFallbacks_;
+    }
+    if (sceneryBacking) slot.sceneryFullRequestedFrame = sceneryFrame_;
     info->texture = slot.premultipliedTexture; info->premultiplied = true;
     return info;
   }
@@ -1359,6 +1462,11 @@ void ImageStore::destroySlot(std::size_t index) {
   slot.preparedFrameBytes = 0;
   if (slot.prepared) clearPreparedFrames(slot.prepared.get());
   pixelReads_.erase(makeHandle(index, slot.generation));
+  for (const auto& view : slot.sceneryWindows) if (view.handle) release(view.handle);
+  slot.sceneryWindows.clear(); slot.sceneryTiles.clear();
+  slot.sceneryColumns = 0; slot.deferredScenery = false;
+  slot.sceneryFullMaterialized = false;
+  slot.sceneryFirstMaterializationCaller.clear();
   clearPremultipliedTexture(slot);
   if (!slot.cacheKey.empty()) pathCache_.erase(slot.cacheKey);
   ++textureEpoch_;
@@ -1442,6 +1550,33 @@ bool ImageStore::endUse(ImageHandle handle) {
 void ImageStore::update() {
   for (const auto handle : activePreparedFrames_) endUse(handle);
   activePreparedFrames_.clear();
+  ++sceneryFrame_;
+  for (auto& slot : slots_) if (slot.live && !slot.sceneryWindows.empty()) {
+    std::erase_if(slot.sceneryWindows, [&](const Slot::SceneryWindow& view) {
+      if (sceneryFrame_ - view.lastFrame < 3) return false;
+      release(view.handle);
+      return true;
+    });
+  }
+  for (auto& slot : slots_) {
+    if (!slot.live || slot.sceneryWindowFrame + 1 != sceneryFrame_ ||
+        slot.sceneryFullRequestedFrame == slot.sceneryWindowFrame ||
+        slot.inFlight.load(std::memory_order_acquire) != 0 ||
+        !(slot.deferredScenery || slot.prepared || slot.tiles)) continue;
+    clearPremultipliedTexture(slot);
+    if (slot.texture) {
+      if (!slot.sharedTexture) {
+        glDeleteTextures(1, &slot.texture);
+        gpuBytes_ -= static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
+      }
+      slot.sharedTexture.reset();
+      slot.texture = 0;
+      gpuBytes_ -= slot.mipmapBytes;
+      slot.mipmapBytes = 0;
+      slot.mipmapsReady = false;
+      ++textureEpoch_;
+    }
+  }
   std::size_t currentWarmBytes = 0;
   for (std::size_t index = 0; index < slots_.size(); ++index) {
     auto& slot = slots_[index];
@@ -1772,6 +1907,8 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
   if (!info || !extent || x < 0 || y < 0 || x > info->width - width ||
       y > info->height - height) return std::nullopt;
   const auto& slot = slots_[(handle & indexMask) - 1U];
+  if (slot.deferredScenery && !slot.cachedPixels)
+    return readSceneryRegion(slot, x, y, width, height);
   if (slot.tiles) return readTileRegion(slot, x, y, width, height);
   if (!slot.prepared) {
     // Mutable GPU surfaces are read on demand; never retain a stale CPU copy.
@@ -1798,19 +1935,385 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
   return result;
 }
 
+std::optional<ImagePixels> ImageStore::readSceneryRegion(const Slot& slot,
+    int x, int y, int width, int height, bool wrap) const {
+  const auto extent = checkedImageExtent(width, height);
+  if (!extent || slot.width <= 0 || slot.height <= 0 ||
+      (!wrap && (x < 0 || y < 0 || x > slot.width - width ||
+                 y > slot.height - height))) return std::nullopt;
+  ImagePixels result{width, height, std::vector<std::uint8_t>(extent->rgbaBytes)};
+  if (slot.prepared) {
+    bool acquired = false;
+    auto& backing = *const_cast<PreparedBacking*>(slot.prepared.get());
+    const auto modulo = [](int value, int modulus) {
+      const int remainder = value % modulus;
+      return remainder < 0 ? remainder + modulus : remainder;
+    };
+    for (int outputY = 0; outputY < height;) {
+      const int sourceY = wrap ? modulo(y + outputY, slot.height) : y + outputY;
+      const int rows = std::min(height - outputY, slot.height - sourceY);
+      for (int outputX = 0; outputX < width;) {
+        const int sourceX = wrap ? modulo(x + outputX, slot.width) : x + outputX;
+        const int columns = std::min(width - outputX, slot.width - sourceX);
+        if (!readPreparedRegionInto(backing, sourceX, sourceY, columns, rows,
+              result, outputX, outputY, &acquired)) {
+          if (acquired) trimPreparedPages();
+          return std::nullopt;
+        }
+        outputX += columns;
+      }
+      outputY += rows;
+    }
+    if (acquired) trimPreparedPages();
+    return result;
+  }
+  std::vector<std::uint8_t> decoded;
+  const auto readSegment = [&](int sourceX, int sourceY, int segmentWidth,
+                               int segmentHeight) -> std::optional<ImagePixels> {
+    ImagePixels segment{segmentWidth, segmentHeight,
+      std::vector<std::uint8_t>(static_cast<std::size_t>(segmentWidth) * segmentHeight * 4)};
+    if (slot.cachedPixels) {
+      for (int row = 0; row < segmentHeight; ++row)
+        std::memcpy(segment.rgba.data() + static_cast<std::size_t>(row) * segmentWidth * 4,
+          slot.cachedPixels->rgba.data() +
+            (static_cast<std::size_t>(sourceY + row) * slot.width + sourceX) * 4,
+          static_cast<std::size_t>(segmentWidth) * 4);
+      return segment;
+    }
+    if (slot.tiles) return readTileRegion(slot, sourceX, sourceY, segmentWidth, segmentHeight);
+    if (slot.sceneryColumns <= 0) return std::nullopt;
+    for (int tileY = sourceY / 512; tileY <= (sourceY + segmentHeight - 1) / 512; ++tileY) {
+      for (int tileX = sourceX / 512; tileX <= (sourceX + segmentWidth - 1) / 512; ++tileX) {
+        const auto index = static_cast<std::size_t>(tileY) * slot.sceneryColumns + tileX;
+        if (index >= slot.sceneryTiles.size()) return std::nullopt;
+        const auto& tile = slot.sceneryTiles[index];
+        const auto size = static_cast<std::size_t>(tile.width) * tile.height * 4;
+        const std::uint8_t* bytes = tile.data.data();
+        if (!tile.raw) {
+          decoded.resize(size);
+          if (LZ4_decompress_safe(reinterpret_cast<const char*>(tile.data.data()),
+              reinterpret_cast<char*>(decoded.data()), static_cast<int>(tile.data.size()),
+              static_cast<int>(size)) != static_cast<int>(size)) return std::nullopt;
+          bytes = decoded.data();
+        } else if (tile.data.size() != size) return std::nullopt;
+        const int tileSourceX = tileX * 512, tileSourceY = tileY * 512;
+        const int left = std::max(sourceX, tileSourceX), top = std::max(sourceY, tileSourceY);
+        const int right = std::min(sourceX + segmentWidth, tileSourceX + tile.width);
+        const int bottom = std::min(sourceY + segmentHeight, tileSourceY + tile.height);
+        for (int row = top; row < bottom; ++row)
+          std::memcpy(segment.rgba.data() +
+              (static_cast<std::size_t>(row - sourceY) * segmentWidth + left - sourceX) * 4,
+            bytes + (static_cast<std::size_t>(row - tileSourceY) * tile.width + left - tileSourceX) * 4,
+            static_cast<std::size_t>(right - left) * 4);
+      }
+    }
+    return segment;
+  };
+  const auto modulo = [](int value, int modulus) {
+    const int remainder = value % modulus;
+    return remainder < 0 ? remainder + modulus : remainder;
+  };
+  for (int outputY = 0; outputY < height;) {
+    const int sourceY = wrap ? modulo(y + outputY, slot.height) : y + outputY;
+    const int rows = std::min(height - outputY, slot.height - sourceY);
+    for (int outputX = 0; outputX < width;) {
+      const int sourceX = wrap ? modulo(x + outputX, slot.width) : x + outputX;
+      const int columns = std::min(width - outputX, slot.width - sourceX);
+      auto segment = readSegment(sourceX, sourceY, columns, rows);
+      if (!segment) return std::nullopt;
+      for (int row = 0; row < rows; ++row)
+        std::memcpy(result.rgba.data() +
+            (static_cast<std::size_t>(outputY + row) * width + outputX) * 4,
+          segment->rgba.data() + static_cast<std::size_t>(row) * columns * 4,
+          static_cast<std::size_t>(columns) * 4);
+      outputX += columns;
+    }
+    outputY += rows;
+  }
+  return result;
+}
+
+bool ImageStore::hasWindowedScenery(ImageHandle handle) const {
+  const auto info = inspect(handle);
+  if (!info) return false;
+  const auto& slot = slots_[(handle & indexMask) - 1U];
+  return (slot.deferredScenery || slot.prepared || slot.tiles) &&
+    slot.width >= 2048 && slot.height >= 2048;
+}
+
+void ImageStore::noteSceneryWindowRejection(ImageHandle handle,
+    const char* reason) {
+  if (hasWindowedScenery(handle) && reason && *reason)
+    ++sceneryWindowRejections_[reason];
+}
+
+std::optional<SpriteImageRegion> ImageStore::resolveSceneryWindow(ImageHandle handle,
+    int x, int y, int width, int height, bool premultiplied, bool wrap) {
+  const auto info = inspect(handle);
+  if (!info || width <= 0 || height <= 0 || !hasWindowedScenery(handle)) return std::nullopt;
+  const auto index = (handle & indexMask) - 1U;
+  auto& slot = slots_[index];
+  constexpr std::int64_t halo = 2;
+  const std::int64_t leftPad = wrap ? halo : std::min<std::int64_t>(halo, x);
+  const std::int64_t topPad = wrap ? halo : std::min<std::int64_t>(halo, y);
+  const std::int64_t rightPad = wrap ? halo : std::min<std::int64_t>(halo,
+    std::int64_t(slot.width) - (std::int64_t(x) + width));
+  const std::int64_t bottomPad = wrap ? halo : std::min<std::int64_t>(halo,
+    std::int64_t(slot.height) - (std::int64_t(y) + height));
+  for (auto& view : slot.sceneryWindows) {
+    if (view.premultiplied != premultiplied || view.wrap != wrap) continue;
+    if (!sceneryWindowCovers({view.x, view.y, view.width, view.height},
+          std::int64_t(x) - leftPad, std::int64_t(y) - topPad,
+          std::int64_t(width) + leftPad + rightPad,
+          std::int64_t(height) + topPad + bottomPad)) continue;
+    if (auto image = inspect(view.handle)) {
+      view.lastFrame = sceneryFrame_;
+      slot.sceneryWindowFrame = sceneryFrame_;
+      ++sceneryWindowHits_;
+      markUsed(slot);
+      return SpriteImageRegion{*image,
+        {float(view.x), float(view.y), float(view.width), float(view.height)},
+        {0, 0, float(view.width), float(view.height)}, slot.width, slot.height, 0};
+    }
+  }
+  const auto selected = chooseSceneryWindow(slot.width, slot.height, x, y, width, height, 1536, wrap);
+  if (!selected) {
+    ++sceneryWindowRejections_[width > 1536 || height > 1536
+      ? "window-exceeds-limit" : "window-bounds"];
+    return std::nullopt;
+  }
+  const int startX = selected->x, startY = selected->y;
+  const int viewWidth = selected->width, viewHeight = selected->height;
+  for (auto& view : slot.sceneryWindows) {
+    if (view.x != startX || view.y != startY || view.width != viewWidth ||
+        view.height != viewHeight || view.premultiplied != premultiplied || view.wrap != wrap) continue;
+    if (auto image = inspect(view.handle)) {
+      view.lastFrame = sceneryFrame_;
+      slot.sceneryWindowFrame = sceneryFrame_;
+      ++sceneryWindowHits_;
+      markUsed(slot);
+      return SpriteImageRegion{*image,
+        {float(startX), float(startY), float(viewWidth), float(viewHeight)},
+        {0, 0, float(viewWidth), float(viewHeight)}, slot.width, slot.height, 0};
+    }
+  }
+  struct ScrollCandidate {
+    ImageHandle handle = 0;
+    int x = 0, y = 0;
+    SceneryWindowScroll plan{};
+  } candidate;
+  for (auto& view : slot.sceneryWindows) {
+    if (view.premultiplied != premultiplied || view.wrap != wrap) continue;
+    const auto old = inspect(view.handle);
+    if (!old || !old->texture || old->width != viewWidth || old->height != viewHeight)
+      continue;
+    const auto equivalentOrigin = [wrap](int oldOrigin, int newOrigin, int period) {
+      if (!wrap) return oldOrigin;
+      const auto delta = std::int64_t(newOrigin) - oldOrigin;
+      const auto periods = static_cast<std::int64_t>(
+        std::llround(static_cast<double>(delta) / period));
+      const auto aligned = std::int64_t(oldOrigin) + periods * period;
+      if (aligned < std::numeric_limits<int>::min() ||
+          aligned > std::numeric_limits<int>::max()) return oldOrigin;
+      return static_cast<int>(aligned);
+    };
+    const int alignedX = equivalentOrigin(view.x, startX, slot.width);
+    const int alignedY = equivalentOrigin(view.y, startY, slot.height);
+    auto plan = sceneryScrollPlan({alignedX, alignedY, view.width, view.height},
+      {startX, startY, viewWidth, viewHeight});
+    // Wrapped non-power-of-two sources can move by two origin quanta at once;
+    // require at least 25% reuse so those transitions still avoid full rebuilds.
+    if (!plan || plan->reusedPixels <=
+        std::uint64_t(viewWidth) * std::uint64_t(viewHeight) / 4U ||
+        plan->reusedPixels <= candidate.plan.reusedPixels) continue;
+    candidate = {view.handle, alignedX, alignedY, *plan};
+  }
+
+  auto makeScrolled = [&]() -> std::optional<ImageInfo> {
+    if (!candidate.handle) return std::nullopt;
+    const auto old = inspect(candidate.handle);
+    if (!old || !old->texture) return std::nullopt;
+    struct GlState {
+      GLint readFramebuffer = 0, drawFramebuffer = 0, texture = 0;
+      GLint unpackAlignment = 4, unpackRowLength = 0, readBuffer = GL_BACK;
+      GLint unpackBuffer = 0;
+      GLuint copyFramebuffer = 0;
+      GlState() {
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpackAlignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &unpackRowLength);
+        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+      }
+      ~GlState() {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(readFramebuffer));
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(drawFramebuffer));
+        glReadBuffer(static_cast<GLenum>(readBuffer));
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture));
+        glPixelStorei(GL_UNPACK_ALIGNMENT, unpackAlignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, unpackRowLength);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(unpackBuffer));
+        if (copyFramebuffer) glDeleteFramebuffers(1, &copyFramebuffer);
+      }
+    } state;
+    const auto createStart = std::chrono::steady_clock::now();
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    auto fresh = createRgba(viewWidth, viewHeight, nullptr, premultiplied);
+    if (!fresh) return std::nullopt;
+    struct FreshOwner {
+      ImageStore* store;
+      ImageHandle handle;
+      ~FreshOwner() { if (handle) store->release(handle); }
+    } owner{this, fresh->handle};
+    std::uint64_t uploaded = 0;
+    bool complete = false;
+    do {
+      glGenFramebuffers(1, &state.copyFramebuffer);
+      if (!state.copyFramebuffer) break;
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, state.copyFramebuffer);
+      glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D, old->texture, 0);
+      if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) break;
+      glReadBuffer(GL_COLOR_ATTACHMENT0);
+      glBindTexture(GL_TEXTURE_2D, fresh->texture);
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+      const auto& overlap = candidate.plan.overlap;
+      glCopyTexSubImage2D(GL_TEXTURE_2D, 0,
+        overlap.x - startX, overlap.y - startY,
+        overlap.x - candidate.x, overlap.y - candidate.y,
+        overlap.width, overlap.height);
+      if (glGetError() != GL_NO_ERROR) break;
+      for (int i = 0; i < candidate.plan.uncoveredCount; ++i) {
+        const auto& band = candidate.plan.uncovered[i];
+        const auto readStart = std::chrono::steady_clock::now();
+        auto pixels = readSceneryRegion(slot, startX + band.x, startY + band.y,
+          band.width, band.height, wrap);
+        sceneryWindowReadMicros_ += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - readStart).count());
+        if (!pixels) break;
+        if (premultiplied) {
+          const auto premultiplyStart = std::chrono::steady_clock::now();
+          for (std::size_t p = 0; p < pixels->rgba.size(); p += 4) {
+            const auto alpha = pixels->rgba[p + 3];
+            for (int channel = 0; channel < 3; ++channel)
+              pixels->rgba[p + channel] = static_cast<std::uint8_t>(
+                (pixels->rgba[p + channel] * alpha + 127) / 255);
+          }
+          sceneryWindowPremultiplyMicros_ += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - premultiplyStart).count());
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, band.x, band.y,
+          band.width, band.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels->rgba.data());
+        if (glGetError() != GL_NO_ERROR) break;
+        uploaded += pixels->rgba.size();
+      }
+      const auto expected = (std::uint64_t(viewWidth) * std::uint64_t(viewHeight) -
+        candidate.plan.reusedPixels) * 4U;
+      complete = uploaded == expected;
+    } while (false);
+    sceneryWindowCreateMicros_ += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - createStart).count());
+    if (!complete) return std::nullopt;
+    ++sceneryScrollWindows_;
+    sceneryScrollCopyBytes_ += candidate.plan.reusedPixels * 4U;
+    sceneryScrollUploadBytes_ += uploaded;
+    textureUploadBytes_ += uploaded;
+    textureRegionUpdates_ += candidate.plan.uncoveredCount;
+    owner.handle = 0;
+    return fresh;
+  };
+
+  auto image = makeScrolled();
+  if (!image) {
+    if (candidate.handle) ++sceneryScrollFallbacks_;
+    const auto readStart = std::chrono::steady_clock::now();
+    auto region = readSceneryRegion(slot, startX, startY, viewWidth, viewHeight, wrap);
+    sceneryWindowReadMicros_ += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - readStart).count());
+    if (!region) {
+      ++sceneryWindowRejections_["backing-read-failed"];
+      return std::nullopt;
+    }
+    if (premultiplied) {
+      const auto premultiplyStart = std::chrono::steady_clock::now();
+      for (std::size_t p = 0; p < region->rgba.size(); p += 4) {
+        const auto alpha = region->rgba[p + 3];
+        for (int channel = 0; channel < 3; ++channel)
+          region->rgba[p + channel] = static_cast<std::uint8_t>(
+            (region->rgba[p + channel] * alpha + 127) / 255);
+      }
+      sceneryWindowPremultiplyMicros_ += static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now() - premultiplyStart).count());
+    }
+    const auto createStart = std::chrono::steady_clock::now();
+    image = createRgba(viewWidth, viewHeight, region->rgba.data(), premultiplied);
+    sceneryWindowCreateMicros_ += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - createStart).count());
+    if (!image) return std::nullopt;
+  }
+  try {
+    slot.sceneryWindows.push_back({image->handle, startX, startY, viewWidth,
+      viewHeight, premultiplied, wrap, sceneryFrame_});
+  } catch (...) {
+    release(image->handle);
+    throw;
+  }
+  if (slot.sceneryWindows.size() > 4) {
+    const auto oldest = std::min_element(slot.sceneryWindows.begin(),
+      slot.sceneryWindows.end() - 1,
+      [](const auto& a, const auto& b) { return a.lastFrame < b.lastFrame; });
+    release(oldest->handle);
+    slot.sceneryWindows.erase(oldest);
+  }
+  slot.sceneryWindowFrame = sceneryFrame_;
+  markUsed(slot);
+  ++sceneryWindowUploads_;
+  return SpriteImageRegion{*image,
+    {float(startX), float(startY), float(viewWidth), float(viewHeight)},
+    {0, 0, float(viewWidth), float(viewHeight)}, slot.width, slot.height, 0};
+}
+
 std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backing,
     int x, int y, int width, int height, bool* acquired) {
   const auto extent = checkedImageExtent(width, height);
   if (!extent) return std::nullopt;
   ImagePixels result{width, height, std::vector<std::uint8_t>(extent->rgbaBytes)};
+  if (!readPreparedRegionInto(backing, x, y, width, height, result, 0, 0, acquired))
+    return std::nullopt;
+  return result;
+}
+
+bool ImageStore::readPreparedRegionInto(PreparedBacking& backing, int x, int y,
+    int width, int height, ImagePixels& destination, int destinationX,
+    int destinationY, bool* acquired) {
+  const auto extent = checkedImageExtent(width, height);
+  if (!extent || destination.width <= 0 || destination.height <= 0 ||
+      destinationX < 0 || destinationY < 0 ||
+      destinationX > destination.width - width ||
+      destinationY > destination.height - height || x < 0 || y < 0 ||
+      x > backing.descriptor.width - width ||
+      y > backing.descriptor.height - height ||
+      destination.rgba.size() < static_cast<std::size_t>(destination.width) *
+        static_cast<std::size_t>(destination.height) * 4U) return false;
   const auto fillRectangle = [&](int left, int top, int right, int bottom,
                                  const std::array<std::uint8_t, 4>& color) {
     if (left >= right || top >= bottom ||
         std::all_of(color.begin(), color.end(), [](std::uint8_t value) { return value == 0; })) return;
     const auto rowBytes = static_cast<std::size_t>(right - left) * 4U;
-    const auto stride = static_cast<std::size_t>(width) * 4U;
-    auto* first = result.rgba.data() + static_cast<std::size_t>(top - y) * stride +
-                  static_cast<std::size_t>(left - x) * 4U;
+    const auto stride = static_cast<std::size_t>(destination.width) * 4U;
+    auto* first = destination.rgba.data() +
+        static_cast<std::size_t>(destinationY + top - y) * stride +
+        static_cast<std::size_t>(destinationX + left - x) * 4U;
     std::copy(color.begin(), color.end(), first);
     for (std::size_t filled = 4; filled < rowBytes;) {
       const auto count = std::min(filled, rowBytes - filled);
@@ -1822,7 +2325,7 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
   };
   if (backing.descriptor.uniform) {
     fillRectangle(x, y, x + width, y + height, *backing.descriptor.uniform);
-    return result;
+    return true;
   }
   for (const auto& cell : backing.descriptor.cells) {
     const int left = std::max(x, cell.rect[0]), top = std::max(y, cell.rect[1]);
@@ -1837,18 +2340,19 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
     const int copyBottom = std::min(bottom, cropY + cell.crop[3]);
     if (copyLeft >= copyRight || copyTop >= copyBottom) continue;
     const auto* page = preparedPixels(backing, cell.page, acquired);
-    if (!page) return std::nullopt;
+    if (!page) return false;
     const auto rowBytes = static_cast<std::size_t>(copyRight - copyLeft) * 4U;
     for (int row = copyTop; row < copyBottom; ++row) {
-      auto* destination = result.rgba.data() +
-          (static_cast<std::size_t>(row - y) * width + copyLeft - x) * 4U;
+      auto* destinationPixel = destination.rgba.data() +
+          (static_cast<std::size_t>(destinationY + row - y) * destination.width +
+           destinationX + copyLeft - x) * 4U;
       const auto* source = page->rgba.data() +
           (static_cast<std::size_t>(cell.atlas[1] + row - cropY) * page->width +
            cell.atlas[0] + copyLeft - cropX) * 4U;
-      std::memcpy(destination, source, rowBytes);
+      std::memcpy(destinationPixel, source, rowBytes);
     }
   }
-  return result;
+  return true;
 }
 
 ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t index, bool* acquired) {
@@ -2680,11 +3184,48 @@ void ImageStore::notePreparedFallback(ImageHandle handle, const std::string& rea
   else if (hasPreparedBacking(handle)) ++preparedFallbacks_[reason];
 }
 
-std::optional<ImageInfo> ImageStore::lookup(ImageHandle handle) const {
+std::optional<ImageInfo> ImageStore::lookup(ImageHandle handle,
+    const char* caller) const {
   auto info = inspect(handle);
-  if (!info || info->texture || (!slots_[(handle & indexMask)-1U].prepared && !slots_[(handle & indexMask)-1U].tiles)) return info;
+  if (!info) return info;
   auto& self = *const_cast<ImageStore*>(this);
-  if (!self.materialize(self.slots_[(handle & indexMask)-1U], false)) return std::nullopt;
+  auto& slot = self.slots_[(handle & indexMask)-1U];
+  if (info->texture) {
+    if (self.hasWindowedScenery(handle))
+      slot.sceneryFullRequestedFrame = self.sceneryFrame_;
+    return info;
+  }
+  if (slot.deferredScenery && !info->texture) {
+    auto decoded = slot.cachedPixels ? std::optional<ImagePixels>{} :
+      self.readSceneryRegion(slot, 0, 0, slot.width, slot.height);
+    const auto* pixels = slot.cachedPixels ? &*slot.cachedPixels :
+      decoded ? &*decoded : nullptr;
+    if (!pixels) return std::nullopt;
+    const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), 4);
+    if (!texture) return std::nullopt;
+    const auto bytes = static_cast<std::size_t>(slot.width) * slot.height * 4;
+    slot.texture = texture;
+    // Keep the compressed backing so a later eligible draw can still create
+    // a window after a full-texture consumer requested the ordinary image.
+    slot.sceneryFullMaterialized = true;
+    slot.sceneryFullRequestedFrame = self.sceneryFrame_;
+    if (slot.sceneryFirstMaterializationCaller.empty())
+      slot.sceneryFirstMaterializationCaller = caller ? caller : "unknown";
+    ++self.sceneryFullFallbacks_;
+    ++self.textureCreates_; ++self.textureEpoch_;
+    self.textureUploadBytes_ += bytes; self.gpuBytes_ += bytes;
+    self.peakGpuBytes_ = std::max(self.peakGpuBytes_, self.gpuBytes_);
+    return self.inspect(handle);
+  }
+  if (!slot.prepared && !slot.tiles) return info;
+  const bool sceneryBacking = slot.deferredScenery || slot.prepared || slot.tiles;
+  if (!self.materialize(slot, false)) return std::nullopt;
+  if (sceneryBacking && !slot.sceneryFullMaterialized) {
+    slot.sceneryFullMaterialized = true;
+    slot.sceneryFirstMaterializationCaller = caller ? caller : "unknown";
+    ++self.sceneryFullFallbacks_;
+  }
+  if (sceneryBacking) slot.sceneryFullRequestedFrame = self.sceneryFrame_;
   return inspect(handle);
 }
 

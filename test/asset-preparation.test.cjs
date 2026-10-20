@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const test = require('node:test');
-const { prepareAssets, validDescriptor } = require('../runner/asset-preparation.cjs');
+const { prepareAssets, validDescriptor, automaticRecipe } = require('../runner/asset-preparation.cjs');
 const { acquireLock } = require('../runner/preparation-lifetime.cjs');
 const { validate } = require('../runner/index.cjs');
 const { parse } = require('../runner/cli.cjs');
@@ -1127,6 +1127,36 @@ test('automatic character grids retain ordinary and single-character logical lay
   }
 });
 
+test('large parallax images receive a bounded preparation layout', async () => {
+  const f = fixture();
+  fs.unlinkSync(path.join(f.gameRoot, f.source));
+  const source = 'img/parallaxes/scenery.png';
+  const file = path.join(f.gameRoot, source);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const png = Buffer.from(PNG);
+  png.writeUInt32BE(3240, 16);
+  png.writeUInt32BE(3240, 20);
+  fs.writeFileSync(file, png);
+  let observed;
+  f.native.assets.processImage = async (_input, _output, recipe) => {
+    observed = recipe;
+    return null;
+  };
+  const result = await prepareAssets(f);
+  assert.equal(result.completed, 1);
+  assert.deepEqual(observed.grid, [3, 3]);
+  assert.equal(observed.source, source);
+  const generated = await automaticRecipe(file, source,
+    crypto.createHash('sha256').update(png).digest('hex'));
+  assert.deepEqual(generated.grid, [3, 3]);
+  assert.equal(generated.source, source);
+  const tooSmall = Buffer.from(png);
+  tooSmall.writeUInt32BE(2047, 16);
+  tooSmall.writeUInt32BE(3240, 20);
+  fs.writeFileSync(file, tooSmall);
+  assert.equal(await automaticRecipe(file, source, '0'.repeat(64)), undefined);
+});
+
 test('block-grid descriptors preserve whole block crops and merged fills within authored frames', () => {
   const cells = [];
   for (let row=0;row<2;++row) for (let column=0;column<4;++column)
@@ -1315,7 +1345,7 @@ test('legacy catalogs acquire content hashes without regenerating prepared asset
   const catalog = JSON.parse(fs.readFileSync(file));
   const hash = value => crypto.createHash('sha256').update(value).digest('hex');
   catalog.binding = hash(JSON.stringify({ gameRoot: f.gameRoot, cacheRoot: f.cacheRoot,
-    processorIdentity: { processor: 'lossless-images-v6', decoder: 'png-rgba-v1', pageSize: 2048 }, recipes: [] }));
+    processorIdentity: { processor: 'lossless-images-v7', decoder: 'png-rgba-v1', pageSize: 2048 }, recipes: [] }));
   const payload = JSON.parse(catalog.payload);
   delete payload.entries[0].backingHash;
   delete payload.entries[0].pageHashes;

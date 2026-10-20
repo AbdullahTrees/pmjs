@@ -505,6 +505,28 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
   napi_set_named_property(env, result, "preparedHits", number(env, images.preparedHits()));
   napi_set_named_property(env, result, "preparedRegions", number(env, images.preparedRegions()));
   napi_set_named_property(env, result, "preparedMaterializations", number(env, images.preparedMaterializations()));
+  napi_set_named_property(env, result, "sceneryWindowHits", number(env, images.sceneryWindowHits()));
+  napi_set_named_property(env, result, "sceneryWindowUploads", number(env, images.sceneryWindowUploads()));
+  napi_set_named_property(env, result, "sceneryScrollWindows", number(env, images.sceneryScrollWindows()));
+  napi_set_named_property(env, result, "sceneryScrollCopyBytes", number(env, images.sceneryScrollCopyBytes()));
+  napi_set_named_property(env, result, "sceneryScrollUploadBytes", number(env, images.sceneryScrollUploadBytes()));
+  napi_set_named_property(env, result, "sceneryScrollFallbacks", number(env, images.sceneryScrollFallbacks()));
+  napi_set_named_property(env, result, "sceneryFullFallbacks", number(env, images.sceneryFullFallbacks()));
+  napi_set_named_property(env, result, "sceneryWindowReadMicros", number(env, images.sceneryWindowReadMicros()));
+  napi_set_named_property(env, result, "sceneryWindowPremultiplyMicros", number(env, images.sceneryWindowPremultiplyMicros()));
+  napi_set_named_property(env, result, "sceneryWindowCreateMicros", number(env, images.sceneryWindowCreateMicros()));
+  napi_value sceneryWindowRejections;
+  check(env, napi_create_object(env, &sceneryWindowRejections),
+    "cannot create scenery window rejection counts");
+  for (const auto& [reason, count] : images.sceneryWindowRejections())
+    napi_set_named_property(env, sceneryWindowRejections, reason.c_str(), number(env, count));
+  napi_set_named_property(env, result, "sceneryWindowRejections", sceneryWindowRejections);
+  napi_value sceneryBackingRejections;
+  check(env, napi_create_object(env, &sceneryBackingRejections),
+    "cannot create scenery backing rejection counts");
+  for (const auto& [reason, count] : images.sceneryBackingRejections())
+    napi_set_named_property(env, sceneryBackingRejections, reason.c_str(), number(env, count));
+  napi_set_named_property(env, result, "sceneryBackingRejections", sceneryBackingRejections);
   napi_set_named_property(env, result, "preparedPageDecodes", number(env, images.preparedPageDecodes()));
   napi_set_named_property(env, result, "preparedSharedPageHits", number(env, images.preparedSharedPageHits()));
   napi_set_named_property(env, result, "preparedSharedTextureHits", number(env, images.preparedSharedTextureHits()));
@@ -565,6 +587,12 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
     napi_set_named_property(env, item, "lastUsedSerial",
       number(env, entry.lastUsedSerial));
     napi_set_named_property(env, item, "warm", boolean(env, entry.warm));
+    napi_set_named_property(env, item, "sceneryBacking", boolean(env, entry.sceneryBacking));
+    napi_set_named_property(env, item, "sceneryFullMaterialized",
+      boolean(env, entry.sceneryFullMaterialized));
+    if (!entry.sceneryFirstMaterializationCaller.empty())
+      napi_set_named_property(env, item, "sceneryFirstMaterializationCaller",
+        string(env, entry.sceneryFirstMaterializationCaller));
     check(env, napi_set_element(env, largest, index, item),
           "cannot append image memory entry");
   }

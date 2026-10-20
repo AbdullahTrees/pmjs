@@ -114,6 +114,9 @@ struct ImageMemoryEntry {
   std::size_t cpuBytes = 0;
   std::uint64_t lastUsedSerial = 0;
   bool warm = false;
+  bool sceneryBacking = false;
+  bool sceneryFullMaterialized = false;
+  std::string sceneryFirstMaterializationCaller;
   std::string path;
 };
 
@@ -204,6 +207,26 @@ class ImageStore {
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
       bool premultiplied = true);
+  std::optional<SpriteImageRegion> resolveSceneryWindow(ImageHandle handle,
+      int x, int y, int width, int height, bool premultiplied, bool wrap = false);
+  bool hasWindowedScenery(ImageHandle handle) const;
+  std::uint64_t sceneryWindowHits() const { return sceneryWindowHits_; }
+  std::uint64_t sceneryWindowUploads() const { return sceneryWindowUploads_; }
+  std::uint64_t sceneryFullFallbacks() const { return sceneryFullFallbacks_; }
+  std::uint64_t sceneryScrollWindows() const { return sceneryScrollWindows_; }
+  std::uint64_t sceneryScrollCopyBytes() const { return sceneryScrollCopyBytes_; }
+  std::uint64_t sceneryScrollUploadBytes() const { return sceneryScrollUploadBytes_; }
+  std::uint64_t sceneryScrollFallbacks() const { return sceneryScrollFallbacks_; }
+  std::uint64_t sceneryWindowReadMicros() const { return sceneryWindowReadMicros_; }
+  std::uint64_t sceneryWindowPremultiplyMicros() const { return sceneryWindowPremultiplyMicros_; }
+  std::uint64_t sceneryWindowCreateMicros() const { return sceneryWindowCreateMicros_; }
+  void noteSceneryWindowRejection(ImageHandle handle, const char* reason);
+  const std::unordered_map<std::string, std::uint64_t>& sceneryWindowRejections() const {
+    return sceneryWindowRejections_;
+  }
+  const std::unordered_map<std::string, std::uint64_t>& sceneryBackingRejections() const {
+    return sceneryBackingRejections_;
+  }
   // Frame textures use ordinary sampling with approximate filtering.
   std::optional<SpriteImageRegion> resolvePreparedFrameRegion(
       ImageHandle handle, float x, float y, float width, float height,
@@ -267,9 +290,11 @@ class ImageStore {
   bool beginUse(ImageHandle handle);
   bool endUse(ImageHandle handle);
   void update();
-  std::optional<ImageInfo> lookup(ImageHandle handle) const;
+  std::optional<ImageInfo> lookup(ImageHandle handle,
+      const char* caller = "image-lookup") const;
   // Pixi samples premultiplied texels; keep the straight CPU snapshot intact.
-  std::optional<ImageInfo> lookupPremultiplied(ImageHandle handle);
+  std::optional<ImageInfo> lookupPremultiplied(ImageHandle handle,
+      const char* caller = "image-lookup");
   ImageHandle fallbackHandle();
   std::optional<ImageInfo> acquireFallback();
   std::uint64_t fallbackUses() const { return fallbackUses_; }
@@ -374,6 +399,26 @@ class ImageStore {
     bool mipmapsReady = false, premultipliedMipmapsReady = false;
     std::size_t mipmapBytes = 0, premultipliedMipmapBytes = 0;
     bool retainCpuPixels = false;
+    bool deferredScenery = false;
+    bool sceneryFullMaterialized = false;
+    std::string sceneryFirstMaterializationCaller;
+    std::uint64_t sceneryFullRequestedFrame = 0;
+    std::uint64_t sceneryWindowFrame = 0;
+    struct SceneryTile {
+      int width = 0, height = 0;
+      bool raw = false;
+      std::vector<std::uint8_t> data;
+    };
+    std::vector<SceneryTile> sceneryTiles;
+    int sceneryColumns = 0;
+    struct SceneryWindow {
+      ImageHandle handle = 0;
+      int x = 0, y = 0, width = 0, height = 0;
+      bool premultiplied = false;
+      bool wrap = false;
+      std::uint64_t lastFrame = 0;
+    };
+    std::vector<SceneryWindow> sceneryWindows;
     std::string cacheKey;
     std::filesystem::path sourcePath;
     std::string lastPreparedFallbackReason;
@@ -388,6 +433,8 @@ class ImageStore {
   static std::shared_ptr<ImageFileSource> captureTileFallback(const TileLoad& load);
   std::optional<ImageInfo> installTileLoad(std::shared_ptr<TileLoad> load, bool retainCpu);
   std::optional<ImagePixels> readTileRegion(const Slot& slot, int x, int y, int width, int height) const;
+  std::optional<ImagePixels> readSceneryRegion(const Slot& slot,
+      int x, int y, int width, int height, bool wrap = false) const;
   std::optional<SpriteImageRegion> resolveTileRegion(Slot& slot, float x, float y,
       float width, float height, bool premultiplied);
   std::size_t tileWarmBytes() const;
@@ -403,6 +450,14 @@ class ImageStore {
   mutable std::unordered_map<std::string, std::weak_ptr<ImageFileSource>> tileFiles_;
   std::shared_ptr<ImageFileSource> captureTileFile(const std::filesystem::path& path) const;
   std::uint64_t tileHits_ = 0, tileRegions_ = 0, tileMaterializations_ = 0;
+  std::uint64_t sceneryFrame_ = 0, sceneryWindowHits_ = 0;
+  std::uint64_t sceneryWindowUploads_ = 0, sceneryFullFallbacks_ = 0;
+  std::uint64_t sceneryScrollWindows_ = 0, sceneryScrollCopyBytes_ = 0;
+  std::uint64_t sceneryScrollUploadBytes_ = 0, sceneryScrollFallbacks_ = 0;
+  std::uint64_t sceneryWindowReadMicros_ = 0, sceneryWindowCreateMicros_ = 0;
+  std::uint64_t sceneryWindowPremultiplyMicros_ = 0;
+  std::unordered_map<std::string, std::uint64_t> sceneryWindowRejections_;
+  std::unordered_map<std::string, std::uint64_t> sceneryBackingRejections_;
   std::uint64_t tilePageDecodes_ = 0, tilePageUploads_ = 0;
   std::unordered_map<std::string, std::uint64_t> tileFallbacks_, tileRegionSets_;
   void clearPrepared(Slot& slot);
@@ -412,6 +467,9 @@ class ImageStore {
   static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page, bool* acquired = nullptr);
   static std::optional<ImagePixels> readPreparedRegion(PreparedBacking& backing,
       int x, int y, int width, int height, bool* acquired = nullptr);
+  static bool readPreparedRegionInto(PreparedBacking& backing, int x, int y,
+      int width, int height, ImagePixels& destination, int destinationX,
+      int destinationY, bool* acquired = nullptr);
   std::optional<ImageInfo> preparedPage(Slot& slot, std::size_t page, bool premultiplied);
   static ImageHandle makeHandle(std::size_t index, std::uint16_t generation);
   void markUsed(Slot& slot);

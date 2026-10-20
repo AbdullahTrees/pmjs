@@ -531,7 +531,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, property(env, exports, "images"), "tileSlot", tileSlot);
   set(env, assets, "tilePreparationVersion", string(env, "lossless-tile-sets-v3"));
   const auto version = moduleObject(env);
-  set(env, version, "processor", string(env, "lossless-images-v6"));
+  set(env, version, "processor", string(env, "lossless-images-v7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-v1"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);

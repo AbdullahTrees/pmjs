@@ -1118,7 +1118,7 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   highp vec4 sampleBlockImage(highp vec2 coordinate);
   void main() {
     highp vec2 coord = vertexUv;
-    if (clampedTilingSampling) {
+    if (clampedTilingSampling && !derivedImage) {
       // Repeat in frame coordinates before mapping and clamping the sampled image.
       highp vec2 margin = vec2(0.5) / imageDimensions;
       coord = coord + ceil(-coord);
@@ -1365,7 +1365,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
           sampleColor = texture(image, coord);
         }
       } else {
-      if (clampedTilingSampling) {
+      if (clampedTilingSampling && !derivedImage) {
         highp vec2 margin = vec2(0.5) / imageDimensions;
         coord = coord + ceil(-coord);
         if (atlasTilingSampling) {
