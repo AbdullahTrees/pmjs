@@ -1348,7 +1348,11 @@ std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
   // Render targets are already framebuffer pixels, not decoded straight images.
   if (slot.gpuOnly) return info;
   if (!slot.premultipliedTexture) {
-    auto pixels = readTexturePixels(*info, slot.channels);
+    auto pixels = slot.cachedPixels &&
+        slot.cachedPixels->width == info->width &&
+        slot.cachedPixels->height == info->height
+      ? std::optional<ImagePixels>(*slot.cachedPixels)
+      : readTexturePixels(*info, slot.channels);
     if (!pixels) return std::nullopt;
     bool changed = false;
     for (std::size_t offset = 0; offset < pixels->rgba.size(); offset += 4) {

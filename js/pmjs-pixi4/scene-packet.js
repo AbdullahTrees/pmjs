@@ -300,6 +300,10 @@ function writeNativePlainSpriteSegment(bindings, parentIndex) {
     if (PIXI.SCALE_MODES && binding.base.scaleMode === PIXI.SCALE_MODES.NEAREST) {
       nativeSceneMetadata[metadataOffset + 5] |= 8;
     }
+    if (binding.base.mipmap &&
+        !(PIXI.BaseRenderTexture && binding.base instanceof PIXI.BaseRenderTexture)) {
+      nativeSceneMetadata[metadataOffset + 5] |= 65536;
+    }
     if (nativeSceneRoundPixels) nativeSceneMetadata[metadataOffset + 5] |= 256;
     if (binding.base.__pmjsPremultiplied) nativeSceneMetadata[metadataOffset + 5] |= 1024;
     if (binding.texture.__pmjsStandaloneBitmapRegion) nativeSceneMetadata[metadataOffset + 5] |= 8192;
