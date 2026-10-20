@@ -735,12 +735,22 @@ return "${MODULE_STATUS:-0}"
 
     def test_setup_failures_stop_and_started_helpers_are_cleaned_up(self):
         for setting, status in (('CONTROL_STATUS', 7), ('MODULE_STATUS', 8),
-                                ('CONTROLS_STATUS', 1), ('PLATFORM_STATUS', 1), ('NODE_STATUS', 23)):
+                                ('CONTROLS_STATUS', 1), ('NODE_STATUS', 23)):
             with self.subTest(setting=setting):
-                started = setting in ('PLATFORM_STATUS', 'NODE_STATUS')
+                started = setting == 'NODE_STATUS'
                 result = self.run_launcher(expect_finish=started, **{setting: str(status)})
                 self.assertEqual(result.returncode, status)
                 self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
+
+    def test_platform_helper_failure_does_not_stop_the_game(self):
+        # muOS's helper exits nonzero when it has nothing to update; established
+        # ports keep going, and so must the bundled launcher.
+        result = self.run_launcher(PLATFORM_STATUS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.capture.exists())
+        events = self.events.read_text().splitlines()
+        self.assertIn('platform:' + str(self.port / 'runtime/bin/node'), events)
+        self.assertEqual(events.count('finish:/firmware/lib'), 1, events)
 
     def test_cleanup_failure_retains_game_failure(self):
         self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)

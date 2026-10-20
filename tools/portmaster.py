@@ -42,7 +42,10 @@ export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
 
 [ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
 $GPTOKEYB2 "$BINARY" -c "$GAMEDIR/@ID@.ini" &
-pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY" || { pm_finish; exit 1; }
+# Firmware helpers may return nonzero when they have nothing to do: muOS returns 1
+# when its optional foreground_process file is absent. Established ports ignore
+# the status, and stopping here would leave the user in the firmware menu.
+pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY" || true
 
 XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
   --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
