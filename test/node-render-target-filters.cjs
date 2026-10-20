@@ -24,7 +24,7 @@ const schema = native.scene.schema;
 for (const resolution of [1, 2]) {
   const inner = plan([3, 2, 8, 8], resolution);
   for (const nested of [false, true]) {
-    for (const snapshot of [false, true]) {
+    for (const snapshot of [false, true]) for (const filtered of [true, false, true]) {
       const metadata = [], values = [];
       function record(kind, parent, resource, filter, flags, x = 0, y = 0) {
         const data = new Array(schema.valueStride).fill(0);
@@ -33,11 +33,11 @@ for (const resolution of [1, 2]) {
         metadata.push(kind, parent, resource, 0xffffff, filter, flags, 0);
         values.push(...data);
       }
-      if (nested) record(6, 0xffffffff, outer.handle, 31, 0);
-      record(6, nested ? 0 : 0xffffffff, inner.handle, 31, 0);
-      record(1, nested ? 1 : 0, source.handle, 0, 8, 3, 2);
-      record(7, nested ? 1 : 0, 0, 0, 0);
-      if (nested) record(7, 0, 0, 0, 0);
+      if (filtered && nested) record(6, 0xffffffff, outer.handle, 31, 0);
+      if (filtered) record(6, nested ? 0 : 0xffffffff, inner.handle, 31, 0);
+      record(1, filtered ? (nested ? 1 : 0) : 0xffffffff, source.handle, 0, 8, 3, 2);
+      if (filtered) record(7, nested ? 1 : 0, 0, 0, 0);
+      if (filtered && nested) record(7, 0, 0, 0, 0);
       native.beginFrame();
       native.scene.submit(schema.version, new Uint32Array(metadata), new Float32Array(values),
         metadata.length / schema.metadataStride);
@@ -52,7 +52,7 @@ for (const resolution of [1, 2]) {
           const expected = x >= 3 && x < 11 && y >= 2 && y < 10 ?
             y < 6 ? [255, 0, 0, 255] : [0, 0, 255, 255] : [0, 0, 0, 0];
           assert.deepEqual(Array.from(actual.slice((y * 16 + x) * 4, (y * 16 + x + 1) * 4)),
-            expected, `resolution=${resolution}, nested=${nested}, snapshot=${snapshot}, pixel=${x},${y}`);
+            expected, `resolution=${resolution}, nested=${nested}, snapshot=${snapshot}, filtered=${filtered}, pixel=${x},${y}`);
         }
       }
       native.canvas.release(target.handle);

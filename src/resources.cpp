@@ -2333,11 +2333,10 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
   if (slot.tiles) return readTileRegion(slot, x, y, width, height);
   if (!slot.prepared) {
     // Mutable GPU surfaces are read on demand; never retain a stale CPU copy.
-    std::optional<ImagePixels> gpuPixels;
-    if (slot.gpuOnly || slot.renderTarget) gpuPixels = readTexturePixels(*info, slot.storage);
-    auto* full = (slot.gpuOnly || slot.renderTarget) ?
-      (gpuPixels ? &*gpuPixels : nullptr) : readPixels(handle);
-    if (!full && !slot.gpuOnly && !slot.renderTarget) {
+    if (slot.gpuOnly || slot.renderTarget)
+      return readTexturePixels(*info, slot.storage, std::array<int, 4>{x, y, width, height});
+    auto* full = readPixels(handle);
+    if (!full) {
       slot.cachedPixels = readTexturePixels(*info, slot.storage);
       full = slot.cachedPixels ? &*slot.cachedPixels : nullptr;
     }

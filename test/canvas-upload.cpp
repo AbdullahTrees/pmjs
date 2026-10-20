@@ -9,6 +9,7 @@
 namespace {
 std::vector<uint8_t> texture;
 int textureWidth, textureHeight, rowLength, fullUploads, regionUploads;
+std::array<int, 4> readRectangle{};
 GLenum pendingError = GL_NO_ERROR;
 bool failUpload = false;
 bool failRead = false;
@@ -51,9 +52,11 @@ void glFramebufferTexture2D(GLenum, GLenum, GLenum, GLuint, GLint) {}
 GLenum glCheckFramebufferStatus(GLenum) { return GL_FRAMEBUFFER_COMPLETE; }
 void glBindBuffer(GLenum, GLuint) {}
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels) {
-  assert(x==0 && y==0 && width==textureWidth && height==textureHeight && format==GL_RGBA && type==GL_UNSIGNED_BYTE);
+  assert(x>=0 && y>=0 && x+width<=textureWidth && y+height<=textureHeight && format==GL_RGBA && type==GL_UNSIGNED_BYTE);
+  readRectangle = {x, y, width, height};
   if (failRead) { pendingError=GL_INVALID_OPERATION; return; }
-  std::copy(texture.begin(),texture.end(),static_cast<uint8_t*>(pixels));
+  for (int row=0;row<height;++row)
+    std::copy_n(texture.data()+((y+row)*textureWidth+x)*4,width*4,static_cast<uint8_t*>(pixels)+row*width*4);
 }
 void glDeleteFramebuffers(GLsizei, const GLuint*) {}
 }
@@ -217,6 +220,31 @@ int main() {
     assert(!images.lookup(gpu->handle)->knownAllZero);
     assert(images.updateRgbaRegion(gpu->handle,0,0,2,2,zeros.data(),2));
     assert(!images.lookup(gpu->handle)->knownAllZero);
+    assert(images.release(gpu->handle));
+  }
+  for (const bool target : {false, true}) {
+    const auto gpu = target ? images.createRenderTarget(5,3,true) : images.createRgba(5,3,nullptr,true);
+    assert(gpu);
+    std::vector<uint8_t> pattern(5*3*4);
+    for (int i=0;i<15;++i) {
+      pattern[i*4]=static_cast<uint8_t>(i*11);
+      pattern[i*4+1]=static_cast<uint8_t>(i*7);
+      pattern[i*4+2]=static_cast<uint8_t>(i*3);
+      pattern[i*4+3]=255;
+    }
+    assert(images.updateRgba(gpu->handle,pattern.data()));
+    const auto region = images.readPixelsRegion(gpu->handle,2,1,2,2);
+    assert(region && region->width==2 && region->height==2);
+    assert((readRectangle==std::array<int,4>{2,1,2,2}));
+    std::vector<uint8_t> expected;
+    for (int y=1;y<3;++y) expected.insert(expected.end(),pattern.begin()+(y*5+2)*4,pattern.begin()+(y*5+4)*4);
+    assert(region->rgba==expected);
+    const std::array<uint8_t,4> changed{19,37,53,255};
+    assert(images.updateRgbaRegion(gpu->handle,4,2,1,1,changed.data(),1));
+    const auto edge = images.readPixelsRegion(gpu->handle,4,2,1,1);
+    assert(edge && edge->rgba==std::vector<uint8_t>(changed.begin(),changed.end()));
+    assert((readRectangle==std::array<int,4>{4,2,1,1}));
+    assert(!images.readPixelsRegion(gpu->handle,4,2,2,1));
     assert(images.release(gpu->handle));
   }
   for (const bool gpu : {false,true}) for (const bool immediate : {false,true}) for (const bool region : {false,true}) {

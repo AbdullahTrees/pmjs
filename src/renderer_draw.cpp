@@ -480,14 +480,15 @@ void Renderer::renderScene() {
     } else {
       filterBounds_.clear();
     }
-  std::vector<bool> inlineFilterBoundary(frame_.commands.size(), false);
+  const auto filterCommandCount = hasFilterGroups ? frame_.commands.size() : 0;
+  std::vector<bool> inlineFilterBoundary(filterCommandCount, false);
   std::vector<const RenderCommand*> inlineFilterMatrix(
-      frame_.commands.size(), nullptr);
-  std::vector<bool> inlineFilterClipped(frame_.commands.size(), false);
-  std::vector<std::array<int, 4>> inlineFilterClip(frame_.commands.size());
-  std::vector<std::size_t> filterDepthBefore(frame_.commands.size(), 0);
+      filterCommandCount, nullptr);
+  std::vector<bool> inlineFilterClipped(filterCommandCount, false);
+  std::vector<std::array<int, 4>> inlineFilterClip(filterCommandCount);
+  std::vector<std::size_t> filterDepthBefore(filterCommandCount, 0);
   std::size_t scannedFilterDepth = 0;
-  for (std::size_t index = 0; index < frame_.commands.size(); ++index) {
+  for (std::size_t index = 0; index < filterCommandCount; ++index) {
     const RenderCommand& command = frame_.commands[index];
     if (command.action == RenderCommand::Action::filterEnd &&
         scannedFilterDepth > 0) --scannedFilterDepth;
@@ -515,7 +516,7 @@ void Renderer::renderScene() {
            std::abs(matrix[13]) <= epsilon &&
            std::abs(matrix[14]) <= epsilon;
   };
-  for (std::size_t begin = 0; begin < frame_.commands.size(); ++begin) {
+  for (std::size_t begin = 0; begin < filterCommandCount; ++begin) {
     const RenderCommand& filter = frame_.commands[begin];
     if (filter.action != RenderCommand::Action::filterBegin ||
         sceneProjection_ != std::array<float, 6>{1, 0, 0, 1, 0, 0} ||
@@ -664,7 +665,8 @@ void Renderer::renderScene() {
   for (std::size_t commandIndex = 0;
        commandIndex < frame_.commands.size(); ++commandIndex) {
     const RenderCommand& command = frame_.commands[commandIndex];
-    if (inlineFilterBoundary[commandIndex]) continue;
+    if (hasFilterGroups && inlineFilterBoundary[commandIndex]) continue;
+    const auto* inlineMatrix = hasFilterGroups ? inlineFilterMatrix[commandIndex] : nullptr;
     if (command.action != RenderCommand::Action::draw) {
       viewportMapping = {1, 1, 0, 0};
       if (command.action == RenderCommand::Action::filterBegin) preparingFilters[preparingFilterDepth] = &command;
@@ -780,7 +782,7 @@ void Renderer::renderScene() {
       !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
       command.blur <= 0 && command.maskImage == 0 && command.textureRotation == 0 &&
       // A constant texture needs no UV remapping in the inline effect sampler.
-      (inlineFilterMatrix[commandIndex] == nullptr || uniformPrepared);
+      (inlineMatrix == nullptr || uniformPrepared);
     const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
     auto derived = frameEligible && paletteEligible ? images_.resolveSpriteRegion(command.image,
       command.source[0], command.source[1], command.source[2], command.source[3],
@@ -805,7 +807,7 @@ void Renderer::renderScene() {
       !command.appliesColorMatrix && !command.appliesSpriteColor &&
       !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
       command.blur <= 0 && command.maskImage == 0 && command.textureRotation == 0 &&
-      inlineFilterMatrix[commandIndex] == nullptr &&
+      inlineMatrix == nullptr &&
       sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
       viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
       p1[0] > p0[0] && p3[1] > p0[1] && p1[1] == p0[1] && p3[0] == p0[0] &&
@@ -825,7 +827,7 @@ void Renderer::renderScene() {
         command.textureRotation ? "texture-rotation" :
         command.appliesColorMatrix || command.appliesSpriteColor ||
           command.appliesMeshPostTintOverlay || command.standaloneBitmapRegion ||
-          inlineFilterMatrix[commandIndex] ? "effects-or-sampler" :
+          inlineMatrix ? "effects-or-sampler" :
         !derivedSampling ? (command.nearest ? "non-power-of-two-sampling" : "linear-sampling") :
         "unsupported-crop";
       images_.notePreparedFallback(command.image, reason);
@@ -844,7 +846,7 @@ void Renderer::renderScene() {
         (command.primitive == RenderCommand::Primitive::sprite ||
          command.primitive == RenderCommand::Primitive::tilingSprite) &&
         command.blendMode == BlendMode::normal && preparingFilterDepth == 0 &&
-        inlineFilterMatrix[commandIndex] == nullptr && command.blur <= 0 &&
+        inlineMatrix == nullptr && command.blur <= 0 &&
         command.maskImage == 0 && !command.appliesSpriteColor &&
         !command.standaloneBitmapRegion && !command.appliesMeshPostTintOverlay) {
       continue;
@@ -947,7 +949,7 @@ void Renderer::renderScene() {
         !command.atlasTilingSampling && !command.maskImage && command.blur <= 0 &&
         !command.appliesSpriteColor && !command.appliesColorMatrix &&
         !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
-        !inlineFilterMatrix[commandIndex] && !palette && !derived && !block && !compact;
+        !inlineMatrix && !palette && !derived && !block && !compact;
     const std::array<float, 72> vertices = {
       vertex0[0], vertex0[1], uv0[0], uv0[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
       vertex1[0], vertex1[1], uv1[0], uv1[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
@@ -957,10 +959,10 @@ void Renderer::renderScene() {
       vertex3[0], vertex3[1], uv3[0], uv3[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
     };
     vertices_.insert(vertices_.end(), vertices.begin(), vertices.end());
-    const bool operationClipped = inlineFilterMatrix[commandIndex] ?
+    const bool operationClipped = inlineMatrix ?
         inlineFilterClipped[commandIndex] : command.clipped;
     const std::array<int, 4>& operationClip =
-        inlineFilterMatrix[commandIndex] ? inlineFilterClip[commandIndex] :
+        inlineMatrix ? inlineFilterClip[commandIndex] :
                                            command.clip;
     std::optional<std::vector<std::array<int, 4>>> sparseClips;
     std::uint64_t sparseFullPixels = 0;
@@ -968,7 +970,7 @@ void Renderer::renderScene() {
         std::isfinite(p0[0]) && std::isfinite(p0[1]) &&
         std::isfinite(p1[0]) && std::isfinite(p1[1]) &&
         std::isfinite(p3[0]) && std::isfinite(p3[1]) &&
-        preparingFilterDepth == 0 && !inlineFilterMatrix[commandIndex] &&
+        preparingFilterDepth == 0 && !inlineMatrix &&
         sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
         viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
         !command.atlasTilingSampling && !command.mipmap && !command.roundPixels &&
@@ -1024,7 +1026,7 @@ void Renderer::renderScene() {
           operations.back().spriteFrame != command.source) &&
         operations.back().colorTone == command.colorTone &&
         operations.back().blendColor == command.blendColor &&
-        operations.back().inlineMatrix == inlineFilterMatrix[commandIndex] &&
+        operations.back().inlineMatrix == inlineMatrix &&
         operations.back().primitive == command.primitive &&
         operations.back().clipped == operationClipped &&
         (!operationClipped || operations.back().clip == operationClip);
@@ -1067,7 +1069,7 @@ void Renderer::renderScene() {
       operations.back().spriteFrame = command.source;
       operations.back().colorTone = command.colorTone;
       operations.back().blendColor = command.blendColor;
-      operations.back().inlineMatrix = inlineFilterMatrix[commandIndex];
+      operations.back().inlineMatrix = inlineMatrix;
       operations.back().primitive = command.primitive;
       operations.back().derivedImage = derived.has_value();
       operations.back().derivedUvTransform = derivedUvTransform;
