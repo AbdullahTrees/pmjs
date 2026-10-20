@@ -197,6 +197,14 @@
       "modules": [
         "js/pmjs-plugins/volume-control/menu.js"
       ]
+    },
+    {
+      "plugins": [
+        "GTP_OmoriFixes"
+      ],
+      "modules": [
+        "js/pmjs-plugins/omori/permanent-data.js"
+      ]
     }
   ]
 }
