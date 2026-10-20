@@ -16,7 +16,11 @@ function harness() {
       if (x < 0 || y < 0 || x >= extent.width || y >= extent.height) throw new RangeError('invalid pixel');
       return x === 0 && y === 0 ? 0x12345678 : 0;
     },
-    readPixels(_handle, x, y) { return x === 0 && y === 0 ? [0x12, 0x34, 0x56, 0x78] : [0, 0, 0, 0]; }
+    readPixels(_handle, x, y, width, height) {
+      const pixels = new Uint8Array(width * height * 4);
+      if (x === 0 && y === 0) pixels.set([0x12, 0x34, 0x56, 0x78]);
+      return pixels;
+    }
   } };
   return { context: createMvBlurContext(native), native, reads };
 }
