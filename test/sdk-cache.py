@@ -1,5 +1,6 @@
 """SDK recipe invalidation and clean rebuilds using compiled local fixtures."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +65,48 @@ class SdkCache(unittest.TestCase):
         result = subprocess.check_output([sys.executable, '-c',
             'import ctypes,sys; print(ctypes.CDLL(sys.argv[1]).value())', str(file)], text=True)
         return int(result)
+
+    def test_download_recovers_from_dns_failure_and_reuses_verified_archive(self):
+        expected = self.root / 'expected'
+        expected.write_bytes(b'verified source archive')
+        failure = urllib.error.URLError('Temporary failure in name resolution')
+        with patch.object(self.builder.urllib.request, 'urlopen', side_effect=[
+                failure, io.BytesIO(expected.read_bytes())]) as request, \
+                patch.object(self.builder.time, 'sleep') as sleep:
+            archive = self.builder.download('https://invalid.example/source.tar.xz', self.builder.digest(expected))
+            self.assertEqual(archive.read_bytes(), expected.read_bytes())
+            self.assertEqual(self.builder.download('https://invalid.example/source.tar.xz',
+                                                  self.builder.digest(expected)), archive)
+            self.assertEqual(request.call_count, 2)
+            sleep.assert_called_once_with(1)
+        self.assertFalse(archive.with_suffix('.xz.part').exists())
+
+    def test_download_retries_are_bounded_and_remove_partial_files(self):
+        archive = self.cache / 'source.tar.xz'
+        with patch.object(self.builder.urllib.request, 'urlopen',
+                          side_effect=lambda *args, **kwargs: io.BytesIO(b'partial')) as request, \
+                patch.object(self.builder.shutil, 'copyfileobj', side_effect=ConnectionResetError('interrupted')), \
+                patch.object(self.builder.time, 'sleep') as sleep:
+            with self.assertRaises(ConnectionResetError):
+                self.builder.download('https://invalid.example/source.tar.xz', 'unused')
+            self.assertEqual(request.call_count, 3)
+            self.assertEqual(sleep.call_count, 2)
+        self.assertFalse(archive.exists())
+        self.assertFalse(archive.with_suffix('.xz.part').exists())
+
+    def test_download_rejects_bad_hashes_and_permanent_http_errors_without_retry(self):
+        url = 'https://invalid.example/source.tar.xz'
+        for error in (None, urllib.error.HTTPError(url, 404, 'Not found', None, None)):
+            with self.subTest(error=error), \
+                    patch.object(self.builder.urllib.request, 'urlopen', side_effect=error,
+                                 return_value=io.BytesIO(b'wrong archive')) as request, \
+                    patch.object(self.builder.time, 'sleep') as sleep:
+                with self.assertRaises(urllib.error.HTTPError if error else ValueError):
+                    self.builder.download(url, 'wrong checksum')
+                request.assert_called_once()
+                sleep.assert_not_called()
+                self.assertFalse((self.cache / 'source.tar.xz').exists())
+                self.assertFalse((self.cache / 'source.tar.xz.part').exists())
 
     def test_diagnostics_preserve_cache_and_recipe_revisions_invalidate_it(self):
         before = self.builder.recipes(self.sdk, self.spec)

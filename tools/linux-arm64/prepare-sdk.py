@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -42,15 +43,27 @@ def download(url, checksum):
     cache = Path(os.environ.get("PMJS_DOWNLOAD_CACHE", ROOT.parent.parent / ".cache/linux-arm64/downloads"))
     cache.mkdir(parents=True, exist_ok=True)
     file = cache / url.rsplit("/", 1)[-1]
-    if not file.exists() or digest(file) != checksum:
-        print(f"Downloading {url}", flush=True)
-        partial = file.with_suffix(file.suffix + ".part")
-        with urllib.request.urlopen(url, timeout=120) as source, partial.open("wb") as target:
-            shutil.copyfileobj(source, target)
-        if digest(partial) != checksum:
-            raise ValueError(f"SHA256 mismatch: {url}")
-        partial.replace(file)
-    return file
+    if file.exists() and digest(file) == checksum:
+        return file
+    partial = file.with_suffix(file.suffix + ".part")
+    for attempt in range(3):
+        try:
+            print(f"Downloading {url}", flush=True)
+            with urllib.request.urlopen(url, timeout=120) as source, partial.open("wb") as target:
+                shutil.copyfileobj(source, target)
+            if digest(partial) != checksum:
+                raise ValueError(f"SHA256 mismatch: {url}")
+            partial.replace(file)
+            return file
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            if attempt == 2:
+                raise
+            print(f"Download failed: {error}; retrying ({attempt + 2}/3)", flush=True)
+            time.sleep(2 ** attempt)
+        finally:
+            partial.unlink(missing_ok=True)
 
 
 def extract(archive, destination):
