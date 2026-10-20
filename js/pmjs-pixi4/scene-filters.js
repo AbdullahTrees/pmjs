@@ -1,4 +1,12 @@
 var nativeCustomFilterPlans = [];
+function disposeNativeCustomFilterPlans(plans) {
+  if (!plans) return;
+  for (var index = 0; index < plans.length; index++) {
+    if (plans[index] && typeof plans[index].dispose === 'function') {
+      plans[index].dispose();
+    }
+  }
+}
 var nativeCustomFilterDefaultVertex = 'attribute vec2 aVertexPosition;\n' +
   'attribute vec2 aTextureCoord;\nuniform mat3 projectionMatrix;\n' +
   'varying vec2 vTextureCoord;\nvoid main(){\n' +

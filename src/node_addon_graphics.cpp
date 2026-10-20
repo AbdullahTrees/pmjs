@@ -5,6 +5,28 @@
 namespace pmjs::addon {
 std::vector<float> floatVector(napi_env env, napi_value input);
 
+struct FilterPlanOwner {
+  std::uint32_t handle = 0;
+  std::shared_ptr<CustomFilterPlan> plan;
+};
+
+napi_value disposeFilterPlan(napi_env env, napi_callback_info info) try {
+  napi_value self;
+  check(env, napi_get_cb_info(env, info, nullptr, nullptr, &self, nullptr),
+    "cannot read filter plan receiver");
+  void* data = nullptr;
+  check(env, napi_unwrap(env, self, &data), "invalid filter plan");
+  if (!data) throw std::runtime_error("invalid filter plan");
+  auto& owner = *static_cast<FilterPlanOwner*>(data);
+  if (owner.plan) {
+    host(env).renderer.releaseFilterPlan(owner.handle);
+    owner.plan.reset();
+  }
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value graphicsInfo(napi_env env, napi_callback_info) try {
   host(env);
   napi_value result;
@@ -243,9 +265,12 @@ napi_value createFilterPlan(napi_env env, napi_callback_info info) try {
   const auto handle = value.renderer.registerFilterPlan(plan);
   napi_value result = moduleObject(env);
   check(env, napi_set_named_property(env, result, "handle", uint32(env, handle)), "cannot set filter plan handle");
-  auto owner = std::make_unique<std::shared_ptr<CustomFilterPlan>>(plan);
-  check(env, napi_add_finalizer(env, result, owner.get(),
-    [](napi_env, void* data, void*) { delete static_cast<std::shared_ptr<CustomFilterPlan>*>(data); },
+  method(env, result, "dispose", disposeFilterPlan);
+  auto owner = std::make_unique<FilterPlanOwner>();
+  owner->handle = handle;
+  owner->plan = std::move(plan);
+  check(env, napi_wrap(env, result, owner.get(),
+    [](napi_env, void* data, void*) { delete static_cast<FilterPlanOwner*>(data); },
     nullptr, nullptr), "cannot retain filter plan");
   owner.release();
   return result;

@@ -839,6 +839,7 @@ function encodeNativeScene(stage, backgroundColor = null) {
     nativeSceneEmission = null;
   }
   nativeSceneEncodingDepth++;
+  var encoded = false;
   try {
     nativeCustomFilterPlans = [];
     resetNativeSceneRecords();
@@ -848,10 +849,13 @@ function encodeNativeScene(stage, backgroundColor = null) {
         0, nativeIdentityTransform, 1, null, 0, null);
     }
     writeNativeSceneNode(stage, 0xffffffff);
-    return { version: nativeScenePacketVersion,
+    var packet = { version: nativeScenePacketVersion,
       metadata: nativeSceneMetadata, values: nativeSceneValues,
       count: nativeSceneCount, customFilterPlans: nativeCustomFilterPlans };
+    encoded = true;
+    return packet;
   } finally {
+    if (!encoded) disposeNativeCustomFilterPlans(nativeCustomFilterPlans);
     nativeSceneEncodingDepth--;
     if (previous) {
       nativeSceneMetadata = previous.metadata;
@@ -869,6 +873,7 @@ function encodeNativeScene(stage, backgroundColor = null) {
 function submitNativeScene(stage, backgroundColor = null) {
   var packet = encodeNativeScene(stage, backgroundColor);
   if (!NativeHost.scene) {
+    disposeNativeCustomFilterPlans(packet.customFilterPlans);
     throw new Error('native scene was not rendered: scene service unavailable');
   }
   try {
@@ -890,6 +895,8 @@ function submitNativeScene(stage, backgroundColor = null) {
     console.error('[pmjs-scene] submit failed resources=' +
       JSON.stringify(resources) + ' videos=' + JSON.stringify(videos));
     throw error;
+  } finally {
+    disposeNativeCustomFilterPlans(packet.customFilterPlans);
   }
   return true;
 }

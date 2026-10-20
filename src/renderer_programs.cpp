@@ -635,7 +635,10 @@ std::uint32_t Renderer::createFilterProgram(const std::string& fragmentSource, c
 }
 
 std::uint32_t Renderer::registerFilterPlan(const std::shared_ptr<CustomFilterPlan>& plan) {
-  std::erase_if(filterPlans_, [](const auto& entry) { return entry.second.expired(); });
+  ++filterPlanRegistrations_;
+  if ((filterPlanRegistrations_ & 63U) == 0 || filterPlans_.size() >= 4096) {
+    std::erase_if(filterPlans_, [](const auto& entry) { return entry.second.expired(); });
+  }
   if (filterPlans_.size() >= 4096 || nextFilterPlan_ == 0xffffffffU)
     throw std::runtime_error("custom filter plan budget exhausted");
   for (float resolution : plan->resolutions) {
@@ -656,6 +659,10 @@ std::uint32_t Renderer::registerFilterPlan(const std::shared_ptr<CustomFilterPla
   const auto handle = nextFilterPlan_++;
   filterPlans_[handle] = plan;
   return handle;
+}
+
+bool Renderer::releaseFilterPlan(std::uint32_t handle) {
+  return filterPlans_.erase(handle) != 0;
 }
 
 Renderer::~Renderer() {

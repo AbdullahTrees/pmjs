@@ -251,6 +251,7 @@ class Renderer {
   std::uint32_t createFilterProgram(const std::string& fragmentSource,
                                     const std::string& vertexSource = "");
   std::uint32_t registerFilterPlan(const std::shared_ptr<CustomFilterPlan>& plan);
+  bool releaseFilterPlan(std::uint32_t handle);
   const FilterProgram& filterProgram(std::uint32_t handle) const;
   const std::string& pixiFragmentPrecision() const {
     return pixiFragmentPrecision_;
@@ -484,6 +485,7 @@ class Renderer {
   std::unordered_map<std::uint32_t, int> targetProjectionLocations_;
   std::shared_ptr<int> filterPlanLifetime_ = std::make_shared<int>(0);
   std::uint32_t nextFilterPlan_ = 0x80000000U;
+  std::uint32_t filterPlanRegistrations_ = 0;
   static void applyBlendMode(BlendMode mode);
   bool isIdentityColorMatrixPlan(const CustomFilterPlan& plan) const;
   bool matchesColorMatrixPlan(const CustomFilterPlan& plan,
