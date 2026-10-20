@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { preparationInputs, resolveGameDirectory as gameDirectory } from './game-inspect.mjs';
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
@@ -11,6 +12,7 @@ import { measureStartup } from '../runner/startup-metrics.cjs';
 import { installConsoleLogging, startLauncherLog } from '../runner/logging.cjs';
 import portPreparation from '../runner/port-preparation.cjs';
 
+const require = createRequire(import.meta.url);
 const action = process.argv[3];
 if (!['--build-info', '--help', 'help', 'self-test', 'bundle', 'package'].includes(action)) {
   installConsoleLogging();
