@@ -764,7 +764,9 @@ void Renderer::renderScene() {
       if (left || right || above || below) continue;
     }
     const auto logicalInfo = images_.inspect(command.image);
+    // LINEAR tiling uses hardware filtering instead of four palette-color decodes per fragment.
     const bool paletteEligible = !command.mipmap && command.blur <= 0 &&
+      (command.nearest || command.primitive != RenderCommand::Primitive::tilingSprite) &&
       (command.primitive == RenderCommand::Primitive::sprite ||
        command.primitive == RenderCommand::Primitive::tilingSprite);
     const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);

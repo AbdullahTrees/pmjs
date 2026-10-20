@@ -38,8 +38,10 @@ PNG image pages. Changing codecs prepares the affected images again on the
 next launch; keep the cache directory so reusable maps can still be used.
 
 Eligible images and prepared sprite pages retain lossless 8-bit or 16-bit
-palette indices on the GPU. LINEAR sampling interpolates decoded colors;
-NEAREST sampling selects one decoded color. Sprite tint, tone, and blend colors
+palette indices on the GPU. LINEAR sprites interpolate decoded colors;
+NEAREST sampling selects one decoded color. LINEAR tiling images use ordinary
+texture storage and hardware filtering to avoid repeated palette decoding per
+fragment; this can use more texture memory. Sprite tint, tone, and blend colors
 use the same palette backing. Pixel reads return original RGBA bytes without
 promoting the GPU texture. Writes and unsupported samplers, including mipmaps
 and blur, use ordinary texture storage.

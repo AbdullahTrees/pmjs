@@ -448,6 +448,7 @@ if(BUILD_TESTING)
     node-mv-bitmap-filtering
     node-tile-edge-filtering
     node-four-texture-tiles
+    node-linear-tiling-palette
     node-yed-retained-tiles
     node-presentation-byte-precision
     node-render-to-image

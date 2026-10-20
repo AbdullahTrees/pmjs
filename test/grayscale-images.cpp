@@ -507,11 +507,21 @@ int main() {
       require(!images.readPixelsRegion(indexed->handle, -1, 0, 1, 1) &&
         !images.readPixelsRegion(indexed->handle, width, 0, 1, 1), "palette region accepted invalid bounds");
       const auto control = images.createRgba(width, height, pixels.rgba.data());
+      const auto tilingPath = root / (path.stem().string() + "-linear-tiling.png");
+      std::filesystem::copy_file(path, tilingPath, std::filesystem::copy_options::overwrite_existing);
       for (int variant : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29, 64, 65, 130, 131, 194, 195, 256, 257, 258, 259, 320, 321, 512, 513, 1536, 1537}) {
-        const auto actual = render(renderer, indexed->handle, width, height, variant);
+        const bool linearTiling = (variant & 512) && !(variant & 1);
+        const auto sampled = linearTiling ? images.loadPng(tilingPath) : indexed;
+        require(sampled.has_value(), "palette sampling fixture failed");
+        const auto actual = render(renderer, sampled->handle, width, height, variant);
         const auto expected = render(renderer, control->handle, width, height, variant);
         if (actual != expected) std::fprintf(stderr, "palette colors=%u opaque=%d variant=%d\n", colorCount, opaque, variant);
         require(actual == expected, "palette rendering differs from RGBA");
+        if (linearTiling) {
+          require(!images.resolvePaletteImage(sampled->handle, false),
+            "linear tiling retained shader-decoded palette storage");
+          images.release(sampled->handle);
+        }
         ++comparisons;
       }
       require(images.resolvePaletteImage(indexed->handle, false).has_value(),
