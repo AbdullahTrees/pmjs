@@ -1148,6 +1148,102 @@ test('automatic battler grids prefer standard frames, then divisible alternative
   assert.equal(await automaticRecipe(null, 'img/sv_actors/battler[4x1].png', '0'.repeat(64), header), undefined);
 });
 
+function sideviewFixture(f = fixture(), encrypted = false) {
+  const source = 'img/sv_actors/custom.png';
+  const diskSource = encrypted ? source.replace(/\.png$/, '.rpgmvp') : source;
+  fs.mkdirSync(path.join(f.gameRoot, 'img/sv_actors'), { recursive: true });
+  fs.renameSync(path.join(f.gameRoot, encrypted ? f.encryptedImage : f.source), path.join(f.gameRoot, diskSource));
+  const png = Buffer.from(PNG); png.writeUInt32BE(360, 16); png.writeUInt32BE(600, 20);
+  fs.writeFileSync(path.join(f.gameRoot, diskSource), encrypted ? f.encrypt(png) : png);
+  fs.mkdirSync(path.join(f.gameRoot, 'js'), { recursive: true });
+  fs.mkdirSync(path.join(f.gameRoot, 'data'), { recursive: true });
+  const manifest = path.join(f.gameRoot, 'js/plugins.js');
+  const plugin = { name: 'YED_SideviewBattler', status: true, parameters: {} };
+  const writePlugin = () => fs.writeFileSync(manifest, 'var $plugins = '+JSON.stringify([plugin])+';');
+  writePlugin();
+  const database = path.join(f.gameRoot, 'data/Enemies.json');
+  const writeSize = height => fs.writeFileSync(database, JSON.stringify([null,
+    { note: '<Sideview Battler: custom>\n<Sideview Battler Frames: 4>\n<Sideview Battler Size: 90, '+height+'>' }
+  ]));
+  writeSize(100);
+  const observed = [];
+  const process = f.native.assets.processImage;
+  f.native.assets.processImage = async (name, output, recipe, input, ...args) => {
+    observed.push(recipe?.grid);
+    // Use the existing one-pixel output fixture; only recipe selection is under test.
+    if (encrypted) return null;
+    return process(name, output, recipe, input, ...args);
+  };
+  return { ...f, source, diskSource, png, plugin, writePlugin, writeSize, observed };
+}
+
+test('sideview metadata changes invalidate warm catalogs and disabling the plugin restores standard grids', async () => {
+  const f = sideviewFixture();
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  const cold = await prepareAssets(f);
+  assert.deepEqual(f.observed, [[4, 6]]);
+  const warm = await prepareAssets(f);
+  assert.equal(warm.catalogHit, true);
+  f.writeSize(75);
+  const changed = await prepareAssets(f);
+  assert.equal(changed.catalogHit, undefined);
+  assert.equal(changed.generated, 1);
+  assert.deepEqual(f.observed, [[4, 6], [4, 8]]);
+  f.plugin.status = false; f.writePlugin();
+  const disabled = await prepareAssets(f);
+  assert.equal(disabled.generated, 1);
+  assert.deepEqual(f.observed.at(-1), [9, 6]);
+  for (const result of [cold, warm, changed, disabled]) result.releaseCacheLease();
+  assert.deepEqual(f.warnings, []);
+});
+
+test('explicit recipes override YED grids and metadata overrides portable negative hints', async () => {
+  const f = sideviewFixture();
+  const sourceHash = crypto.createHash('sha256').update(f.png).digest('hex');
+  const hinted = await prepareAssets({ ...f, portableIndex: { negativeHints: [f.source], images: [{
+    source: f.source, sourceHash, recipe: { source: f.source, sourceHash, grid: [9, 6] },
+    encryptionSettingsSha256: null, descriptor: null, outputs: []
+  }] } });
+  assert.equal(hinted.indexedNegative, 0);
+  assert.deepEqual(f.observed, [[4, 6]]);
+  hinted.releaseCacheLease();
+  const explicit = await prepareAssets({ ...f, recipes: [{ source: f.source, sourceHash, grid: [3, 4] }] });
+  assert.deepEqual(f.observed.at(-1), [3, 4]);
+  explicit.releaseCacheLease();
+});
+
+test('offline preparation reads YED metadata through the virtual filesystem', async () => {
+  const f = sideviewFixture();
+  const database = fs.readFileSync(path.join(f.gameRoot, 'data/Enemies.json'));
+  fs.unlinkSync(path.join(f.gameRoot, 'data/Enemies.json'));
+  f.native.fs = { readBytes(source) {
+    if (source === 'data/Enemies.json') return database;
+    const file = path.join(f.gameRoot, source);
+    return fs.existsSync(file) ? fs.readFileSync(file) : null;
+  } };
+  const result = await prepareAssets({ ...f, preparationContext: 'offline' });
+  assert.deepEqual(f.observed, [[4, 6]]);
+  assert.equal(result.prepared, 1);
+  assert.deepEqual(f.warnings, []);
+});
+
+test('encrypted sideview recipes follow metadata changes even when encrypted source bytes are unchanged', async () => {
+  const f = sideviewFixture(encryptedFixture('MV'), true);
+  const first = await prepareAssets(f);
+  assert.deepEqual(f.observed, [[4, 6]]);
+  assert.equal(first.decrypted, 2);
+  const indexed = await prepareAssets({ ...f, preparationContext: 'offline' });
+  assert.equal(indexed.generated, 0);
+  assert.deepEqual(indexed.decisions.find(d => d.source === f.diskSource).recipe.grid, [4, 6]);
+  f.writeSize(75);
+  const changed = await prepareAssets(f);
+  assert.deepEqual(f.observed, [[4, 6], [4, 8]]);
+  assert.equal(changed.generated, 1, 'only the sideview source needs regeneration');
+  first.releaseCacheLease(); changed.releaseCacheLease();
+  assert.deepEqual(f.warnings, []);
+});
+
 test('large parallax images receive a bounded preparation layout', async () => {
   const f = fixture();
   fs.unlinkSync(path.join(f.gameRoot, f.source));

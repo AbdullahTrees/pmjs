@@ -9,6 +9,7 @@ const { pipeline } = require('node:stream/promises');
 const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
 const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
+const { yedSideviewFrames } = require('./yed-sideview-recipes.cjs');
 
 const CACHE_VERSION = 1;
 const PROCESSOR_IDENTITY = { processor: 'images-v14-perimeter-fills-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
@@ -122,7 +123,7 @@ async function decryptFile(file, output, key, extension) {
   await fsp.writeFile(output, body, { flag: 'wx' });
   await pipeline(fs.createReadStream(file, { start: 32 }), fs.createWriteStream(output, { flags: 'a' }));
 }
-async function automaticRecipe(file, source, sourceHash, header) {
+async function automaticRecipe(file, source, sourceHash, header, frames = new Map()) {
   let grid;
   const filenameGrid = path.basename(source).match(/\[([1-9]\d*)x([1-9]\d*)\]\.png$/i);
   if (filenameGrid) {
@@ -139,7 +140,12 @@ async function automaticRecipe(file, source, sourceHash, header) {
     try { if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24) return undefined; }
     finally { await handle.close(); }
   }
-  if (!filenameGrid && source.startsWith('img/sv_actors/') &&
+  if (frames.has(source)) {
+    const frame = frames.get(source);
+    if (!frame || header.length < 24 || !header.subarray(0, 8).equals(PNG)) return undefined;
+    grid = [header.readUInt32BE(16) / frame.width, header.readUInt32BE(20) / frame.height];
+    if (!grid.every(n => Number.isSafeInteger(n) && n > 0) || grid[0] > 4096 / grid[1]) return undefined;
+  } else if (!filenameGrid && source.startsWith('img/sv_actors/') &&
       header.length >= 24 && header.subarray(0, 8).equals(PNG)) {
     const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
     grid = [[9, 6], [4, 6], [4, 8], [4, 1], [3, 4]].find(
@@ -396,8 +402,21 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       throw new Error('image preparation is unavailable in this addon');
     }
 
+    const frames = await yedSideviewFrames(async source => {
+      if (native.fs?.readBytes) {
+        const bytes = native.fs.readBytes(source);
+        return bytes === null ? null : Buffer.from(bytes);
+      }
+      const file = typeof native.assets.sourcePath === 'function'
+        ? native.assets.sourcePath(source) : path.join(gameRoot, source);
+      if (!file) return null;
+      try { return await fsp.readFile(file); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    }, logger);
+    const automaticRecipes = { version: 1, sideview: [...frames].sort(([a], [b]) => a.localeCompare(b)) };
     const storageRecords = (portableIndex?.images || []).filter(record => validStorageDecision(record.storage));
     const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes, losslessPrefixes, astc,
+      automaticRecipes,
       ...(storageRecords.length ? { imageStorage: identity(storageRecords
         .map(record => [record.source, record.sourceHash, record.storage])) } : {}),
       contentIdentity: 1, ...(audioViewSupport ? { audioViewVersion: 1, audioSettingsHash: audioSettings.hash || null } : {}) };
@@ -505,17 +524,18 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         }
         let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
         const hintedNegative = !offline && !verifyHashes && !encrypted && extension === '.png' &&
-          !recipeMap.has(logicalSource) && negativeHints.has(source) &&
+          !recipeMap.has(logicalSource) && !frames.has(logicalSource) && negativeHints.has(source) &&
           !indexedImages.get(source)?.some(record => validStorageDecision(record.storage));
         const checkedSource = hintedNegative ? { hash: null, size: 0 } : await files.inspect(file, 'source');
         const sourceHash = checkedSource.hash;
         if (sourceIdentity !== undefined && native.assets.sourceIdentity(source) !== sourceIdentity) throw new Error('source changed while hashing');
         result.sourceBytes += checkedSource.size;
         let recipe = recipeMap.get(logicalSource);
-        if (!recipe && !encrypted && !hintedNegative) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header);
+        if (!recipe && !encrypted && !hintedNegative) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header, frames);
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
         const allowAstc = astc.enabled && !losslessPrefixes.some(prefix => logicalSource.startsWith(prefix));
         const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null, allowAstc,
+          automaticRecipes: { version: automaticRecipes.version, frame: frames.get(logicalSource) },
           astcQuality: allowAstc ? astc.quality : null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
         const findIndexed = () => indexedImages.get(source)?.find(record =>
@@ -539,6 +559,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           let manifest = await cachedEntry(directory, key, sourceHash, files);
           if (manifest && encrypted && manifest.decrypted !== 'source' + extension) manifest = null;
           if (manifest) {
+            if (encrypted && extension === '.png' && !recipe)
+              recipe = await automaticRecipe(path.join(directory, manifest.decrypted), logicalSource, sourceHash, undefined, frames);
             result.hits += 1;
             if (!manifest.descriptor && !manifest.decrypted) result.negativeHits += 1;
           } else {
@@ -551,7 +573,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             if (decrypted) {
               input = path.join(stage, decrypted);
               await decryptFile(file, input, settings.key, extension);
-              if (!recipe) recipe = await automaticRecipe(input, logicalSource, sourceHash);
+              if (!recipe) recipe = await automaticRecipe(input, logicalSource, sourceHash, undefined, frames);
               indexed = findIndexed();
             }
             if (cancelled()) break;
