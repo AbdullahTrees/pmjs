@@ -75,6 +75,11 @@ Only the standard block codec is compiled. For offline CMake builds, set
 `PMJS_LZ4_ARCHIVE` to the matching archive; `tools/dependencies.py` prepares it
 for ARM64. Local online builds can fetch the pinned archive during configuration.
 
+The ASTC encoder is built statically from version 4.7.0 pinned in
+`tools/astcenc.lock.json`, using SSE2 on x64 and NEON on ARM64. Offline builds
+accept `PMJS_ASTCENC_ARCHIVE`; dependency preparation downloads and verifies
+this archive for ARM64. No encoder command-line executable is required at runtime.
+
 The host also needs Make, `dpkg-deb`, `readelf`, and Clang/LLVM 20.1.2:
 `clang-20`, `clang++-20`, `llvm-ar-20`, and `llvm-strip-20`.
 The target needs glibc 2.28 or newer and working SDL2, EGL, and GLES 3

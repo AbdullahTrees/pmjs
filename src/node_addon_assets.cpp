@@ -159,6 +159,7 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset) {
   set(env, result, "version", number(env, 1));
   set(env, result, "width", number(env, asset.width)); set(env, result, "height", number(env, asset.height));
   set(env, result, "halo", number(env, asset.halo));
+  if (!asset.compression.empty()) set(env, result, "compression", string(env, asset.compression));
   if (asset.uniform) set(env, result, "uniform", arrayValue(env, *asset.uniform));
   if (asset.blockGrid) set(env, result, "blockGrid", arrayValue(env, *asset.blockGrid));
   napi_value cells, pages;
@@ -292,6 +293,13 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
     const auto codec = asString(env, property(env, args[5], "pageCodec"));
     if (codec != "png" && codec != "lz4") throw std::runtime_error("pageCodec must be png or lz4");
     work->options.lz4Pages = codec == "lz4";
+  }
+  if (args.size() > 5 && hasProperty(env, args[5], "allowAstc"))
+    work->options.allowAstc = asBoolean(env, property(env, args[5], "allowAstc"));
+  if (args.size() > 5 && hasProperty(env, args[5], "astcQuality")) {
+    work->options.astcQuality = asString(env, property(env, args[5], "astcQuality"));
+    if (work->options.astcQuality != "fast" && work->options.astcQuality != "medium" && work->options.astcQuality != "thorough")
+      throw std::invalid_argument("ASTC quality must be fast, medium or thorough");
   }
   napi_value promise;
   check(env, napi_create_promise(env, &work->deferred, &promise), "cannot create asset preparation promise");
@@ -531,7 +539,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, property(env, exports, "images"), "tileSlot", tileSlot);
   set(env, assets, "tilePreparationVersion", string(env, "lossless-tile-sets-v3"));
   const auto version = moduleObject(env);
-  set(env, version, "processor", string(env, "lossless-images-v7"));
+  set(env, version, "processor", string(env, "images-v10-astc4x4-optional-astcenc4.7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-v1"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);

@@ -61,6 +61,7 @@ struct PreparedImageDescriptor {
   std::vector<PreparedImageCell> cells;
   std::vector<PreparedImagePage> pages;
   std::optional<std::array<int, 3>> blockGrid;
+  std::string compression;
 };
 
 struct PreparedTileRegion {
@@ -118,6 +119,10 @@ struct ImageMemoryEntry {
   bool sceneryFullMaterialized = false;
   std::string sceneryFirstMaterializationCaller;
   std::string path;
+  bool astc = false;
+  bool fullTextureResident = false;
+  ImageHandle sceneryParent = 0;
+  std::array<int, 4> sceneryRect{};
 };
 
 class ImageFileSource {
@@ -371,6 +376,19 @@ class ImageStore {
   struct TileBacking;
   struct TileLoad;
   struct Slot {
+    struct AstcBacking {
+      std::shared_ptr<ImageFileSource> original;
+      std::vector<std::shared_ptr<ImageFileSource>> pages;
+    };
+    std::shared_ptr<AstcBacking> astc;
+    std::size_t compressedBytes = 0;
+    // Preserve both alpha representations until pending image users finish.
+    std::array<std::uint32_t, 2> retiredTextures{};
+    std::size_t retiredTextureBytes = 0;
+    std::size_t textureBytes() const {
+      return compressedBytes ? compressedBytes : static_cast<std::size_t>(width) * height * channels;
+    };
+
     std::uint16_t generation = 1;
     std::uint64_t contentRevision = 0;
     std::uint64_t opacityRevision = 0;
@@ -463,6 +481,11 @@ class ImageStore {
   void clearPrepared(Slot& slot);
   void trimPreparedPages() const;
   bool materialize(Slot& slot, bool premultiplied);
+  std::optional<ImageInfo> lookupAstc(ImageHandle handle, bool premultiplied);
+  bool promoteAstc(Slot& slot, const void* replacement = nullptr);
+  void clearRetiredTextures(Slot& slot);
+  bool supportsAstc() const;
+  mutable std::optional<bool> astcSupported_;
   std::optional<std::size_t> uploadPreparedCrops(Slot& slot, std::uint32_t& texture);
   static ImagePixels* preparedPixels(PreparedBacking& backing, std::size_t page, bool* acquired = nullptr);
   static std::optional<ImagePixels> readPreparedRegion(PreparedBacking& backing,

@@ -41,6 +41,39 @@ needed to check them. It contains no original game files, decrypted sources,
 source snapshots, or decoded pixel buffers. PMJS checks each relevant input
 before reuse and prepares normally when a record is stale or unsuitable.
 
+Image preparation is lossless by default. Opt into lossy ASTC 4×4 compression
+for all supported image assets in your configuration:
+
+```json
+{
+  "assetPreparation": {
+    "astc": { "enabled": true, "quality": "medium" },
+    "losslessPrefixes": ["img/masks/", "img/parallaxes/collision"]
+  }
+}
+```
+
+ASTC has no minimum resolution, image-area, grayscale or frame-grid filter.
+When enabled, it applies to small sprites, interfaces, grayscale images and
+whole sprite sheets as well as large backgrounds. `medium` is the default
+quality; `fast` and `thorough` are also supported. Higher quality increases
+preparation time without changing the compressed block size. The encoder uses
+one worker; cached images do not need re-encoding on ordinary launches.
+
+Use `losslessPrefixes` for collision maps, lookup masks and other images whose
+exact pixel values carry meaning. Crop/backdrop transformations that cannot be
+represented directly, workspace limits and unsupported source formats retain
+the ordinary lossless preparation path. Normal image-allocation bounds still
+apply. Unsupported GPU formats or texture dimensions also use lossless storage.
+
+Original files remain unchanged. Translucent images have separate straight and
+premultiplied artifacts, uploaded only when requested. Full ASTC textures do not
+need scrolling-window replacements. Pixel reads, mutations and mipmap generation
+recover original lossless pixels. Texture promotion commits only after a
+successful replacement upload and retains old textures until pending users
+finish. Image GPU byte counters describe compressed API payload, which can
+differ from physical residency on drivers that emulate ASTC.
+
 Skip the index if you prefer:
 
 ```sh

@@ -1,5 +1,6 @@
 #include "log.hpp"
 #include "resources.hpp"
+#include "astc_texture.hpp"
 #include "scenery_window.hpp"
 #include <EGL/egl.h>
 #include "prepared_page.hpp"
@@ -509,7 +510,7 @@ struct ImageStore::PreparedLoad {
   std::shared_ptr<PreparedBacking> backing;
   std::shared_ptr<TileLoad> tiles;
   bool validated = false;
-  std::shared_ptr<ImageFileSource> sourceToVerify;
+  std::shared_ptr<ImageFileSource> sourceToVerify, original;
   std::shared_ptr<std::atomic<unsigned>> invalidations;
   std::optional<ImagePixels> pixels;
 };
@@ -583,6 +584,7 @@ ImageStore::~ImageStore() {
   *alive_ = false;
   for (auto& slot : slots_) {
     if (slot.live) {
+      clearRetiredTextures(slot);
       if (slot.prepared) {
         slot.prepared->clearBlockTextures();
         slot.prepared->clearCompactTextures();
@@ -823,6 +825,7 @@ bool ImageStore::retainCpuPixels(ImageHandle handle) {
   if (!info) return false;
   const std::size_t index = (handle & indexMask) - 1U;
   auto& slot = slots_[index];
+  if (slot.astc && !promoteAstc(slot)) return false;
   if (slot.cachedPixels) {
     slot.retainCpuPixels = true;
     slot.cpuPixelFrames = 0;
@@ -869,7 +872,8 @@ const ImagePixels* ImageStore::readPixels(ImageHandle handle) const {
   const std::uint32_t encodedIndex = handle & indexMask;
   const auto info = inspect(handle);
   if (!info || encodedIndex == 0) return nullptr;
-  const auto& slot = slots_[encodedIndex - 1U];
+  auto& slot = const_cast<ImageStore*>(this)->slots_[encodedIndex - 1U];
+  if (slot.astc && !const_cast<ImageStore*>(this)->promoteAstc(slot)) return nullptr;
   if (slot.cachedPixels) {
     if (!slot.retainCpuPixels && !slot.cacheKey.empty()) slot.cpuPixelFrames = 60;
     return &*slot.cachedPixels;
@@ -986,8 +990,7 @@ std::size_t ImageStore::residentBytes(const Slot& slot) const {
     for (const auto& block : slot.prepared->blockTextures)
       if (block.sharedAtlas) ownedCells += block.sharedAtlas->bytes;
   }
-  return ownedCells + sharedMipBytes + static_cast<std::size_t>(slot.width) *
-      static_cast<std::size_t>(slot.height) * slot.channels *
+  return ownedCells + sharedMipBytes + slot.retiredTextureBytes + slot.textureBytes() *
       ((slot.texture ? 1U : 0U) + (slot.premultipliedTexture && slot.premultipliedTexture != slot.texture ? 1U : 0U)) +
       (slot.prepared ? slot.prepared->gpuBytes : 0U) +
       slot.mipmapBytes + slot.premultipliedMipmapBytes +
@@ -1045,6 +1048,10 @@ std::size_t ImageStore::warmFileCount() const {
         slot.inFlight.load(std::memory_order_acquire) != 0) continue;
     if (slot.prepared) for (const auto& page : slot.prepared->pages)
       if (page.source) files.insert(page.source.get());
+    if (slot.astc) {
+      if (slot.astc->original) files.insert(slot.astc->original.get());
+      for (const auto& page : slot.astc->pages) if (page) files.insert(page.get());
+    }
     collectTileFiles(slot, files);
   }
   return files.size();
@@ -1077,6 +1084,15 @@ std::size_t ImageStore::pinnedCount() const {
 std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
   std::vector<ImageMemoryEntry> result;
   result.reserve(liveCount_);
+  struct WindowOwner { ImageHandle parent; std::array<int, 4> rect; };
+  std::unordered_map<ImageHandle, WindowOwner> windows;
+  for (std::size_t index = 0; index < slots_.size(); ++index) {
+    const auto& slot = slots_[index];
+    if (!slot.live) continue;
+    for (const auto& view : slot.sceneryWindows)
+      windows.emplace(view.handle, WindowOwner{makeHandle(index, slot.generation),
+        {view.x, view.y, view.width, view.height}});
+  }
   for (std::size_t index = 0; index < slots_.size(); ++index) {
     const auto& slot = slots_[index];
     if (!slot.live) continue;
@@ -1098,7 +1114,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
     const bool sceneryBacking = slot.deferredScenery || slot.prepared || slot.tiles;
     result.push_back({makeHandle(index, slot.generation), slot.width, slot.height,
       slot.references, slot.inFlight.load(std::memory_order_acquire), slot.pins,
-      static_cast<std::size_t>(slot.width) * slot.height * slot.channels *
+      slot.retiredTextureBytes + slot.textureBytes() *
         ((slot.texture ? 1U : 0U) + (slot.premultipliedTexture && slot.premultipliedTexture != slot.texture ? 1U : 0U)) +
         (slot.prepared ? slot.prepared->gpuBytes : 0U) +
         slot.mipmapBytes + slot.premultipliedMipmapBytes + sharedGpuBytes,
@@ -1113,6 +1129,15 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
       sceneryBacking, slot.sceneryFullMaterialized,
       slot.sceneryFirstMaterializationCaller,
       slot.sourcePath.generic_string()});
+    auto& entry = result.back();
+    entry.astc = bool(slot.astc);
+    entry.fullTextureResident = slot.texture || slot.premultipliedTexture;
+    if (const auto window = windows.find(entry.handle); window != windows.end()) {
+      entry.sceneryParent = window->second.parent;
+      entry.sceneryRect = window->second.rect;
+      entry.path = slots_[(entry.sceneryParent & indexMask) - 1U].sourcePath.generic_string();
+      entry.fullTextureResident = false;
+    }
   }
   return result;
 }
@@ -1127,7 +1152,7 @@ bool ImageStore::updateRgba(ImageHandle handle, const void* pixels) {
   slot.knownAllZero = false;
   if (!detachSharedTexture(slot)) return false;
   clearPrepared(slot);
-  clearPremultipliedTexture(slot);
+  if (!slot.astc) clearPremultipliedTexture(slot);
   const bool compact = slot.channels != 4;
   bool ok = false;
   if (compact) {
@@ -1170,7 +1195,7 @@ bool ImageStore::updateRgbaRegion(ImageHandle handle, int x, int y, int width,
   slot.knownAllZero = false;
   if (!detachSharedTexture(slot)) return false;
   clearPrepared(slot);
-  clearPremultipliedTexture(slot);
+  if (!slot.astc) clearPremultipliedTexture(slot);
   if (slot.channels != 4 && !promoteToRgba(slot)) return false;
   while (glGetError() != GL_NO_ERROR) {}
   glBindTexture(GL_TEXTURE_2D, slot.texture);
@@ -1225,7 +1250,96 @@ bool ImageStore::preservePixelReads(ImageHandle handle) {
   return true;
 }
 
+bool ImageStore::supportsAstc() const {
+  if (astcSupported_) return *astcSupported_;
+  GLint major = 0, minor = 0, extensions = 0;
+  glGetIntegerv(GL_MAJOR_VERSION, &major); glGetIntegerv(GL_MINOR_VERSION, &minor);
+  bool supported = major > 3 || (major == 3 && minor >= 2);
+  glGetIntegerv(GL_NUM_EXTENSIONS, &extensions);
+  for (GLint i = 0; !supported && i < extensions; ++i) {
+    const auto* extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
+    supported = extension && (std::strcmp(extension, "GL_KHR_texture_compression_astc_ldr") == 0 ||
+      std::strcmp(extension, "GL_KHR_texture_compression_astc_hdr") == 0);
+  }
+  astcSupported_ = supported;
+  return supported;
+}
+
+std::optional<ImageInfo> ImageStore::lookupAstc(ImageHandle handle, bool premultiplied) {
+  auto& slot = slots_[(handle & indexMask)-1U];
+  const auto fallback = [&](const char* reason) -> std::optional<ImageInfo> {
+    ++preparedFallbacks_[reason];
+    if (!promoteAstc(slot)) return std::nullopt;
+    return premultiplied ? lookupPremultiplied(handle) : lookup(handle);
+  };
+  if (!supportsAstc()) return fallback("astc-unsupported");
+  const bool separate = premultiplied && slot.astc->pages.size() > 1;
+  auto& texture = separate ? slot.premultipliedTexture : slot.texture;
+  if (!texture) {
+    const auto& page = slot.astc->pages[separate ? 1 : 0];
+    const auto bytes = page ? readCapturedBytes(*page) : std::nullopt;
+    if (!bytes || !validAstc4x4(*bytes, slot.width, slot.height)) {
+      preparationInvalidations_->fetch_or(1, std::memory_order_relaxed);
+      return fallback("astc-invalid");
+    }
+    while (glGetError() != GL_NO_ERROR) {}
+    GLuint created = 0;
+    glGenTextures(1, &created); glBindTexture(GL_TEXTURE_2D, created);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, 0x93B0, slot.width, slot.height, 0,
+      static_cast<GLsizei>(slot.compressedBytes), bytes->data() + 16);
+    if (!created || glGetError() != GL_NO_ERROR) {
+      glDeleteTextures(1, &created);
+      return fallback("astc-upload");
+    }
+    texture = created;
+    gpuBytes_ += slot.compressedBytes; textureUploadBytes_ += slot.compressedBytes;
+    peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
+    ++textureCreates_; ++textureEpoch_;
+  }
+  auto image = inspect(handle);
+  image->texture = texture; image->premultiplied = premultiplied;
+  return image;
+}
+
+bool ImageStore::promoteAstc(Slot& slot, const void* replacement) {
+  if (!slot.astc) return true;
+  auto pixels = replacement ? std::optional<ImagePixels>{} :
+    (slot.astc->original ? decodeFile(*slot.astc->original) : std::nullopt);
+  if (!replacement && !pixels) return false;
+  GLint binding = 0; glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+  const auto texture = uploadTexture(slot.width, slot.height,
+    replacement ? replacement : pixels->rgba.data(), 4);
+  if (!texture) { glBindTexture(GL_TEXTURE_2D, binding); return false; }
+  slot.retiredTextures = {slot.texture,
+    slot.premultipliedTexture != slot.texture ? slot.premultipliedTexture : 0U};
+  slot.retiredTextureBytes = slot.textureBytes() *
+    ((slot.retiredTextures[0] ? 1U : 0U) + (slot.retiredTextures[1] ? 1U : 0U));
+  slot.premultipliedTexture = 0;
+  ++textureCreates_;
+  slot.texture = texture; slot.channels = 4; slot.compressedBytes = 0; slot.astc.reset();
+  slot.mipmapBytes = 0; slot.mipmapsReady = false;
+  gpuBytes_ += slot.textureBytes();
+  peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
+  if (slot.inFlight.load(std::memory_order_acquire) == 0) clearRetiredTextures(slot);
+  textureUploadBytes_ += slot.textureBytes(); ++textureEpoch_;
+  if (pixels) { slot.cachedPixels = std::move(pixels); slot.cpuPixelFrames = slot.retainCpuPixels ? 0 : 60; }
+  return true;
+}
+
+void ImageStore::clearRetiredTextures(Slot& slot) {
+  if (!slot.retiredTextureBytes) return;
+  glDeleteTextures(static_cast<GLsizei>(slot.retiredTextures.size()), slot.retiredTextures.data());
+  gpuBytes_ -= slot.retiredTextureBytes;
+  slot.retiredTextures = {}; slot.retiredTextureBytes = 0;
+  ++textureEpoch_;
+}
+
 bool ImageStore::promoteToRgba(Slot& slot, const void* replacement) {
+  if (slot.astc) return promoteAstc(slot, replacement);
   std::optional<ImagePixels> snapshot;
   if (!replacement) {
     snapshot = readTexturePixels(ImageInfo{0, slot.width, slot.height, slot.texture}, slot.channels);
@@ -1248,7 +1362,7 @@ bool ImageStore::promoteToRgba(Slot& slot, const void* replacement) {
   gpuBytes_ -= count * slot.channels + slot.mipmapBytes;
   slot.mipmapBytes = 0;
   slot.mipmapsReady = false;
-  slot.channels = 4;
+  slot.channels = 4; slot.compressedBytes = 0;
   gpuBytes_ += count * 4;
   peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
   ++textureEpoch_;
@@ -1325,6 +1439,7 @@ std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
   auto info = inspect(handle);
   if (!info) return info;
   auto& slot = slots_[(handle & indexMask) - 1U];
+  if (slot.astc) return lookupAstc(handle, true);
   if (info->texture && hasWindowedScenery(handle))
     slot.sceneryFullRequestedFrame = sceneryFrame_;
   if (info->premultiplied) return info->texture ? info : lookup(handle, caller);
@@ -1384,6 +1499,11 @@ std::optional<ImageInfo> ImageStore::lookupPremultiplied(ImageHandle handle,
 }
 
 bool ImageStore::ensureMipmaps(ImageHandle handle, bool premultiplied) {
+  const auto dimensions = inspect(handle);
+  if (!dimensions || (dimensions->width & (dimensions->width - 1)) ||
+      (dimensions->height & (dimensions->height - 1))) return false;
+  auto& original = slots_[(handle & indexMask)-1U];
+  if (original.astc && !promoteAstc(original)) return false;
   const auto info = premultiplied ? lookupPremultiplied(handle) : lookup(handle);
   if (!info || (info->width & (info->width - 1)) || (info->height & (info->height - 1))) return false;
   auto& slot = slots_[(handle & indexMask) - 1U];
@@ -1417,7 +1537,7 @@ void ImageStore::clearPremultipliedTexture(Slot& slot) {
   if (!slot.sharedPremultipliedTexture && slot.premultipliedTexture && slot.premultipliedTexture != slot.texture) {
     ++textureEpoch_;
     glDeleteTextures(1, &slot.premultipliedTexture);
-    gpuBytes_ -= static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
+    gpuBytes_ -= slot.textureBytes();
   }
   slot.premultipliedTexture = 0;
   slot.sharedPremultipliedTexture.reset();
@@ -1462,6 +1582,7 @@ bool ImageStore::touch(ImageHandle handle) {
 
 void ImageStore::destroySlot(std::size_t index) {
   auto& slot = slots_[index];
+  clearRetiredTextures(slot);
   preparedFrameResidentBytes_ -= slot.preparedFrameBytes;
   slot.preparedFrameBytes = 0;
   if (slot.prepared) clearPreparedFrames(slot.prepared.get());
@@ -1469,6 +1590,7 @@ void ImageStore::destroySlot(std::size_t index) {
   for (const auto& view : slot.sceneryWindows) if (view.handle) release(view.handle);
   slot.sceneryWindows.clear(); slot.sceneryTiles.clear();
   slot.sceneryColumns = 0; slot.deferredScenery = false;
+  slot.astc.reset();
   slot.sceneryFullMaterialized = false;
   slot.sceneryFirstMaterializationCaller.clear();
   clearPremultipliedTexture(slot);
@@ -1477,7 +1599,7 @@ void ImageStore::destroySlot(std::size_t index) {
   if (!slot.sharedTexture) glDeleteTextures(1, &slot.texture);
   gpuBytes_ -= slot.mipmapBytes;
   slot.mipmapBytes = 0;
-  if (slot.texture && !slot.sharedTexture) gpuBytes_ -= static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
+  if (slot.texture && !slot.sharedTexture) gpuBytes_ -= slot.textureBytes();
   slot.sharedTexture.reset();
   if (slot.prepared) {
     slot.prepared->clearBlockTextures();
@@ -1489,7 +1611,7 @@ void ImageStore::destroySlot(std::size_t index) {
     gpuBytes_ -= slot.prepared->gpuBytes;
     for (const auto image : slot.prepared->cellImages) if (image) release(image);
   }
-  slot.texture = 0;
+  slot.texture = 0; slot.compressedBytes = 0;
   slot.width = 0;
   slot.height = 0;
   slot.references = 0;
@@ -1544,6 +1666,7 @@ bool ImageStore::endUse(ImageHandle handle) {
     slot.inFlight.store(0, std::memory_order_release);
     return false;
   }
+  if (previous == 1) clearRetiredTextures(slot);
   if (previous == 1 && slot.references == 0 && slot.pins == 0 &&
       slot.cacheKey.empty()) {
     destroySlot(index);
@@ -1571,7 +1694,7 @@ void ImageStore::update() {
     if (slot.texture) {
       if (!slot.sharedTexture) {
         glDeleteTextures(1, &slot.texture);
-        gpuBytes_ -= static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
+        gpuBytes_ -= slot.textureBytes();
       }
       slot.sharedTexture.reset();
       slot.texture = 0;
@@ -1664,7 +1787,11 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
         !std::all_of(pageHashes->begin(), pageHashes->end(), validContentHash)))) return false;
   auto backing = std::make_shared<PreparedBacking>();
   const auto sourceIdentity = expectedSourceIdentity.empty() ? original->key() : expectedSourceIdentity;
-  if (!descriptor.uniform && descriptor.cells.empty()) return false;
+  const bool astc = descriptor.compression == "astc-4x4";
+  if (!descriptor.compression.empty() && !astc) return false;
+  if (astc && (descriptor.uniform || descriptor.blockGrid || !descriptor.cells.empty() ||
+      descriptor.pages.empty() || descriptor.pages.size() > 2)) return false;
+  if (!astc && !descriptor.uniform && descriptor.cells.empty()) return false;
   std::size_t area = 0;
   for (const auto& cell : descriptor.cells) {
     const auto& r = cell.rect; const auto& c = cell.crop; const auto& a = cell.atlas;
@@ -1680,7 +1807,7 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
     }
     area += static_cast<std::size_t>(r[2]) * r[3];
   }
-  if (!descriptor.uniform) {
+  if (!astc && !descriptor.uniform) {
     if (area != static_cast<std::size_t>(descriptor.width) * descriptor.height) return false;
     for (std::size_t i = 0; i < descriptor.cells.size(); ++i)
       for (std::size_t j = 0; j < i; ++j) {
@@ -1691,7 +1818,8 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
   }
   if (!validBlockGrid(descriptor)) return false;
   for (const auto& page : descriptor.pages) {
-    if (page.width <= 0 || page.height <= 0 || page.width > 2048 || page.height > 2048 ||
+    if (page.width <= 0 || page.height <= 0 || page.width > (astc ? 8192 : 2048) || page.height > (astc ? 8192 : 2048) ||
+        (astc && (page.width != descriptor.width || page.height != descriptor.height || page.path.extension() != ".astc")) ||
         page.path.empty() || page.path.is_absolute() || page.path.has_parent_path()) return false;
     PreparedBacking::Page prepared;
     if (pageIdentities) {
@@ -1750,6 +1878,15 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
   backing.descriptor = prototype->descriptor;
   backing.sourceIdentity = source.key();
   backing.sourceHash = prototype->sourceHash;
+  if (backing.descriptor.compression == "astc-4x4") {
+    load->original.reset(new ImageFileSource());
+    auto& captured = *load->original;
+    captured.descriptor_ = fcntl(source.descriptor_, F_DUPFD_CLOEXEC, 0);
+    if (captured.descriptor_ < 0) return nullptr;
+    captured.size_ = source.size_; captured.modifiedSeconds_ = source.modifiedSeconds_;
+    captured.modifiedNanoseconds_ = source.modifiedNanoseconds_;
+    captured.path_ = source.path_; captured.key_ = source.key_; captured.encryptionKey_ = source.encryptionKey_;
+  }
   if (prototype->sourceIdentity != source.key()) {
     load->sourceToVerify.reset(new ImageFileSource());
     auto& captured = *load->sourceToVerify;
@@ -1778,7 +1915,7 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
 }
 
 std::shared_ptr<ImageFileSource> ImageStore::capturePreparedFallback(const PreparedLoad& load) {
-  return load.tiles ? captureTileFallback(*load.tiles) : nullptr;
+  return load.tiles ? captureTileFallback(*load.tiles) : load.original;
 }
 
 bool ImageStore::validatePrepared(PreparedLoad& load, bool retainCpu) {
@@ -1796,14 +1933,20 @@ bool ImageStore::validatePrepared(PreparedLoad& load, bool retainCpu) {
       load.sourceToVerify.reset();
     }
     for (std::size_t i = 0; i < backing.pages.size(); ++i) {
-      if (!preparedPixels(backing, i)) return invalid();
+      if (backing.descriptor.compression == "astc-4x4") {
+        const auto& page = backing.pages[i];
+        const auto bytes = page.source ? readCapturedBytes(*page.source) : std::nullopt;
+        if (!bytes || !validAstc4x4(*bytes, backing.descriptor.width, backing.descriptor.height) ||
+            (page.verifyHash && !contentHashMatches(*bytes, page.expectedHash))) return invalid();
+      } else if (!preparedPixels(backing, i)) return invalid();
     }
     load.validated = true;
   }
   if (retainCpu && !load.pixels &&
       checkedImageExtent(backing.descriptor.width, backing.descriptor.height)) {
-    load.pixels = readPreparedRegion(backing, 0, 0,
-      backing.descriptor.width, backing.descriptor.height);
+    load.pixels = backing.descriptor.compression == "astc-4x4" ?
+      (load.original ? decodeFile(*load.original) : std::nullopt) :
+      readPreparedRegion(backing, 0, 0, backing.descriptor.width, backing.descriptor.height);
     for (auto& page : backing.pages) page.pixels.reset();
     if (!load.pixels) return false;
   }
@@ -1835,6 +1978,28 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
       for (auto& page : slot.prepared->pages) page.pixels.reset();
     } else if (retainCpu) retainCpuPixels(cached->handle);
     return cached;
+  }
+  if (load->backing->descriptor.compression == "astc-4x4") {
+    GLint maxTexture = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+    if (retainCpu || !supportsAstc() || load->backing->descriptor.width > maxTexture ||
+        load->backing->descriptor.height > maxTexture) {
+      if (!pixels && load->original) pixels = decodeFile(*load->original);
+      return pixels ? installDecoded(source, std::move(*pixels), retainCpu) : std::nullopt;
+    }
+    auto image = createRgba(1, 1, nullptr);
+    if (!image) return std::nullopt;
+    auto& slot = slots_[(image->handle & indexMask)-1U];
+    glDeleteTextures(1, &slot.texture); slot.texture = 0; gpuBytes_ -= 4;
+    slot.width = load->backing->descriptor.width; slot.height = load->backing->descriptor.height;
+    slot.channels = 1; slot.compressedBytes = astc4x4Bytes(slot.width, slot.height);
+    slot.astc = std::make_shared<Slot::AstcBacking>();
+    slot.astc->original = load->original;
+    for (const auto& page : load->backing->pages) slot.astc->pages.push_back(page.source);
+    slot.gpuOnly = false; slot.knownAllZero = false; slot.opaque = slot.astc->pages.size() == 1;
+    slot.opacityRevision = slot.contentRevision;
+    slot.cacheKey = source.key(); slot.sourcePath = source.path();
+    pathCache_.emplace(slot.cacheKey, image->handle); ++preparedHits_;
+    return inspect(image->handle);
   }
   auto cacheKey = source.key();
   auto sourcePath = source.path();
@@ -3151,7 +3316,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   }
   ++textureEpoch_; ++textureCreates_;
   if (slot.tiles) { if (tileDiagnostics_) ++tileMaterializations_; } else ++preparedMaterializations_;
-  const auto bytes = static_cast<std::size_t>(slot.width) * slot.height * slot.channels;
+  const auto bytes = slot.textureBytes();
   const auto uploaded = cropUpload.value_or(bytes);
   textureUploadBytes_ += uploaded;
   gpuBytes_ += bytes; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
@@ -3194,6 +3359,7 @@ std::optional<ImageInfo> ImageStore::lookup(ImageHandle handle,
   if (!info) return info;
   auto& self = *const_cast<ImageStore*>(this);
   auto& slot = self.slots_[(handle & indexMask)-1U];
+  if (slot.astc) return self.lookupAstc(handle, false);
   if (info->texture) {
     if (self.hasWindowedScenery(handle))
       slot.sceneryFullRequestedFrame = self.sceneryFrame_;

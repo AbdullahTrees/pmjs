@@ -22,7 +22,8 @@ def arm64_environment():
     paths = {"PMJS_SDK_ROOT": ".cache/linux-arm64/sdk", "PMJS_NODE_ROOT": ".cache/linux-arm64/node",
              "PMJS_SKIA65_COMPONENT_DIR": ".cache/components/arm64",
              "PMJS_EFFEKSEER_ARCHIVE": ".cache/effekseer/source.tar.gz",
-             "PMJS_LZ4_ARCHIVE": ".cache/lz4/source.tar.gz"}
+             "PMJS_LZ4_ARCHIVE": ".cache/lz4/source.tar.gz",
+             "PMJS_ASTCENC_ARCHIVE": ".cache/astcenc/source.tar.gz"}
     return {**os.environ, **{name: str(Path(os.environ.get(name) or ROOT / path).resolve())
                             for name, path in paths.items()}}
 
@@ -59,7 +60,7 @@ def prepare_arm64(jobs):
     run(sys.executable, ROOT / "tools/linux-arm64/prepare-sdk.py",
         "--sdk", sdk, "--jobs", jobs)
     run(sys.executable, ROOT / "tools/linux-arm64/prepare-node.py", "--output", node)
-    for dependency in ("effekseer", "lz4"):
+    for dependency in ("effekseer", "lz4", "astcenc"):
         archive = Path(env["PMJS_" + dependency.upper() + "_ARCHIVE"])
         lock = json.loads((ROOT / f"tools/{dependency}.lock.json").read_text())
         if not archive.is_file() or digest(archive) != lock["sha256"]:

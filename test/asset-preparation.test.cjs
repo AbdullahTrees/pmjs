@@ -72,7 +72,7 @@ test('first preparation installs logical backing; unchanged launch reuses verifi
   const processImage = f.native.assets.processImage;
   f.native.assets.preparationWorkspaceVersion = 1;
   f.native.assets.processImage = async (...args) => {
-    assert.deepEqual(args[5], { workspaceBytes: 256 * 1024 * 1024 });
+    assert.deepEqual(args[5], { workspaceBytes: 256 * 1024 * 1024, allowAstc: false, astcQuality: 'medium' });
     return processImage(...args);
   };
   const progress = [];
@@ -104,7 +104,7 @@ test('workspace limits reach capable processors without invalidating cached outp
   f.native.assets.preparationWorkspaceVersion = 1;
   f.native.assets.processImage = async (...args) => {
     assert.equal(args[4], null);
-    assert.deepEqual(args[5], { workspaceBytes: 0 });
+    assert.deepEqual(args[5], { workspaceBytes: 0, allowAstc: false, astcQuality: 'medium' });
     return original(...args);
   };
   const cold = await prepareAssets({ ...f, workspaceBytes: 0 });
@@ -1440,4 +1440,41 @@ test('portable image lookup keeps ordered candidates for the same source', async
   ] } });
   assert.equal(result.indexedNegative, 1);
   assert.equal(f.jobs, 0);
+});
+
+
+test('ASTC descriptors validate padded block payloads through the cache and functional-image policy changes its key', async () => {
+  const f = fixture();
+  f.native.assets.preparationWorkspaceVersion = 1;
+  const calls = [];
+  f.native.assets.processImage = async (name, output, recipe, input, layout, options) => {
+    calls.push([options.allowAstc, options.astcQuality]);
+    if (!options.allowAstc) return null;
+    const header = Buffer.from([0x13, 0xab, 0xa1, 0x5c, 4, 4, 1, 5, 0, 0, 3, 0, 0, 1, 0, 0]);
+    fs.writeFileSync(path.join(output, 'page-0.astc'), Buffer.concat([header, Buffer.alloc(32)]));
+    return { version: 1, width: 5, height: 3, halo: 1, compression: 'astc-4x4', cells: [],
+      pages: [{ path: 'page-0.astc', width: 5, height: 3 }] };
+  };
+  const lossless = await prepareAssets(f);
+  assert.deepEqual(calls, [[false, 'medium']]);
+  assert.equal(lossless.entries.length, 0);
+  const enabled = { ...f, astc: { enabled: true } };
+  let result = await prepareAssets(enabled);
+  assert.equal(result.generated, 1); assert.deepEqual(calls, [[false, 'medium'], [true, 'medium']]);
+  result = await prepareAssets(enabled);
+  assert.equal(result.hits, 1); assert.equal(calls.length, 2);
+  const descriptor = result.entries[0].descriptor;
+  await prepareAssets({ ...f, astc: { enabled: true, quality: 'thorough' } });
+  assert.deepEqual(calls.at(-1), [true, 'thorough']);
+  assert.equal(calls.length, 3);
+  await prepareAssets({ ...enabled, losslessPrefixes: ['img/pictures/a'] });
+  assert.deepEqual(calls.at(-1), [false, 'medium']);
+  const disabled = await prepareAssets(f);
+  assert.equal(disabled.entries.some(entry => entry.descriptor?.compression), false);
+  await assert.rejects(prepareAssets({ ...f, astc: { quality: 'bad' } }), /assetPreparation.astc/);
+  await assert.rejects(prepareAssets({ ...f, astc: { enabled: 'yes' } }), /assetPreparation.astc/);
+  assert.equal(validDescriptor(descriptor), true);
+  assert.equal(validDescriptor({ ...descriptor, compression: 'other' }), false);
+  assert.equal(validDescriptor({ ...descriptor, pages: [{ ...descriptor.pages[0], path: '../page-0.astc' }] }), false);
+  await assert.rejects(prepareAssets({ ...f, losslessPrefixes: ['../unsafe'] }), /losslessPrefixes/);
 });

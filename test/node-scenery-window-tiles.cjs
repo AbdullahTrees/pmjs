@@ -71,6 +71,13 @@ async function main() {
     renderer.render(stage);
     native.renderScene();
     const after = native.images.memory();
+    const owners = native.images.memory(100).largest;
+    const window = owners.find(entry => entry.sceneryParent === image.handle);
+    assert.ok(window, 'physical window is attributed to its logical image');
+    assert.ok(window.path.endsWith(source));
+    assert.equal(window.sceneryRect[2], window.width);
+    assert.equal(window.sceneryRect[3], window.height);
+    assert.equal(owners.find(entry => entry.handle === image.handle).fullTextureResident, false);
     assert.equal(after.sceneryWindowUploads, before.sceneryWindowUploads + 1,
       'prepared tile-backed parallax should upload one bounded scenery window');
     assert.equal(after.sceneryFullFallbacks, before.sceneryFullFallbacks,

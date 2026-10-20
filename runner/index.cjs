@@ -12,7 +12,7 @@ const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const { measureStartup } = require('./startup-metrics.cjs');
 const { createStorage, createGameFilesystem } = require('./storage.cjs');
-const { prepareAssets, validRecipes } = require('./asset-preparation.cjs');
+const { prepareAssets, validRecipes, astcSettings, validLosslessPrefixes } = require('./asset-preparation.cjs');
 const hostTimers = require('node:timers');
 const { createDiagnostics } = require('./diagnostics.cjs');
 
@@ -105,6 +105,8 @@ function resolveDefaults(input) {
   if (!Number.isSafeInteger(assetPreparation.workspaceBytes) || assetPreparation.workspaceBytes < 0 ||
       assetPreparation.workspaceBytes > 256 * 1024 * 1024)
     throw new Error('assetPreparation.workspaceBytes must be an integer from 0 to 268435456');
+  assetPreparation.losslessPrefixes = validLosslessPrefixes(assetPreparation.losslessPrefixes);
+  assetPreparation.astc = astcSettings(assetPreparation.astc);
   if (!assetPreparation.enabled) assetPreparation.maps = false;
   if (input.assetCacheRoot !== undefined) assetPreparation.cacheRoot = path.resolve(input.assetCacheRoot);
   else if (assetPreparation.cacheRoot !== undefined) {
@@ -426,6 +428,8 @@ async function prepareStartupAssets(options, native) {
       verifyHashes: options.assetPreparation.verifyHashes,
       workspaceBytes: options.assetPreparation.workspaceBytes,
       pageCodec: options.assetPreparation.pageCodec,
+      losslessPrefixes: options.assetPreparation.losslessPrefixes,
+      astc: options.assetPreparation.astc,
       shouldCancel: () => cancelled,
       onProgress: progress => {
         activeLog.progress(progress);

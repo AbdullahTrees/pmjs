@@ -46,7 +46,7 @@ def cache_values(build):
     return values
 
 
-NATIVE_TARGET = r'CMakeFiles/(?:pmjs_native|pmjs_runtime|pmjs_lz4|Effekseer|EffekseerRendererGL)\.dir/'
+NATIVE_TARGET = r'CMakeFiles/(?:pmjs_native|pmjs_runtime|pmjs_lz4|astcenc-(?:neon|sse2|none)-static|Effekseer|EffekseerRendererGL)\.dir/'
 
 
 def compiled_identity(source, build):

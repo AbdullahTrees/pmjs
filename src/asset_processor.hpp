@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <vector>
+#include <string>
 
 namespace pmjs {
 class AssetPreparationUnsupported : public std::runtime_error {
@@ -41,6 +42,7 @@ struct PreparedAsset {
   std::optional<std::array<int, 3>> blockGrid;
   std::vector<PreparedAssetCell> cells;
   std::vector<PreparedAssetPage> pages;
+  std::string compression;
 };
 struct AssetPreparationStats {
   std::uint64_t sourceDecodes = 0, sourceCacheHits = 0;
@@ -53,6 +55,8 @@ struct AssetPreparationOptions {
   std::size_t workspaceBytes = 256U * 1024U * 1024U;
   AssetPreparationStats* statistics = nullptr;
   bool lz4Pages = false;
+  bool allowAstc = false;
+  std::string astcQuality = "medium";
 };
 void writePreparedPng(const std::filesystem::path& path, int width, int height,
                       const std::vector<std::uint8_t>& bytes);

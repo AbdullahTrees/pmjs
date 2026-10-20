@@ -1,4 +1,6 @@
 #include "asset_processor.hpp"
+#include "astc_encoder.hpp"
+#include "checked_bounds.hpp"
 #include "prepared_page.hpp"
 
 #include <algorithm>
@@ -1144,6 +1146,47 @@ static PreparedAsset prepareAssetCells(PreparationSource& source,
   return result;
 }
 
+namespace {
+std::optional<PreparedAsset> prepareAstc(PreparationSource& source,
+    const std::filesystem::path& staging, const AssetRecipe& recipe,
+    const AssetPreparationOptions& options) {
+  if (!options.allowAstc || recipe.crop || recipe.backdrop != AssetColor{}) return std::nullopt;
+  const auto extent = checkedImageExtent(source.width, source.height);
+  if (!extent) return std::nullopt;
+  const auto count = std::uint64_t(source.width) * source.height;
+  if (recipe.columns <= 0 || recipe.rows <= 0 || recipe.columns > 4096 ||
+      recipe.rows > 4096 / recipe.columns || source.width % recipe.columns || source.height % recipe.rows)
+    return std::nullopt;
+  auto buffer = source.workspace.retain(static_cast<std::size_t>(count) * 4);
+  if (!buffer) return std::nullopt;
+  auto rows = source.rows();
+  bool opaque = true;
+  for (int y = 0; y < source.height; ++y) {
+    rows.read();
+    std::memcpy(buffer->bytes.get() + std::size_t(y) * source.width * 4, rows.row.data(), rows.row.size());
+    for (std::size_t i = 0; i < rows.row.size(); i += 4) {
+      opaque &= rows.row[i+3] == 255;
+    }
+  }
+  rows.finish();
+  std::filesystem::create_directories(staging);
+  PreparedAsset result;
+  result.width = source.width; result.height = source.height; result.halo = 1;
+  result.compression = "astc-4x4";
+  const std::span<std::uint8_t> pixels(buffer->bytes.get(), static_cast<std::size_t>(count) * 4);
+  encodeAstc4x4(staging / "page-0.astc", source.width, source.height, pixels, options.astcQuality);
+  result.pages.push_back({"page-0.astc", source.width, source.height});
+  if (!opaque) {
+    for (std::size_t i = 0; i < pixels.size(); i += 4)
+      for (int channel = 0; channel < 3; ++channel)
+        pixels[i+channel] = static_cast<std::uint8_t>((pixels[i+channel] * pixels[i+3] + 127) / 255);
+    encodeAstc4x4(staging / "page-1.astc", source.width, source.height, pixels, options.astcQuality);
+    result.pages.push_back({"page-1.astc", source.width, source.height});
+  }
+  return result;
+}
+}
+
 PreparedAsset prepareAssetImage(const std::filesystem::path& path,
                                const std::filesystem::path& staging,
                                const AssetRecipe& recipe, const PreparedAsset* layout,
@@ -1153,7 +1196,8 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
   stats = {};
   Workspace workspace(options.workspaceBytes, stats);
   PreparationSource source(path, workspace);
-  if (layout) {
+  if (auto astc = prepareAstc(source, staging, recipe, options)) return *astc;
+  if (layout && layout->compression.empty()) {
     try {
       validateLayout(source, recipe, *layout);
       auto result = *layout;

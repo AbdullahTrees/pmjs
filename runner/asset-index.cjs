@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { prepareAssets, validDescriptor } = require('./asset-preparation.cjs');
+const { prepareAssets, astcSettings, validDescriptor } = require('./asset-preparation.cjs');
 const { prepareMaps, validTileDescriptor } = require('./map-preparation.cjs');
 const { COMPILER_VERSION } = require('./map-demand.cjs');
 
@@ -70,6 +70,8 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     const empty = { schema: 2, kind: 'pmjs-asset-index',
       sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
+      losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
+      astc: astcSettings(options.assetPreparation.astc),
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
@@ -85,7 +87,9 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
   try {
     const images = await prepareAssets({ gameRoot, cacheRoot, native,
       recipes: options.assetPreparation.recipes, preparationContext: 'offline',
-      pageCodec: options.assetPreparation.pageCodec, workspaceBytes: options.assetPreparation.workspaceBytes,
+      pageCodec: options.assetPreparation.pageCodec,
+      losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
+      astc: astcSettings(options.assetPreparation.astc), workspaceBytes: options.assetPreparation.workspaceBytes,
       verifyHashes: true, logger, shouldCancel });
     if (images.cancelled) throw new Error('image preparation cancelled');
     if (images.error) warnings.push('[pmjs] image index incomplete: ' + images.error);
@@ -126,6 +130,8 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     const index = { schema: 2, kind: 'pmjs-asset-index',
       sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
+      losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
+      astc: astcSettings(options.assetPreparation.astc),
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
@@ -151,6 +157,8 @@ function loadAssetIndex(file, native, options) {
       Array.isArray(index.images) && index.images.length <= 100000 &&
       JSON.stringify(index.processor) === JSON.stringify(native.assets.preparationVersion) &&
       index.recipesIdentity === identity(options.assetPreparation.recipes) &&
+      JSON.stringify(index.losslessPrefixes || []) === JSON.stringify(options.assetPreparation.losslessPrefixes || []) &&
+      JSON.stringify(astcSettings(index.astc)) === JSON.stringify(astcSettings(options.assetPreparation.astc)) &&
       (legacy || index.pageCodec === options.assetPreparation.pageCodec);
     const compilationCompatible = (legacy || index.sections?.mapCompilation === 1) &&
       index.maps?.compiler === COMPILER_VERSION;

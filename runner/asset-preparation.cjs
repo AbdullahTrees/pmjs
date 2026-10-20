@@ -11,7 +11,7 @@ const { acquireLock, createLease, retainLeases } = require('./preparation-lifeti
 const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 
 const CACHE_VERSION = 1;
-const PROCESSOR_IDENTITY = { processor: 'lossless-images-v7', decoder: 'png-rgba-v1', pageSize: 2048 };
+const PROCESSOR_IDENTITY = { processor: 'images-v10-astc4x4-optional-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
 const HASH = /^[a-f0-9]{64}$/;
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ENCRYPTED_HEADER = Buffer.from('5250474d560000000003010000000000', 'hex');
@@ -29,6 +29,21 @@ async function hashFile(file) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
   return hash.digest('hex');
+}
+function validLosslessPrefixes(value = []) {
+  if (!Array.isArray(value) || value.some(prefix => {
+    if (typeof prefix !== 'string' || !prefix.startsWith('img/') || prefix.includes('\\') || prefix.includes('\0')) return true;
+    const parts = (prefix.endsWith('/') ? prefix.slice(0, -1) : prefix).split('/');
+    return parts.some(part => !part || part === '.' || part === '..');
+  })) throw new Error('assetPreparation.losslessPrefixes must contain safe image path prefixes');
+  return value.slice();
+}
+function astcSettings(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      (value.enabled !== undefined && typeof value.enabled !== 'boolean') ||
+      (value.quality !== undefined && !['fast', 'medium', 'thorough'].includes(value.quality)))
+    throw new Error('assetPreparation.astc requires a boolean enabled and quality fast, medium or thorough');
+  return { enabled: value.enabled ?? false, quality: value.quality ?? 'medium' };
 }
 function safeSource(source) {
   return typeof source === 'string' && source.startsWith('img/') &&
@@ -79,6 +94,13 @@ function mediaHeader(bytes, extension) {
   return extension === '.m4a' && bytes.subarray(4, 8).toString() === 'ftyp';
 }
 function pageHeaderMatches(header, page, size) {
+  if (page.path.endsWith('.astc')) {
+    const dimension = offset => header.readUIntLE(offset, 3);
+    return header.length >= 16 && header.readUInt32LE(0) === 0x5ca1ab13 &&
+      header[4] === 4 && header[5] === 4 && header[6] === 1 && dimension(7) === page.width &&
+      dimension(10) === page.height && dimension(13) === 1 &&
+      size === 16 + Math.ceil(page.width / 4) * Math.ceil(page.height / 4) * 16;
+  }
   if (page.path.endsWith('.pml4')) {
     return header.length >= 32 && header.toString('ascii', 0, 4) === 'PML4' && header.readUInt32LE(4) === 1 &&
       header.readUInt32LE(8) === page.width && header.readUInt32LE(12) === page.height &&
@@ -164,6 +186,12 @@ function rect(value, positive = true) {
 function validDescriptor(d) {
   if (!d || d.version !== 1 || !Number.isSafeInteger(d.width) || !Number.isSafeInteger(d.height) ||
       d.width < 1 || d.height < 1 || !Array.isArray(d.pages) || !Array.isArray(d.cells) || d.pages.length > 4096 || d.cells.length > 4096) return false;
+  if (d.compression !== undefined) {
+    return d.compression === 'astc-4x4' && d.width <= 8192 && d.height <= 8192 &&
+      d.width * d.height <= 32 * 1024 * 1024 && d.halo === 1 && d.uniform === undefined &&
+      d.blockGrid === undefined && d.cells.length === 0 && [1, 2].includes(d.pages.length) &&
+      d.pages.every((p, i) => p && p.path === `page-${i}.astc` && p.width === d.width && p.height === d.height);
+  }
   if (d.uniform !== undefined && !rgba(d.uniform)) return false;
   if (d.halo !== undefined && (!Number.isInteger(d.halo) || d.halo < 1 || d.halo > 2048)) return false;
   if (d.blockGrid !== undefined) {
@@ -172,7 +200,7 @@ function validDescriptor(d) {
         !g.every(n => Number.isSafeInteger(n) && n > 0) || d.width % g[1] || d.height % g[2] ||
         Math.ceil(g[1] / 64) * Math.ceil(g[2] / 64) * (d.width / g[1]) * (d.height / g[2]) > 65536) return false;
   }
-  if (d.pages.some(p => !p || !/^page-\d+\.(png|pml4)$/.test(p.path) || !Number.isInteger(p.width) ||
+  if (d.pages.some(p => !p || !/^page-\d+\.(png|pml4|astc)$/.test(p.path) || !Number.isInteger(p.width) ||
       !Number.isInteger(p.height) || p.width < 1 || p.height < 1 || p.width > 2048 || p.height > 2048)) return false;
   if (new Set(d.pages.map(p => p.path)).size !== d.pages.length) return false;
   let area = 0;
@@ -278,9 +306,13 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   shouldCancel = () => false, logger = console, verifyHashes = false,
   workspaceBytes = 256 * 1024 * 1024,
   pageCodec = 'lz4',
+  losslessPrefixes = [],
+  astc,
   preparationContext = 'live',
   portableIndex = null, portableAssetRoot = null,
   processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY }) {
+  losslessPrefixes = validLosslessPrefixes(losslessPrefixes);
+  astc = astcSettings(astc);
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   if (!['png', 'lz4'].includes(pageCodec)) throw new Error('assetPreparation.pageCodec must be png or lz4');
   if (!Number.isSafeInteger(workspaceBytes) || workspaceBytes < 0 || workspaceBytes > 256 * 1024 * 1024)
@@ -337,7 +369,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       throw new Error('image preparation is unavailable in this addon');
     }
 
-    const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes,
+    const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes, losslessPrefixes, astc,
       contentIdentity: 1, ...(audioViewSupport ? { audioViewVersion: 1, audioSettingsHash: audioSettings.hash || null } : {}) };
     const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
       typeof native.assets.installDerivedCatalog === 'function';
@@ -448,7 +480,9 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         let recipe = recipeMap.get(logicalSource);
         if (!recipe && !encrypted && !hintedNegative) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header);
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
-        const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null,
+        const allowAstc = astc.enabled && !losslessPrefixes.some(prefix => logicalSource.startsWith(prefix));
+        const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null, allowAstc,
+          astcQuality: allowAstc ? astc.quality : null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
         const findIndexed = () => indexedImages.get(source)?.find(record =>
           record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
@@ -488,14 +522,14 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             let descriptor = null, copied = false;
             const indexedFallback = indexed?.descriptor === null;
             if (indexedFallback) ++result.indexedNegative;
-            if (indexed?.descriptor && indexed.descriptor.pages.every(p => p.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')) &&
+            if (indexed?.descriptor && (indexed.descriptor.compression === 'astc-4x4' || indexed.descriptor.pages.every(p => p.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png'))) &&
                 portableAssetRoot && Array.isArray(indexed.outputs) &&
                 indexed.outputs.length === indexed.descriptor.pages.length) {
               const pages = indexed.descriptor.pages;
               try {
                 for (let i = 0; i < pages.length; ++i) {
                   const item = indexed.outputs[i];
-                  if (!item || typeof item.path !== 'string' || !/^assets\/images\/[a-f0-9]{64}\/page-\d+\.(png|pml4)$/.test(item.path) ||
+                  if (!item || typeof item.path !== 'string' || !/^assets\/images\/[a-f0-9]{64}\/page-\d+\.(png|pml4|astc)$/.test(item.path) ||
                       path.basename(item.path) !== pages[i].path || !HASH.test(item.hash)) throw new Error('invalid indexed page');
                   const candidate = path.join(portableAssetRoot, item.path);
                   const checked = await files.copyVerified(candidate, path.join(stage, pages[i].path), item.hash);
@@ -516,13 +550,14 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               const processingStarted = performance.now();
               try { descriptor = await native.assets.processImage(source, stage, recipe || null,
                 input, ...(native.assets.preparationWorkspaceVersion === 1
-                  ? [indexed ? indexed.descriptor : null, { workspaceBytes, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
+                  ? [indexed ? indexed.descriptor : null, { workspaceBytes, allowAstc, astcQuality: astc.quality, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
                   : indexed ? [indexed.descriptor] : [])); }
               finally { result.processingMs += performance.now() - processingStarted; }
             }
             if (cancelled()) break;
+            if (descriptor?.compression && !allowAstc) throw new Error('lossless image policy forbids compressed output');
             if (descriptor !== null && !validDescriptor(descriptor)) throw new Error('processor returned invalid logical image descriptor');
-            if (descriptor?.pages.some(p => !p.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')))
+            if (!descriptor?.compression && descriptor?.pages.some(p => !p.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')))
               throw new Error('processor returned a different page codec');
             // Ordinary boot assumes game assets remain unchanged while preparing.
             if (verifyHashes && await hashFile(file) !== sourceHash) throw new Error('source changed during image preparation');
@@ -681,4 +716,4 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   return result;
 }
 
-module.exports = { prepareAssets, validRecipes, validDescriptor, automaticRecipe, PROCESSOR_IDENTITY };
+module.exports = { astcSettings, validLosslessPrefixes, prepareAssets, validRecipes, validDescriptor, automaticRecipe, PROCESSOR_IDENTITY };

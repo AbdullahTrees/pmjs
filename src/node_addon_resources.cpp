@@ -590,6 +590,17 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
     napi_set_named_property(env, item, "sceneryBacking", boolean(env, entry.sceneryBacking));
     napi_set_named_property(env, item, "sceneryFullMaterialized",
       boolean(env, entry.sceneryFullMaterialized));
+    napi_set_named_property(env, item, "fullTextureResident", boolean(env, entry.fullTextureResident));
+    napi_set_named_property(env, item, "astc", boolean(env, entry.astc));
+    if (entry.sceneryParent) {
+      napi_set_named_property(env, item, "sceneryParent", uint32(env, entry.sceneryParent));
+      napi_value rect;
+      check(env, napi_create_array_with_length(env, 4, &rect), "cannot create scenery rectangle");
+      for (std::size_t coordinate = 0; coordinate < 4; ++coordinate)
+        check(env, napi_set_element(env, rect, coordinate, number(env, entry.sceneryRect[coordinate])),
+          "cannot set scenery coordinate");
+      napi_set_named_property(env, item, "sceneryRect", rect);
+    }
     if (!entry.sceneryFirstMaterializationCaller.empty())
       napi_set_named_property(env, item, "sceneryFirstMaterializationCaller",
         string(env, entry.sceneryFirstMaterializationCaller));
@@ -687,6 +698,7 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
     const auto object = property(env, entry, "descriptor");
     PreparedImageDescriptor descriptor;
     descriptor.version = asInt32(env, property(env, object, "version"));
+    if (hasProperty(env, object, "compression")) descriptor.compression = asString(env, property(env, object, "compression"));
     descriptor.width = asInt32(env, property(env, object, "width"));
     descriptor.height = asInt32(env, property(env, object, "height"));
     if (hasProperty(env, object, "halo")) descriptor.halo = asInt32(env, property(env, object, "halo"));

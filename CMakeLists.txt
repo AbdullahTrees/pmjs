@@ -104,6 +104,7 @@ set(PMJS_MEDIA_LIBS PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL Pkg
 include(cmake/Effekseer.cmake)
 include(cmake/Skia65.cmake)
 include(cmake/Lz4.cmake)
+include(cmake/Astcenc.cmake)
 set(PMJS_RUNTIME_SOURCES
   src/runtime_core.cpp
   src/platform.cpp
@@ -118,6 +119,7 @@ set(PMJS_RUNTIME_SOURCES
   src/psd_decoder.cpp
   src/resources_tiles.cpp
   src/asset_processor.cpp
+  src/astc_encoder.cpp
   src/prepared_page.cpp
   src/tile_assets.cpp
   src/canvas.cpp
@@ -143,7 +145,7 @@ endif()
 add_library(pmjs_runtime STATIC ${PMJS_RUNTIME_SOURCES})
 target_include_directories(pmjs_runtime PUBLIC src)
 target_compile_options(pmjs_runtime PRIVATE ${PMJS_BASE_COMPILE_OPTIONS})
-target_link_libraries(pmjs_runtime PUBLIC ${PMJS_PLATFORM_LIBS} PkgConfig::PNG PkgConfig::WEBP PkgConfig::ZLIB pmjs_lz4
+target_link_libraries(pmjs_runtime PUBLIC ${PMJS_PLATFORM_LIBS} PkgConfig::PNG PkgConfig::WEBP PkgConfig::ZLIB pmjs_lz4 pmjs_astcenc
   PkgConfig::JPEG PkgConfig::FREETYPE PkgConfig::HARFBUZZ ${PMJS_MEDIA_LIBS} EffekseerRendererGL m dl pthread)
 if(PMJS_ENABLE_SKIA65)
   target_compile_definitions(pmjs_runtime PRIVATE PMJS_HAS_SKIA65)
@@ -213,11 +215,11 @@ if(BUILD_TESTING)
   pmjs_add_cpp_test(pmjs-log-test native-log test/log.cpp)
   target_link_libraries(pmjs-log-test PRIVATE pthread)
   target_link_libraries(pmjs-vfs-test PRIVATE PkgConfig::AVUTIL)
-  pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp src/asset_processor.cpp)
+  pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp src/asset_processor.cpp src/astc_encoder.cpp)
   pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp src/prepared_page.cpp)
   target_link_libraries(pmjs-prepared-page-test PRIVATE pmjs_lz4 PkgConfig::ZLIB)
   target_sources(pmjs-asset-processor-test PRIVATE src/prepared_page.cpp)
-  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB pmjs_lz4 pthread)
+  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB pmjs_lz4 pmjs_astcenc pthread)
   pmjs_add_cpp_test(pmjs-tile-assets-test native-tile-assets test/tile-assets.cpp)
   target_link_libraries(pmjs-tile-assets-test PRIVATE pmjs_runtime)
   add_test(NAME node-prepared-tiles COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
@@ -236,6 +238,12 @@ if(BUILD_TESTING)
   add_test(NAME node-shared-prepared-pages COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-shared-prepared-pages.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-shared-prepared-pages PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_executable(pmjs-astc-images-test test/astc-images.cpp)
+  target_link_libraries(pmjs-astc-images-test PRIVATE pmjs_runtime)
+  add_test(NAME native-astc-images COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-astc-images-test> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  set_tests_properties(native-astc-images PROPERTIES FIXTURES_REQUIRED pmjs_assets ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME native-astc-fallback COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-astc-images-test> "${CMAKE_CURRENT_BINARY_DIR}/test-assets" --unsupported)
+  set_tests_properties(native-astc-fallback PROPERTIES FIXTURES_REQUIRED pmjs_assets ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;MESA_GLES_VERSION_OVERRIDE=3.0;MESA_EXTENSION_OVERRIDE=-GL_KHR_texture_compression_astc_ldr -GL_KHR_texture_compression_astc_hdr")
   add_executable(pmjs-grayscale-images-test test/grayscale-images.cpp)
   target_compile_options(pmjs-grayscale-images-test PRIVATE -Wall -Wextra -Wpedantic)
   target_link_libraries(pmjs-grayscale-images-test PRIVATE pmjs_runtime)

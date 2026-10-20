@@ -44,13 +44,16 @@ test('portable index reuses independent sections across configuration, viewport 
 });
 
 test('recipe, codec and section versions only invalidate the affected index sections', () => {
-  for (const field of ['recipes', 'pageCodec', 'images', 'mapCompilation', 'tileOutputs', 'negativeHints']) {
+  for (const field of ['recipes', 'pageCodec', 'losslessPrefixes', 'astc', 'astcQuality', 'images', 'mapCompilation', 'tileOutputs', 'negativeHints']) {
     const f = fixture();
-    if (field === 'recipes') f.options.assetPreparation.recipes = [{ changed: true }];
+    if (field === 'astc') f.options.assetPreparation.astc = { enabled: true };
+    else if (field === 'astcQuality') f.options.assetPreparation.astc = { enabled: false, quality: 'thorough' };
+    else if (field === 'losslessPrefixes') f.options.assetPreparation.losslessPrefixes = ['img/masks/'];
+    else if (field === 'recipes') f.options.assetPreparation.recipes = [{ changed: true }];
     else if (field === 'pageCodec') f.options.assetPreparation.pageCodec = 'png';
     else f.index.sections[field] = 99;
     const loaded = f.load();
-    if (['recipes', 'pageCodec', 'images'].includes(field)) {
+    if (['recipes', 'pageCodec', 'losslessPrefixes', 'astc', 'astcQuality', 'images'].includes(field)) {
       assert.deepEqual(loaded.images, []); assert.equal(loaded.maps.entries.length, 1);
     } else if (field === 'mapCompilation') assert.equal(loaded.maps, null);
     else if (field === 'tileOutputs') assert.deepEqual(loaded.maps.entries, []);

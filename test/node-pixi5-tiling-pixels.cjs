@@ -165,7 +165,7 @@ try {
   assert.equal(afterFullFallback.sceneryFullFallbacks, beforeScenery.sceneryFullFallbacks + 1,
     'an ordinary full-texture consumer records its materialization');
   assert.ok(afterFullFallback.largest.some(entry => entry.handle === sceneryImage.handle &&
-    entry.sceneryBacking && entry.sceneryFullMaterialized &&
+    entry.sceneryBacking && entry.sceneryFullMaterialized && entry.fullTextureResident &&
     entry.sceneryFirstMaterializationCaller === 'image-lookup'),
     'full materialization keeps and reports the compact source backing and caller');
   const sceneryTiling = new c.PIXI.TilingSprite(sceneryTexture, 32, 24);
@@ -199,6 +199,9 @@ try {
     entry.handle === sceneryImage.handle);
   assert.equal(sceneryEntry.gpuBytes, 0,
     'after a successful windowed frame, the unused full texture is evicted at the next frame boundary');
+  assert.equal(sceneryEntry.fullTextureResident, false);
+  assert.equal(sceneryEntry.sceneryFullMaterialized, true,
+    'materialization history does not imply current full-texture residency');
   const scenerySprite = new c.PIXI.Sprite(sceneryTexture);
   scenerySprite.vertexData = new Float32Array([
     -1320.375, -624.625, 1919.625, -624.625,
