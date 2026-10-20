@@ -183,6 +183,17 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset) {
   set(env, result, "cells", cells); set(env, result, "pages", pages);
   return result;
 }
+napi_value storageDescriptor(napi_env env, const ImageStorageDecision& decision) {
+  auto value = moduleObject(env);
+  set(env, value, "version", number(env, 1));
+  set(env, value, "width", number(env, decision.width));
+  set(env, value, "height", number(env, decision.height));
+  set(env, value, "paletteBits", number(env, decision.paletteBits));
+  set(env, value, "channels", number(env, decision.channels.channels));
+  set(env, value, "source", arrayValue(env, decision.channels.source));
+  set(env, value, "swizzle", arrayValue(env, decision.channels.swizzle));
+  return value;
+}
 struct AssetWork {
   ~AssetWork() { if (sourceFd >= 0) ::close(sourceFd); }
   napi_async_work work = nullptr;
@@ -194,6 +205,8 @@ struct AssetWork {
   AssetPreparationOptions options;
   std::optional<PreparedAsset> layout;
   std::optional<PreparedAsset> result;
+  std::shared_ptr<ImageFileSource> storageSource;
+  std::optional<ImageStorageDecision> storage;
   std::string error;
   bool unsupported = false;
 };
@@ -202,6 +215,12 @@ napi_value element(napi_env env, napi_value value, std::uint32_t index);
 void executeAsset(napi_env, void* opaque) noexcept {
   auto& work = *static_cast<AssetWork*>(opaque);
   try {
+    if (work.storageSource) {
+      const auto pixels = ImageStore::decodeFile(*work.storageSource);
+      if (!pixels) throw std::runtime_error("cannot decode image for storage classification");
+      work.storage = ImageStore::classifyStorage(*pixels);
+      return;
+    }
     work.result = prepareAssetImage("/proc/self/fd/" + std::to_string(work.sourceFd), work.staging,
       work.recipe, work.layout ? &*work.layout : nullptr, work.options);
     struct stat current{};
@@ -219,6 +238,7 @@ void completeAsset(napi_env env, napi_status status, void* opaque) {
     if (status != napi_ok) throw std::runtime_error("asset preparation cancelled");
     if (!work->error.empty()) throw std::runtime_error(work->error);
     check(env, napi_resolve_deferred(env, work->deferred,
+      work->storage ? storageDescriptor(env, *work->storage) :
       work->unsupported ? null(env) : descriptor(env, *work->result)), "cannot resolve asset preparation");
   } catch (const std::exception& error) {
     napi_value result;
@@ -312,6 +332,58 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
   return promise;
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 
+napi_value classifyImageStorage(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  auto work = std::make_unique<AssetWork>();
+  work->storageSource = ImageStore::openFile(asString(env, args.at(0)));
+  if (!work->storageSource) throw std::runtime_error("cannot capture image storage source");
+  napi_value promise;
+  check(env, napi_create_promise(env, &work->deferred, &promise), "cannot create storage classification promise");
+  check(env, napi_create_async_work(env, nullptr, string(env, "pmjs-image-storage"), executeAsset,
+    completeAsset, work.get(), &work->work), "cannot create storage classification work");
+  const auto queued = napi_queue_async_work(env, work->work);
+  if (queued != napi_ok) { napi_delete_async_work(env, work->work); check(env, queued, "cannot queue storage classification"); }
+  work.release();
+  return promise;
+} catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+
+napi_value installImageStorage(napi_env env, napi_callback_info info) try {
+  const auto args = arguments(env, info, 1);
+  auto& value = host(env);
+  struct InstallGuard {
+    ImageStore& images;
+    bool complete = false;
+    ~InstallGuard() { if (!complete) images.clearStorageDecisions(); }
+  } guard{value.images};
+  value.images.clearStorageDecisions();
+  std::uint32_t installed = 0;
+  for (std::uint32_t i = 0, n = arrayLength(env, args.at(0), 100000); i < n; ++i) {
+    const auto record = element(env, args[0], i);
+    const auto path = value.vfs.resolve(asString(env, property(env, record, "source")));
+    if (!path) continue;
+    const auto storage = property(env, record, "storage");
+    if (integer(env, property(env, storage, "version")) != 1) continue;
+    ImageStorageDecision decision;
+    decision.width = integer(env, property(env, storage, "width"));
+    decision.height = integer(env, property(env, storage, "height"));
+    decision.paletteBits = integer(env, property(env, storage, "paletteBits"));
+    decision.channels.channels = integer(env, property(env, storage, "channels"));
+    const auto source = integers<4>(env, property(env, storage, "source"));
+    const auto swizzle = integers<4>(env, property(env, storage, "swizzle"));
+    bool valid = true;
+    for (int c = 0; c < 4; ++c) {
+      valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 && swizzle[c] < 6;
+      decision.channels.source[c] = static_cast<std::uint8_t>(source[c]);
+      decision.channels.swizzle[c] = static_cast<std::uint8_t>(swizzle[c]);
+    }
+    if (valid && value.images.installStorageDecision(*path,
+        asString(env, property(env, record, "sourceIdentity")), decision)) ++installed;
+  }
+  guard.complete = true;
+  return number(env, installed);
+} catch (const std::exception& error) {
+  napi_throw_error(env, nullptr, error.what()); return nullptr;
+}
 struct TileWork {
   napi_async_work work = nullptr;
   napi_deferred deferred = nullptr;
@@ -533,6 +605,9 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, assets, "releasePreparationLock", releasePreparationLock);
   method(env, assets, "consumePreparationInvalidations", consumePreparationInvalidations);
   method(env, assets, "processImage", processImage);
+  method(env, assets, "classifyImageStorage", classifyImageStorage);
+  method(env, assets, "installImageStorage", installImageStorage);
+  set(env, assets, "imageStorageVersion", number(env, 1));
   method(env, assets, "processTiles", processTiles);
   method(env, assets, "installTileSets", installTileSets);
   method(env, assets, "installTileSetCatalog", installTileSetCatalog);

@@ -93,7 +93,12 @@ try {
   const help = cli('--help');
   assert.equal(help.status, 0, help.stdout + help.stderr);
   assert.match(help.stdout, /pmjs prepare --game DIR/);
-  assert.match(cli().stdout, /Usage:/, 'no recognized game in the current directory shows help');
+  const emptyDirectory = path.join(temporary, 'empty-directory');
+  fs.mkdirSync(emptyDirectory);
+  const noGame = spawnSync(path.join(stage, 'bin/pmjs'), [], {
+    cwd: emptyDirectory, encoding: 'utf8', env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' }
+  });
+  assert.match(noGame.stdout, /Usage:/, 'no recognized game in the current directory shows help');
   const unprepared = cli('run', '--game', game, '--state', state);
   assertGuestReached(unprepared);
   const buildInfoSha256 = crypto.createHash('sha256').update(fs.readFileSync(infoFile)).digest('hex');
@@ -136,6 +141,10 @@ try {
   const index = JSON.parse(fs.readFileSync(path.join(bundle, 'asset-index.json')));
   assert.equal(index.images.length, 1);
   assert.ok(index.images[0].descriptor);
+  assert.equal(index.sections.imageStorage, 1);
+  assert.equal(index.imageStorageVersion, 1);
+  assert.equal(index.images[0].storage.version, 1);
+  assert.ok([0, 8, 16].includes(index.images[0].storage.paletteBits));
   assert.equal(fs.existsSync(path.join(bundle, 'assets')), false, 'artwork is not bundled by default');
   const noIndexBundle = path.join(temporary, 'bundle without index');
   const noIndex = cli('bundle', game, '--output', noIndexBundle, '--no-index');

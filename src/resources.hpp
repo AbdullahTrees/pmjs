@@ -43,6 +43,11 @@ struct ImageChannelStorage {
   std::array<std::uint8_t, 4> swizzle{0, 1, 2, 3};
 };
 
+struct ImageStorageDecision {
+  int width = 0, height = 0, paletteBits = 0;
+  ImageChannelStorage channels;
+};
+
 // A deferred reader keeps its crop alive at the revision it observed. Pixel
 // storage is captured only if the image changes before the reader executes.
 struct ImagePixelSnapshot {
@@ -95,6 +100,11 @@ struct SpriteImageRegion {
   int logicalWidth = 0, logicalHeight = 0, halo = 0;
 };
 
+struct PaletteImageRegion {
+  ImageInfo image;
+  std::uint32_t table = 0;
+};
+
 struct CompactImageRegion {
   ImageInfo image;
   std::array<float, 4> contentBounds{}, fill{};
@@ -128,6 +138,8 @@ struct ImageMemoryEntry {
   std::string path;
   bool astc = false;
   bool fullTextureResident = false;
+  bool palette = false;
+  int paletteIndexBits = 0;
   ImageHandle sceneryParent = 0;
   std::array<int, 4> sceneryRect{};
 };
@@ -170,6 +182,11 @@ class ImageStore {
   // cannot redirect an in-flight load to a different inode.
   static std::unique_ptr<ImageFileSource> openFile(const std::filesystem::path& path,
       std::optional<ImageEncryptionKey> encryptionKey = std::nullopt);
+  static ImageStorageDecision classifyStorage(const ImagePixels& pixels);
+  bool installStorageDecision(const std::filesystem::path& path,
+      const std::string& sourceIdentity, ImageStorageDecision decision);
+  void clearStorageDecisions() { storageDecisions_.clear(); }
+  std::uint64_t storageDecisionHits() const { return storageDecisionHits_; }
   static std::size_t decodedStorageBytes(const ImagePixels& pixels);
   static std::optional<std::vector<std::uint8_t>> readCapturedBytes(const ImageFileSource& source);
   static std::optional<ImagePixels> decodeFile(const ImageFileSource& source,
@@ -219,9 +236,7 @@ class ImageStore {
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
       bool premultiplied = true);
-  std::optional<SpriteImageRegion> resolveSceneryWindow(ImageHandle handle,
-      int x, int y, int width, int height, bool premultiplied, bool wrap = false);
-  bool hasWindowedScenery(ImageHandle handle) const;
+  std::optional<PaletteImageRegion> resolvePaletteImage(ImageHandle handle, bool premultiplied);
   std::uint64_t sceneryWindowHits() const { return sceneryWindowHits_; }
   std::uint64_t sceneryWindowUploads() const { return sceneryWindowUploads_; }
   std::uint64_t sceneryFullFallbacks() const { return sceneryFullFallbacks_; }
@@ -382,7 +397,10 @@ class ImageStore {
   struct TilePages;
   struct TileBacking;
   struct TileLoad;
+  struct PaletteBacking;
   struct Slot {
+    std::shared_ptr<PaletteBacking> palette, retiredPalette;
+    bool paletteChecked = false;
     struct AstcBacking {
       std::shared_ptr<ImageFileSource> original;
       std::vector<std::shared_ptr<ImageFileSource>> pages;
@@ -424,26 +442,8 @@ class ImageStore {
     bool mipmapsReady = false, premultipliedMipmapsReady = false;
     std::size_t mipmapBytes = 0, premultipliedMipmapBytes = 0;
     bool retainCpuPixels = false;
-    bool deferredScenery = false;
     bool sceneryFullMaterialized = false;
     std::string sceneryFirstMaterializationCaller;
-    std::uint64_t sceneryFullRequestedFrame = 0;
-    std::uint64_t sceneryWindowFrame = 0;
-    struct SceneryTile {
-      int width = 0, height = 0;
-      bool raw = false;
-      std::vector<std::uint8_t> data;
-    };
-    std::vector<SceneryTile> sceneryTiles;
-    int sceneryColumns = 0;
-    struct SceneryWindow {
-      ImageHandle handle = 0;
-      int x = 0, y = 0, width = 0, height = 0;
-      bool premultiplied = false;
-      bool wrap = false;
-      std::uint64_t lastFrame = 0;
-    };
-    std::vector<SceneryWindow> sceneryWindows;
     std::string cacheKey;
     std::filesystem::path sourcePath;
     std::string lastPreparedFallbackReason;
@@ -458,8 +458,6 @@ class ImageStore {
   static std::shared_ptr<ImageFileSource> captureTileFallback(const TileLoad& load);
   std::optional<ImageInfo> installTileLoad(std::shared_ptr<TileLoad> load, bool retainCpu);
   std::optional<ImagePixels> readTileRegion(const Slot& slot, int x, int y, int width, int height) const;
-  std::optional<ImagePixels> readSceneryRegion(const Slot& slot,
-      int x, int y, int width, int height, bool wrap = false) const;
   std::optional<SpriteImageRegion> resolveTileRegion(Slot& slot, float x, float y,
       float width, float height, bool premultiplied);
   std::size_t tileWarmBytes() const;
@@ -475,7 +473,7 @@ class ImageStore {
   mutable std::unordered_map<std::string, std::weak_ptr<ImageFileSource>> tileFiles_;
   std::shared_ptr<ImageFileSource> captureTileFile(const std::filesystem::path& path) const;
   std::uint64_t tileHits_ = 0, tileRegions_ = 0, tileMaterializations_ = 0;
-  std::uint64_t sceneryFrame_ = 0, sceneryWindowHits_ = 0;
+  std::uint64_t sceneryWindowHits_ = 0;
   std::uint64_t sceneryWindowUploads_ = 0, sceneryFullFallbacks_ = 0;
   std::uint64_t sceneryScrollWindows_ = 0, sceneryScrollCopyBytes_ = 0;
   std::uint64_t sceneryScrollUploadBytes_ = 0, sceneryScrollFallbacks_ = 0;
@@ -487,6 +485,15 @@ class ImageStore {
   std::unordered_map<std::string, std::uint64_t> tileFallbacks_, tileRegionSets_;
   void clearPrepared(Slot& slot);
   void trimPreparedPages() const;
+  std::unordered_map<std::string, ImageStorageDecision> storageDecisions_;
+  std::uint64_t storageDecisionHits_ = 0;
+  const ImageStorageDecision* storageDecision(const std::string& key) const;
+  std::shared_ptr<PaletteBacking> makePalette(const ImagePixels& pixels,
+      const ImageStorageDecision* decision = nullptr);
+  std::optional<ImagePixels> readPalettePixels(const Slot& slot) const;
+  bool materializePalette(Slot& slot);
+  std::size_t paletteGpuBytes(const Slot& slot) const;
+  std::size_t paletteCpuBytes(const Slot& slot) const;
   bool materialize(Slot& slot, bool premultiplied);
   std::optional<ImageInfo> lookupAstc(ImageHandle handle, bool premultiplied);
   bool promoteAstc(Slot& slot, const void* replacement = nullptr);
@@ -507,9 +514,11 @@ class ImageStore {
   std::uint64_t textureEpoch_ = 0;
   void destroySlot(std::size_t index);
   void clearPremultipliedTexture(Slot& slot);
-  std::optional<ImageInfo> createDecoded(const ImagePixels& pixels);
+  std::optional<ImageInfo> createDecoded(const ImagePixels& pixels,
+      const ImageStorageDecision* decision = nullptr);
   std::optional<ImageInfo> createImage(int width, int height, const void* pixels,
-                                     bool premultiplied, ImageChannelStorage storage);
+                                     bool premultiplied, ImageChannelStorage storage,
+      std::shared_ptr<PaletteBacking> palette = {});
   bool detachSharedTexture(Slot& slot);
   bool promoteToRgba(Slot& slot, const void* replacement = nullptr);
   std::deque<Slot> slots_;

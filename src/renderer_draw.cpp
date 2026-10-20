@@ -655,16 +655,9 @@ void Renderer::renderScene() {
     bool sparse = false;
     std::vector<std::array<int, 4>> sparseClips{};
     std::uint64_t sparseFullPixels = 0;
+    std::uint32_t paletteTable = 0;
   };
   std::vector<DrawOperation> operations;
-  struct SceneryWindowPinGuard {
-    ImageStore& images;
-    std::vector<ImageHandle> handles;
-    ~SceneryWindowPinGuard() {
-      for (const auto handle : handles) images.endUse(handle);
-    }
-  } sceneryWindowPins{images_, {}};
-  sceneryWindowPins.handles.reserve(frame_.commands.size());
   std::size_t preparingFilterDepth = 0;
   std::array<const RenderCommand*, scene_packet::maxFilterDepth> preparingFilters{};
   std::array<float, 4> viewportMapping{1, 1, 0, 0};
@@ -771,6 +764,13 @@ void Renderer::renderScene() {
       if (left || right || above || below) continue;
     }
     const auto logicalInfo = images_.inspect(command.image);
+    const bool paletteEligible = command.nearest && !command.mipmap &&
+      !command.standaloneBitmapRegion && !command.appliesSpriteColor && command.blur <= 0 &&
+      (command.primitive == RenderCommand::Primitive::sprite ||
+       command.primitive == RenderCommand::Primitive::tilingSprite);
+    const auto palette = paletteEligible ? images_.resolvePaletteImage(command.image,
+      command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture)) :
+      std::optional<PaletteImageRegion>{};
     const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
     const bool exactNearestDimensions = logicalInfo && logicalInfo->width > 0 &&
       logicalInfo->height > 0 && (logicalInfo->width & (logicalInfo->width - 1)) == 0 &&
@@ -784,111 +784,14 @@ void Renderer::renderScene() {
       // A constant texture needs no UV remapping in the inline effect sampler.
       (inlineFilterMatrix[commandIndex] == nullptr || uniformPrepared);
     const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
-    const auto block = frameEligible ? images_.resolveBlockRegion(command.image,
+    const auto block = !palette && frameEligible ? images_.resolveBlockRegion(command.image,
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<BlockImageRegion>{};
-    auto derived = !block && derivedEligible ? images_.resolveSpriteRegion(command.image,
+    auto derived = !palette && !block && derivedEligible ? images_.resolveSpriteRegion(command.image,
       command.source[0], command.source[1], command.source[2], command.source[3],
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<SpriteImageRegion>{};
-    bool sceneryWindow = false;
-    const bool scenerySprite = command.primitive == RenderCommand::Primitive::sprite &&
-      !command.repeat;
-    const bool sceneryTiling = command.primitive == RenderCommand::Primitive::tilingSprite;
-    const bool sceneryBacking = !block && !derived &&
-      images_.hasWindowedScenery(command.image);
-    const bool sceneryWindowEligible = sceneryBacking &&
-        (scenerySprite || sceneryTiling) &&
-        !command.mipmap && (!command.clampedTilingSampling || sceneryTiling) &&
-        !command.atlasTilingSampling && !command.appliesColorMatrix &&
-        !command.appliesSpriteColor && !command.appliesMeshPostTintOverlay &&
-        !command.standaloneBitmapRegion &&
-        command.blur <= 0 && !command.maskImage && !command.textureRotation &&
-        !command.roundPixels && !inlineFilterMatrix[commandIndex] &&
-        preparingFilterDepth == 0 &&
-        sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
-        viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
-        p1[0] > p0[0] && p3[1] > p0[1] &&
-        // The corner checks also admit authored world vertices only when they
-        // describe the same axis-aligned rectangle used for source mapping.
-        p0[1] == p1[1] && p0[0] == p3[0] &&
-        p2[0] == p1[0] && p2[1] == p3[1] && logicalInfo &&
-        std::isfinite(command.source[0]) && std::isfinite(command.source[1]) &&
-        std::isfinite(command.source[2]) && std::isfinite(command.source[3]) &&
-        command.source[2] > 0 && command.source[3] > 0 &&
-        (sceneryTiling || (command.source[0] >= 0 && command.source[1] >= 0 &&
-          command.source[0] + command.source[2] <= logicalInfo->width &&
-          command.source[1] + command.source[3] <= logicalInfo->height));
-    if (sceneryWindowEligible) {
-      int clipX0 = 0, clipY0 = 0, clipX1 = width_, clipY1 = height_;
-      if (command.clipped) {
-        clipX0 = std::max(clipX0, command.clip[0]);
-        clipY0 = std::max(clipY0, command.clip[1]);
-        clipX1 = std::min(clipX1, command.clip[2]);
-        clipY1 = std::min(clipY1, command.clip[3]);
-      }
-      if (clipX0 < clipX1 && clipY0 < clipY1) {
-        const auto x0 = std::max(float(clipX0), p0[0]);
-        const auto y0 = std::max(float(clipY0), p0[1]);
-        const auto x1 = std::min(float(clipX1), p1[0]);
-        const auto y1 = std::min(float(clipY1), p3[1]);
-        if (x1 > x0 && y1 > y0) {
-          const auto sourceX = [&](float v) { return command.source[0] +
-            (v - p0[0]) * command.source[2] / (p1[0] - p0[0]); };
-          const auto sourceY = [&](float v) { return command.source[1] +
-            (v - p0[1]) * command.source[3] / (p3[1] - p0[1]); };
-          const double sourceLeft = std::floor(sourceX(x0)) - 3.0;
-          const double sourceTop = std::floor(sourceY(y0)) - 3.0;
-          const double sourceRight = std::ceil(sourceX(x1)) + 3.0;
-          const double sourceBottom = std::ceil(sourceY(y1)) + 3.0;
-          constexpr double intMin = static_cast<double>(std::numeric_limits<int>::min());
-          constexpr double intMax = static_cast<double>(std::numeric_limits<int>::max());
-          if (sourceLeft >= intMin && sourceTop >= intMin &&
-              sourceRight <= intMax && sourceBottom <= intMax) {
-            const int left = sceneryTiling ? int(sourceLeft) : std::max(0, int(sourceLeft));
-            const int top = sceneryTiling ? int(sourceTop) : std::max(0, int(sourceTop));
-            const int right = sceneryTiling ? int(sourceRight) :
-              std::min(logicalInfo->width, int(sourceRight));
-            const int bottom = sceneryTiling ? int(sourceBottom) :
-              std::min(logicalInfo->height, int(sourceBottom));
-            if (right > left && bottom > top) {
-              auto sceneryRegion = images_.resolveSceneryWindow(command.image, left, top,
-                right - left, bottom - top,
-                command.pixiSpritePacking && !command.premultipliedSpriteTexture,
-                sceneryTiling);
-              if (sceneryRegion) {
-                if (images_.beginUse(sceneryRegion->image.handle)) {
-                  sceneryWindowPins.handles.push_back(sceneryRegion->image.handle);
-                  derived = std::move(sceneryRegion);
-                }
-              }
-              sceneryWindow = derived.has_value() && sceneryTiling;
-            }
-          }
-        }
-      }
-    } else if (sceneryBacking) {
-      const char* reason = "source-geometry";
-      if (!(scenerySprite || sceneryTiling)) reason = "primitive";
-      else if (command.mipmap) reason = "mipmap";
-      else if (command.clampedTilingSampling && !sceneryTiling) reason = "clamped-non-tiling";
-      else if (command.atlasTilingSampling) reason = "atlas-tiling";
-      else if (command.appliesColorMatrix) reason = "color-matrix";
-      else if (command.appliesSpriteColor) reason = "sprite-color";
-      else if (command.appliesMeshPostTintOverlay) reason = "mesh-post-tint";
-      else if (command.standaloneBitmapRegion) reason = "standalone-bitmap-region";
-      else if (command.spriteWorldVertices) reason = "world-vertices";
-      else if (command.blur > 0) reason = "blur";
-      else if (command.maskImage) reason = "mask";
-      else if (command.textureRotation) reason = "texture-rotation";
-      else if (command.roundPixels) reason = "round-pixels";
-      else if (inlineFilterMatrix[commandIndex]) reason = "inline-filter";
-      else if (preparingFilterDepth > 0) reason = "filter-depth";
-      else if (sceneProjection_ != std::array<float, 6>{1, 0, 0, 1, 0, 0}) reason = "scene-projection";
-      else if (viewportMapping != std::array<float, 4>{1, 1, 0, 0}) reason = "viewport-mapping";
-      images_.noteSceneryWindowRejection(command.image, reason);
-    }
-    const bool compactEligible = logicalInfo && !block && !derived && !command.nearest &&
+    const bool compactEligible = logicalInfo && !palette && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
       command.source[1] == 0 && command.source[3] == logicalInfo->height &&
       command.source[2] > 0 && localWidth > 0 && localHeight > 0 &&
@@ -904,11 +807,11 @@ void Renderer::renderScene() {
     const auto compact = compactEligible ? images_.resolveCompactRegion(command.image,
       command.source[0], command.source[1], command.source[2], command.source[3]) :
       std::optional<CompactImageRegion>{};
-    if (!block && !derived && !compact && frameEligible)
+    if (!palette && !block && !derived && !compact && frameEligible)
       derived = images_.resolvePreparedFrameRegion(command.image,
         command.source[0], command.source[1], command.source[2], command.source[3],
         command.pixiSpritePacking && !command.premultipliedSpriteTexture);
-    if (!block && !derived && !compact && images_.hasPreparedBacking(command.image)) {
+    if (!palette && !block && !derived && !compact && images_.hasPreparedBacking(command.image)) {
       const char* reason = derivedEligible ? "unsupported-crop" :
         command.primitive != RenderCommand::Primitive::sprite ? "non-sprite" :
         command.mipmap ? "mipmaps" : command.repeat ? "repetition" :
@@ -921,7 +824,7 @@ void Renderer::renderScene() {
         "unsupported-crop";
       images_.notePreparedFallback(command.image, reason);
     }
-    const auto info = block ? std::optional<ImageInfo>{block->image} :
+    const auto info = palette ? std::optional<ImageInfo>{palette->image} : block ? std::optional<ImageInfo>{block->image} :
       compact ? std::optional<ImageInfo>{compact->image} :
       derived ? std::optional<ImageInfo>{derived->image} :
       command.image == 0 ? std::optional<ImageInfo>{} :
@@ -1038,7 +941,7 @@ void Renderer::renderScene() {
         !command.atlasTilingSampling && !command.maskImage && command.blur <= 0 &&
         !command.appliesSpriteColor && !command.appliesColorMatrix &&
         !command.appliesMeshPostTintOverlay && !command.standaloneBitmapRegion &&
-        !inlineFilterMatrix[commandIndex] && !derived && !block && !compact;
+        !inlineFilterMatrix[commandIndex] && !palette && !derived && !block && !compact;
     const std::array<float, 72> vertices = {
       vertex0[0], vertex0[1], uv0[0], uv0[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
       vertex1[0], vertex1[1], uv1[0], uv1[1], color[0], color[1], color[2], color[3], sampleBounds[0], sampleBounds[1], sampleBounds[2], sampleBounds[3],
@@ -1084,6 +987,7 @@ void Renderer::renderScene() {
       }
     }
     const bool operationStateMatches = !operations.empty() &&
+        operations.back().paletteTable == (palette ? palette->table : 0U) &&
         !block && !operations.back().block && !compact && !operations.back().compact &&
         operations.back().tileLayer == 0 && !operations.back().sparse &&
         !sparseClips.has_value() &&
@@ -1092,7 +996,7 @@ void Renderer::renderScene() {
         operations.back().derivedSampleBounds == derivedSampleBounds &&
         operations.back().derivedAtlasOffset == derivedAtlasOffset &&
         operations.back().blendMode == command.blendMode &&
-        operations.back().repeat == (command.repeat && !sceneryWindow) &&
+        operations.back().repeat == command.repeat &&
         operations.back().nearest == command.nearest &&
         operations.back().mipmap == mipmap &&
         operations.back().clampedTilingSampling == command.clampedTilingSampling &&
@@ -1133,7 +1037,7 @@ void Renderer::renderScene() {
     if (!operationStateMatches ||
         (operations.back().texture != texture && !canAppendTexture)) {
       operations.push_back({0, texture, command.blendMode,
-        command.repeat && !sceneryWindow,
+        command.repeat,
         command.nearest,
         static_cast<GLsizei>(vertices_.size() / 12U - 6U), 6, nullptr,
         operationClip, operationClipped, textureWidth, textureHeight,
@@ -1163,6 +1067,7 @@ void Renderer::renderScene() {
       operations.back().derivedSampleBounds = derivedSampleBounds;
       operations.back().derivedAtlasOffset = derivedAtlasOffset;
       operations.back().block = block;
+      operations.back().paletteTable = palette ? palette->table : 0U;
       if (compact) {
         operations.back().compact = compact;
         const auto& bounds = compact->contentBounds;
@@ -2282,6 +2187,12 @@ void Renderer::renderScene() {
     }
     projectTarget(spriteProgram, operation.primitive != RenderCommand::Primitive::screenFill);
     glBindTexture(GL_TEXTURE_2D, operation.texture);
+    glUniform1i(simpleSprite ? simplePaletteUniform_ : spriteEffect.palette, operation.paletteTable != 0);
+    if (operation.paletteTable) {
+      glActiveTexture(GL_TEXTURE3);
+      glBindTexture(GL_TEXTURE_2D, operation.paletteTable);
+      glActiveTexture(GL_TEXTURE0);
+    }
     const auto nearest = textureNearestState_.find(operation.texture);
     if (nearest == textureNearestState_.end() ||
         nearest->second != operation.nearest) {

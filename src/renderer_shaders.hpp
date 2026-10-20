@@ -1099,6 +1099,12 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
   uniform highp sampler2D image;
+  uniform bool paletteImage;
+  uniform highp sampler2D paletteTable;
+  highp vec4 samplePalette(highp vec2 coord) {
+    highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
+    return texelFetch(paletteTable, ivec2(bytes), 0);
+  }
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
   uniform bool clampedTilingSampling;
@@ -1140,7 +1146,7 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
       } else sampleColor = texture(image,
         coord * derivedUvTransform.xy + derivedUvTransform.zw);
     } else {
-      sampleColor = texture(image, coord);
+      sampleColor = paletteImage ? samplePalette(coord) : texture(image, coord);
     }
     outputColor = sampleColor * vertexColor;
     outputColor.rgb *= pixiSpritePacking ? (texturePremultiplied ? 1.0 : sampleColor.a) : (texturePremultiplied ? vertexColor.a : outputColor.a);
@@ -1297,6 +1303,12 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   precision mediump float;
   precision highp int;
   uniform highp sampler2D image;
+  uniform bool paletteImage;
+  uniform highp sampler2D paletteTable;
+  highp vec4 samplePalette(highp vec2 coord) {
+    highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
+    return texelFetch(paletteTable, ivec2(bytes), 0);
+  }
   uniform bool pixiSpritePacking;
   uniform bool texturePremultiplied;
   uniform bool clampedTilingSampling;
@@ -1385,7 +1397,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
           sampleColor = texelFetch(image, ivec2(clamp(floor(position) + spriteFrame.xy, spriteFrame.xy, spriteFrame.zw)), 0);
         } else {
           coord = (clamp(position, vec2(0.5), spriteFrame.zw - spriteFrame.xy + vec2(0.5)) + spriteFrame.xy) / imageDimensions;
-          sampleColor = texture(image, coord);
+          sampleColor = paletteImage ? samplePalette(coord) : texture(image, coord);
         }
       } else {
       if (clampedTilingSampling && !derivedImage) {
@@ -1400,7 +1412,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       bool outside = derivedImage && (any(lessThan(coord, vec2(0.0))) ||
         any(greaterThan(coord, vec2(1.0))));
       sampleColor = outside ? vec4(0.0) : blockImage ?
-        sampleBlockImage(coord * imageDimensions) : texture(image, coord);
+        sampleBlockImage(coord * imageDimensions) : paletteImage ? samplePalette(coord) : texture(image, coord);
       }
     } else {
       highp vec2 coord = standaloneBitmapRegion ?

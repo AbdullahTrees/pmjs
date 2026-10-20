@@ -203,14 +203,6 @@ if(BUILD_TESTING)
     add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TARGET}>)
   endfunction()
 
-  add_executable(pmjs-scenery-window-test test/scenery-window.cpp)
-  target_compile_options(pmjs-scenery-window-test PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME native-scenery-window COMMAND pmjs-scenery-window-test)
-
-  add_executable(pmjs-scenery-scroll-test test/scenery-scroll.cpp)
-  target_compile_options(pmjs-scenery-scroll-test PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
-  add_test(NAME native-scenery-scroll COMMAND pmjs-scenery-scroll-test)
-
   pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp src/vfs.cpp src/file_identity.cpp)
   pmjs_add_cpp_test(pmjs-log-test native-log test/log.cpp)
   target_link_libraries(pmjs-log-test PRIVATE pthread)
@@ -438,7 +430,8 @@ if(BUILD_TESTING)
     node-identity-filter-shader
     node-nearest-tile-shader
     node-scene
-    node-scenery-window-tiles
+    node-resident-scenery-tiles
+    node-image-storage-index
     node-sprite-byte-precision
     node-pixi4-clear
     node-window-layer-clears

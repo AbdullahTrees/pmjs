@@ -1,3 +1,4 @@
+#include "asset_processor.hpp"
 #include "platform.hpp"
 #include "renderer.hpp"
 #include "resources.hpp"
@@ -318,6 +319,149 @@ int main() {
         "releasing a tile view damaged another owner");
       images.release(secondTile->handle); images.update();
       require(images.gpuBytes() == 0, "shared compressed tile pages leaked");
+    }
+    // Exercise index-width selection and every 16-bit address, including hidden RGB and odd dimensions.
+    for (const unsigned colorCount : {256U, 257U, 65536U}) for (const bool opaque : {false, true}) {
+      constexpr int width = 2049, height = 2048;
+      pmjs::ImagePixels pixels{width, height, std::vector<std::uint8_t>(width * height * 4)};
+      for (std::size_t i = 0; i < pixels.rgba.size() / 4; ++i) {
+        const unsigned color = i % colorCount;
+        pixels.rgba[i * 4] = color & 255;
+        pixels.rgba[i * 4 + 1] = color >> 8;
+        pixels.rgba[i * 4 + 2] = (color * 17 + (color >> 8) * 7) & 255;
+        pixels.rgba[i * 4 + 3] = opaque ? 255 : (color * 31) & 255;
+      }
+      const auto path = root / (std::to_string(colorCount) + (opaque ? "-palette-opaque.png" : "-palette-alpha.png"));
+      writePng(path, pixels);
+      const auto decision = pmjs::ImageStore::classifyStorage(pixels);
+      require(decision.paletteBits == (colorCount <= 256 ? 8 : 16), "offline palette classification differs");
+      const auto source = pmjs::ImageStore::openFile(path);
+      require(source && !images.installStorageDecision(path, "stale-identity", decision),
+        "storage decision accepted an unrelated source identity");
+      require(images.installStorageDecision(path, source->key(), decision), "storage decision installation failed");
+      const auto decisionHits = images.storageDecisionHits();
+      const auto indexed = images.loadPng(path);
+      require(images.storageDecisionHits() == decisionHits + 1, "decoded image ignored installed storage decision");
+      require(indexed && !indexed->texture, "large palette image eagerly allocated RGBA storage");
+      const auto indexBytes = colorCount <= 256 ? 1U : 2U;
+      const auto paletteBytes = std::size_t(width) * height * indexBytes + ((colorCount + 255) / 256) * 1024;
+      require(images.gpuBytes() == paletteBytes, "16-bit palette allocation accounting differs");
+      const auto view = images.resolvePaletteImage(indexed->handle, false);
+      require(view && view->image.texture && view->table, "palette view unavailable");
+      const auto entries = images.memoryEntries();
+      require(std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+        return entry.handle == indexed->handle && entry.paletteIndexBits == int(indexBytes * 8);
+      }), "palette index width did not match its color count");
+      const auto roundtrip = images.readPixelsRegion(indexed->handle, 0, 0, width, height);
+      require(roundtrip && roundtrip->rgba == pixels.rgba, "16-bit palette readback changed RGBA bytes");
+      const auto control = images.createRgba(width, height, pixels.rgba.data());
+      for (int variant : {1, 3, 5, 7, 9, 13, 17, 21, 25, 29}) {
+        require(render(renderer, indexed->handle, width, height, variant) ==
+          render(renderer, control->handle, width, height, variant), "palette nearest rendering differs from RGBA");
+        ++comparisons;
+      }
+      require(images.resolvePaletteImage(indexed->handle, false).has_value(),
+        "nearest draws promoted the palette to RGBA");
+      const auto premultiplied = images.resolvePaletteImage(indexed->handle, true);
+      require(premultiplied && premultiplied->image.texture == view->image.texture,
+        "premultiplied palette duplicated index storage");
+      const auto afterPremultiply = images.gpuBytes();
+      require(images.resolvePaletteImage(indexed->handle, true).has_value() &&
+        images.gpuBytes() == afterPremultiply, "premultiplied palette was recreated");
+      auto snapshot = images.deferPixelRead(indexed->handle, 0, 0, 2, 1);
+      require(images.beginUse(indexed->handle), "palette pending-use setup failed");
+      const auto rgba = images.lookup(indexed->handle);
+      require(rgba && rgba->texture && glIsTexture(view->image.texture),
+        "RGBA promotion destroyed an in-flight palette texture");
+      require(!images.resolvePaletteImage(indexed->handle, false), "promoted image kept an active index view");
+      require(render(renderer, indexed->handle, width, height, 0) ==
+        render(renderer, control->handle, width, height, 0), "palette linear fallback differs from RGBA");
+      ++comparisons;
+      const std::array<std::uint8_t, 4> replacement{11, 29, 73, 109};
+      require(images.updateRgbaRegion(indexed->handle, 0, 0, 1, 1, replacement.data(), 1),
+        "palette mutation failed");
+      require(snapshot->pixels && std::equal(snapshot->pixels->rgba.begin(), snapshot->pixels->rgba.end(), pixels.rgba.begin()),
+        "palette mutation changed a deferred reader's snapshot");
+      require(images.endUse(indexed->handle), "palette pending-use release failed");
+      require(!glIsTexture(view->image.texture), "retired palette survived its last pending reader");
+      const auto changed = images.readPixelsRegion(indexed->handle, 0, 0, 1, 1);
+      require(changed && std::equal(changed->rgba.begin(), changed->rgba.end(), replacement.begin()),
+        "mutated palette fallback returned stale pixels");
+      renderer.beginFrame();
+      images.release(indexed->handle); images.release(control->handle); images.update();
+      require(images.gpuBytes() == 0, "palette or promoted RGBA allocations leaked");
+      if (opaque && colorCount == 256) {
+        pixels.rgba[3] = 254;
+        writePng(path, pixels);
+        require(!images.installStorageDecision(path, source->key(), decision),
+          "changed source accepted stale storage metadata");
+        const auto oldHits = images.storageDecisionHits();
+        const auto changed = images.loadPng(path);
+        require(changed && images.storageDecisionHits() == oldHits && images.resolvePaletteImage(changed->handle, false),
+          "changed image did not use ordinary classification");
+        const auto owners = images.memoryEntries();
+        require(std::any_of(owners.begin(), owners.end(), [&](const auto& owner) {
+          return owner.handle == changed->handle && owner.paletteIndexBits == 16;
+        }), "changed 257-color source reused an 8-bit decision");
+        images.release(changed->handle); images.update();
+        require(images.gpuBytes() == 0, "changed-source palette leaked");
+        auto rgbaDecision = decision;
+        rgbaDecision.paletteBits = 0;
+        const auto currentSource = pmjs::ImageStore::openFile(path);
+        require(images.installStorageDecision(path, currentSource->key(), rgbaDecision),
+          "ordinary-storage decision installation failed");
+        const auto ordinary = images.loadPng(path);
+        require(ordinary && ordinary->texture && !images.resolvePaletteImage(ordinary->handle, false),
+          "ordinary-storage decision rediscovered palette eligibility");
+        images.release(ordinary->handle); images.update();
+        require(images.gpuBytes() == 0, "ordinary-storage decision leaked");
+      }
+      if (opaque && colorCount == 65536) {
+        pmjs::PreparedImageDescriptor descriptor;
+        pmjs::AssetRecipe recipe; recipe.columns = 3; recipe.rows = 2;
+        const auto asset = pmjs::prepareAssetImage(path, root / "prepared-palette", recipe);
+        descriptor.width = width; descriptor.height = height; descriptor.halo = asset.halo;
+        for (const auto& page : asset.pages)
+          descriptor.pages.push_back({page.path, page.width, page.height});
+        for (const auto& cell : asset.cells)
+          descriptor.cells.push_back({cell.rect, cell.crop, cell.atlas, cell.fill, cell.page});
+        require(images.installPrepared(path, root / "prepared-palette", descriptor), "prepared palette installation failed");
+        const auto prepared = images.loadPng(path);
+        const auto preparedHits = images.storageDecisionHits();
+        require(prepared && images.resolvePaletteImage(prepared->handle, false),
+          "prepared image did not realize a full palette");
+        require(images.storageDecisionHits() == preparedHits + 1, "prepared image ignored storage metadata");
+        require(images.gpuBytes() == paletteBytes, "prepared palette retained an extra RGBA texture");
+        require(images.cpuBytes() < 512 * 1024, "resident palette retained decoded preparation pages");
+        const auto preparedPixels = images.readPixelsRegion(prepared->handle, 0, 0, width, height);
+        require(preparedPixels && preparedPixels->rgba == pixels.rgba,
+          "prepared palette reconstruction changed pixels");
+        images.release(prepared->handle); images.update();
+        require(images.gpuBytes() == 0, "prepared palette allocation leaked");
+
+        pixels.rgba[3] = 254; // The original opaque color still occurs elsewhere.
+        const auto overflowPath = root / "palette-overflow.png";
+        writePng(overflowPath, pixels);
+        const auto overflow = images.loadPng(overflowPath);
+        require(overflow && overflow->texture && !images.resolvePaletteImage(overflow->handle, false),
+          "65,537 colors must fall back to a full texture without truncating indices");
+        require(images.gpuBytes() == pixels.rgba.size(), "palette overflow fallback accounting differs");
+        images.release(overflow->handle); images.update();
+        require(images.gpuBytes() == 0, "palette overflow fallback leaked");
+      }
+    }
+    {
+      pmjs::ImagePixels pixels{2, 1, {11, 29, 73, 109, 43, 89, 127, 173}};
+      const auto path = root / "invalid-channel-hint.png";
+      writePng(path, pixels);
+      pmjs::ImageStorageDecision decision{2, 1, 0, {1, {0, 1, 2, 3}, {0, 0, 0, 5}}};
+      require(images.installStorageDecision(path, pmjs::ImageStore::openFile(path)->key(), decision),
+        "channel-hint fixture installation failed");
+      const auto image = images.loadPng(path);
+      const auto readback = images.readPixelsRegion(image->handle, 0, 0, 2, 1);
+      require(readback && readback->rgba == pixels.rgba, "incorrect compact hint changed source pixels");
+      images.release(image->handle); images.update();
+      require(images.gpuBytes() == 0, "invalid channel hint leaked an allocation");
     }
     require(glGetError() == GL_NO_ERROR, "grayscale operations left a GL error");
   }

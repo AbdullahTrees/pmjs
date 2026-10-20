@@ -183,6 +183,17 @@ function rect(value, positive = true) {
   return Array.isArray(value) && value.length === 4 && value.every(n => Number.isSafeInteger(n) && n >= 0) &&
     (positive ? value[2] > 0 && value[3] > 0 : true);
 }
+function validStorageDecision(value) {
+  return value && value.version === 1 &&
+    [value.width, value.height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 8192) &&
+    [0, 8, 16].includes(value.paletteBits) && [1, 2, 4].includes(value.channels) &&
+    Array.isArray(value.source) && value.source.length === 4 &&
+    value.source.every(n => Number.isInteger(n) && n >= 0 && n < 4) &&
+    Array.isArray(value.swizzle) && value.swizzle.length === 4 &&
+    value.swizzle.every(n => Number.isInteger(n) && (n >= 0 && n < value.channels || n === 4 || n === 5)) &&
+    (!value.paletteBits || value.channels === 4 && value.width >= 2048 && value.height >= 2048);
+}
+
 function validDescriptor(d) {
   if (!d || d.version !== 1 || !Number.isSafeInteger(d.width) || !Number.isSafeInteger(d.height) ||
       d.width < 1 || d.height < 1 || !Array.isArray(d.pages) || !Array.isArray(d.cells) || d.pages.length > 4096 || d.cells.length > 4096) return false;
@@ -333,7 +344,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     fallback: 0, failedFiles: 0, installFailures: 0, prepared: 0, installed: 0, decrypted: 0, sourceBytes: 0, cacheBytes: 0,
     indexedNegative: 0, indexedLayoutAttempts: 0, indexedZeroPage: 0,
     indexedPageCopies: 0, unindexedProcessed: 0, processingMs: 0,
-    cancelled: false, entries: [], decryptedEntries: [], audioViewEntries: [], audioViews: 0, decisions: [], durationMs: 0 };
+    cancelled: false, entries: [], decryptedEntries: [], audioViewEntries: [], audioViews: 0, decisions: [], storageEntries: [], durationMs: 0 };
   const catalogFile = path.join(cacheRoot, 'catalog-'+identity(path.resolve(gameRoot))+'.json');
   result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
   let release;
@@ -348,6 +359,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   async function clearIndexes() {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => native.assets.installPrepared([])),
+      Promise.resolve().then(() => native.assets.installImageStorage?.([])),
       Promise.resolve().then(() => native.assets.installDecrypted?.([])),
       Promise.resolve().then(() => native.media?.installAudioViews?.([]))
     ]);
@@ -369,7 +381,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       throw new Error('image preparation is unavailable in this addon');
     }
 
+    const storageRecords = (portableIndex?.images || []).filter(record => validStorageDecision(record.storage));
     const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes, losslessPrefixes, astc,
+      ...(storageRecords.length ? { imageStorage: identity(storageRecords
+        .map(record => [record.source, record.sourceHash, record.storage])) } : {}),
       contentIdentity: 1, ...(audioViewSupport ? { audioViewVersion: 1, audioSettingsHash: audioSettings.hash || null } : {}) };
     const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
       typeof native.assets.installDerivedCatalog === 'function';
@@ -392,13 +407,16 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             throw new Error('incomplete audio view installation');
           if (audioViewSupport && (await encryptionSettings(native, gameRoot)).hash !== audioSettings.hash)
             throw new Error('audio encryption settings changed during preparation');
+          const storageEntries = catalog.storageEntries || [];
+          if ((await native.assets.installImageStorage?.(storageEntries) || 0) !== storageEntries.length)
+            throw new Error('incomplete image storage catalog installation');
           const installed = await native.assets.installPreparedCatalog(catalog.entries);
           if (installed !== catalog.entries.length) throw new Error('incomplete image catalog installation');
           if (cancelled()) throw new Error('catalog installation cancelled');
           const previous = installedLeases.get(native.assets);
           installedLeases.set(native.assets, lease);
           if (previous) previous();
-          Object.assign(result, catalog.summary, { entries: catalog.entries, decryptedEntries: catalog.decryptedEntries,
+          Object.assign(result, catalog.summary, { entries: catalog.entries, storageEntries, decryptedEntries: catalog.decryptedEntries,
             audioViewEntries: catalog.audioViewEntries || [],
             generated: 0, failedFiles: 0, installFailures: 0, catalogHit: true, catalogStatus: 'hit', releaseCacheLease: lease });
           report('install');
@@ -472,7 +490,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         }
         let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
         const hintedNegative = !offline && !verifyHashes && !encrypted && extension === '.png' &&
-          !recipeMap.has(logicalSource) && negativeHints.has(source);
+          !recipeMap.has(logicalSource) && negativeHints.has(source) &&
+          !indexedImages.get(source)?.some(record => validStorageDecision(record.storage));
         const checkedSource = hintedNegative ? { hash: null, size: 0 } : await files.inspect(file, 'source');
         const sourceHash = checkedSource.hash;
         if (sourceIdentity !== undefined && native.assets.sourceIdentity(source) !== sourceIdentity) throw new Error('source changed while hashing');
@@ -494,6 +513,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         // The ordinary loader will read the original source if it is requested.
         const indexedNegativeSkip = !offline && !encrypted && extension === '.png' && indexed?.descriptor === null;
         if (indexedNegativeSkip) {
+          if (validStorageDecision(indexed.storage))
+            result.storageEntries.push({ source: logicalSource, sourceIdentity, storage: indexed.storage });
           ++result.indexedNegative;
           ++result.fallback;
           ++catalogNegativeHits;
@@ -576,6 +597,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             result.generated += 1;
           }
           sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
+          if (validStorageDecision(indexed?.storage))
+            result.storageEntries.push({ source: logicalSource, sourceIdentity, storage: indexed.storage });
           if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
             encryptionSettingsSha256: encrypted ? settings.hash : null,
             descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
@@ -647,6 +670,15 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         result.fallback += result.audioViewEntries.length - result.audioViews;
         result.installFailures += result.audioViewEntries.length - result.audioViews;
       }
+      const decryptedSources = new Set(result.decryptedEntries.map(entry => entry.logicalSource));
+      result.storageEntries = result.storageEntries.filter(entry => {
+        if (!decryptedSources.has(entry.source)) return true;
+        if (!native.assets.hasDecrypted(entry.source)) return false;
+        entry.sourceIdentity = native.assets.sourceIdentity(entry.source);
+        return true;
+      });
+      if ((await native.assets.installImageStorage?.(result.storageEntries) || 0) !== result.storageEntries.length)
+        throw new Error('incomplete image storage installation');
       const installed = await native.assets.installPrepared(result.entries, catalogCapable);
       if (previousLease) previousLease();
       result.prepared = result.entries.length;
@@ -661,7 +693,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
         summary.hits = keys.length + indexedNegativeSkips + result.audioViews;
         summary.negativeHits = catalogNegativeHits;
-        await publishCatalog(catalogFile, binding, cacheRoot, { keys, entries: result.entries,
+        await publishCatalog(catalogFile, binding, cacheRoot, { keys, entries: result.entries, storageEntries: result.storageEntries,
           decryptedEntries: result.decryptedEntries, audioViewEntries: result.audioViewEntries, summary });
       }
       report('cleanup');
@@ -716,4 +748,4 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   return result;
 }
 
-module.exports = { astcSettings, validLosslessPrefixes, prepareAssets, validRecipes, validDescriptor, automaticRecipe, PROCESSOR_IDENTITY };
+module.exports = { astcSettings, validLosslessPrefixes, prepareAssets, validRecipes, validDescriptor, validStorageDecision, automaticRecipe, PROCESSOR_IDENTITY };

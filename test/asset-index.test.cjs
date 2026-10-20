@@ -73,3 +73,21 @@ test('an invalid image section does not discard valid map compilation or tile ou
   const loaded = f.load();
   assert.deepEqual(loaded.images, []); assert.equal(loaded.maps.entries.length, 1);
 });
+
+test('storage decisions require their own supported version and valid layout', () => {
+  const f = fixture();
+  const storage = { version: 1, width: 2048, height: 2048, channels: 4,
+    paletteBits: 8, source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] };
+  f.index.sections.imageStorage = 1;
+  f.index.imageStorageVersion = f.native.assets.imageStorageVersion = 1;
+  f.index.images[0].storage = storage;
+  assert.deepEqual(f.load().images[0].storage, storage);
+  f.index.imageStorageVersion = 2;
+  assert.equal(f.load().images[0].storage, undefined);
+  f.index.imageStorageVersion = 1;
+  f.index.images[0].storage = { ...storage, paletteBits: 12 };
+  assert.equal(f.load().images[0].storage, undefined);
+  f.index.images[0].storage = { ...storage, channels: 1, swizzle: [0, 1, 0, 5] };
+  assert.equal(f.load().images[0].storage, undefined);
+  assert.equal(f.load().images.length, 1, 'bad storage metadata does not discard preparation layout');
+});

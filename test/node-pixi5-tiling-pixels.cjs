@@ -162,12 +162,8 @@ try {
   native.render.setPresentationLayers(0, sceneryImage.handle, 0, 0, 0);
   native.render.setPresentationLayers(0, 0, 0, 0, 0);
   const afterFullFallback = native.images.memory(100);
-  assert.equal(afterFullFallback.sceneryFullFallbacks, beforeScenery.sceneryFullFallbacks + 1,
-    'an ordinary full-texture consumer records its materialization');
   assert.ok(afterFullFallback.largest.some(entry => entry.handle === sceneryImage.handle &&
-    entry.sceneryBacking && entry.sceneryFullMaterialized && entry.fullTextureResident &&
-    entry.sceneryFirstMaterializationCaller === 'image-lookup'),
-    'full materialization keeps and reports the compact source backing and caller');
+    entry.fullTextureResident), 'ordinary consumers use a full resident texture');
   const sceneryTiling = new c.PIXI.TilingSprite(sceneryTexture, 32, 24);
   sceneryTiling.tilePosition.x = -1320.375;
   sceneryTiling.tilePosition.y = -624.625;
@@ -180,12 +176,12 @@ try {
   sceneryStage.filterArea = null;
   native.beginFrame(); renderer.render(sceneryStage); native.renderScene();
   const afterScenery = native.images.memory(100);
-  assert.equal(afterScenery.sceneryWindowUploads, beforeScenery.sceneryWindowUploads + 1,
-    'clamped non-power-of-two TilingSprites return to bounded windows after a full fallback');
+  assert.equal(afterScenery.sceneryWindowUploads, beforeScenery.sceneryWindowUploads,
+    'clamped non-power-of-two TilingSprites do not create scrolling windows');
   assert.equal(afterScenery.sceneryFullFallbacks, afterFullFallback.sceneryFullFallbacks,
-    'a later windowed draw reuses the retained compact backing');
+    'later draws reuse the full resident texture');
   assert.ok(afterScenery.gpuBytes - afterFullFallback.gpuBytes < 10 * 1024 * 1024,
-    'returning to a windowed draw must not allocate another full texture');
+    'later draws must not allocate another full texture');
   const windowedPixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
   let maxSceneryDelta = 0;
   for (let i = 0; i < fullTexturePixels.length; i++)
@@ -197,11 +193,8 @@ try {
   const afterFullTextureEviction = native.images.memory(100);
   const sceneryEntry = afterFullTextureEviction.largest.find(entry =>
     entry.handle === sceneryImage.handle);
-  assert.equal(sceneryEntry.gpuBytes, 0,
-    'after a successful windowed frame, the unused full texture is evicted at the next frame boundary');
-  assert.equal(sceneryEntry.fullTextureResident, false);
-  assert.equal(sceneryEntry.sceneryFullMaterialized, true,
-    'materialization history does not imply current full-texture residency');
+  assert.ok(sceneryEntry.gpuBytes > 0, 'the full texture stays resident across frame boundaries');
+  assert.equal(sceneryEntry.fullTextureResident, true);
   const scenerySprite = new c.PIXI.Sprite(sceneryTexture);
   scenerySprite.vertexData = new Float32Array([
     -1320.375, -624.625, 1919.625, -624.625,
@@ -220,10 +213,10 @@ try {
   native.beginFrame(); renderer.render(scenerySpriteStage); native.renderScene();
   const afterSpriteWindow = native.images.memory(100);
   assert.equal(afterSpriteWindow.sceneryWindowUploads + afterSpriteWindow.sceneryWindowHits,
-    beforeSpriteWindow.sceneryWindowUploads + beforeSpriteWindow.sceneryWindowHits + 1,
-    'axis-aligned Sprites with authored world vertices use bounded scenery windows');
+    beforeSpriteWindow.sceneryWindowUploads + beforeSpriteWindow.sceneryWindowHits,
+    'axis-aligned Sprites with authored world vertices retain the full texture');
   assert.equal(afterSpriteWindow.sceneryFullFallbacks, beforeSpriteWindow.sceneryFullFallbacks,
-    'the world-vertex window reuses the retained compact backing');
+    'world-vertex drawing reuses resident storage');
   const windowedSpritePixels = Buffer.from(native.canvas.captureSceneRawPremultiplied());
   let maxSpriteDelta = 0;
   for (let i = 0; i < fullSpritePixels.length; i++)

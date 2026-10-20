@@ -168,6 +168,7 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.nearest = glGetUniformLocation(effect.program, "nearestSampling");
     effect.textureSize =
       glGetUniformLocation(effect.program, "imageDimensions");
+    effect.palette = glGetUniformLocation(effect.program, "paletteImage");
     effect.derivedImage = glGetUniformLocation(effect.program, "derivedImage");
     effect.derivedUvTransform = glGetUniformLocation(effect.program, "derivedUvTransform");
     effect.derivedAtlasOffset = glGetUniformLocation(effect.program, "derivedAtlasOffset");
@@ -177,6 +178,7 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.block.tableWidth = glGetUniformLocation(effect.program, "blockTableWidth");
     glUseProgram(effect.program);
     glUniform1i(glGetUniformLocation(effect.program, "blockTable"), 2);
+    glUniform1i(glGetUniformLocation(effect.program, "paletteTable"), 3);
     effect.blur =
       glGetUniformLocation(effect.program, "blurRadius");
     effect.maskEnabled =
@@ -462,6 +464,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   simpleTilingMappingUniform_ = glGetUniformLocation(simpleProgram_, "tilingAtlasMapping");
   simpleTilingBoundsUniform_ = glGetUniformLocation(simpleProgram_, "tilingAtlasBounds");
   simpleTextureSizeUniform_ = glGetUniformLocation(simpleProgram_, "imageDimensions");
+  simplePaletteUniform_ = glGetUniformLocation(simpleProgram_, "paletteImage");
   simpleDerivedImageUniform_ = glGetUniformLocation(simpleProgram_, "derivedImage");
   simpleDerivedNearestUniform_ = glGetUniformLocation(simpleProgram_, "derivedNearest");
   simpleDerivedAtlasOffsetUniform_ = glGetUniformLocation(simpleProgram_, "derivedAtlasOffset");
@@ -473,6 +476,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   simpleBlock_.tableWidth = glGetUniformLocation(simpleProgram_, "blockTableWidth");
   glUseProgram(simpleProgram_);
   glUniform1i(glGetUniformLocation(simpleProgram_, "blockTable"), 2);
+  glUniform1i(glGetUniformLocation(simpleProgram_, "paletteTable"), 3);
   tileProgram_ = tile;
   fourTileProgram_ = fourTile;
   nearestTileProgram_ = nearestTile;

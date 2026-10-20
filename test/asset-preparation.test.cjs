@@ -1478,3 +1478,59 @@ test('ASTC descriptors validate padded block payloads through the cache and func
   assert.equal(validDescriptor({ ...descriptor, pages: [{ ...descriptor.pages[0], path: '../page-0.astc' }] }), false);
   await assert.rejects(prepareAssets({ ...f, losslessPrefixes: ['../unsafe'] }), /losslessPrefixes/);
 });
+
+test('storage decisions bind to source hashes and survive warm catalog installation', async () => {
+  const f = fixture();
+  f.native.assets.sourceIdentity = () => 'current-source';
+  f.native.assets.installPrepared = entries => entries.length;
+  f.native.assets.installPreparedCatalog = entries => entries.length;
+  f.native.assets.installDerivedCatalog = () => {};
+  let installed = [];
+  f.native.assets.installImageStorage = entries => { installed = entries; return entries.length; };
+  const storage = { version: 1, width: 1, height: 1, channels: 4,
+    paletteBits: 0, source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] };
+  const portableIndex = { negativeHints: [f.source], images: [{
+    source: f.source, sourceHash: crypto.createHash('sha256').update(PNG).digest('hex'),
+    recipe: null, encryptionSettingsSha256: null, descriptor: null, outputs: [], storage
+  }] };
+  const cold = await prepareAssets({ ...f, portableIndex });
+  assert.equal(cold.error, undefined);
+  assert.equal(f.jobs, 0, 'verified negative layout skips image preparation');
+  assert.ok(cold.validation.hashedBytes > 0, 'unverified negative hints cannot authorize storage');
+  assert.deepEqual(installed, [{ source: f.source, sourceIdentity: 'current-source', storage }]);
+  installed = [];
+  const warm = await prepareAssets({ ...f, portableIndex });
+  assert.equal(warm.catalogHit, true);
+  assert.deepEqual(installed, cold.storageEntries);
+  // Native identity rejection makes the catalog take the normal hash-checked path.
+  fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
+  let rejectCatalog = true;
+  f.native.assets.installImageStorage = entries => {
+    if (entries.length && rejectCatalog) { rejectCatalog = false; return 0; }
+    installed = entries; return entries.length;
+  };
+  const changed = await prepareAssets({ ...f, portableIndex });
+  assert.equal(changed.catalogHit, undefined);
+  assert.equal(changed.error, undefined);
+  assert.deepEqual(installed, [], 'changed content cannot reuse the old storage decision');
+  assert.equal(f.jobs, 1);
+});
+
+for (const engine of ['MV', 'MZ']) test(engine + ' storage decisions bind to the installed plaintext image', async () => {
+  const f = encryptedFixture(engine);
+  let installed;
+  f.native.assets.installImageStorage = entries => { installed = entries; return entries.length; };
+  const storage = { version: 1, width: 1, height: 1, channels: 4,
+    paletteBits: 0, source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] };
+  const portableIndex = { images: [{
+    source: f.encryptedImage,
+    sourceHash: crypto.createHash('sha256').update(fs.readFileSync(path.join(f.gameRoot, f.encryptedImage))).digest('hex'),
+    recipe: null, encryptionSettingsSha256: crypto.createHash('sha256').update(fs.readFileSync(f.systemFile)).digest('hex'),
+    descriptor: null, outputs: [], storage
+  }] };
+  const result = await prepareAssets({ ...f, portableIndex });
+  assert.equal(result.error, undefined);
+  assert.equal(installed.length, 1);
+  assert.equal(installed[0].source, f.source);
+  assert.equal(installed[0].sourceIdentity, f.native.assets.sourceIdentity(f.source));
+});

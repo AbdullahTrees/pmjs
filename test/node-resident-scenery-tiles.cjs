@@ -7,11 +7,11 @@ const { createContext, runModule } = require('./helpers/pixi5-context.cjs');
 const { png } = require('./helpers/png.cjs');
 const native = require(path.resolve(process.argv[2]));
 const assets = path.resolve(process.argv[3]);
-const root = fs.mkdtempSync(path.join(assets, 'pmjs-scenery-window-'));
+const root = fs.mkdtempSync(path.join(assets, 'pmjs-resident-scenery-'));
 const source = 'img/overlays/scenery.png';
 const sourceFile = path.join(root, source);
 const tileDirectory = path.join(root, 'prepared-scenery');
-const tileSetId = 'scenery-window-test';
+const tileSetId = 'resident-scenery-test';
 let image = null;
 let initialized = false;
 
@@ -20,7 +20,7 @@ async function main() {
     fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
     fs.writeFileSync(sourceFile, png(2049, 2049, Buffer.alloc(2049 * 2049 * 4, 255)));
     native.initialize({ gameRoot: root, width: 32, height: 24,
-      windowTitle: 'prepared scenery windows' });
+      windowTitle: 'prepared resident scenery' });
     initialized = true;
     fs.mkdirSync(tileDirectory, { recursive: true });
 
@@ -72,61 +72,24 @@ async function main() {
     native.renderScene();
     const after = native.images.memory();
     const owners = native.images.memory(100).largest;
-    const window = owners.find(entry => entry.sceneryParent === image.handle);
-    assert.ok(window, 'physical window is attributed to its logical image');
-    assert.ok(window.path.endsWith(source));
-    assert.equal(window.sceneryRect[2], window.width);
-    assert.equal(window.sceneryRect[3], window.height);
-    assert.equal(owners.find(entry => entry.handle === image.handle).fullTextureResident, false);
-    assert.equal(after.sceneryWindowUploads, before.sceneryWindowUploads + 1,
-      'prepared tile-backed parallax should upload one bounded scenery window');
-    assert.equal(after.sceneryFullFallbacks, before.sceneryFullFallbacks,
-      'prepared tile-backed parallax should not materialize its full texture');
-    assert.ok(after.sceneryWindowReadMicros > before.sceneryWindowReadMicros,
-      'scenery source reconstruction time is reported');
-    assert.ok(after.sceneryWindowCreateMicros > before.sceneryWindowCreateMicros,
-      'scenery texture creation and upload time is reported');
-    assert.equal(after.preparedFallbacks['non-sprite'] || 0,
-      before.preparedFallbacks['non-sprite'] || 0,
-      'windowed tiling should avoid the generic non-sprite fallback');
-    assert.ok(after.gpuBytes - before.gpuBytes < 10 * 1024 * 1024,
-      'window upload should avoid allocating the full 2049x2049 parallax texture');
+    const owner = owners.find(entry => entry.handle === image.handle);
+    assert.ok(owner.fullTextureResident, 'large tiling images remain fully resident');
+    assert.equal(after.sceneryWindowUploads, before.sceneryWindowUploads,
+      'large images no longer create scrolling windows');
     assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied().subarray(0, 4)),
-      [255, 255, 255, 255], 'prepared scenery window preserves the source pixels');
-
-    parallax.tilePosition.x += 300;
-    native.beginFrame();
-    renderer.render(stage);
-    native.renderScene();
-    const moved = native.images.memory();
-    assert.equal(moved.sceneryWindowUploads, after.sceneryWindowUploads,
-      'a compatible window is reused while camera movement stays inside its coverage');
-    assert.equal(moved.sceneryWindowHits, after.sceneryWindowHits + 1,
-      'coverage reuse is counted as a scenery window hit');
-    assert.equal(moved.sceneryWindowCreateMicros, after.sceneryWindowCreateMicros,
-      'reusing a resident window performs no texture creation or upload');
-
-    let scrolled = moved;
-    for (let attempt = 0; attempt < 20 &&
-        scrolled.sceneryWindowUploads === moved.sceneryWindowUploads; attempt++) {
-      parallax.tilePosition.x += 50;
+      [255, 255, 255, 255], 'full-resident scenery preserves source pixels');
+    for (const position of [-1321, -1824, 0, -2049]) {
+      parallax.tilePosition.x = position;
       native.beginFrame();
       renderer.render(stage);
       native.renderScene();
-      scrolled = native.images.memory();
+      assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied().subarray(0, 4)),
+        [255, 255, 255, 255], 'scrolling preserves full-resident pixels');
     }
-    assert.equal(scrolled.sceneryWindowUploads, moved.sceneryWindowUploads + 1,
-      'moving beyond resident coverage creates one replacement window');
-    assert.equal(scrolled.sceneryScrollWindows, moved.sceneryScrollWindows + 1,
-      'replacement window copies its overlap on the GPU and uploads exposed strips');
-    assert.ok(scrolled.sceneryScrollCopyBytes > moved.sceneryScrollCopyBytes,
-      'GPU overlap copy bytes are reported');
-    assert.ok(scrolled.sceneryScrollUploadBytes > moved.sceneryScrollUploadBytes,
-      'exposed strip upload bytes are reported');
-    assert.ok(scrolled.sceneryScrollUploadBytes - moved.sceneryScrollUploadBytes <
-      1536 * 1536 * 4, 'scroll replacement uploads less than a full window');
-    assert.deepEqual(Array.from(native.canvas.captureSceneRawPremultiplied().subarray(0, 4)),
-      [255, 255, 255, 255], 'GPU-overlap replacement preserves rendered pixels');
+    const scrolled = native.images.memory();
+    assert.equal(scrolled.sceneryWindowUploads, before.sceneryWindowUploads);
+    assert.equal(scrolled.textureUploadBytes, after.textureUploadBytes,
+      'scrolling a resident texture never replaces or uploads a window');
   } finally {
     if (image) native.images.release(image.handle);
     if (initialized) native.runtime.quit();

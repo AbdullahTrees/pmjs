@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { prepareAssets, astcSettings, validDescriptor } = require('./asset-preparation.cjs');
+const { prepareAssets, astcSettings, validDescriptor, validStorageDecision } = require('./asset-preparation.cjs');
 const { prepareMaps, validTileDescriptor } = require('./map-preparation.cjs');
 const { COMPILER_VERSION } = require('./map-demand.cjs');
 
@@ -68,10 +68,11 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
   const cacheRoot = path.join(output, '.preparation');
   if (!options.assetPreparation.enabled) {
     const empty = { schema: 2, kind: 'pmjs-asset-index',
-      sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
+      sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
       astc: astcSettings(options.assetPreparation.astc),
+      imageStorageVersion: nativeAddon.assets.imageStorageVersion,
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
@@ -108,7 +109,12 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     images.entries.forEach((entry, index) => {
       if (!imageEntries.has(entry.source)) imageEntries.set(entry.source, { entry, index });
     });
-    const imageRecords = images.decisions.map(decision => {
+    if (nativeAddon.assets.imageStorageVersion !== 1 || typeof nativeAddon.assets.classifyImageStorage !== 'function')
+      throw new Error('image storage indexing requires a current host runtime');
+    const decryptedInputs = new Map(images.decryptedEntries.map(entry => [entry.source, entry.file]));
+    const imageRecords = [];
+    for (const decision of images.decisions) {
+      if (shouldCancel()) throw new Error('image storage indexing cancelled');
       if (decision.descriptor && !validDescriptor(decision.descriptor)) throw new Error('invalid generated image descriptor');
       const original = imageEntries.get(decision.source);
       const decrypted = imageEntries.get(decision.source.replace(/\.(png_|rpgmvp)$/i, '.png'));
@@ -125,13 +131,30 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
         }
         return { path: relative, hash: checksum };
       });
-      return { ...decision, outputs };
-    });
+      let storage;
+      const transformsPixels = decision.recipe?.crop ||
+        decision.recipe?.backdrop?.some(channel => channel !== 0);
+      const imageSource = decision.source.replace(/\.(png_|rpgmvp)$/i, '.png');
+      if (imageSource.toLowerCase().endsWith('.png') && !transformsPixels) {
+        try {
+          storage = await nativeAddon.assets.classifyImageStorage(
+            decryptedInputs.get(decision.source) || filesystem.assets.sourcePath(decision.source));
+          if (!validStorageDecision(storage)) throw new Error('invalid storage decision');
+          if (hash(filesystem.assets.sourcePath(decision.source)) !== decision.sourceHash)
+            throw new Error('image source changed during storage classification');
+        } catch (error) {
+          storage = undefined;
+          warnings.push('[pmjs] image storage index unavailable ' + decision.source + ': ' + error.message);
+        }
+      }
+      imageRecords.push({ ...decision, ...(storage ? { storage } : {}), outputs });
+    }
     const index = { schema: 2, kind: 'pmjs-asset-index',
-      sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
+      sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
       astc: astcSettings(options.assetPreparation.astc),
+      imageStorageVersion: nativeAddon.assets.imageStorageVersion,
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
       configSha256: config ? hash(config) : null, width: options.width, height: options.height,
@@ -165,7 +188,12 @@ function loadAssetIndex(file, native, options) {
     const tilesCompatible = (legacy || index.sections?.tileOutputs === 1) &&
       index.tileProcessor === native.assets.tilePreparationVersion &&
       index.width === options.width && index.height === options.height;
-    return { ...index, images: imageCompatible ? index.images.filter(record => record && typeof record.source === 'string') : [],
+    return { ...index, images: imageCompatible ? index.images.filter(record => record && typeof record.source === 'string')
+        .map(record => {
+          const { storage, ...rest } = record;
+          return index.sections?.imageStorage === 1 && index.imageStorageVersion === native.assets.imageStorageVersion &&
+            index.imageStorageVersion === 1 && validStorageDecision(storage) ? { ...rest, storage } : rest;
+        }) : [],
       negativeHints: !legacy && index.sections?.negativeHints === 1 &&
         Array.isArray(index.negativeHints) && index.negativeHints.length <= 100000 ? index.negativeHints : [],
       maps: compilationCompatible ? { ...index.maps,

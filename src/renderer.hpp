@@ -539,6 +539,7 @@ class Renderer {
     std::array<int, 4> images{-1, -1, -1, -1};
   };
   MultiTextureSpriteProgram multiTextureSprite_;
+  int simplePaletteUniform_ = -1;
   int simpleDerivedImageUniform_ = -1;
   int simpleDerivedNearestUniform_ = -1;
   int simpleDerivedAtlasOffsetUniform_ = -1;
@@ -564,6 +565,7 @@ class Renderer {
     int tilingBounds = -1;
     int nearest = -1;
     int textureSize = -1;
+    int palette = -1;
     int derivedImage = -1;
     int derivedUvTransform = -1;
     int derivedAtlasOffset = -1;
