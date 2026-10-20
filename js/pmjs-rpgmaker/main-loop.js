@@ -1,7 +1,6 @@
 'use strict';
 
 (function() {
-  var reportedScene = null;
 
   function updateNativeServices() {
     if (globalThis.PMJS && PMJS.rpgmaker && PMJS.rpgmaker.audio &&
@@ -20,12 +19,6 @@
     }).then(function() {
       if (typeof beforeScheduler === 'function') beforeScheduler(now);
       return globalThis.pmjsDrainScheduler(now);
-    }).then(function() {
-      if (typeof SceneManager !== 'undefined' && SceneManager._scene !== reportedScene) {
-        reportedScene = SceneManager._scene;
-        console.log('[pmjs] scene', reportedScene && reportedScene.constructor &&
-          reportedScene.constructor.name || 'UnknownScene');
-      }
     });
   }
 

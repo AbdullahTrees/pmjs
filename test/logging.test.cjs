@@ -47,3 +47,32 @@ test('CLI argument errors are logged once with ERROR severity and retain their s
   assert.equal((result.stderr.match(/Error: invalid argument: --invalid/g) || []).length, 1);
   assert.ok(result.stderr.includes('cli.cjs:'));
 });
+
+test('routine informational logs avoid stack capture and share bounded repeat output', () => {
+  const output = [];
+  const target = {
+    log: line => output.push(String(line)),
+    info: line => output.push(String(line)),
+    debug: line => output.push(String(line)),
+    warn: line => output.push(String(line)),
+    error: line => output.push(String(line))
+  };
+  const OriginalError = global.Error;
+  let stackCaptures = 0;
+  global.Error = class CountingError extends OriginalError {
+    constructor(...args) { super(...args); stackCaptures++; }
+  };
+  try {
+    installConsoleLogging(target);
+    target.info('same plugin message');
+    target.info('same plugin message');
+    target.info('another plugin message');
+    assert.equal(stackCaptures, 0);
+    target.warn('warning needs source attribution');
+    assert.equal(stackCaptures, 1);
+    assert.ok(output.some(line => line.includes('[x2] same plugin message')));
+    assert.ok(output.some(line => line.includes('another plugin message')));
+  } finally {
+    global.Error = OriginalError;
+  }
+});

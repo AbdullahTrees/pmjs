@@ -446,7 +446,6 @@ Platform::Platform(int width, int height, std::string title) {
               << " reported_match=" << (swapIntervalAccepted_ && swapInterval_ == requestedSwapInterval_ ? "yes" : "no");
       if (swapResult != 0) message << " error=\"" << SDL_GetError() << '\"';
     }
-    printGraphicsDiagnostics();
   } else if (swapResult != 0) {
     Log(LogLevel::Warning) << "[pmjs] swap interval unavailable: " << SDL_GetError() << '\n';
   }
@@ -454,7 +453,10 @@ Platform::Platform(int width, int height, std::string title) {
     Log(LogLevel::Warning) << "[pmjs] SDL reports swap interval " << swapInterval_
               << " instead of requested " << requestedSwapInterval_ << '\n';
   }
+  printGraphicsDiagnostics();
   const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+  Log() << "[pmjs] graphics hardware renderer=\"" << (renderer ? renderer : "unknown")
+        << "\" software=" << (softwareRenderer(renderer) ? "yes" : "no") << '\n';
   if (environmentFlag("PMJS_REQUIRE_HARDWARE_GL") && softwareRenderer(renderer)) {
     SDL_GL_DeleteContext(context_);
     context_ = nullptr;
@@ -868,6 +870,11 @@ void Platform::printGraphicsDiagnostics() const {
   const int displayIndex = SDL_GetWindowDisplayIndex(window_);
   const bool haveMode = displayIndex >= 0 &&
     SDL_GetCurrentDisplayMode(displayIndex, &mode) == 0;
+  SDL_Rect displayBounds{}, usableBounds{};
+  const bool haveBounds = displayIndex >= 0 &&
+    SDL_GetDisplayBounds(displayIndex, &displayBounds) == 0;
+  const bool haveUsableBounds = displayIndex >= 0 &&
+    SDL_GetDisplayUsableBounds(displayIndex, &usableBounds) == 0;
   int contextMajor = 0;
   int contextMinor = 0;
   int doubleBuffer = 0;
@@ -894,6 +901,11 @@ void Platform::printGraphicsDiagnostics() const {
   Log() << "[pmjs-gpu] sdl_driver="
             << (SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "unknown")
             << " available_drivers=" << drivers.str()
+            << " display_index=" << displayIndex
+            << " display_bounds=" << (haveBounds ? displayBounds.w : 0) << 'x'
+            << (haveBounds ? displayBounds.h : 0)
+            << " display_usable=" << (haveUsableBounds ? usableBounds.w : 0) << 'x'
+            << (haveUsableBounds ? usableBounds.h : 0)
             << " window=" << windowWidth << 'x' << windowHeight
             << " drawable=" << drawableWidth << 'x' << drawableHeight
             << " display_hz=" << (haveMode ? mode.refresh_rate : 0)

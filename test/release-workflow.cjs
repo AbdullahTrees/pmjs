@@ -80,23 +80,32 @@ try {
         XDG_DATA_HOME: data, XDG_CACHE_HOME: path.join(temporary, 'cache-default') } });
   }
   const cli = (...args) => cliAt(dataRoot, ...args);
-  const version = cli('--version');
-  assert.equal(version.status, 0, version.stdout + version.stderr);
-  assert.match(version.stdout, /^PMJS /);
+  const buildInfo = cli('--build-info');
+  assert.equal(buildInfo.status, 0, buildInfo.stdout + buildInfo.stderr);
+  assert.match(buildInfo.stdout, /^PMJS /);
   const infoFile = path.join(stage, 'build-info.json');
   const installedInfo = JSON.parse(fs.readFileSync(infoFile));
-  if (installedInfo.buildId) assert.ok(version.stdout.includes(`build=${installedInfo.buildId}`));
+  if (installedInfo.buildId) assert.ok(buildInfo.stdout.includes(`build=${installedInfo.buildId}`));
   fs.writeFileSync(infoFile, JSON.stringify({ ...installedInfo, buildId: undefined }));
-  assert.equal(cli('--version').stdout.includes('build='), false, 'older packages without a build ID still work');
+  assert.equal(cli('--build-info').stdout.includes('build='), false, 'older packages without a build ID still work');
   fs.writeFileSync(infoFile, JSON.stringify({ ...installedInfo, buildId: 'build-fixture' }));
-  assert.ok(cli('--version').stdout.includes('build=build-fixture'), 'relocated package reports its stored build ID');
+  assert.ok(cli('--build-info').stdout.includes('build=build-fixture'), 'relocated package reports its stored build ID');
   const help = cli('--help');
   assert.equal(help.status, 0, help.stdout + help.stderr);
   assert.match(help.stdout, /pmjs prepare --game DIR/);
   assert.match(cli().stdout, /Usage:/, 'no recognized game in the current directory shows help');
   const unprepared = cli('run', '--game', game, '--state', state);
   assertGuestReached(unprepared);
-  assert.ok(unprepared.stdout.includes(`version=${installedInfo.version} build=build-fixture source=${installedInfo.source.commit}`));
+  const buildInfoSha256 = crypto.createHash('sha256').update(fs.readFileSync(infoFile)).digest('hex');
+  const expectedSource = installedInfo.source.dirty ? 'dirty' : installedInfo.source.commit;
+  assert.ok(unprepared.stdout.includes(`launcher identity build=build-fixture source=${expectedSource} ` +
+    `build_info_sha256=${buildInfoSha256}`));
+  for (const pass of ['cache-lookup', 'bootstrap-integrity', 'prelaunch']) {
+    assert.ok(unprepared.stdout.includes(`launcher check=runtime pass=${pass}`),
+      `runtime verification labels ${pass}`);
+    assert.ok(unprepared.stdout.includes(`launcher check=game-inputs pass=${pass}`),
+      `game input verification labels ${pass}`);
+  }
   const missingGame = cli('run', '--game', path.join(temporary, 'missing-game'));
   assert.notEqual(missingGame.status, 0);
   assert.ok(missingGame.stdout.includes('build=build-fixture'), 'startup failures still identify the installed build');
@@ -192,7 +201,7 @@ try {
     for (const run of cachedRuns) {
       const result = cli(...run.args);
       assertGuestReached(result);
-      assert.ok(result.stdout.includes(`package=${updatedPackageHash}`), 'startup logs the current package');
+      assert.ok(result.stdout.includes(`build_info_sha256=${updatedPackageHash}`), 'startup logs the current build metadata hash');
       assert.equal(fs.readFileSync(path.join(run.state, 'prepared.json'), 'utf8'), run.record,
         'documentation-only installation changes preserve preparation records');
       assert.equal(fs.statSync(path.join(run.state, JSON.parse(run.record).bootstrap), { bigint: true }).mtimeNs,

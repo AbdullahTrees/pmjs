@@ -422,16 +422,30 @@ std::uint32_t MediaService::loadEncryptedAudio(const std::filesystem::path& path
 }
 
 AudioCacheStats MediaService::audioCacheStats() const {
-  std::lock_guard lock(impl_->mutex);
-  auto stats = impl_->cacheStats;
-  stats.cacheBytes = impl_->cacheBytes;
-  stats.livePcmBytes = impl_->livePcmBytes->load(std::memory_order_relaxed);
-  stats.entries = impl_->cache.size();
-  stats.diagnostics = impl_->diagnostics;
-  for (const auto& [handle, voice] : impl_->voices) {
-    (void)handle;
+  AudioCacheStats stats;
+  std::vector<std::shared_ptr<Impl::Voice>> voices;
+  {
+    std::lock_guard lock(impl_->mutex);
+    stats = impl_->cacheStats;
+    stats.cacheBytes = impl_->cacheBytes;
+    stats.livePcmBytes = impl_->livePcmBytes->load(std::memory_order_relaxed);
+    stats.entries = impl_->cache.size();
+    stats.diagnostics = impl_->diagnostics;
+    voices.reserve(impl_->voices.size());
+    for (const auto& [handle, voice] : impl_->voices) {
+      (void)handle;
+      voices.push_back(voice);
+    }
+  }
+  // Do not nest the service lock with voice locks: playback and decoder work
+  // can update each voice independently while this diagnostic snapshot runs.
+  for (const auto& voice : voices) {
+    std::lock_guard voiceLock(voice->mutex);
     if (voice->mix.asset) ++stats.sampleVoices;
-    else ++stats.streamVoices;
+    else {
+      ++stats.streamVoices;
+      stats.streamBufferedBytes += voice->mix.samples.size() * sizeof(float);
+    }
   }
   stats.workerDecodeCalls = impl_->workerDecodeCalls.load(std::memory_order_relaxed);
   stats.workerDecodeUs = impl_->workerDecodeUs.load(std::memory_order_relaxed);

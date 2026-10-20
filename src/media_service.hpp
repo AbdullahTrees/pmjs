@@ -27,6 +27,7 @@ struct AudioCacheStats {
   bool diagnostics = false;
   std::uint64_t hits = 0, misses = 0;
   std::size_t cacheBytes = 0, livePcmBytes = 0, entries = 0;
+  std::size_t streamBufferedBytes = 0;
   std::size_t sampleVoices = 0, streamVoices = 0;
   std::uint64_t loads = 0, decoderOpens = 0;
   std::uint64_t encryptedLoads = 0;

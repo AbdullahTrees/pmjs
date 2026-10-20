@@ -6,7 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { parse } = require('../runner/cli.cjs');
-const { run, createPreparationLog, validate, parseTimingConfig, resolveSwapDefault, advanceDeadline } = require('../runner/index.cjs');
+const { run, createPreparationLog, validate, parseTimingConfig, resolveSwapDefault, advanceDeadline,
+  sendSupervisorHeartbeat } = require('../runner/index.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
 function fixture(source) {
@@ -36,6 +37,19 @@ function native(polls = [true, false]) {
     },
     input: { snapshot() { return {}; }, consumePressed() {} }, canvas: {}, media: {} };
 }
+
+test('supervisor heartbeat uses its captured Node process, not the guest process replacement', () => {
+  const sent = [];
+  const nodeProcess = { connected: true, send(message, callback) { sent.push(message); callback(); } };
+  const previousProcess = globalThis.process;
+  globalThis.process = { connected: false, send() { assert.fail('guest process must not receive supervisor IPC'); } };
+  try {
+    assert.equal(sendSupervisorHeartbeat(nodeProcess, { mapId: 3 }), true);
+  } finally {
+    globalThis.process = previousProcess;
+  }
+  assert.deepEqual(sent, [{ type: 'pmjs-heartbeat', heartbeat: { mapId: 3 } }]);
+});
 
 function writeAddon(root, polls = [true, false]) {
   const addon = path.join(root, 'addon.cjs');

@@ -8,15 +8,17 @@ import { spawnSync } from 'node:child_process';
 import { preparationInputs, resolveGameDirectory as gameDirectory } from './game-inspect.mjs';
 import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
 import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
-import { measureStartup } from '../runner/startup-metrics.cjs';
+import { measureLauncherCheck } from '../runner/startup-metrics.cjs';
 import { installConsoleLogging, startLauncherLog } from '../runner/logging.cjs';
 import portPreparation from '../runner/port-preparation.cjs';
+import { formatLauncherIdentity, formatLauncherEnvironment } from '../runner/launcher-info.cjs';
 
 const require = createRequire(import.meta.url);
 const action = process.argv[3];
 if (!['--build-info', '--help', 'help', 'self-test', 'bundle', 'package'].includes(action)) {
   installConsoleLogging();
   startLauncherLog();
+  console.log(formatLauncherEnvironment());
 }
 const root = path.resolve(process.argv[2]);
 const share = path.join(root, 'share/pmjs');
@@ -75,9 +77,9 @@ function hash(file) {
 
 let verification;
 const verifiedHash = file => verification ? verification.hash(file) : hash(file);
-const runtimeIdentity = () => measureStartup('runtime-identity', () =>
+const runtimeIdentity = pass => measureLauncherCheck('runtime', pass, () =>
   computeRuntimeIdentity(share, verifiedHash), verification?.stats);
-const gameInputs = (game, config, manifest, adapters) => measureStartup('game-inputs', () =>
+const gameInputs = (game, config, manifest, adapters, pass) => measureLauncherCheck('game-inputs', pass, () =>
   preparationInputs(game, config, manifest, adapters, verifiedHash), verification?.stats);
 
 function preparePortArtifacts({ game, bundle, adapters, cacheRoot }) {
@@ -130,8 +132,8 @@ function prepare(context) {
       invoke(path.join(share, 'tools/build-js-runtime.mjs'), buildArgs);
     }
     if (JSON.stringify(context.inputs) !== JSON.stringify(gameInputs(context.game,
-      context.config, context.manifest, context.adapters)) ||
-      context.runtimeIdentity !== runtimeIdentity()) {
+      context.config, context.manifest, context.adapters, 'bootstrap-integrity')) ||
+      context.runtimeIdentity !== runtimeIdentity('bootstrap-integrity')) {
       throw new Error('preparation inputs changed during generation; retry');
     }
     const bootstrap = `bootstrap-${hash(temporary)}.js`;
@@ -174,7 +176,7 @@ async function main() {
     if (includeAssets) console.warn('[pmjs] Generated pages can contain game artwork. Share this bundle only when allowed.');
     if (includePortAssets) console.warn('[pmjs] Port-generated data may reproduce game content. Confirm redistribution rights.');
     await createBundle({ root, share, game, output: options['--output'], config: options['--config'],
-      manifest: options['--manifest'], adapters: options.adapters, runtimeIdentity: runtimeIdentity(),
+      manifest: options['--manifest'], adapters: options.adapters, runtimeIdentity: runtimeIdentity('bundle-build'),
       index, includeAssets, portProcessors: options.portPreparers, includePortAssets });
     console.log(`Bundle created: ${options['--output']}`);
     return;
@@ -226,13 +228,8 @@ async function main() {
     options['--manifest'] = bundle.manifest;
     options.adapters = bundle.adapters;
   }
-  const packageSha256 = hash(path.join(root, 'build-info.json'));
-  const identity = [
-    info.buildId && `build=${info.buildId}`,
-    `source=${info.source.dirty ? 'dirty' : info.source.commit}`,
-    `package=${packageSha256}`
-  ].filter(Boolean).join(' ');
-  console.log(`[pmjs] ${identity}`);
+  const buildInfoSha256 = hash(path.join(root, 'build-info.json'));
+  console.log(formatLauncherIdentity(info, buildInfoSha256));
   const game = gameDirectory(options['--game']);
   const id = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   const state = options['--state'] || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmjs', id);
@@ -245,11 +242,11 @@ async function main() {
   const manifest = options['--manifest'] || (command === 'run' && previous?.game === game ? previous.manifest : null);
   const adapters = options.adapters.length ? options.adapters :
     (command === 'run' && previous?.game === game && Array.isArray(previous.adapters) ? previous.adapters : []);
-  verification = startupFiles(path.join(state, 'bootstrap-files.json'), packageSha256,
+  verification = startupFiles(path.join(state, 'bootstrap-files.json'), buildInfoSha256,
     process.env.PMJS_VERIFY_BOOTSTRAP === '1' || command === 'prepare');
-  const context = { game, state, packageSha256,
-    runtimeIdentity: runtimeIdentity(), config, manifest, adapters,
-    inputs: gameInputs(game, config, manifest, adapters) };
+  const context = { game, state, packageSha256: buildInfoSha256,
+    runtimeIdentity: runtimeIdentity('cache-lookup'), config, manifest, adapters,
+    inputs: gameInputs(game, config, manifest, adapters, 'cache-lookup') };
   if (bundle) {
     context.bundleBootstrap = path.join(bundle.root, bundle.descriptor.bootstrap);
     context.bundleBootstrapSha256 = bundle.descriptor.bootstrapSha256;
@@ -267,8 +264,8 @@ async function main() {
   const result = await runSupervised(() => {
     const portArtifacts = Object.fromEntries(preparePortArtifacts({
       game, bundle, adapters, cacheRoot: portCacheRoot }));
-    context.inputs = gameInputs(game, config, manifest, adapters);
-    context.runtimeIdentity = runtimeIdentity();
+    context.inputs = gameInputs(game, config, manifest, adapters, 'prelaunch');
+    context.runtimeIdentity = runtimeIdentity('prelaunch');
     if (bundle) context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
       JSON.stringify(bundle.descriptor.bootstrapGameInputs) === JSON.stringify(gameDeclarations(game, verifiedHash));
     if (!matches(record, context)) record = prepare(context);

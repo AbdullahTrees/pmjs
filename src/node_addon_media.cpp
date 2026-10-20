@@ -425,6 +425,7 @@ napi_value audioStats(napi_env env, napi_callback_info) try {
   number(env, static_cast<double>(stats.name))), "cannot set audio " #name)
   AUDIO_STAT(hits); AUDIO_STAT(misses); AUDIO_STAT(cacheBytes); AUDIO_STAT(livePcmBytes);
   AUDIO_STAT(entries); AUDIO_STAT(sampleVoices); AUDIO_STAT(streamVoices);
+  AUDIO_STAT(streamBufferedBytes);
   check(env, napi_set_named_property(env, result, "diagnostics", boolean(env, stats.diagnostics)),
         "cannot set audio diagnostics state");
   if (stats.diagnostics) {
