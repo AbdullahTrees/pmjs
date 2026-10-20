@@ -8,6 +8,13 @@
       "license": "MIT",
       "notice": "LICENSE"
     },
+    "third_party/astcenc.LICENSE": {
+      "origin": "permissive",
+      "source": "https://github.com/ARM-software/astc-encoder/tree/4.7.0",
+      "revision": "4.7.0",
+      "license": "Apache-2.0",
+      "notice": "third_party/astcenc.LICENSE"
+    },
     "third_party/lz4.LICENSE": {
       "origin": "permissive",
       "source": "https://github.com/lz4/lz4/tree/v1.10.0",
