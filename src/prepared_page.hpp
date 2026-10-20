@@ -2,20 +2,36 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <vector>
 
 namespace pmjs {
+struct PreparedPagePixels;
+struct SparsePalettePage {
+  int width = 0, height = 0;
+  std::vector<std::uint8_t> base, colors, residual;
+  // Low/high occupancy words and a block-major residual offset for each 8×8 block.
+  std::vector<std::array<std::uint32_t, 3>> blocks;
+  std::size_t gpuBytes() const;
+  std::size_t cpuBytes() const { return base.capacity() + colors.capacity() + residual.capacity() + blocks.capacity() * 12; }
+  std::vector<std::uint8_t> denseIndices() const;
+  PreparedPagePixels pixels() const;
+};
 struct PreparedPagePixels {
   int width = 0, height = 0;
   std::vector<std::uint8_t> rgba;
 };
 void writeLz4Page(const std::filesystem::path& path, int width, int height,
-                  std::span<const std::uint8_t> rgba);
+                  std::span<const std::uint8_t> rgba, bool sparsePalette = false);
 std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> encoded,
                                            std::size_t maxDecodedBytes);
+std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
+    std::span<const std::uint8_t> rgba);
+std::optional<SparsePalettePage> readSparsePalettePage(std::span<const std::uint8_t> encoded,
+    std::size_t maxDecodedBytes);
 std::vector<std::uint8_t> compressLz4Artifact(std::span<const std::uint8_t> bytes);
 std::optional<std::vector<std::uint8_t>> decompressLz4Artifact(
     std::span<const std::uint8_t> encoded, std::size_t maxDecodedBytes);

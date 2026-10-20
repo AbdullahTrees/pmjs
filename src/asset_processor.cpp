@@ -622,7 +622,7 @@ void emitLayout(PreparationSource& source, const std::filesystem::path& staging,
     }
     page.path.replace_extension(lz4Pages ? ".pml4" : ".png");
     if (lz4Pages) {
-      writeLz4Page(staging / page.path, page.width, page.height, bytes);
+      writeLz4Page(staging / page.path, page.width, page.height, bytes, true);
       ++source.workspace.stats.lz4Encodes;
     } else {
       writePng(staging / page.path, page.width, page.height, bytes);

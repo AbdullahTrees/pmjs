@@ -12,12 +12,12 @@ const identity = value => crypto.createHash('sha256').update(JSON.stringify(valu
 
 function fixture() {
   const root = temporaryDirectory('asset-index-'), file = path.join(root, 'index.json');
-  const native = { assets: { preparationVersion: { processor: 1 }, tilePreparationVersion: 'tiles-1' } };
+  const native = { assets: { preparationVersion: { processor: 1 }, tilePreparationVersion: 'tiles-1', preparationLz4Version: 'sparse-palette-v2' } };
   const options = { width: 816, height: 624, assetPreparation: { recipes: [], pageCodec: 'lz4' } };
   const index = { schema: 2, kind: 'pmjs-asset-index',
     sections: { images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
     processor: native.assets.preparationVersion, tileProcessor: native.assets.tilePreparationVersion,
-    recipesIdentity: identity([]), pageCodec: 'lz4', width: 816, height: 624, configSha256: 'old',
+    recipesIdentity: identity([]), pageCodec: 'lz4', pageCodecVersion: native.assets.preparationLz4Version, width: 816, height: 624, configSha256: 'old',
     images: [{ source: 'img/pictures/a.png', outputs: [] }], negativeHints: ['img/pictures/b.png'],
     maps: { compiler: COMPILER_VERSION, compilations: { key: 'compilation' }, mapInputs: { name: 'contract' },
       entries: [{ identity: 'entry', outputs: [] }] } };
@@ -99,4 +99,21 @@ test('storage decisions require their own supported version and valid layout', (
   f.index.images[0].storage = { ...storage, channels: 1, swizzle: [0, 1, 0, 5] };
   assert.equal(f.load().images[0].storage, undefined);
   assert.equal(f.load().images.length, 1, 'bad storage metadata does not discard preparation layout');
+});
+
+test('LZ4 container versions invalidate image outputs without discarding independent sections', () => {
+  const f = fixture();
+  assert.equal(f.load().images.length, 1);
+  for (const version of [undefined, 'rgba-v1', 'future-v3']) {
+    f.index.pageCodecVersion = version;
+    const loaded = f.load();
+    assert.deepEqual(loaded.images, []);
+    assert.equal(loaded.maps.entries.length, 1);
+    assert.deepEqual(loaded.negativeHints, f.index.negativeHints);
+  }
+  f.index.pageCodecVersion = f.native.assets.preparationLz4Version;
+  assert.equal(f.load().images.length, 1);
+  f.index.pageCodec = f.options.assetPreparation.pageCodec = 'png';
+  delete f.index.pageCodecVersion;
+  assert.equal(f.load().images.length, 1, 'PNG outputs do not depend on the LZ4 container');
 });

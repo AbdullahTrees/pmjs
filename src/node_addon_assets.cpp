@@ -661,11 +661,11 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, property(env, exports, "images"), "tileSlot", tileSlot);
   set(env, assets, "tilePreparationVersion", string(env, "lossless-tile-sets-v3"));
   const auto version = moduleObject(env);
-  set(env, version, "processor", string(env, "images-v14-perimeter-fills-astcenc4.7"));
+  set(env, version, "processor", string(env, "images-v15-sparse-palette-astcenc4.7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-v1"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);
   set(env, assets, "preparationWorkspaceVersion", number(env, 1));
-  set(env, assets, "preparationLz4Version", string(env, "lz4-1.10.0-rgba-v1"));
+  set(env, assets, "preparationLz4Version", string(env, "lz4-1.10.0-sparse-palette-v2"));
 }
 }

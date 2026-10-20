@@ -1,6 +1,10 @@
 #include "prepared_page.hpp"
 
 #include <array>
+#include <algorithm>
+#include <bit>
+#include <numeric>
+#include <unordered_map>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -26,17 +30,37 @@ std::uint32_t get(std::span<const std::uint8_t> bytes, std::size_t offset) {
 }
 }
 void writeLz4Page(const std::filesystem::path& path, int width, int height,
-                  std::span<const std::uint8_t> rgba) {
+                  std::span<const std::uint8_t> rgba, bool sparsePalette) {
   if (width <= 0 || height <= 0 || width > static_cast<int>(maximumExtent) ||
       height > static_cast<int>(maximumExtent) || rgba.size() != static_cast<std::size_t>(width) * height * 4)
     throw std::runtime_error("invalid LZ4 page extent");
+  std::vector<std::uint8_t> packed;
+  const auto sparse = sparsePalette ? makeSparsePalettePage(width, height, rgba) : std::nullopt;
+  if (sparse) {
+    packed.resize(8 + sparse->colors.size() + sparse->base.size() + sparse->blocks.size() * 12 + sparse->residual.size());
+    put(packed, 0, sparse->colors.size() / 4); put(packed, 4, sparse->residual.size() / 2);
+    std::size_t at = 8;
+    const auto copy = [&](std::span<const std::uint8_t> bytes) {
+      std::copy(bytes.begin(), bytes.end(), packed.begin() + at); at += bytes.size();
+    };
+    copy(sparse->colors); copy(sparse->base);
+    for (const auto& block : sparse->blocks) for (auto word : block) { put(packed, at, word); at += 4; }
+    copy(sparse->residual);
+    const auto indices = sparse->denseIndices();
+    for (std::size_t i = 0; i < indices.size() / 2; ++i) {
+      const auto index = unsigned(indices[i * 2]) | (unsigned(indices[i * 2 + 1]) << 8);
+      if (std::memcmp(sparse->colors.data() + index * 4, rgba.data() + i * 4, 4))
+        throw std::runtime_error("sparse palette reconstruction differs from source");
+    }
+    rgba = packed;
+  }
   std::vector<char> compressed(static_cast<std::size_t>(LZ4_compressBound(static_cast<int>(rgba.size()))));
   const int length = LZ4_compress_default(reinterpret_cast<const char*>(rgba.data()), compressed.data(),
     static_cast<int>(rgba.size()), static_cast<int>(compressed.size()));
   if (length <= 0) throw std::runtime_error("cannot compress LZ4 page");
   std::array<std::uint8_t, headerBytes> header{};
   std::memcpy(header.data(), "PML4", 4);
-  put(header, 4, 1); put(header, 8, width); put(header, 12, height);
+  put(header, 4, sparse ? 2 : 1); put(header, 8, width); put(header, 12, height);
   put(header, 16, rgba.size()); put(header, 20, length);
   put(header, 24, checksum(rgba)); put(header, 28, checksum(std::span(header).first(28)));
   std::ofstream file(path, std::ios::binary | std::ios::trunc);
@@ -47,6 +71,10 @@ void writeLz4Page(const std::filesystem::path& path, int width, int height,
 }
 std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> encoded,
                                            std::size_t maxDecodedBytes) {
+  if (encoded.size() >= headerBytes && !std::memcmp(encoded.data(), "PML4", 4) && get(encoded, 4) == 2) {
+    auto sparse = readSparsePalettePage(encoded, maxDecodedBytes);
+    return sparse ? std::optional(sparse->pixels()) : std::nullopt;
+  }
   if (encoded.size() < headerBytes || std::memcmp(encoded.data(), "PML4", 4) || get(encoded, 4) != 1 ||
       get(encoded, 28) != checksum(encoded.first(28))) return std::nullopt;
   const auto width = get(encoded, 8), height = get(encoded, 12);
@@ -60,6 +88,128 @@ std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> enco
         reinterpret_cast<char*>(pixels.rgba.data()), static_cast<int>(length), static_cast<int>(decoded)) !=
         static_cast<int>(decoded) || checksum(pixels.rgba) != get(encoded, 24)) return std::nullopt;
   return pixels;
+}
+std::size_t SparsePalettePage::gpuBytes() const {
+  const auto count = residual.size() / 2;
+  const auto residualWidth = std::min<std::size_t>(1024, count);
+  return base.size() + blocks.size() * 12 + ((colors.size() + 1023) / 1024) * 1024 +
+    (residualWidth ? ((count + residualWidth - 1) / residualWidth) * residualWidth * 2 : 0);
+}
+std::vector<std::uint8_t> SparsePalettePage::denseIndices() const {
+  std::vector<std::uint8_t> indices(base.size() * 2);
+  const int columns = (width + 7) / 8;
+  for (std::size_t i = 0; i < base.size(); ++i) {
+    unsigned index = base[i];
+    if (index == 255) {
+      const int x = i % width, y = i / width, bit = (y % 8) * 8 + x % 8;
+      const auto& block = blocks[(y / 8) * columns + x / 8];
+      const auto rank = std::popcount(block[bit / 32] & ((1U << (bit % 32)) - 1)) +
+        (bit >= 32 ? std::popcount(block[0]) : 0);
+      const auto at = (block[2] + rank) * 2;
+      index = residual[at] | (unsigned(residual[at + 1]) << 8);
+    }
+    indices[i * 2] = index & 255; indices[i * 2 + 1] = index >> 8;
+  }
+  return indices;
+}
+PreparedPagePixels SparsePalettePage::pixels() const {
+  const auto indices = denseIndices();
+  PreparedPagePixels result{width, height, std::vector<std::uint8_t>(base.size() * 4)};
+  for (std::size_t i = 0; i < base.size(); ++i) {
+    const auto index = unsigned(indices[i * 2]) | (unsigned(indices[i * 2 + 1]) << 8);
+    std::copy_n(colors.data() + index * 4, 4, result.rgba.data() + i * 4);
+  }
+  return result;
+}
+std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
+    std::span<const std::uint8_t> rgba) {
+  if (width <= 0 || height <= 0 || width > int(maximumExtent) || height > int(maximumExtent) ||
+      rgba.size() != std::size_t(width) * height * 4 || rgba.size() < 256 * 1024) return std::nullopt;
+  struct Color { std::uint32_t value, count; };
+  std::vector<Color> colors;
+  std::unordered_map<std::uint32_t, std::uint32_t> lookup;
+  for (std::size_t i = 0; i < rgba.size(); i += 4) {
+    const auto value = get(rgba, i);
+    auto [at, inserted] = lookup.try_emplace(value, colors.size());
+    if (inserted) {
+      if (colors.size() == 65536) return std::nullopt;
+      colors.push_back({value, 0});
+    }
+    ++colors[at->second].count;
+  }
+  if (colors.size() <= 256) return std::nullopt;
+  std::sort(colors.begin(), colors.end(), [](const auto& a, const auto& b) {
+    return a.count != b.count ? a.count > b.count : a.value < b.value;
+  });
+  std::size_t exceptions = 0;
+  for (std::size_t i = 255; i < colors.size(); ++i) exceptions += colors[i].count;
+  if (exceptions > rgba.size() / 4 / 16) return std::nullopt;
+  SparsePalettePage page;
+  page.width = width; page.height = height;
+  page.base.resize(rgba.size() / 4); page.colors.resize(colors.size() * 4);
+  page.blocks.resize(std::size_t((width + 7) / 8) * ((height + 7) / 8));
+  page.residual.reserve(exceptions * 2);
+  for (std::size_t i = 0; i < colors.size(); ++i) { put(page.colors, i * 4, colors[i].value); lookup[colors[i].value] = i; }
+  for (int by = 0; by < height; by += 8) for (int bx = 0; bx < width; bx += 8) {
+    auto& block = page.blocks[(by / 8) * ((width + 7) / 8) + bx / 8];
+    block[2] = page.residual.size() / 2;
+    for (int y = by; y < std::min(by + 8, height); ++y) for (int x = bx; x < std::min(bx + 8, width); ++x) {
+      const auto pixel = std::size_t(y) * width + x;
+      const auto index = lookup.at(get(rgba, pixel * 4));
+      page.base[pixel] = std::min<std::uint32_t>(index, 255);
+      if (index >= 255) {
+        const auto bit = (y % 8) * 8 + x % 8;
+        block[bit / 32] |= 1U << (bit % 32);
+        page.residual.push_back(index & 255); page.residual.push_back(index >> 8);
+      }
+    }
+  }
+  const auto denseBytes = page.base.size() * 2 + ((page.colors.size() + 1023) / 1024) * 1024;
+  if (page.gpuBytes() * 100 > denseBytes * 85) return std::nullopt;
+  return page;
+}
+std::optional<SparsePalettePage> readSparsePalettePage(std::span<const std::uint8_t> encoded,
+    std::size_t maxDecodedBytes) {
+  if (encoded.size() < headerBytes || std::memcmp(encoded.data(), "PML4", 4) || get(encoded, 4) != 2 ||
+      get(encoded, 28) != checksum(encoded.first(28))) return std::nullopt;
+  const auto width = get(encoded, 8), height = get(encoded, 12), decoded = get(encoded, 16), length = get(encoded, 20);
+  if (!width || !height || width > maximumExtent || height > maximumExtent || width * height * 4 > maxDecodedBytes ||
+      decoded < 8 || decoded > width * height * 4 || !length ||
+      length > unsigned(LZ4_compressBound(int(decoded))) || encoded.size() != headerBytes + std::size_t(length)) return std::nullopt;
+  std::vector<std::uint8_t> packed(decoded);
+  if (LZ4_decompress_safe(reinterpret_cast<const char*>(encoded.data() + headerBytes),
+      reinterpret_cast<char*>(packed.data()), length, decoded) != int(decoded) || checksum(packed) != get(encoded, 24)) return std::nullopt;
+  const auto colors = get(packed, 0), residuals = get(packed, 4);
+  const auto count = std::size_t(width) * height, blocks = std::size_t((width + 7) / 8) * ((height + 7) / 8);
+  if (colors <= 256 || colors > 65536 || !residuals || residuals > count / 16 ||
+      packed.size() != 8 + colors * 4 + count + blocks * 12 + residuals * 2) return std::nullopt;
+  SparsePalettePage page;
+  page.width = width; page.height = height;
+  page.colors.assign(packed.begin() + 8, packed.begin() + 8 + colors * 4);
+  std::size_t at = 8 + colors * 4;
+  page.base.assign(packed.begin() + at, packed.begin() + at + count); at += count;
+  page.blocks.resize(blocks);
+  for (auto& block : page.blocks) for (auto& word : block) { word = get(packed, at); at += 4; }
+  page.residual.assign(packed.begin() + at, packed.end());
+  std::size_t offset = 0;
+  for (unsigned by = 0; by < height; by += 8) for (unsigned bx = 0; bx < width; bx += 8) {
+    const auto& block = page.blocks[(by / 8) * ((width + 7) / 8) + bx / 8];
+    if (block[2] != offset) return std::nullopt;
+    for (unsigned bit = 0; bit < 64; ++bit) {
+      const auto x = bx + bit % 8, y = by + bit / 8;
+      const bool exceptional = (block[bit / 32] >> (bit % 32)) & 1;
+      if (x >= width || y >= height) { if (exceptional) return std::nullopt; continue; }
+      if ((page.base[y * width + x] == 255) != exceptional) return std::nullopt;
+      if (exceptional) {
+        if (offset >= residuals) return std::nullopt;
+        const auto index = unsigned(page.residual[offset * 2]) | (unsigned(page.residual[offset * 2 + 1]) << 8);
+        if (index < 255 || index >= colors) return std::nullopt;
+        ++offset;
+      }
+    }
+  }
+  if (offset != residuals || page.gpuBytes() * 100 > (count * 2 + ((colors * 4 + 1023) / 1024) * 1024) * 85) return std::nullopt;
+  return page;
 }
 std::vector<std::uint8_t> compressLz4Artifact(std::span<const std::uint8_t> bytes) {
   if (bytes.empty() || bytes.size() > maximumArtifactBytes)

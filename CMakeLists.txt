@@ -508,6 +508,9 @@ if(BUILD_TESTING)
   set_tests_properties(node-prepared-frame-cache node-prepared-frame-cache-disabled
     node-prepared-frame-cache-default
     PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  add_test(NAME node-sparse-palette COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-sparse-palette.cjs" $<TARGET_FILE:pmjs_native>)
+  set_tests_properties(node-sparse-palette PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-prepared-frame-effects COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-effects.cjs" $<TARGET_FILE:pmjs_native>)
   add_test(NAME node-large-prepared-frame COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}

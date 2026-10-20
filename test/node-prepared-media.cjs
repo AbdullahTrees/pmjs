@@ -56,7 +56,7 @@ async function main() {
   // Materialized aliases remain supported for addons without audio-view capability.
   const options = { gameRoot, cacheRoot: path.join(root, 'cache'),
     native: { assets: native.assets, fs: native.fs }, pageCodec };
-  assert.match(native.assets.preparationLz4Version, /^lz4-1\.10\.0-rgba-v1$/);
+  assert.match(native.assets.preparationLz4Version, /^lz4-1\.10\.0-sparse-palette-v2$/);
   assert.equal(native.assets.preparationWorkspaceVersion, 1);
   for (const workspaceBytes of [-1, 0.5, 268435457])
     assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-workspace'), null,
@@ -65,18 +65,20 @@ async function main() {
   assert.ok(cold.entries[0].descriptor.pages.every(page => page.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')));
   assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-codec'), null,
     path.join(gameRoot, imageSource), null, { pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
-  assert.equal(native.assets.preparationVersion.processor, 'lossless-images-v7');
+  assert.equal(native.assets.preparationVersion.processor, 'images-v15-sparse-palette-astcenc4.7');
   assert.equal(cold.decrypted, 3);
-  assert.equal(cold.installed, 1);
-  assert.equal(cold.fallback, 1, 'larger prepared representation keeps ordinary loading');
+  assert.equal(cold.installed, pageCodec === 'lz4' ? 2 : 1);
+  assert.equal(cold.fallback, pageCodec === 'lz4' ? 0 : 1, 'LZ4 retains standalone pages; PNG requires a layout saving');
   const directories = fs.readdirSync(path.join(options.cacheRoot, 'entries'));
   const negative = directories.map(name => path.join(options.cacheRoot, 'entries', name))
     .find(directory => {
       const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
       return manifest.descriptor === null && !manifest.decrypted;
     });
-  assert.ok(negative, 'unprofitable image decision was not cached');
-  assert.deepEqual(fs.readdirSync(negative), ['manifest.json'], 'rejected pages and temporary tiles leaked');
+  if (pageCodec === 'png') {
+    assert.ok(negative, 'unprofitable image decision was not cached');
+    assert.deepEqual(fs.readdirSync(negative), ['manifest.json'], 'rejected pages and temporary tiles leaked');
+  } else assert.equal(negative, undefined, 'LZ4 standalone page was negatively cached');
   assert.equal(cold.entries[0].descriptor.cells.length, 12, 'all character cells retained');
   assert.deepEqual(Buffer.from(native.fs.readBytes('audio/bgm/tone.ogg')), wav);
   const original = native.images.loadBytes(imageBytes);
@@ -98,7 +100,7 @@ async function main() {
   assert.equal(warm.catalogHit, true);
   assert.equal(warm.generated, 0);
   assert.equal(warm.hits, 4);
-  assert.equal(warm.negativeHits, 1);
+  assert.equal(warm.negativeHits, pageCodec === 'lz4' ? 0 : 1);
   assert.equal(warm.decrypted, 3);
   const drifted = warm.decryptedEntries.map(entry => {
     const drift = identity => { const parts = identity.split(':'); parts[parts.length - 6] = String(BigInt(parts[parts.length - 6]) + 1n); return parts.join(':'); };

@@ -492,6 +492,7 @@ std::string preparedDigest(const void* data, std::size_t size) {
 struct ImageStore::SharedPreparedPage {
   std::mutex mutex;
   std::weak_ptr<ImagePixels> pixels;
+  std::weak_ptr<SparsePalettePage> sparse;
   std::string key;
   std::atomic<std::uint64_t> lastCpuUse{0};
 };
@@ -519,13 +520,13 @@ struct ImageStore::SharedTexture {
 
 struct ImageStore::PaletteBacking {
   ImageStore* owner = nullptr;
-  std::uint32_t indices = 0, table = 0, premultipliedTable = 0;
+  std::uint32_t indices = 0, table = 0, premultipliedTable = 0, blocks = 0, residual = 0;
   int height = 0, indexChannels = 2;
   bool premultipliedReady = false;
   std::vector<std::uint8_t> colors;
   std::size_t bytes = 0;
   ~PaletteBacking() {
-    const std::array<GLuint, 3> textures{indices, table, premultipliedTable};
+    const std::array<GLuint, 5> textures{indices, table, premultipliedTable, blocks, residual};
     glDeleteTextures(textures.size(), textures.data());
     owner->gpuBytes_ -= bytes;
     ++owner->textureEpoch_;
@@ -539,11 +540,14 @@ struct ImageStore::PreparedBacking {
   struct Page {
     std::shared_ptr<ImageFileSource> source;
     std::shared_ptr<ImagePixels> pixels;
+    std::shared_ptr<SparsePalettePage> sparse;
+    bool sparseChecked = false, sparseFormat = false, sparseDisabled = false;
     std::shared_ptr<SharedPreparedPage> shared;
     std::shared_ptr<SharedTexture> sharedTexture, sharedPremultipliedTexture;
     std::uint32_t texture = 0, premultipliedTexture = 0, compactTexture = 0;
     ImageChannelStorage storage{0};
     std::shared_ptr<PaletteBacking> palette;
+    std::vector<std::shared_ptr<PaletteBacking>> retiredPalettes;
     bool paletteChecked = false;
     std::filesystem::path path;
     std::string identity, expectedHash;
@@ -1022,6 +1026,47 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makePalette(const ImageP
   return result;
 }
 
+std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const SparsePalettePage& page, bool sparseAllowed) {
+  auto result = std::make_shared<PaletteBacking>();
+  result->owner = this; result->indexChannels = 2;
+  result->height = (page.colors.size() / 4 + 255) / 256;
+  result->colors = page.colors; result->colors.resize(std::size_t(result->height) * 1024);
+  const auto record = [&](std::size_t bytes) { result->bytes += bytes; gpuBytes_ += bytes; };
+  if (sparseAllowed) {
+    result->indices = uploadTexture(page.width, page.height, page.base.data(), ImageChannelStorage{1}, 0, true);
+    if (!result->indices) return {};
+    record(page.base.size());
+    while (glGetError() != GL_NO_ERROR) {}
+    glGenTextures(1, &result->blocks); glBindTexture(GL_TEXTURE_2D, result->blocks);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32UI, (page.width + 7) / 8, (page.height + 7) / 8,
+      0, GL_RGB_INTEGER, GL_UNSIGNED_INT, page.blocks.data());
+    if (!result->blocks || glGetError() != GL_NO_ERROR) return {};
+    record(page.blocks.size() * 12);
+    const auto count = page.residual.size() / 2;
+    const int width = std::min<std::size_t>(1024, count), height = (count + width - 1) / width;
+    auto residual = page.residual; residual.resize(std::size_t(width) * height * 2);
+    result->residual = uploadTexture(width, height, residual.data(), ImageChannelStorage{2}, 0, true);
+    if (!result->residual) return {};
+    record(residual.size());
+  } else {
+    const auto indices = page.denseIndices();
+    result->indices = uploadTexture(page.width, page.height, indices.data(), ImageChannelStorage{2}, 0, true);
+    if (!result->indices) return {};
+    record(indices.size());
+  }
+  result->table = uploadTexture(256, result->height, result->colors.data(), {});
+  if (!result->table) return {};
+  record(result->colors.size());
+  textureCreates_ += sparseAllowed ? 4 : 2; ++textureEpoch_; textureUploadBytes_ += result->bytes;
+  peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
+  return result;
+}
+
 std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle handle, bool premultiplied) {
   auto info = inspect(handle);
   if (!info) return std::nullopt;
@@ -1104,7 +1149,8 @@ bool ImageStore::materializePalette(Slot& slot) {
 std::size_t ImageStore::paletteGpuBytes(const Slot& slot) const {
   std::size_t pages = 0;
   if (slot.prepared) for (const auto& page : slot.prepared->pages)
-    if (page.palette) pages += page.palette->bytes;
+    { if (page.palette) pages += page.palette->bytes;
+      for (const auto& palette : page.retiredPalettes) pages += palette->bytes; }
   return pages + (slot.palette ? slot.palette->bytes : 0U) +
     (slot.retiredPalette ? slot.retiredPalette->bytes : 0U);
 }
@@ -1112,7 +1158,8 @@ std::size_t ImageStore::paletteGpuBytes(const Slot& slot) const {
 std::size_t ImageStore::paletteCpuBytes(const Slot& slot) const {
   std::size_t pages = 0;
   if (slot.prepared) for (const auto& page : slot.prepared->pages)
-    if (page.palette) pages += page.palette->colors.capacity();
+    { if (page.palette) pages += page.palette->colors.capacity();
+      for (const auto& palette : page.retiredPalettes) pages += palette->colors.capacity(); }
   return pages + (slot.palette ? slot.palette->colors.capacity() : 0U) +
     (slot.retiredPalette ? slot.retiredPalette->colors.capacity() : 0U);
 }
@@ -1194,11 +1241,16 @@ std::size_t ImageStore::cpuBytes() const {
     if (slot.live) {
       result += paletteCpuBytes(slot);
       if (slot.prepared) for (const auto& page : slot.prepared->pages)
-        if (page.palette && !seen.insert(page.palette.get()).second) result -= page.palette->colors.capacity();
+        { if (page.palette && !seen.insert(page.palette.get()).second) result -= page.palette->colors.capacity();
+          for (const auto& palette : page.retiredPalettes)
+            if (!seen.insert(palette.get()).second) result -= palette->colors.capacity(); }
     }
     if (slot.live && slot.sparseRegions) result += slot.sparseRegions->capacity() * sizeof(std::array<int, 4>);
     if (slot.live && slot.prepared) for (const auto& page : slot.prepared->pages)
-      if (page.pixels && seen.insert(page.pixels.get()).second) result += page.pixels->rgba.capacity();
+      {
+        if (page.pixels && seen.insert(page.pixels.get()).second) result += page.pixels->rgba.capacity();
+        if (page.sparse && seen.insert(page.sparse.get()).second) result += page.sparse->cpuBytes();
+      }
   }
   return result;
 }
@@ -1225,7 +1277,7 @@ std::size_t ImageStore::residentBytes(const Slot& slot) const {
       slot.mipmapBytes + slot.premultipliedMipmapBytes +
       (slot.cachedPixels ? slot.cachedPixels->rgba.capacity() : 0U) +
       (slot.sparseRegions ? slot.sparseRegions->capacity() * sizeof(std::array<int, 4>) : 0U) +
-      (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) if (page.pixels) bytes += page.pixels->rgba.capacity(); return bytes; }() : 0U);
+      (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) { if (page.pixels) bytes += page.pixels->rgba.capacity(); if (page.sparse) bytes += page.sparse->cpuBytes(); } return bytes; }() : 0U);
 }
 
 std::size_t ImageStore::warmBytes() const {
@@ -1249,8 +1301,10 @@ std::size_t ImageStore::warmBytes() const {
     if (slot.prepared) {
       for (const auto& page : slot.prepared->pages) {
         if (page.pixels) shared(page.pixels.get(), page.pixels->rgba.capacity());
+        if (page.sparse) shared(page.sparse.get(), page.sparse->cpuBytes());
         texture(page.sharedTexture); texture(page.sharedPremultipliedTexture);
         if (page.palette) shared(page.palette.get(), page.palette->bytes + page.palette->colors.capacity());
+        for (const auto& palette : page.retiredPalettes) shared(palette.get(), palette->bytes + palette->colors.capacity());
       }
       for (const auto& block : slot.prepared->blockTextures) texture(block.sharedAtlas);
     }
@@ -1340,7 +1394,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
         slot.mipmapBytes + slot.premultipliedMipmapBytes + sharedGpuBytes,
       paletteCpuBytes(slot) + (slot.cachedPixels ? slot.cachedPixels->rgba.capacity() : 0U) +
           (slot.sparseRegions ? slot.sparseRegions->capacity() * sizeof(std::array<int, 4>) : 0U) +
-        (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) if (page.pixels) bytes += page.pixels->rgba.capacity(); return bytes; }() : 0U),
+        (slot.prepared ? [&]() { std::size_t bytes = 0; for (const auto& page : slot.prepared->pages) { if (page.pixels) bytes += page.pixels->rgba.capacity(); if (page.sparse) bytes += page.sparse->cpuBytes(); } return bytes; }() : 0U),
       slot.lastUsedSerial,
       slot.references == 0 && slot.pins == 0 &&
         slot.inFlight.load(std::memory_order_acquire) == 0 &&
@@ -1355,6 +1409,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
     entry.paletteIndexBits = slot.palette ? slot.palette->indexChannels * 8 : 0;
     if (slot.prepared) for (const auto& page : slot.prepared->pages) if (page.palette) {
       entry.palette = true;
+      entry.paletteSparse |= page.palette->blocks != 0;
       entry.paletteIndexBits = std::max(entry.paletteIndexBits, page.palette->indexChannels * 8);
     }
 
@@ -1552,6 +1607,7 @@ bool ImageStore::promoteAstc(Slot& slot, const void* replacement) {
 
 void ImageStore::clearRetiredTextures(Slot& slot) {
   slot.retiredPalette.reset();
+  if (slot.prepared) for (auto& page : slot.prepared->pages) page.retiredPalettes.clear();
   if (!slot.retiredTextureBytes) return;
   glDeleteTextures(static_cast<GLsizei>(slot.retiredTextures.size()), slot.retiredTextures.data());
   gpuBytes_ -= slot.retiredTextureBytes;
@@ -2129,7 +2185,7 @@ bool ImageStore::validatePrepared(PreparedLoad& load, bool retainCpu) {
         const auto bytes = page.source ? readCapturedBytes(*page.source) : std::nullopt;
         if (!bytes || !validAstc4x4(*bytes, backing.descriptor.width, backing.descriptor.height) ||
             (page.verifyHash && !contentHashMatches(*bytes, page.expectedHash))) return invalid();
-      } else if (!preparedPixels(backing, i)) return invalid();
+      } else if (!preparedSparsePage(backing, i) && !preparedPixels(backing, i)) return invalid();
     }
     load.validated = true;
   }
@@ -2372,8 +2428,57 @@ bool ImageStore::readPreparedRegionInto(PreparedBacking& backing, int x, int y,
   return true;
 }
 
+bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index) {
+  auto& page = backing.pages[index];
+  if (page.sparse) return true;
+  if (page.sparseChecked && !page.sparseFormat) return false;
+  page.sparseChecked = true;
+  std::array<std::uint8_t, 8> header{};
+  if (!page.source || pread(page.source->descriptor_, header.data(), header.size(), 0) != ssize_t(header.size()) ||
+      std::memcmp(header.data(), "PML4\2\0\0\0", 8)) return false;
+  const auto bytes = readCapturedBytes(*page.source);
+  if (!bytes || (page.verifyHash && !contentHashMatches(*bytes, page.expectedHash))) return false;
+  const auto& d = backing.descriptor.pages[index];
+  const auto key = preparedDigest(bytes->data(), bytes->size()) + std::to_string(d.width) + ":" + std::to_string(d.height);
+  {
+    std::lock_guard lock(backing.pool->mutex);
+    auto& entry = backing.pool->pages[key];
+    page.shared = entry.lock();
+    if (!page.shared) {
+      page.shared = std::make_shared<SharedPreparedPage>(); page.shared->key = key; entry = page.shared;
+    }
+  }
+  std::lock_guard lock(page.shared->mutex);
+  page.sparse = page.shared->sparse.lock();
+  if (!page.sparse) {
+    auto parsed = readSparsePalettePage(*bytes, preparedPageCacheBudget);
+    if (!parsed || parsed->width != d.width || parsed->height != d.height) return false;
+    page.sparse = std::make_shared<SparsePalettePage>(std::move(*parsed));
+    page.shared->sparse = page.sparse;
+    backing.pageDecodes->fetch_add(1, std::memory_order_relaxed);
+  } else backing.pool->hits.fetch_add(1, std::memory_order_relaxed);
+  page.sparseFormat = true;
+  page.verifyHash = false;
+  page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  return true;
+}
+
 ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t index, bool* acquired) {
   auto& page = backing.pages[index];
+  if (!page.pixels && preparedSparsePage(backing, index)) {
+    std::lock_guard lock(page.shared->mutex);
+    page.pixels = page.shared->pixels.lock();
+    if (!page.pixels) {
+      auto pixels = page.sparse->pixels();
+      page.pixels = std::make_shared<ImagePixels>(ImagePixels{pixels.width, pixels.height, std::move(pixels.rgba)});
+      page.shared->pixels = page.pixels;
+    }
+    if (!page.storage.channels) {
+      const auto& known = backing.descriptor.pages[index].storage;
+      page.storage = known ? known->channels : imageStorage(*page.pixels);
+    }
+    if (acquired) *acquired = true;
+  }
   if (!page.pixels) {
     if (acquired) *acquired = true;
     const auto& dimensions = backing.descriptor.pages[index];
@@ -2455,30 +2560,49 @@ ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t in
   return &*page.pixels;
 }
 
-std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index, bool premultiplied, std::uint32_t* table) {
+std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index, bool premultiplied,
+    PaletteImageRegion* view, bool sparseAllowed) {
   auto& backing = *slot.prepared;
   auto& page = backing.pages[index];
-  if (table) {
-    if (!page.paletteChecked) {
-      const auto* pixels = preparedPixels(backing, index);
-      if (!pixels) return std::nullopt;
-      const auto& decision = backing.descriptor.pages[index].storage;
+  if (view) {
+    const bool sparse = page.sparseFormat || preparedSparsePage(backing, index);
+    const auto& decision = backing.descriptor.pages[index].storage;
+    if (sparse && !sparseAllowed) page.sparseDisabled = true;
+    bool useSparse = sparse && sparseAllowed && !page.sparseDisabled && (!decision || decision->paletteBits == 16);
+    if (!page.paletteChecked || (page.palette && bool(page.palette->blocks) != useSparse)) {
+      if (sparse && !page.sparse && !preparedSparsePage(backing, index)) return std::nullopt;
+      const auto* pixels = sparse ? nullptr : preparedPixels(backing, index);
+      if (!sparse && !pixels) return std::nullopt;
       if (!decision || decision->paletteBits) {
-        const auto key = page.shared->key + ":palette:" + std::to_string(decision ? decision->paletteBits : 0);
-        page.palette = preparedPalettes_[key].lock();
-        if (!page.palette) {
-          page.palette = makePalette(*pixels, decision ? &*decision : nullptr);
-          if (page.palette) preparedPalettes_[key] = page.palette;
+        auto key = page.shared->key + ":palette:" + std::to_string(decision ? decision->paletteBits : 0) +
+          (useSparse ? ":sparse" : ":dense");
+        auto palette = preparedPalettes_[key].lock();
+        if (!palette) {
+          palette = sparse ? makeSparsePalette(*page.sparse, useSparse) : makePalette(*pixels, decision ? &*decision : nullptr);
+          if (!palette && useSparse) {
+            page.sparseDisabled = true; useSparse = false;
+            key.replace(key.size() - 7, 7, ":dense");
+            palette = makeSparsePalette(*page.sparse, false);
+          }
+          if (palette) preparedPalettes_[key] = palette;
         } else ++preparedSharedTextureHits_;
+        if (palette) {
+          // A previous draw in this submission may still reference the old view.
+          if (page.palette && slot.inFlight.load(std::memory_order_acquire)) page.retiredPalettes.push_back(page.palette);
+          page.palette = std::move(palette);
+        }
       }
       page.paletteChecked = true;
       trimPreparedPages();
     }
     if (page.palette) {
-      *table = paletteTable(*page.palette, premultiplied);
-      if (!*table) return std::nullopt;
+      view->table = paletteTable(*page.palette, premultiplied);
+      if (!view->table) return std::nullopt;
+      view->blocks = page.palette->blocks; view->residual = page.palette->residual;
+      page.sparse.reset();
       const auto& d = backing.descriptor.pages[index];
-      return ImageInfo{0, d.width, d.height, page.palette->indices, premultiplied, false};
+      view->image = ImageInfo{0, d.width, d.height, page.palette->indices, premultiplied, false};
+      return view->image;
     }
     return std::nullopt;
   }
@@ -2533,7 +2657,7 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
 }
 
 std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle handle,
-    float x, float y, float width, float height, bool premultiplied, bool paletteOnly) {
+    float x, float y, float width, float height, bool premultiplied, bool paletteOnly, bool sparseAllowed) {
   auto info = inspect(handle);
   if (!info || width <= 0 || height <= 0 || !std::isfinite(x) || !std::isfinite(y) ||
       !std::isfinite(width) || !std::isfinite(height) || x < 0 || y < 0 ||
@@ -2561,15 +2685,15 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
     if (x < r[0] || y < r[1] || x + width > r[0] + r[2] || y + height > r[1] + r[3]) continue;
     const bool zero = std::all_of(cell.fill.begin(), cell.fill.end(), [](std::uint8_t v) { return v == 0; });
     if (zero && cell.crop[2] && cell.crop[3]) {
-      std::uint32_t table = 0;
-      auto physical = preparedPage(slot, cell.page, premultiplied, paletteOnly ? &table : nullptr);
+      PaletteImageRegion palette;
+      auto physical = preparedPage(slot, cell.page, premultiplied, paletteOnly ? &palette : nullptr, sparseAllowed);
       if (!physical) return std::nullopt;
       ++preparedRegions_;
       return SpriteImageRegion{*physical,
         {static_cast<float>(r[0] + cell.crop[0]), static_cast<float>(r[1] + cell.crop[1]),
          static_cast<float>(cell.crop[2]), static_cast<float>(cell.crop[3])},
         {static_cast<float>(cell.atlas[0]), static_cast<float>(cell.atlas[1]),
-         static_cast<float>(cell.atlas[2]), static_cast<float>(cell.atlas[3])}, info->width, info->height, backing.descriptor.halo, table};
+         static_cast<float>(cell.atlas[2]), static_cast<float>(cell.atlas[3])}, info->width, info->height, backing.descriptor.halo, palette.table, palette.blocks, palette.residual};
     }
     if (paletteOnly) return std::nullopt;
     auto& image = backing.cellImages[i];

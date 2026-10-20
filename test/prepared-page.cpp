@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <unistd.h>
 #include <zlib.h>
+#include <lz4.h>
 
 namespace {
 void require(bool value, const std::source_location& location = std::source_location::current()) {
@@ -66,6 +67,63 @@ int main() {
           require(!checked || checked->rgba == rgba);
         }
       }
+    }
+    for (const auto [width, height] : {std::pair{257,259}, {512,512}}) {
+      std::vector<std::uint8_t> rgba(std::size_t(width) * height * 4);
+      std::size_t rarePixels = 0;
+      for (std::size_t i = 0; i < rgba.size() / 4; ++i) {
+        const bool rare = i % 31 == 0;
+        rgba[i * 4] = i & 255; rgba[i * 4 + 1] = rare ? (i >> 8) & 255 : 97;
+        rgba[i * 4 + 2] = rare ? 137 : 51; rgba[i * 4 + 3] = rare ? i % 255 : 255;
+        rarePixels += rare;
+      }
+      const auto sparse = pmjs::makeSparsePalettePage(width, height, rgba);
+      require(sparse && sparse->pixels().rgba == rgba && sparse->residual.size() / 2 > rarePixels);
+      const auto denseBytes = rgba.size() / 2 + ((sparse->colors.size() + 1023) / 1024) * 1024;
+      require(sparse->gpuBytes() * 100 <= denseBytes * 85);
+      const auto file = root / "sparse.pml4";
+      pmjs::writeLz4Page(file, width, height, rgba, true);
+      std::ifstream input(file, std::ios::binary);
+      const std::vector<std::uint8_t> encoded(std::istreambuf_iterator<char>(input), {});
+      require(encoded[4] == 2);
+      const auto parsed = pmjs::readSparsePalettePage(encoded, rgba.size());
+      require(parsed && parsed->pixels().rgba == rgba && parsed->gpuBytes() == sparse->gpuBytes());
+      const auto ordinary = pmjs::readLz4Page(encoded, rgba.size());
+      require(ordinary && ordinary->rgba == rgba);
+      require(!pmjs::readSparsePalettePage(encoded, rgba.size() - 1));
+      for (const auto at : {0U, 4U, 16U, 24U, 28U, unsigned(encoded.size() - 1)}) {
+        auto broken = encoded; broken[at] ^= 128;
+        require(!pmjs::readSparsePalettePage(broken, rgba.size()));
+      }
+      std::vector<std::uint8_t> packed(encoded[16] | (unsigned(encoded[17]) << 8) | (unsigned(encoded[18]) << 16));
+      require(LZ4_decompress_safe(reinterpret_cast<const char*>(encoded.data() + 32),
+        reinterpret_cast<char*>(packed.data()), encoded.size() - 32, packed.size()) == int(packed.size()));
+      const auto badPacked = [&](std::size_t at, std::uint32_t value) {
+        auto bytes = packed; put(bytes, at, value);
+        std::vector<std::uint8_t> broken(32 + LZ4_compressBound(bytes.size()));
+        std::copy_n(encoded.begin(), 32, broken.begin());
+        const auto length = LZ4_compress_default(reinterpret_cast<const char*>(bytes.data()),
+          reinterpret_cast<char*>(broken.data() + 32), bytes.size(), broken.size() - 32);
+        require(length > 0); broken.resize(32 + length);
+        put(broken, 20, length); put(broken, 24, crc32(0, bytes.data(), bytes.size())); headerChecksum(broken);
+        require(!pmjs::readSparsePalettePage(broken, rgba.size()));
+      };
+      const auto base = 8 + sparse->colors.size(), blocks = base + sparse->base.size();
+      badPacked(0, 65537); badPacked(4, rgba.size());
+      badPacked(base, 0); // The first source pixel is exceptional.
+      badPacked(blocks + 8, 1); // The first block must start at residual zero.
+      badPacked(blocks + sparse->blocks.size() * 12, 0xffffffffU);
+      std::cout << "sparse palette " << width << 'x' << height << ": dense=" << denseBytes
+        << " sparse=" << sparse->gpuBytes() << " exceptions=" << sparse->residual.size() / 2 << '\n';
+    }
+    for (const unsigned count : {256U, 512U, 65537U}) {
+      std::vector<std::uint8_t> rgba(512 * 512 * 4);
+      for (std::size_t i = 0; i < rgba.size() / 4; ++i) {
+        const auto color = i % count;
+        rgba[i * 4] = color & 255; rgba[i * 4 + 1] = (color >> 8) & 255;
+        rgba[i * 4 + 2] = color >> 16; rgba[i * 4 + 3] = 255;
+      }
+      require(!pmjs::makeSparsePalettePage(512, 512, rgba));
     }
     bool refused = false;
     try { pmjs::writeLz4Page(root / "invalid", 2049, 1, {}); }

@@ -6,6 +6,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { png } = require('./helpers/png.cjs');
+const { spritePacket, drawPacket } = require('./helpers/sparse-palette.cjs');
 const { generateAssetIndex, loadAssetIndex } = require('../runner/asset-index.cjs');
 const { prepareAssets } = require('../runner/asset-preparation.cjs');
 const addon = path.resolve(process.argv[2]);
@@ -26,7 +27,8 @@ const fixtures = [
   { name: 'gray', width: 16, height: 16, count: 256, channels: 1, bits: 0 },
   { name: 'rgba', width: 16, height: 16, count: 256, channels: 4, bits: 0 },
   { name: 'palette8', width: 2048, height: 2048, count: 256, channels: 4, bits: 8 },
-  { name: 'palette16', width: 2048, height: 2048, count: 257, channels: 4, bits: 16 }
+  { name: 'palette16', width: 2048, height: 2048, count: 257, channels: 4, bits: 16 },
+  { name: 'paletteResidual', width: 512, height: 512, count: 8192, channels: 4, bits: 16 }
 ];
 for (const f of fixtures) {
   const pixels = Buffer.alloc(f.width * f.height * 4);
@@ -36,6 +38,10 @@ for (const f of fixtures) {
     pixels[i * 4 + 1] = f.name === 'gray' ? color : color >> 8;
     pixels[i * 4 + 2] = f.name === 'gray' ? color : (color * 17 + (color >> 8) * 7) & 255;
     pixels[i * 4 + 3] = f.name === 'rgba' ? (color * 31) & 255 : 255;
+  }
+  if (f.name === 'paletteResidual') for (let i = 0; i < f.width * f.height; ++i) {
+    const rare = i % 31 === 0;
+    pixels.set([i & 255, rare ? (i >>> 8) & 31 : 97, rare ? 137 : 51, 255], i * 4);
   }
   if (f.name === 'zero') pixels.fill(0);
   if (f.name === 'sparse') {
@@ -53,6 +59,10 @@ for (const f of fixtures) {
 const sheet = fixtures.find(f => f.name === 'sparse');
 options.assetPreparation.recipes = [{ source: sheet.source,
   sourceHash: createHash('sha256').update(fs.readFileSync(path.join(gameRoot, sheet.source))).digest('hex'), grid: [2, 1] }];
+const residualFixture = fixtures.find(f => f.name === 'paletteResidual');
+options.assetPreparation.recipes.push({ source: residualFixture.source,
+  sourceHash: createHash('sha256').update(fs.readFileSync(path.join(gameRoot, residualFixture.source))).digest('hex'),
+  grid: [1, 1], backdrop: [0, 0, 0, 0] });
 const native = require(addon);
 let initialized = false;
 const handles = [];
@@ -79,7 +89,7 @@ const handles = [];
         assert.ok(record.descriptor.pages.every(p => p.storage?.pixelFactsVersion === 1));
       }
     }
-    native.initialize({ gameRoot, width: 32, height: 24, windowTitle: 'Image storage index' });
+    native.initialize({ gameRoot, width: 32, height: 24, windowTitle: 'Image storage index', imageWarmCacheBytes: 0 });
     initialized = true;
     const preparation = { gameRoot, cacheRoot, native, portableIndex: index,
       pageCodec: 'png', recipes: options.assetPreparation.recipes, workspaceBytes: options.assetPreparation.workspaceBytes };
@@ -118,11 +128,41 @@ const handles = [];
     const lz4Output = path.join(root, 'lz4-bundle');
     fs.mkdirSync(lz4Output);
     const lz4Options = { ...options, assetPreparation: { ...options.assetPreparation, pageCodec: 'lz4' } };
-    const lz4 = await generateAssetIndex({ root: runtime, gameRoot, config: null, options: lz4Options, output: lz4Output });
+    const lz4 = await generateAssetIndex({ root: runtime, gameRoot, config: null, options: lz4Options, output: lz4Output, includeAssets: true });
     assert.equal(lz4.warningCount, 0);
     const lz4Index = loadAssetIndex(path.join(lz4Output, 'asset-index.json'), native, lz4Options);
     const pages = lz4Index.images.find(r => r.source === sheet.source).descriptor.pages;
     assert.ok(pages.length && pages.every(p => p.path.endsWith('.pml4') && p.storage.channels === 2));
+    assert.equal(lz4Index.pageCodecVersion, native.assets.preparationLz4Version);
+    const residual = lz4Index.images.find(r => r.source.endsWith('/paletteResidual.png'));
+    assert.ok(residual.descriptor.pages.some(page => {
+      const outputPage = residual.outputs.find(o => o.path.endsWith('/' + page.path));
+      const file = path.join(lz4Output, outputPage.path);
+      const bytes = fs.readFileSync(file);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), outputPage.hash);
+      return bytes.toString('ascii', 0, 4) === 'PML4' && bytes.readUInt32LE(4) === 2 && page.storage.paletteBits === 16;
+    }), 'portable index did not include a sparse palette page with valid storage metadata');
+    native.beginFrame();
+    for (const handle of handles) native.images.release(handle);
+    handles.length = 0;
+    native.beginFrame();
+    const installed = await prepareAssets({ ...preparation, pageCodec: 'lz4',
+      portableIndex: lz4Index, portableAssetRoot: lz4Output, cacheRoot: path.join(root, 'bundled-cache') });
+    assert.equal(installed.error, undefined);
+    assert.ok(installed.indexedPageCopies > 0, 'bundled sparse pages were not reused');
+    const entry = installed.entries.find(e => e.source === residual.source);
+    assert.ok(entry && entry.descriptor.pages.every(page => page.storage));
+    const image = await native.images.loadAsync(residual.source);
+    handles.push(image.handle);
+    console.error(JSON.stringify({ beforeDraw: native.images.memory(100).largest.find(o => o.handle === image.handle) }));
+    drawPacket(native, spritePacket(native, image, { crop: [0, 0, image.width, image.height], scale: 32 / image.width }));
+    const indexedOwner = native.images.memory(100).largest.find(o => o.handle === image.handle);
+    if (!indexedOwner.paletteSparse) console.error(JSON.stringify({ indexedOwner, cells: entry.descriptor.cells }));
+    assert.equal(indexedOwner.paletteSparse, true,
+      'indexed sparse page was promoted to dense storage');
+    const reused = await prepareAssets({ ...preparation, pageCodec: 'lz4',
+      portableIndex: lz4Index, portableAssetRoot: lz4Output, cacheRoot: path.join(root, 'bundled-cache') });
+    assert.equal(reused.catalogHit, true, 'sparse pages did not survive warm catalog validation');
     console.log('Offline channel/8-bit/16-bit/RGBA decisions, native activation and warm catalog passed');
   } finally {
     for (const handle of handles) native.images.release(handle);

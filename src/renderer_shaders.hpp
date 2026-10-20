@@ -1099,15 +1099,35 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
   uniform highp sampler2D image;
-  // 1 selects nearest colors; 2 interpolates colors after index lookup.
+  // 1/2 select dense nearest/linear colors; 3 selects sparse nearest colors.
   uniform int paletteImage;
   uniform highp sampler2D paletteTable;
+  uniform highp usampler2D paletteBlocks;
+  uniform highp sampler2D paletteResidual;
+  highp uint paletteRank(highp uint bits) {
+    bits -= (bits >> 1u) & 0x55555555u;
+    bits = (bits & 0x33333333u) + ((bits >> 2u) & 0x33333333u);
+    bits = (bits + (bits >> 4u)) & 0x0f0f0f0fu;
+    return (bits * 0x01010101u) >> 24u;
+  }
   highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
+    if (paletteImage == 3 && bytes.r == 255.0) {
+      highp ivec2 size = textureSize(image, 0);
+      highp ivec2 pixel = ivec2(clamp(floor(coord * vec2(size)), vec2(0.0), vec2(size - 1)));
+      highp uvec3 block = texelFetch(paletteBlocks, pixel / 8, 0).rgb;
+      highp uint bit = uint((pixel.y % 8) * 8 + pixel.x % 8);
+      highp uint mask = bit < 32u ? block.x : block.y;
+      highp uint rank = paletteRank(mask & ((1u << (bit % 32u)) - 1u));
+      if (bit >= 32u) rank += paletteRank(block.x);
+      highp uint offset = block.z + rank;
+      highp uint width = uint(textureSize(paletteResidual, 0).x);
+      bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
+    }
     return texelFetch(paletteTable, ivec2(bytes), 0);
   }
   highp vec4 samplePalette(highp vec2 coord) {
-    if (paletteImage == 1) return paletteColor(coord);
+    if (paletteImage == 1 || paletteImage == 3) return paletteColor(coord);
     highp vec2 size = vec2(textureSize(image, 0));
     highp vec2 position = roundEven((coord * size - vec2(0.5)) * 256.0) / 256.0;
     highp vec2 pixel = floor(position), weight = fract(position);
@@ -1320,15 +1340,35 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   precision mediump float;
   precision highp int;
   uniform highp sampler2D image;
-  // 1 selects nearest colors; 2 interpolates colors after index lookup.
+  // 1/2 select dense nearest/linear colors; 3 selects sparse nearest colors.
   uniform int paletteImage;
   uniform highp sampler2D paletteTable;
+  uniform highp usampler2D paletteBlocks;
+  uniform highp sampler2D paletteResidual;
+  highp uint paletteRank(highp uint bits) {
+    bits -= (bits >> 1u) & 0x55555555u;
+    bits = (bits & 0x33333333u) + ((bits >> 2u) & 0x33333333u);
+    bits = (bits + (bits >> 4u)) & 0x0f0f0f0fu;
+    return (bits * 0x01010101u) >> 24u;
+  }
   highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
+    if (paletteImage == 3 && bytes.r == 255.0) {
+      highp ivec2 size = textureSize(image, 0);
+      highp ivec2 pixel = ivec2(clamp(floor(coord * vec2(size)), vec2(0.0), vec2(size - 1)));
+      highp uvec3 block = texelFetch(paletteBlocks, pixel / 8, 0).rgb;
+      highp uint bit = uint((pixel.y % 8) * 8 + pixel.x % 8);
+      highp uint mask = bit < 32u ? block.x : block.y;
+      highp uint rank = paletteRank(mask & ((1u << (bit % 32u)) - 1u));
+      if (bit >= 32u) rank += paletteRank(block.x);
+      highp uint offset = block.z + rank;
+      highp uint width = uint(textureSize(paletteResidual, 0).x);
+      bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
+    }
     return texelFetch(paletteTable, ivec2(bytes), 0);
   }
   highp vec4 samplePalette(highp vec2 coord) {
-    if (paletteImage == 1) return paletteColor(coord);
+    if (paletteImage == 1 || paletteImage == 3) return paletteColor(coord);
     highp vec2 size = vec2(textureSize(image, 0));
     highp vec2 position = roundEven((coord * size - vec2(0.5)) * 256.0) / 256.0;
     highp vec2 pixel = floor(position), weight = fract(position);

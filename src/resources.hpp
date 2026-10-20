@@ -18,6 +18,8 @@ namespace pmjs {
 using ImageEncryptionKey = std::array<std::uint8_t, 16>;
 ImageEncryptionKey imageEncryptionKey(const std::string& hex);
 
+struct SparsePalettePage;
+
 using ImageHandle = std::uint32_t;
 constexpr std::uint32_t canvasHandleTag = 0x80000000U;
 
@@ -103,12 +105,12 @@ struct SpriteImageRegion {
   ImageInfo image;
   std::array<float, 4> source{}, atlas{};
   int logicalWidth = 0, logicalHeight = 0, halo = 0;
-  std::uint32_t paletteTable = 0;
+  std::uint32_t paletteTable = 0, paletteBlocks = 0, paletteResidual = 0;
 };
 
 struct PaletteImageRegion {
   ImageInfo image;
-  std::uint32_t table = 0;
+  std::uint32_t table = 0, blocks = 0, residual = 0;
 };
 
 struct CompactImageRegion {
@@ -143,6 +145,7 @@ struct ImageMemoryEntry {
   std::string sceneryFirstMaterializationCaller;
   std::string path;
   bool astc = false;
+  bool paletteSparse = false;
   bool fullTextureResident = false;
   bool palette = false;
   int paletteIndexBits = 0;
@@ -241,7 +244,7 @@ class ImageStore {
   bool hasCpuPixels(ImageHandle handle) const;
   std::optional<SpriteImageRegion> resolveSpriteRegion(
       ImageHandle handle, float x, float y, float width, float height,
-      bool premultiplied = true, bool paletteOnly = false);
+      bool premultiplied = true, bool paletteOnly = false, bool sparseAllowed = false);
   std::optional<PaletteImageRegion> resolvePaletteImage(ImageHandle handle, bool premultiplied);
   std::uint64_t sceneryWindowHits() const { return sceneryWindowHits_; }
   std::uint64_t sceneryWindowUploads() const { return sceneryWindowUploads_; }
@@ -515,8 +518,10 @@ class ImageStore {
       int width, int height, ImagePixels& destination, int destinationX,
       int destinationY, bool* acquired = nullptr);
   std::optional<ImageInfo> preparedPage(Slot& slot, std::size_t page, bool premultiplied,
-      std::uint32_t* paletteTable = nullptr);
+      PaletteImageRegion* paletteView = nullptr, bool sparseAllowed = false);
   std::uint32_t paletteTable(PaletteBacking& palette, bool premultiplied);
+  std::shared_ptr<PaletteBacking> makeSparsePalette(const SparsePalettePage& page, bool sparseAllowed);
+  static bool preparedSparsePage(PreparedBacking& backing, std::size_t index);
   static ImageHandle makeHandle(std::size_t index, std::uint16_t generation);
   void markUsed(Slot& slot);
   std::size_t residentBytes(const Slot& slot) const;

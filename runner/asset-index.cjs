@@ -70,6 +70,7 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     const empty = { schema: 2, kind: 'pmjs-asset-index',
       sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
+      pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
       astc: astcSettings(options.assetPreparation.astc),
       imageStorageVersion: nativeAddon.assets.imageStorageVersion,
@@ -89,6 +90,7 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     const images = await prepareAssets({ gameRoot, cacheRoot, native,
       recipes: options.assetPreparation.recipes, preparationContext: 'offline',
       pageCodec: options.assetPreparation.pageCodec,
+      pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
       astc: astcSettings(options.assetPreparation.astc), workspaceBytes: options.assetPreparation.workspaceBytes,
       verifyHashes: true, logger, shouldCancel });
@@ -166,6 +168,7 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
     const index = { schema: 2, kind: 'pmjs-asset-index',
       sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
+      pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
       astc: astcSettings(options.assetPreparation.astc),
       imageStorageVersion: nativeAddon.assets.imageStorageVersion,
@@ -196,7 +199,9 @@ function loadAssetIndex(file, native, options) {
       index.recipesIdentity === identity(options.assetPreparation.recipes) &&
       JSON.stringify(index.losslessPrefixes || []) === JSON.stringify(options.assetPreparation.losslessPrefixes || []) &&
       JSON.stringify(astcSettings(index.astc)) === JSON.stringify(astcSettings(options.assetPreparation.astc)) &&
-      (legacy || index.pageCodec === options.assetPreparation.pageCodec);
+      (legacy || index.pageCodec === options.assetPreparation.pageCodec) &&
+      (legacy || index.pageCodec !== 'lz4' || typeof native.assets.preparationLz4Version === 'string' &&
+        index.pageCodecVersion === native.assets.preparationLz4Version);
     const compilationCompatible = (legacy || index.sections?.mapCompilation === 1) &&
       index.maps?.compiler === COMPILER_VERSION;
     const tilesCompatible = (legacy || index.sections?.tileOutputs === 1) &&

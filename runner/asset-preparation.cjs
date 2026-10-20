@@ -12,7 +12,7 @@ const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } =
 const { yedSideviewFrames } = require('./yed-sideview-recipes.cjs');
 
 const CACHE_VERSION = 1;
-const PROCESSOR_IDENTITY = { processor: 'images-v14-perimeter-fills-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
+const PROCESSOR_IDENTITY = { processor: 'images-v15-sparse-palette-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
 const HASH = /^[a-f0-9]{64}$/;
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ENCRYPTED_HEADER = Buffer.from('5250474d560000000003010000000000', 'hex');
@@ -103,9 +103,10 @@ function pageHeaderMatches(header, page, size) {
       size === 16 + Math.ceil(page.width / 4) * Math.ceil(page.height / 4) * 16;
   }
   if (page.path.endsWith('.pml4')) {
-    return header.length >= 32 && header.toString('ascii', 0, 4) === 'PML4' && header.readUInt32LE(4) === 1 &&
+    return header.length >= 32 && header.toString('ascii', 0, 4) === 'PML4' && [1, 2].includes(header.readUInt32LE(4)) &&
       header.readUInt32LE(8) === page.width && header.readUInt32LE(12) === page.height &&
-      header.readUInt32LE(16) === page.width * page.height * 4 &&
+      (header.readUInt32LE(4) === 1 ? header.readUInt32LE(16) === page.width * page.height * 4 :
+        header.readUInt32LE(16) >= 8 && header.readUInt32LE(16) <= page.width * page.height * 4) &&
       header.readUInt32LE(20) > 0 && header.readUInt32LE(20) === size - 32;
   }
   return header.length >= 24 && header.subarray(0, 8).equals(PNG) &&
