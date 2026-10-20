@@ -453,11 +453,17 @@ void Renderer::renderScene() {
       sceneSubmittedThisFrame_ || offscreenRender_ || !hasValidSceneFrame_;
   if (shouldRenderScene) {
     reduceConstantBlackGroups();
+    bool hasEffect = false;
+    bool hasFilterGroups = false;
+    bool hasCustomFilter = false;
+    for (const auto& command : frame_.commands) {
+      hasEffect |= command.primitive == RenderCommand::Primitive::effect;
+      hasFilterGroups |= command.action == RenderCommand::Action::filterBegin;
+      hasCustomFilter |= command.filterKind == scene_packet::FilterKind::custom;
+    }
     if (!offscreenRender_) filterIntermediateUsed_ = false;
     // llvmpipe changes interpolation when depth is first attached; keep its scene storage stable.
-    if (!offscreenRender_ && (softwareSceneDepth_ || std::any_of(frame_.commands.begin(), frame_.commands.end(), [](const auto& command) {
-      return command.primitive == RenderCommand::Primitive::effect;
-    }))) ensureDepthBuffer(rootTarget);
+    if (!offscreenRender_ && (softwareSceneDepth_ || hasEffect)) ensureDepthBuffer(rootTarget);
     if (!offscreenRender_) toneCompositionActive_ = false;
     glBindFramebuffer(GL_FRAMEBUFFER, rootFramebuffer);
     glViewport(0, 0, width_, height_);
@@ -469,12 +475,7 @@ void Renderer::renderScene() {
 
     vertices_.clear();
     vertices_.reserve(frame_.commands.size() * 72);
-    const bool hasFilterGroups = std::any_of(frame_.commands.begin(), frame_.commands.end(),
-        [](const auto& command) { return command.action == RenderCommand::Action::filterBegin; });
-    if (hasFilterGroups && (filterBoundsEnabled_ ||
-        std::any_of(frame_.commands.begin(), frame_.commands.end(), [](const auto& command) {
-          return command.filterKind == scene_packet::FilterKind::custom;
-        }))) {
+    if (hasFilterGroups && (filterBoundsEnabled_ || hasCustomFilter)) {
       computeFilterContentBounds();
     } else {
       filterBounds_.clear();

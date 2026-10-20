@@ -352,10 +352,12 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
       sx * transform[2], sy * transform[3], 0,
       -1.0F - (final ? outputFrame[0] * sx : frame[0] * sx) + sx * transform[4],
       (final ? (yDown ? -1.0F : 1.0F) - outputFrame[1] * sy : -1.0F - frame[1] * sy) + sy * transform[5], 1};
-    glUniformMatrix3fv(glGetUniformLocation(shader, "projectionMatrix"), 1, GL_FALSE, projection.data());
-    glUniform4f(glGetUniformLocation(shader, "filterArea"),
+    const auto& builtInLocations = identity ? custom.identityBuiltInUniformLocations :
+      custom.builtInUniformLocations;
+    glUniformMatrix3fv(builtInLocations[0], 1, GL_FALSE, projection.data());
+    glUniform4f(builtInLocations[1],
       input.width / resolution, input.height / resolution, frame[0], frame[1]);
-    glUniform4f(glGetUniformLocation(shader, "filterClamp"), 0, 0,
+    glUniform4f(builtInLocations[2], 0, 0,
       (frame[2] - 1) * resolution / input.width, (frame[3] - 1) * resolution / input.height);
     glActiveTexture(GL_TEXTURE0);
     const auto inputTexture = cacheHit ? filterIntermediateTarget_.texture :
@@ -364,7 +366,7 @@ void Renderer::drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTa
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     textureNearestState_[inputTexture] = false;
-    glUniform1i(glGetUniformLocation(shader, "uSampler"), 0);
+    glUniform1i(builtInLocations[3], 0);
     std::size_t offset = 0, samplerOffset = 0;
     int unit = 1;
     std::size_t uniformIndex = 0;

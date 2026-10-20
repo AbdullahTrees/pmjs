@@ -563,6 +563,12 @@ std::uint32_t Renderer::createFilterProgram(const std::string& fragmentSource, c
   GLuint identityProgram = 0;
   try {
     FilterProgram result{program, vertexSource + "\n" + source, !vertexSource.empty(), {}};
+    constexpr std::array<const char*, 4> builtInUniformNames{
+      "projectionMatrix", "filterArea", "filterClamp", "uSampler"};
+    for (std::size_t index = 0; index < builtInUniformNames.size(); ++index) {
+      result.builtInUniformLocations[index] =
+        glGetUniformLocation(program, builtInUniformNames[index]);
+    }
     const auto normalizeLines = [](const std::string& text) {
       std::string normalized;
       normalized.reserve(text.size());
@@ -639,6 +645,10 @@ std::uint32_t Renderer::createFilterProgram(const std::string& fragmentSource, c
       // the original vertex program and sampling. Only exact matrix constants fold.
       result.identityUniformLocations.reserve(result.uniforms.size());
       result.identityProgram = identityProgram = linkProgram(vertexSource.c_str(), identitySource.c_str());
+      for (std::size_t index = 0; index < builtInUniformNames.size(); ++index) {
+        result.identityBuiltInUniformLocations[index] =
+          glGetUniformLocation(result.identityProgram, builtInUniformNames[index]);
+      }
       for (const auto& uniform : result.uniforms)
         result.identityUniformLocations.push_back(glGetUniformLocation(result.identityProgram, uniform.name.c_str()));
     }

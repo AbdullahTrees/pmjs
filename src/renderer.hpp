@@ -248,6 +248,9 @@ class Renderer {
     bool identityColorMatrixContract = false;
     std::uint32_t identityProgram = 0;
     std::vector<int> identityUniformLocations{};
+    // projectionMatrix, filterArea, filterClamp, uSampler
+    std::array<int, 4> builtInUniformLocations{{-1, -1, -1, -1}};
+    std::array<int, 4> identityBuiltInUniformLocations{{-1, -1, -1, -1}};
   };
   std::uint32_t createFilterProgram(const std::string& fragmentSource,
                                     const std::string& vertexSource = "");
