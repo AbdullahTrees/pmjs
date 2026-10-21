@@ -225,6 +225,39 @@ function nativePreparedWorldRecord(node, nodeIndex, forcedAlpha) {
   nativeSceneMetadata[nodeIndex * nativeSceneMetadataStride + 5] |= 524288;
 }
 
+// A plain leaf sprite drawn straight to the screen whose quad lies wholly outside it draws no
+// pixels. Large maps with many events otherwise transform and encode every off-screen sprite on
+// every frame (e.g. a 90x80-tile interior shows ~4% of its ~330 character sprites at a time).
+// Containers, filters, masks, prepared nodes (text, meshes), presentations, render targets and
+// nested encodes keep the full path.
+function nativeSceneCulledLeaf(node) {
+  if (!nativeSceneCullRect || nativeSceneFilterDepth || nativeSceneEncodingDepth !== 1 ||
+      !nativeSceneUsePixiWorldState || !node || node.children && node.children.length ||
+      nativeSceneNodeRejected(node, null) || node.mask || node.isMask || node._cacheAsBitmap ||
+      node.shader || typeof node.calculateVertices !== 'function' ||
+      nativeNodeRenderType(node) !== 'sprite' || PMJS.pixi4.scenePreparation.forNode(node) ||
+      PMJS.pixi4.bitmapPresentation && PMJS.pixi4.bitmapPresentation.has(node) ||
+      !PMJS.optimizations.isEnabled('scene.viewport-cull')) return false;
+  // Any filter, direct or assigned, keeps the full path (filters can sample outside the quad).
+  if (Array.isArray(node._filters) && node._filters.length ||
+      Array.isArray(node.filters) && node.filters.length) return false;
+  node.calculateVertices();
+  var vertices = node.vertexData;
+  if (!vertices || vertices.length !== 8) return false;
+  var root = nativeSceneRootTransform;
+  var left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (var corner = 0; corner < 8; corner += 2) {
+    var x = root.a * vertices[corner] + root.c * vertices[corner + 1] + root.tx;
+    var y = root.b * vertices[corner] + root.d * vertices[corner + 1] + root.ty;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    left = Math.min(left, x); right = Math.max(right, x);
+    top = Math.min(top, y); bottom = Math.max(bottom, y);
+  }
+  // One pixel of slack covers rounding and linear filtering at the edge.
+  return right < -1 || bottom < -1 ||
+    left > nativeSceneCullRect.width + 1 || top > nativeSceneCullRect.height + 1;
+}
+
 function nativePlainSpriteBinding(node) {
   if (nativeSceneNodeRejected(node, null) || node.children && node.children.length ||
       node._cacheAsBitmap || PMJS.pixi4.bitmapPresentation && PMJS.pixi4.bitmapPresentation.has(node) ||
@@ -724,12 +757,14 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   var particleFrame = particleContainer ? nativeParticleFrameContext(node) : null;
   for (var index = 0; index < childLimit; index++) {
     if (nativeSceneTraversesChild(kind, node, node.children[index])) {
+      if (!particleFrame && nativeSceneCulledLeaf(node.children[index])) continue;
       if (nativeScenePlainSpriteSegments && !particleFrame && childLimit - index >= 4 &&
           PMJS.optimizations.isEnabled('scene.plain-sprite-segment')) {
         var segment = [];
         var segmentIndex = index;
         while (segmentIndex < childLimit &&
             nativeSceneTraversesChild(kind, node, node.children[segmentIndex])) {
+          if (nativeSceneCulledLeaf(node.children[segmentIndex])) { segmentIndex++; continue; }
           var binding = nativePlainSpriteBinding(node.children[segmentIndex]);
           if (!binding) break;
           segment.push(binding);
@@ -925,7 +960,8 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     worldState: nativeSceneUsePixiWorldState, prepared: nativeSceneTransformsPrepared,
     root: nativeSceneRootTransform, usesWorld: nativeSceneRootUsesWorldTransform,
     resolution: nativeSceneFilterResolution, roundPixels: nativeSceneRoundPixels,
-    renderer: nativeSceneRenderer, plainSpriteSegments: nativeScenePlainSpriteSegments
+    renderer: nativeSceneRenderer, plainSpriteSegments: nativeScenePlainSpriteSegments,
+    cullRect: nativeSceneCullRect
   };
   var parentWorld = nativeTransformParent.transform.worldTransform;
   var previousParentWorld = { a: parentWorld.a, b: parentWorld.b, c: parentWorld.c,
@@ -949,6 +985,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     Number(filterResolution) || 1);
   nativeSceneRoundPixels = !!roundPixels;
   nativeScenePlainSpriteSegments = options.plainSpriteSegments !== false;
+  nativeSceneCullRect = options.viewportCull || null;
   nativeSceneRenderer = options.renderer || null;
   if (parentWorld.a !== 1 || parentWorld.b !== 0 || parentWorld.c !== 0 ||
       parentWorld.d !== 1 || parentWorld.tx !== 0 || parentWorld.ty !== 0) {
@@ -998,6 +1035,7 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
     nativeSceneFilterResolution = previousContext.resolution;
     nativeSceneRoundPixels = previousContext.roundPixels;
     nativeScenePlainSpriteSegments = previousContext.plainSpriteSegments;
+    nativeSceneCullRect = previousContext.cullRect;
     nativeSceneRenderer = previousContext.renderer;
     if (enclosingOverlays) {
       nativeScreenOverlays = enclosingOverlays;
