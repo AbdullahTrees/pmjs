@@ -5,6 +5,39 @@ const { memoryState, memoryPressure, processMappingDetails, gameContext, createD
 
 const MiB = 1024 * 1024;
 
+test('CPU logs expose sustained background load without asserting a JIT cause', () => {
+  let clock = 0, totalUs = 0, mainUs = 0;
+  const lines = [];
+  const monitor = createDiagnostics({ now: () => clock,
+    logger: { info: line => lines.push(line), warn: line => lines.push(line) },
+    readMemory: () => ({ totalBytes: 1024 * MiB, availableBytes: 600 * MiB }),
+    readCpu: () => ({ totalUs, mainUs }) });
+  const sample = (total, main) => {
+    clock += 10000; totalUs += total; mainUs = main === null ? null : mainUs + main;
+    monitor.sample();
+  };
+  monitor.sample();
+  sample(28800000, 8900000);
+  let records = lines.map(line => JSON.parse(line.slice('[pmjs] diagnostic '.length)));
+  const cpu = records.find(row => row.reason === 'cpu-usage');
+  assert.equal(cpu.totalPercent, 288);
+  assert.equal(cpu.mainPercent, 89);
+  assert.equal(cpu.backgroundPercent, 199);
+  assert.equal(records.some(row => row.reason === 'background-cpu-pressure'), false);
+  sample(28800000, 8900000);
+  sample(28800000, 8900000);
+  records = lines.map(line => JSON.parse(line.slice('[pmjs] diagnostic '.length)));
+  const warnings = records.filter(row => row.reason === 'background-cpu-pressure');
+  assert.equal(warnings.length, 1, 'sustained warnings have a cooldown');
+  assert.equal(warnings[0].attribution, 'unknown');
+  sample(10000000, 9000000);
+  sample(28800000, 8900000);
+  sample(28800000, null);
+  records = lines.map(line => JSON.parse(line.slice('[pmjs] diagnostic '.length)));
+  assert.equal(records.filter(row => row.reason === 'background-cpu-pressure').length, 1);
+  assert.equal(records.filter(row => row.reason === 'cpu-usage').at(-1).backgroundPercent, null);
+});
+
 test('memory accounting uses MemAvailable and a bounded cgroup (not free-only memory)', () => {
   const files = {
     '/proc/meminfo': 'MemTotal: 1048576 kB\nMemAvailable: 140000 kB\n',

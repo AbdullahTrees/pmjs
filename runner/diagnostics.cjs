@@ -7,6 +7,17 @@ const v8 = require('node:v8');
 const { performance } = require('node:perf_hooks');
 const HOST_PROCESS = process;
 const HOST_CONSOLE = console;
+const hostCpuUsage = process.cpuUsage.bind(process);
+
+function cpuState() {
+  const usage = hostCpuUsage();
+  let mainUs = null;
+  try {
+    const runNs = Number(fs.readFileSync('/proc/self/schedstat', 'utf8').trim().split(/\s+/)[0]);
+    if (Number.isFinite(runNs) && runNs > 0) mainUs = runNs / 1000;
+  } catch (_) {}
+  return { totalUs: usage.user + usage.system, mainUs };
+}
 
 const MiB = 1024 * 1024;
 // Resolve the active cgroup v2 if the mount exposes multiple descendants.
@@ -269,7 +280,7 @@ function compactLocation(context) {
 }
 function createDiagnostics({ logger = console, getNative = () => null,
   getGlobals = () => globalThis, now = () => performance.now(),
-  readMemory = options => memoryState(options), timers = require('node:timers'),
+  readMemory = options => memoryState(options), readCpu = cpuState, timers = require('node:timers'),
   intervalMs = 10000, slowFrameMs = 180,
   heartbeatMs = 10000, slowRepeatMs = 60000, onHeartbeat = () => {} } = {}) {
   let stage = 'starting', handle = null, pressureLevel = 0;
@@ -280,6 +291,7 @@ function createDiagnostics({ logger = console, getNative = () => null,
   let lastCompletedFrameAt = -Infinity;
   const memoryHistory = [];
   let lastLocationCheckAt = -Infinity, lastHeartbeatAt = now();
+  let previousCpu = null, backgroundBusyMs = 0, lastCpuWarningAt = -Infinity;
   // Resource enumeration and renderer/audio summaries are reserved for rare
   // memory warnings. They must remain optional if native diagnostics fail.
   function optionalNative({ includeLargestImages = false } = {}) {
@@ -406,6 +418,30 @@ function createDiagnostics({ logger = console, getNative = () => null,
         externalBytes: memory.externalBytes, cgroupEvents: memory.cgroupEvents });
       if (memoryHistory.length > 8) memoryHistory.shift();
       sampleLocation(lastContext, timestamp);
+      const cpu = readCpu();
+      if (previousCpu && timestamp - previousCpu.at >= 1000) {
+        const elapsedMs = timestamp - previousCpu.at;
+        const totalDelta = cpu.totalUs - previousCpu.totalUs;
+        const mainDelta = cpu.mainUs !== null && previousCpu.mainUs !== null ?
+          cpu.mainUs - previousCpu.mainUs : null;
+        if (Number.isFinite(totalDelta) && totalDelta >= 0) {
+          const totalPercent = totalDelta / (elapsedMs * 10);
+          const mainPercent = mainDelta !== null && mainDelta >= 0 ? mainDelta / (elapsedMs * 10) : null;
+          const backgroundPercent = mainPercent !== null ? Math.max(0, totalPercent - mainPercent) : null;
+          const details = { intervalMs: Math.round(elapsedMs),
+            totalPercent: Math.round(totalPercent),
+            mainPercent: mainPercent === null ? null : Math.round(mainPercent),
+            backgroundPercent: backgroundPercent === null ? null : Math.round(backgroundPercent) };
+          emit('cpu-usage', details, null, 'info');
+          backgroundBusyMs = backgroundPercent >= 100 ? backgroundBusyMs + elapsedMs : 0;
+          if (backgroundBusyMs >= 20000 && timestamp - lastCpuWarningAt >= 60000) {
+            lastCpuWarningAt = timestamp;
+            emit('background-cpu-pressure', { ...details, sustainedMs: Math.round(backgroundBusyMs),
+              attribution: 'unknown', nextDiagnostic: 'bounded V8 optimization trace or thread stacks' }, null);
+          }
+        } else backgroundBusyMs = 0;
+      }
+      previousCpu = { ...cpu, at: timestamp };
       const events = memory.cgroupEvents;
       const oomDelta = events && priorEvents ?
         Math.max(0, (events.oom_kill || 0) - (priorEvents.oom_kill || 0)) : 0;
