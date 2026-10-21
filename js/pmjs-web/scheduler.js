@@ -15,6 +15,9 @@
     if (typeof pmjsReportEventError === 'function') pmjsReportEventError(error);
     else console.error('[pmjs] async error:', error);
   }
+  function reportUncaught(error) {
+    console.error('[pmjs] uncaught exception in Node callback:', error);
+  }
   function wake() {
     if (!stopped && scheduled === null) scheduled = host.setImmediate(step);
   }
@@ -104,6 +107,7 @@
     try { entry.callback(); }
     catch (error) {
       if (entry.options.errorMode === 'event') report(error);
+      else if (entry.options.errorMode === 'uncaught') reportUncaught(error);
       else { fatal(error); return; }
     }
     if (!rendering && head >= tasks.length) { tasks = []; head = 0; }
