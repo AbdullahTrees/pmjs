@@ -61,4 +61,66 @@ test('guest uncaught Node exceptions reach process listeners and preserve later 
   await context.PMJS.tasks.idle();
   assert.deepEqual(logs, [[ '[pmjs] uncaught exception in Node callback:', fallbackError ]]);
   assert.deepEqual(trace, ['continued', 'continued after log']);
+
+  const nextTickError = new Error('nextTick callback failure'), nextTickArguments = [];
+  context.process.once('uncaughtException', received => nextTickArguments.push(received));
+  context.process.nextTick(function(value) {
+    assert.equal(value, 'nextTick argument');
+    throw nextTickError;
+  }, 'nextTick argument');
+  context.PMJS.tasks.enqueue(() => trace.push('continued after nextTick'));
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(nextTickArguments, [nextTickError]);
+  assert.deepEqual(trace, ['continued', 'continued after log', 'continued after nextTick']);
+});
+
+test('read stream listener exceptions unwind the event without making internal tasks nonfatal', async t => {
+  const context = vm.createContext({ process, performance, console, Buffer,
+    PMJS: { config: {} }, __pmjsBuiltinRequire: require, location: {},
+    NativeHost: { fs: {
+      readText() { return null; },
+      async openReadAsync() {
+        let read = false;
+        return { async readAsync() {
+          if (read) return Buffer.alloc(0);
+          read = true;
+          return Buffer.from('data');
+        }, close() {} };
+      }
+    }, runtime: { isFullscreen: () => false, scheduling: require('node:timers') } },
+    nativePlatform: { platform: process.platform, arch: process.arch } });
+  for (const file of ['scheduler.js', 'modules.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web', file), 'utf8'), context);
+  }
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
+  t.after(() => context.PMJS.tasks.stop());
+
+  const trace = [];
+  const openError = new Error('stream open listener');
+  const openCaught = new Promise(resolve => context.process.once('uncaughtException', resolve));
+  const openStream = context.fsModule.createReadStream('open-error');
+  openStream.on('open', () => { throw openError; });
+  openStream.on('open', () => trace.push('later open listener'));
+  assert.equal(await openCaught, openError);
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(trace, []);
+  const openClosed = new Promise(resolve => openStream.once('close', resolve));
+  openStream.destroy();
+  await openClosed;
+
+  const dataError = new Error('stream data listener');
+  const dataCaught = new Promise(resolve => context.process.once('uncaughtException', resolve));
+  const dataStream = context.fsModule.createReadStream('data-error');
+  dataStream.on('data', () => { throw dataError; });
+  dataStream.on('data', () => trace.push('later data listener'));
+  assert.equal(await dataCaught, dataError);
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(trace, []);
+  const dataClosed = new Promise(resolve => dataStream.once('close', resolve));
+  dataStream.destroy();
+  await dataClosed;
+
+  context.PMJS.tasks.enqueue(() => trace.push('later scheduler task'));
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(trace, ['later scheduler task']);
 });

@@ -9,7 +9,7 @@ const { PassThrough } = require('node:stream');
 function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
   const children = new Set();
   let stopping = false;
-  function enqueue(callback) { tasks().enqueue(callback, { errorMode: 'event' }); }
+  function enqueue(callback, errorMode = 'event') { tasks().enqueue(callback, { errorMode }); }
   function optionsFor(options) {
     if (stopping) throw Object.assign(new Error('session has terminated'), { code: 'ERR_RUNTIME_STOPPED' });
     return { ...options, detached: true, cwd: resolveDirectory(options && options.cwd || '/game') };
@@ -24,17 +24,19 @@ function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
     result.unref = () => { child.unref(); return result; };
     for (const name of ['stdout', 'stderr']) {
       if (!child[name]) { result[name] = null; continue; }
-      const output = result[name] = new PassThrough();
-      child[name].on('data', data => enqueue(() => output.write(data)));
-      child[name].on('end', () => enqueue(() => output.end()));
-      child[name].on('error', error => enqueue(() => output.destroy(error)));
+      const outputTarget = new PassThrough();
+      result[name] = typeof tasks().wrapNodeEmitter === 'function'
+        ? tasks().wrapNodeEmitter(outputTarget, ['emit', 'write', 'read']) : outputTarget;
+      child[name].on('data', data => enqueue(() => outputTarget.write(data)));
+      child[name].on('end', () => enqueue(() => outputTarget.end()));
+      child[name].on('error', error => enqueue(() => outputTarget.destroy(error)));
     }
     for (const name of ['spawn', 'error', 'exit', 'close']) child.on(name, (...args) => {
       if (name === 'close') children.delete(child);
       enqueue(() => {
         if (name === 'exit') { result.exitCode = args[0]; result.signalCode = args[1]; }
         if (name !== 'error' || !callbackHandlesErrors || result.listenerCount('error')) result.emit(name, ...args);
-      });
+      }, 'uncaught');
     });
     return result;
   }
@@ -53,14 +55,14 @@ function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
         catch (caught) { error = caught; }
         result.exitCode = error ? 1 : 0;
         result.signalCode = null;
-        result.emit('exit', result.exitCode, null);
-        if (callback) callback(error, '', '');
-        result.emit('close', result.exitCode, null);
+        enqueue(() => result.emit('exit', result.exitCode, null), 'uncaught');
+        if (callback) enqueue(() => callback(error, '', ''), 'uncaught');
+        enqueue(() => result.emit('close', result.exitCode, null), 'uncaught');
       });
       return result;
     }
     return wrap(childProcess.exec(command, resolvedOptions, typeof callback === 'function'
-      ? (error, stdout, stderr) => enqueue(() => callback(error, stdout, stderr)) : undefined), typeof callback === 'function');
+      ? (error, stdout, stderr) => enqueue(() => callback(error, stdout, stderr), 'uncaught') : undefined), typeof callback === 'function');
   }
   return {
     api: {
@@ -69,7 +71,7 @@ function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
         if (!Array.isArray(args)) { callback = options; options = args; args = []; }
         if (typeof options === 'function') { callback = options; options = {}; }
         return wrap(childProcess.execFile(file, args, optionsFor(options), typeof callback === 'function'
-          ? (error, stdout, stderr) => enqueue(() => callback(error, stdout, stderr)) : undefined), typeof callback === 'function');
+          ? (error, stdout, stderr) => enqueue(() => callback(error, stdout, stderr), 'uncaught') : undefined), typeof callback === 'function');
       },
       spawn(file, args, options) {
         if (!Array.isArray(args)) { options = args; args = []; }

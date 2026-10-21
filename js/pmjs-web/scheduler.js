@@ -9,6 +9,8 @@
   var clock = performance.now.bind(performance);
   var frameTasks = 0, frameStartedAt = 0, idleWaiters = [];
   var stopListeners = new Set();
+  var nodeListenerExceptions = new WeakMap();
+  var runningTask = false;
   var rafs = new Map(), timers = new Map(), timerWake = null;
 
   function report(error) {
@@ -18,6 +20,72 @@
   function reportUncaught(error) {
     if (typeof pmjsReportNodeException === 'function') pmjsReportNodeException(error);
     else console.error('[pmjs] uncaught exception in Node callback:', error);
+  }
+  function nodeListenerException(error) {
+    var marker = {};
+    nodeListenerExceptions.set(marker, error);
+    return marker;
+  }
+  function wrapNodeEmitter(emitter, synchronousMethods) {
+    // Tag only guest listener throws so unrelated failures in the same I/O task stay fatal.
+    var synchronousDispatch = 0;
+    var originalEmit = emitter.emit;
+    var methods = ['on', 'addListener', 'once', 'prependListener', 'prependOnceListener'];
+    var synchronous = synchronousMethods || ['emit', 'push', 'read', 'write'];
+    emitter.emit = function(event) {
+      if (event === 'error' && !synchronousDispatch && emitter.listenerCount('error') === 0) {
+        var error = arguments[1];
+        if (runningTask) throw nodeListenerException(error);
+        reportUncaught(error);
+        return false;
+      }
+      return originalEmit.apply(this, arguments);
+    };
+    var guestEmitter;
+    guestEmitter = new Proxy(emitter, {
+      get: function(target, property) {
+        if (methods.indexOf(property) >= 0) return function(event, listener) {
+          if (typeof listener !== 'function') return target[property].call(target, event, listener);
+          var wrapped = function() {
+            try { return listener.apply(guestEmitter, arguments); }
+            catch (error) {
+              if (synchronousDispatch) throw error;
+              if (runningTask) throw nodeListenerException(error);
+              reportUncaught(error);
+            }
+          };
+          wrapped.pmjsGuestNodeListener = true;
+          wrapped.listener = listener;
+          var result = target[property].call(target, event, wrapped);
+          return result === target ? guestEmitter : result;
+        };
+        if (property === 'removeListener' || property === 'off') return function(event, listener) {
+          var raw = target.rawListeners(event), wrapped = null;
+          for (var index = raw.length - 1; index >= 0 && !wrapped; index--) {
+            var candidate = raw[index];
+            while (candidate && !candidate.pmjsGuestNodeListener) candidate = candidate.listener;
+            if (candidate && candidate.listener === listener) wrapped = candidate;
+          }
+          var result = target.removeListener(event, wrapped || listener);
+          return result === target ? guestEmitter : result;
+        };
+        var value = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        if (synchronous.indexOf(property) >= 0) return function() {
+          synchronousDispatch++;
+          try {
+            var result = value.apply(target, arguments);
+            return result === target ? guestEmitter : result;
+          } finally { synchronousDispatch--; }
+        };
+        return function() {
+          var result = value.apply(target, arguments);
+          return result === target ? guestEmitter : result;
+        };
+      },
+      set: function(target, property, value) { target[property] = value; return true; }
+    });
+    return guestEmitter;
   }
   function wake() {
     if (!stopped && scheduled === null) scheduled = host.setImmediate(step);
@@ -105,12 +173,15 @@
       if (frameTasks === 0) frameStartedAt = clock();
       frameTasks++;
     }
+    runningTask = true;
     try { entry.callback(); }
     catch (error) {
-      if (entry.options.errorMode === 'event') report(error);
+      runningTask = false;
+      if (nodeListenerExceptions.has(error)) reportUncaught(nodeListenerExceptions.get(error));
+      else if (entry.options.errorMode === 'event') report(error);
       else if (entry.options.errorMode === 'uncaught') reportUncaught(error);
       else { fatal(error); return; }
-    }
+    } finally { runningTask = false; }
     if (!rendering && head >= tasks.length) { tasks = []; head = 0; }
     // Amortize compaction across the queue; consumed slots release callbacks above.
     else if (!rendering && head > 64 && head * 2 >= tasks.length) { tasks.splice(0, head); head = 0; }
@@ -120,6 +191,8 @@
   PMJS.tasks = {
     enqueue: enqueue,
     invoke: invoke,
+    nodeListenerException: nodeListenerException,
+    wrapNodeEmitter: wrapNodeEmitter,
     invokeRendering: function(callback, errorMode) { return invoke(callback, errorMode, true); },
     idle: function() {
       return new Promise(function(resolve) {

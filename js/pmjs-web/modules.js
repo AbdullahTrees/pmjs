@@ -28,19 +28,34 @@ function unavailableDevTools() {
 var NwEventEmitter = globalThis.__pmjsBuiltinRequire('events').EventEmitter;
 var nativeWindow = new NwEventEmitter();
 if (NativeHost.runtime.interceptWindowClose) NativeHost.runtime.interceptWindowClose(true);
+function dispatchNodeEmitterEvent(emitter, event, args) {
+  try { return emitter.emit.apply(emitter, [event].concat(args || [])); }
+  catch (error) {
+    if (typeof PMJS.tasks.nodeListenerException === 'function') {
+      throw PMJS.tasks.nodeListenerException(error);
+    }
+    if (typeof pmjsReportNodeException === 'function') pmjsReportNodeException(error);
+    else console.error('[pmjs] uncaught exception in Node callback:', error);
+    return false;
+  }
+}
 function windowState() { return NativeHost.runtime.windowState(); }
 function windowCommand(name, x, y) {
   NativeHost.runtime.windowCommand(name, Number(x) || 0, Number(y) || 0);
   globalThis.__pmjsUpdateWindowState(windowState());
 }
 var nativeWindowClosed = false;
-function closeNativeWindow(force) {
+function closeNativeWindow(force, nodeEvent) {
   if (nativeWindowClosed) return;
-  if (!force && nativeWindow.listenerCount('close')) nativeWindow.emit('close');
+  if (!force && nativeWindow.listenerCount('close')) {
+    if (nodeEvent) dispatchNodeEmitterEvent(nativeWindow, 'close');
+    else nativeWindow.emit('close');
+  }
   else {
     nativeWindowClosed = true;
     NativeHost.runtime.quit();
-    nativeWindow.emit('closed');
+    if (nodeEvent) dispatchNodeEmitterEvent(nativeWindow, 'closed');
+    else nativeWindow.emit('closed');
   }
 }
 function reloadNativeSession() { return NativeHost.runtime.reload(); }
@@ -138,7 +153,7 @@ var nativeNwGui = {
   }; } }
 };
 if (PMJS.phases) PMJS.phases.on('windowLoaded', 'pmjs.desktop.loaded', function() {
-  PMJS.tasks.enqueue(function() { nativeWindow.emit('loaded'); }, { errorMode: 'event' });
+  PMJS.tasks.enqueue(function() { dispatchNodeEmitterEvent(nativeWindow, 'loaded'); }, { errorMode: 'event' });
 });
 var captureRequests = [];
 PMJS.tasks.onStop(function() { captureRequests.length = 0; });
@@ -151,7 +166,7 @@ globalThis.__pmjsAfterPresent = function() {
       data = Buffer.from(png ? NativeHost.canvas.encodePng(canvas) : NativeHost.canvas.encodeJpeg(canvas, 0.9));
       if (request.datatype !== 'buffer') data = (request.datatype === 'datauri' ? 'data:image/' + (png ? 'png' : 'jpeg') + ';base64,' : '') + data.toString('base64');
     } finally { NativeHost.canvas.release(canvas); }
-    PMJS.tasks.enqueue(function() { request.callback(data); }, { errorMode: 'event' });
+    PMJS.tasks.enqueue(function() { request.callback(data); }, { errorMode: 'uncaught' });
   });
 };
 var previousNwFullscreen = NativeHost.runtime.isFullscreen();
@@ -161,20 +176,20 @@ globalThis.__pmjsDispatchWindowEvents = function(events) {
       var old = nativeScreen.screens || [];
       nativeScreen.Init();
       var current = nativeScreen.screens;
-      if (current.length > old.length) nativeScreen.emit('displayAdded', current[event.x]);
-      else if (current.length < old.length) nativeScreen.emit('displayRemoved', event.x);
-      else nativeScreen.emit('displayBoundsChanged', current[event.x]);
+      if (current.length > old.length) dispatchNodeEmitterEvent(nativeScreen, 'displayAdded', [current[event.x]]);
+      else if (current.length < old.length) dispatchNodeEmitterEvent(nativeScreen, 'displayRemoved', [event.x]);
+      else dispatchNodeEmitterEvent(nativeScreen, 'displayBoundsChanged', [current[event.x]]);
     } else if (event.type === 'enter-fullscreen' || event.type === 'leave-fullscreen') {
       previousNwFullscreen = event.type === 'enter-fullscreen';
-      nativeWindow.emit(event.type);
-    } else if (event.type === 'close') closeNativeWindow(false);
-    else if (event.type === 'move' || event.type === 'resize') nativeWindow.emit(event.type, event.x, event.y);
-    else nativeWindow.emit(event.type);
+      dispatchNodeEmitterEvent(nativeWindow, event.type);
+    } else if (event.type === 'close') closeNativeWindow(false, true);
+    else if (event.type === 'move' || event.type === 'resize') dispatchNodeEmitterEvent(nativeWindow, event.type, [event.x, event.y]);
+    else dispatchNodeEmitterEvent(nativeWindow, event.type);
   });
   var fullscreen = NativeHost.runtime.isFullscreen();
   if (fullscreen !== previousNwFullscreen) {
     previousNwFullscreen = fullscreen;
-    nativeWindow.emit(fullscreen ? 'enter-fullscreen' : 'leave-fullscreen');
+    dispatchNodeEmitterEvent(nativeWindow, fullscreen ? 'enter-fullscreen' : 'leave-fullscreen');
   }
 };
 globalThis.moveTo = nativeWindow.moveTo;
@@ -328,7 +343,7 @@ Object.assign(guestProcess, {
   cwd: function() { return '/game'; },
   nextTick: function(callback) {
     var args = Array.prototype.slice.call(arguments, 1);
-    PMJS.tasks.enqueue(function() { callback.apply(undefined, args); });
+    PMJS.tasks.enqueue(function() { callback.apply(undefined, args); }, { errorMode: 'uncaught' });
   },
   hrtime: hostProcessHrtime,
   execPath: '/game/pmjs',

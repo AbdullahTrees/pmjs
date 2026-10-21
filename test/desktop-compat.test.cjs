@@ -15,9 +15,10 @@ function desktop(engine) {
   const queue = [], stops = [];
   let stopped = false, clipboard = '', quits = 0, reloads = 0, released = 0;
   const state = { x: 10, y: 20, width: 640, height: 480, fullscreen: false };
-  const context = vm.createContext({ Buffer, console, process, performance, PMJS_RUNTIME_ENGINE: engine, __pmjsBuiltinRequire: require,
+  let context;
+  context = vm.createContext({ Buffer, console, process, performance, PMJS_RUNTIME_ENGINE: engine, __pmjsBuiltinRequire: require,
     PMJS: { config: {}, web: {}, compat: { hit() {} }, tasks: {
-      enqueue(fn) { if (stopped) return false; queue.push(fn); return true; },
+      enqueue(fn, options) { if (stopped) return false; queue.push({ fn, options }); return true; },
       onStop(fn) { stops.push(fn); }
     } },
     NativeHost: { storage: save, fs: game, runtime: {
@@ -39,7 +40,16 @@ function desktop(engine) {
   for (const file of ['runtime', 'filesystem', 'modules']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/' + file + '.js'), 'utf8'), context);
   }
-  return { context, game, save, state, root, drain() { while (queue.length) queue.shift()(); },
+  return { context, game, save, state, root, drain() {
+      while (queue.length) {
+        const task = queue.shift();
+        try { task.fn(); }
+        catch (error) {
+          if (task.options?.errorMode === 'uncaught' && context.pmjsReportNodeException) context.pmjsReportNodeException(error);
+          else throw error;
+        }
+      }
+    },
     stop() { stopped = true; queue.length = 0; stops.forEach(fn => fn()); },
     get quits() { return quits; }, get reloads() { return reloads; }, get released() { return released; } };
 }
@@ -130,6 +140,27 @@ test('window state, subscriptions, close interception, menus and clipboard have 
   c.location.reload(); c.chrome.runtime.reload(); win.reload(); assert.equal(h.reloads, 3);
 });
 
+test('asynchronous NW Window and Screen listener errors use guest Node delivery', () => {
+  const h = desktop(), c = h.context, win = c.nw.Window.get(), screen = c.nw.Screen;
+  const moveError = new Error('window listener'), displayError = new Error('screen listener');
+  const handled = [], later = [];
+  c.process.on('uncaughtException', error => handled.push(error));
+  win.on('move', () => { throw moveError; });
+  screen.on('displayAdded', () => { throw displayError; });
+  c.NativeHost.runtime.screens = () => [{ id: 0, bounds: { x: 0, y: 0, width: 640, height: 480 },
+    work_area: { x: 0, y: 0, width: 640, height: 480 }, scaleFactor: 1 }];
+  c.PMJS.tasks.enqueue(() => c.__pmjsDispatchWindowEvents([{ type: 'move', x: 4, y: 5 }]), { errorMode: 'uncaught' });
+  c.PMJS.tasks.enqueue(() => c.__pmjsDispatchWindowEvents([{ type: 'display', x: 0 }]), { errorMode: 'uncaught' });
+  c.PMJS.tasks.enqueue(() => later.push('continued'));
+  h.drain();
+  assert.deepEqual(handled, [moveError, displayError]);
+  assert.deepEqual(later, ['continued']);
+
+  const syncError = new Error('synchronous window emit');
+  win.on('manual', () => { throw syncError; });
+  assert.throws(() => win.emit('manual'), error => error === syncError);
+});
+
 test('NW fullscreen methods change native state without entering DOM fullscreen', () => {
   const h = desktop(), c = h.context, win = c.nw.Window.get();
   c.setNativeFullscreen = () => assert.fail('NW window command entered DOM fullscreen');
@@ -163,8 +194,14 @@ test('capture waits for presentation, returns requested formats, releases resour
   assert.ok(Buffer.isBuffer(values[0])); assert.equal(values[0].toString(), 'png');
   assert.equal(values[1], Buffer.from('jpeg').toString('base64'));
   assert.equal(values[2], 'data:image/png;base64,' + Buffer.from('png').toString('base64'));
+  const callbackError = new Error('capturePage callback');
+  let handled;
+  c.process.once('uncaughtException', error => { handled = error; });
+  win.capturePage(() => { throw callbackError; });
+  c.__pmjsAfterPresent(); h.drain();
+  assert.equal(handled, callbackError);
   win.capturePage(() => assert.fail('callback after shutdown'));
-  h.stop(); c.__pmjsAfterPresent(); h.drain(); assert.equal(h.released, 3);
+  h.stop(); c.__pmjsAfterPresent(); h.drain(); assert.equal(h.released, 4);
 });
 
 test('desktop loaded and closed events fire once and unavailable developer tools preserve the original exception', () => {

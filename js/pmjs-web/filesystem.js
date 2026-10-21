@@ -170,6 +170,8 @@ function FsReadStream(path, options) {
         function() { callback(error); }, function(closeError) { callback(error || closeError); });
     }
   });
+  var guestStream = typeof PMJS.tasks.wrapNodeEmitter === 'function'
+    ? PMJS.tasks.wrapNodeEmitter(stream, ['emit', 'push', 'read']) : stream;
   var removeStopListener;
   stream.path = path;
   PMJS.tasks.enqueue(function() {
@@ -203,7 +205,7 @@ function FsReadStream(path, options) {
       });
     }).catch(function(error) { PMJS.tasks.enqueue(function() { stream.destroy(error); }); });
   });
-  return stream;
+  return guestStream;
 }
 
 // Callbacks given to game code follow NW.js uncaught-exception semantics (see scheduler.js).

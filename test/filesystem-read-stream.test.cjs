@@ -9,7 +9,7 @@ const { temporaryDirectory } = require('./helpers/temp.cjs');
 
 const filename = path.resolve(__dirname, '../js/pmjs-web/filesystem.js');
 function fixture(contents = Buffer.from('René')) {
-  const tasks = [], reads = [], chunks = [];
+  const tasks = [], reads = [], chunks = [], nodeErrors = [];
   let started = false, closed = 0;
   async function openReadAsync(file, start) {
     reads.push(file);
@@ -24,12 +24,21 @@ function fixture(contents = Buffer.from('René')) {
       close() { assert.equal(destroyed, false); destroyed = true; closed++; }
     };
   }
-  const context = vm.createContext({ Buffer, Error, __pmjsBuiltinRequire: require,
+  const context = vm.createContext({ Buffer, Error, performance, __pmjsBuiltinRequire: require,
     NativeHost: { fs: { openReadAsync }, storage: { openReadAsync(file, start) { return openReadAsync('save:' + file, start); } } },
+    runtime: { scheduling: require('node:timers') },
+    pmjsReportNodeException(error) { nodeErrors.push(error); },
     PMJS: { config: { virtualFiles: { extensionAliases: { '.txt': '.data' } } },
       tasks: { enqueue(callback) { if (started) setImmediate(callback); else tasks.push(callback); } } } });
+  context.NativeHost.runtime = { scheduling: require('node:timers') };
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  const wrapNodeEmitter = context.PMJS.tasks.wrapNodeEmitter;
+  context.PMJS.tasks.stop();
+  context.PMJS.tasks = { wrapNodeEmitter, enqueue(callback) {
+    if (started) setImmediate(callback); else tasks.push(callback);
+  } };
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context);
-  return { guest: context.fsModule, paths: context.pathModule, reads, chunks, context,
+  return { guest: context.fsModule, paths: context.pathModule, reads, chunks, context, nodeErrors,
     get closed() { return closed; },
     drain() { started = true; tasks.splice(0).forEach(task => task()); } };
 }
@@ -109,6 +118,26 @@ test('empty files and paused streams use Node completion and buffering semantics
   assert.deepEqual(data, ['René']);
 });
 
+test('async stream listener errors use the Node dispatcher while synchronous emit stays catchable', async () => {
+  const f = fixture(), stream = f.guest.createReadStream('input'), trace = [];
+  const openError = new Error('open listener'), dataError = new Error('data listener');
+  stream.on('open', () => { throw openError; });
+  stream.on('open', () => trace.push('open continued'));
+  stream.on('data', () => { throw dataError; });
+  stream.on('data', chunk => trace.push(String(chunk)));
+  stream.on('end', () => trace.push('end'));
+  stream.on('close', () => trace.push('close'));
+  f.drain();
+  await new Promise(resolve => stream.once('close', resolve));
+  await turn();
+  assert.deepEqual(f.nodeErrors, [openError, dataError]);
+  assert.deepEqual(trace, ['open continued', 'René', 'end', 'close']);
+
+  const syncError = new Error('manual emit');
+  stream.on('manual', () => { throw syncError; });
+  assert.throws(() => stream.emit('manual'), error => error === syncError);
+});
+
 test('unhandled read errors and guest callback exceptions surface as they do in Node', () => {
   for (const mode of ['missing', 'listener']) {
     const outcomes = [];
@@ -116,15 +145,24 @@ test('unhandled read errors and guest callback exceptions surface as they do in 
       const script = `
         const fs = require('node:fs'), vm = require('node:vm');
         const tasks = [];
-        process.once('uncaughtException', error => {
+        let fileErrors = 0, stream;
+        if (${JSON.stringify(implementation)} === 'node') process.once('uncaughtException', error => {
           console.log(JSON.stringify({ message: error.code || error.message, fileErrors }));
           process.exit(0);
         });
-        let fileErrors = 0, stream;
         if (${JSON.stringify(implementation)} === 'guest') {
-          const c = vm.createContext({ Buffer, Error, __pmjsBuiltinRequire: require,
-            NativeHost: { fs: { async openReadAsync() { return ${mode === 'missing' ? 'null' : "{ async readAsync() { return Buffer.from('data'); }, close() {} }"}; } } },
+          const c = vm.createContext({ Buffer, Error, performance, __pmjsBuiltinRequire: require,
+            pmjsReportNodeException(error) {
+              console.log(JSON.stringify({ message: error.code || error.message, fileErrors }));
+              process.exit(0);
+            },
+            NativeHost: { runtime: { scheduling: require('node:timers') },
+              fs: { async openReadAsync() { return ${mode === 'missing' ? 'null' : "{ async readAsync() { return Buffer.from('data'); }, close() {} }"}; } } },
             PMJS: { config: {}, tasks: { enqueue(fn) { setImmediate(fn); } } } });
+          vm.runInContext(fs.readFileSync(${JSON.stringify(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'))}, 'utf8'), c);
+          const wrapNodeEmitter = c.PMJS.tasks.wrapNodeEmitter;
+          c.PMJS.tasks.stop();
+          c.PMJS.tasks = { wrapNodeEmitter, enqueue(fn) { setImmediate(fn); } };
           vm.runInContext(fs.readFileSync(${JSON.stringify(filename)}, 'utf8'), c);
           stream = c.fsModule.createReadStream('missing');
         } else stream = fs.createReadStream(${mode === 'missing' ? JSON.stringify(path.join(__dirname, 'missing-stream-fixture')) : JSON.stringify(filename)});
