@@ -1,5 +1,8 @@
 function CanvasContext2D(canvas) {
   this.canvas = canvas;
+  // Reserve double storage before the integer default so fractional opacity
+  // does not invalidate context layout checks embedded by V8.
+  this._globalAlpha = NaN;
   resetCanvasContextState(this);
 }
 
