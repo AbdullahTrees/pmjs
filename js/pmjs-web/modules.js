@@ -317,7 +317,8 @@ var hostProcessHrtime = typeof process !== 'undefined' ? process.hrtime : undefi
 var hostProcessPid = typeof process !== 'undefined' ? process.pid : undefined;
 var guestArguments = NativeHost.runtime.arguments || [];
 var nwCompatVersion = PMJS.config.nwVersion || (globalThis.PMJS_RUNTIME_ENGINE === 'mz' ? '0.48.4' : '0.29.0');
-globalThis.process = {
+var guestProcess = new NwEventEmitter();
+Object.assign(guestProcess, {
   pid: hostProcessPid,
   platform: nativePlatform.platform,
   arch: nativePlatform.arch,
@@ -333,6 +334,14 @@ globalThis.process = {
   execPath: '/game/pmjs',
   version: 'v' + (hostProcessVersions.node || '12.0.0'),
   versions: Object.assign({}, hostProcessVersions, { nw: nwCompatVersion, 'node-webkit': nwCompatVersion, 'nw-flavor': 'sdk' })
+});
+globalThis.process = guestProcess;
+globalThis.pmjsReportNodeException = function(error) {
+  if (guestProcess.listenerCount('uncaughtException')) {
+    guestProcess.emit('uncaughtException', error);
+  } else {
+    console.error('[pmjs] uncaught exception in Node callback:', error);
+  }
 };
 var packageText = NativeHost.fs.readText('package.json');
 nativeNwGui.App.manifest = packageText === null ? NativeHost.runtime.manifest || {} : JSON.parse(packageText);

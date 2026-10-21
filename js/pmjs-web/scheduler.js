@@ -16,7 +16,8 @@
     else console.error('[pmjs] async error:', error);
   }
   function reportUncaught(error) {
-    console.error('[pmjs] uncaught exception in Node callback:', error);
+    if (typeof pmjsReportNodeException === 'function') pmjsReportNodeException(error);
+    else console.error('[pmjs] uncaught exception in Node callback:', error);
   }
   function wake() {
     if (!stopped && scheduled === null) scheduled = host.setImmediate(step);
