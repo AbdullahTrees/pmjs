@@ -5,7 +5,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
-const { preparationFiles } = require('./preparation-files.cjs');
+const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const installedLeases = new WeakMap();
 const checksum = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const inside = (root, name) => {
@@ -72,8 +72,9 @@ async function reclaimLegacyOutputs(cacheRoot, assets, logger) {
 }
 
 async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = false,
-  shouldCancel = () => false, onProgress = () => {}, logger = console, offline = false }) {
+  shouldCancel = () => false, onProgress = () => {}, logger = console, offline = false, sourceRoots = [] }) {
   gameRoot = await fsp.realpath(gameRoot);
+  sourceRoots = [gameRoot, ...await Promise.all(sourceRoots.map(root => fsp.realpath(root).catch(() => null)))].filter(Boolean);
   await fsp.mkdir(cacheRoot, { recursive: true });
   cacheRoot = await fsp.realpath(cacheRoot);
   const root = path.join(path.resolve(cacheRoot), 'preparation-v1', checksum(gameRoot).slice(0, 16));
@@ -82,6 +83,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
     () => onProgress({ phase: 'wait', completed: 0, total: 0 }), native.assets);
   if (!releaseLock) return null;
   try {
+    await applyPendingInvalidations({ root, native, logger });
     const filename = path.join(root, 'preparation-state.json');
     let saved = {};
     try {
@@ -99,7 +101,8 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       directories.set(path.posix.dirname(name) + '/' + record.key, name);
     }
     let lastChecksum = saved.files ? checksum(data) : null;
-    const session = { root, data, native, offline, logger, shouldCancel, pending, touched, phases: new Set(), repairSources: new Set(), outcomes: new Map(),
+    const session = { root, gameRoot, sourceRoots, data, native, offline, logger, shouldCancel, pending, touched, invalidated: 0,
+      phaseStates: new Map(), repairSources: new Set(), outcomes: new Map(),
       outcome(id, outcome, reason) {
         const previous = session.outcomes.get(id)?.outcome;
         if (outcome === 'reused-local' && ['generated', 'reused-package'].includes(previous)) outcome = previous;
@@ -134,6 +137,13 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         return value?.failed ? null : value;
       },
       touch(directory) { const key = inside(root, directory); if (Object.hasOwn(data.results, key)) touched.add(key); },
+      discard(directory) {
+        const key = inside(root, directory);
+        if (Object.hasOwn(data.results, key)) ++session.invalidated;
+        delete data.results[key]; touched.delete(key);
+      },
+      startPhase(name) { session.phaseStates.set(name, 'active'); },
+      finishPhase(name, state) { session.phaseStates.set(name, state); },
       writeManifest(directory, manifest) {
         pending.set(inside(root, directory), manifest);
       },
@@ -155,11 +165,13 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       async finish() {
         for (const key of Object.keys(data.results)) {
           const phase = key.startsWith('maps/') ? 'maps' : key.startsWith('port/') ? 'port' : 'images';
-          if (session.phases.has(phase) && !touched.has(key)) delete data.results[key];
+          if (session.phaseStates.get(phase) === 'completed' && !touched.has(key)) {
+            delete data.results[key]; ++session.invalidated;
+          }
         }
         for (const id of Object.keys(data.failures)) {
           const phase = id.startsWith('map:') ? 'maps' : id.startsWith('port:') ? 'port' : 'images';
-          if (session.phases.has(phase) && !session.outcomes.has(id)) delete data.failures[id];
+          if (session.phaseStates.get(phase) === 'completed' && !session.outcomes.has(id)) delete data.failures[id];
         }
         const retained = new Set(Object.keys(data.results).map(value => value.split('/').at(-1)));
         for (const record of Object.values(data.results))
@@ -211,19 +223,78 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
 async function invalidateResults({ root, native, sources, logger = console }) {
   const release = await acquireLock(root, () => false, () => {}, native.assets);
   try {
+    const directory = path.join(root, 'invalidations');
+    await fsp.mkdir(directory, { recursive: true });
+    for (const request of sources) {
+      const file = path.join(directory, checksum(request) + '.json');
+      if (fs.existsSync(file)) continue;
+      const temporary = file + '.stage-' + crypto.randomBytes(6).toString('hex');
+      try {
+        await writeJson(temporary, { version: 1, request });
+        await fsp.rename(temporary, file);
+      } finally { await fsp.rm(temporary, { force: true }); }
+    }
+    logger.info?.('[pmjs] preparation invalidation queued count=' + sources.length + ' deferred=true');
+  } catch (error) { logger.warn('[pmjs] cannot record preparation failure: ' + error.message); }
+  finally { release(); }
+}
+
+// The caller holds the preparation lock; full state work stays before guest execution.
+async function applyPendingInvalidations({ root, native, logger = console }) {
+  try {
+    const directory = path.join(root, 'invalidations');
+    const names = await fsp.readdir(directory).catch(error => {
+      if (error.code === 'ENOENT') return []; throw error;
+    });
+    const markers = names.filter(name => /^[a-f0-9]{64}\.json$/.test(name)).map(name => path.join(directory, name));
+    if (!markers.length) return;
+    const sources = [];
+    for (const file of markers) {
+      const marker = JSON.parse(await fsp.readFile(file, 'utf8'));
+      if (marker.version !== 1 || !(typeof marker.request === 'string' ||
+          marker.request && typeof marker.request.source === 'string'))
+        throw new Error('invalid preparation invalidation marker');
+      sources.push(marker.request);
+    }
     const filename = path.join(root, 'preparation-state.json');
     const saved = JSON.parse(await fsp.readFile(filename, 'utf8'));
     if (saved.version !== 1 || saved.checksum !== checksum(saved.data)) return;
+    const requestsBySource = new Map();
+    for (const value of sources) {
+      const request = value && typeof value === 'object' ? value : { source: value, mapDemand: false };
+      const previous = requestsBySource.get(request.source);
+      requestsBySource.set(request.source, { source: request.source,
+        mapDemand: !!request.mapDemand || !!previous?.mapDemand });
+    }
+    const requests = [...requestsBySource.values()];
     let changed = false;
     for (const [key, record] of Object.entries(saved.data.results)) {
-      if (!record || typeof record !== 'object' || record.failed) continue;
-      if (sources.some(source => record.source === source || record.filename === source || record.key === source ||
-          record.source && native.assets.sourcePath?.(record.source) === source ||
-          record.decrypted && path.join(root, key, record.decrypted) === source)) {
-        record.failed = true; changed = true;
+      if (!record || typeof record !== 'object') continue;
+      const request = requests.find(({ source }) => record.source === source || record.filename === source || record.key === source ||
+        record.source && native.assets.sourcePath?.(record.source) === source ||
+        record.decrypted && path.join(root, key, record.decrypted) === source);
+      if (request) {
+        if (!record.failed) { record.failed = true; changed = true; }
+        if (request.mapDemand && record.filename && saved.data.indices.maps) {
+          const mapInputs = saved.data.indices.maps.mapInputs || {};
+          const mapInput = mapInputs[record.filename];
+          if (mapInput?.compilationKey && saved.data.indices.maps.compilations)
+            delete saved.data.indices.maps.compilations[mapInput.compilationKey];
+          delete mapInputs[record.filename];
+          const recompile = new Set(saved.data.indices.maps.recompileMapInputs || []);
+          recompile.add(record.filename);
+          saved.data.indices.maps.recompileMapInputs = [...recompile];
+          saved.data.indices.maps.mapInputsHash = checksum(mapInputs);
+          if (saved.data.indices.maps.compilations)
+            saved.data.indices.maps.compilationsHash = checksum(saved.data.indices.maps.compilations);
+          changed = true;
+        }
       }
     }
-    if (!changed) return;
+    if (!changed) {
+      for (const file of markers) await fsp.rm(file, { force: true });
+      return;
+    }
     const temporary = filename + '.stage-' + crypto.randomBytes(6).toString('hex');
     try {
       const handle = await fsp.open(temporary, 'wx');
@@ -231,8 +302,8 @@ async function invalidateResults({ root, native, sources, logger = console }) {
       finally { await handle.close(); }
       await fsp.rename(temporary, filename);
     } finally { await fsp.rm(temporary, { force: true }); }
-  } catch (error) { logger.warn('[pmjs] cannot record preparation failure: ' + error.message); }
-  finally { release(); }
+    for (const file of markers) await fsp.rm(file, { force: true });
+  } catch (error) { logger.warn('[pmjs] cannot apply preparation invalidations: ' + error.message); }
 }
 
 module.exports = { openPreparation, inventory, invalidateResults };

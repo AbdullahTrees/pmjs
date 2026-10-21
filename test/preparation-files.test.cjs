@@ -39,6 +39,25 @@ test('replacement of a staged object cannot inherit its verification receipt', a
   assert.equal(files.stats.publicationReuses, 0);
 });
 
+test('an in-root symlink replaced with an escaping target during hashing is rejected', async t => {
+  const root = temporaryDirectory('symlink-replacement-'), gameRoot = path.join(root, 'game');
+  fs.mkdirSync(gameRoot);
+  const target = path.join(gameRoot, 'target'), link = path.join(gameRoot, 'image.png');
+  const outside = path.join(root, 'outside');
+  fs.writeFileSync(target, 'inside'); fs.writeFileSync(outside, 'outside'); fs.symlinkSync(target, link);
+  const session = { gameRoot, data: { files: {} }, checkpoint: async () => {} };
+  const files = await preparationFiles(session), realpath = fs.promises.realpath;
+  let checks = 0;
+  t.mock.method(fs.promises, 'realpath', async (...args) => {
+    if (path.resolve(String(args[0])) === link && ++checks === 2) {
+      fs.unlinkSync(link); fs.symlinkSync(outside, link);
+    }
+    return realpath(...args);
+  });
+  await assert.rejects(files.inspect(link), /preparation input changed while verifying/);
+  assert.equal(Object.hasOwn(files.receipts, link), false);
+});
+
 test('checksum mismatch and failed publication never create a verified published object', async () => {
   const root = temporaryDirectory('copy-failure-'), source = path.join(root, 'source');
   const stage = path.join(root, 'stage'); fs.writeFileSync(source, 'original');

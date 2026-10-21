@@ -57,12 +57,9 @@ async function validateEntry(directory, key, files) {
         (manifest.descriptor && !validTileDescriptor(manifest.descriptor)) ||
         !Array.isArray(manifest.outputs)) return false;
     if (manifest.outputs.length !== (manifest.descriptor ? manifest.descriptor.pages.length : 0)) return false;
-    for (const page of manifest.outputs) {
-      if (!/^tiles-\d+\.png$/.test(page.path) || !HASH.test(page.hash)) return false;
-      const file = path.join(directory, page.path);
-      const checked = await files.inspect(file, 'output');
-      if (checked.hash !== page.hash) return false;
-      if (reused && checked.reused) continue;
+    if (manifest.outputs.some(page => !page || !/^tiles-\d+\.png$/.test(page.path) || !HASH.test(page.hash))) return false;
+    return files.validateOutputs(directory, manifest.outputs, page => page.hash, async (page, file, checked) => {
+      if (reused && checked.reused) return true;
       let bytes = checked.header;
       if (!bytes) {
         const handle = await fsp.open(file, 'r');
@@ -71,10 +68,9 @@ async function validateEntry(directory, key, files) {
         finally { await handle.close(); }
       }
       const expected = manifest.descriptor.pages.find(p => p.path === page.path);
-      if (!expected || bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' ||
-          bytes.readUInt32BE(16) !== expected.width || bytes.readUInt32BE(20) !== expected.height) return false;
-    }
-    return true;
+      return !!expected && bytes.length >= 24 && bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' &&
+        bytes.readUInt32BE(16) === expected.width && bytes.readUInt32BE(20) === expected.height;
+    });
   }
   try {
     return await files.validatedJson(file, validate);
@@ -181,6 +177,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
       throw new Error('tile preparation unavailable in this addon');
 
     const data = session.inventory.filter(file => /^data\/Map\d+\.json$/i.test(file)).map(file => file.slice(5)).sort();
+    result.total = data.length;
     if (!data.length) {
       if (!offline) { native.assets.installTileSets([]); native.assets.preparedMapIndex = {}; }
       session.data.indices.maps = null;
@@ -242,6 +239,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         mapInputsHash: identity(rebound) };
     }
     const previousIndex = session.data.indices.maps || imported;
+    const recompileMapInputs = new Set(previousIndex?.recompileMapInputs || []);
     const previousCompilations = previousIndex?.compilations &&
       previousIndex.compilationsHash === identity(previousIndex.compilations) ? previousIndex.compilations : {};
     const previousInputs = previousIndex?.mapInputs &&
@@ -272,7 +270,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         let dependencies, demand, compile, visualContract;
         const compilationKey = inputs => identity({ compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
           compilation: true, dependencies: [...sharedDependencies,...inputs].map(input=>input.hash), width, height });
-        if (cachedInputs && cachedInputs.tiled === tiled) {
+        if (!recompileMapInputs.has(filename) && cachedInputs && cachedInputs.tiled === tiled) {
           dependencies = await unchangedDependencies(cachedInputs).catch(() => null);
           if (dependencies) {
             const cached = previousCompilations[compilationKey(dependencies)];
@@ -309,9 +307,11 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         const refusalKey = compilationKey(dependencies);
         const refusalDirectory = path.join(root,'entries',refusalKey);
         const refusal = await validateEntry(refusalDirectory,refusalKey,files);
-        if (refusal) { declined = true; keys.push(refusalKey); ++result.hits; ++result.negativeHits; throw new Error(refusal.reason); }
+        if (refusal && !recompileMapInputs.has(filename)) {
+          declined = true; keys.push(refusalKey); ++result.hits; ++result.negativeHits; throw new Error(refusal.reason);
+        }
         try {
-          const cached = previousCompilations[refusalKey];
+          const cached = recompileMapInputs.has(filename) ? null : previousCompilations[refusalKey];
           if (demand) ++result.compilationHits;
           else if (cached) {
             const { renderer, ...prepared } = cached;
@@ -319,8 +319,10 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
             demand = { renderer, contract: visualContract(), ...prepared };
             ++result.compilationHits;
           } else demand = compile();
+          recompileMapInputs.delete(filename);
           if (!demand.sources.length) throw new Error('no compact tile demand');
         } catch (error) {
+          recompileMapInputs.delete(filename);
           declined = true;
           keys.push(refusalKey);
           stage = await fsp.mkdtemp(path.join(root,'entries','.stage-'));
@@ -336,7 +338,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         delete prepared.contract;
         compilations[refusalKey] = prepared;
         if (demand.renderer !== 'tiled') { delete visual.tilesetNames; delete visual.flags; }
-        mapInputs[filename] = { tiled, dependencies, contract: visual };
+        mapInputs[filename] = { tiled, dependencies, contract: visual, compilationKey: refusalKey };
         row.renderer = demand.renderer;
         row.features = demand.features;
         let inputs = [];
@@ -490,7 +492,8 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         if (match) retainedKeys.push(match[1]);
       }
       const nextIndex = { keys: retainedKeys, snapshots: [...snapshots.keys()],
-        compilations, compilationsHash: identity(compilations), mapInputs, mapInputsHash: identity(mapInputs) };
+        compilations, compilationsHash: identity(compilations), mapInputs, mapInputsHash: identity(mapInputs),
+        recompileMapInputs: [...recompileMapInputs] };
       result.compilations = compilations;
       result.mapInputs = mapInputs;
       session.data.indices.maps = nextIndex;

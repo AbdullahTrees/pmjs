@@ -24,9 +24,26 @@ async function preparationFiles(session, verifyHashes = false) {
   function identity(stat) {
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':');
   }
+  function containedGameFile(file) {
+    return (session.sourceRoots || [session.gameRoot]).some(root => {
+      if (!root) return false;
+      const relative = path.relative(root, file);
+      return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+    });
+  }
+  async function inspectPath(file) {
+    const lexical = path.resolve(file);
+    const link = await fsp.lstat(lexical, { bigint: true });
+    if (!link.isSymbolicLink() || !containedGameFile(lexical)) return { file: lexical, stat: link };
+    const resolved = await fsp.realpath(lexical);
+    if (!containedGameFile(resolved)) throw new Error('preparation symlink target outside game root');
+    const stat = await fsp.stat(resolved, { bigint: true });
+    if (!stat.isFile()) throw new Error('preparation input is not a regular file');
+    return { file: resolved, stat, gameRooted: true };
+  }
   async function inspect(file, category = 'other') {
     file = path.resolve(file);
-    const before = await fsp.lstat(file, { bigint: true });
+    const inspected = await inspectPath(file), actual = inspected.file, before = inspected.stat;
     if (!before.isFile()) throw new Error('preparation input is not a regular file');
     const signature = identity(before);
     const cached = previous[file];
@@ -39,15 +56,17 @@ async function preparationFiles(session, verifyHashes = false) {
     else {
       const hasher = crypto.createHash('sha256');
       header = Buffer.alloc(0);
-      for await (const chunk of fs.createReadStream(file)) {
+      for await (const chunk of fs.createReadStream(actual)) {
         hasher.update(chunk);
         if (header.length < 32) header = Buffer.concat([header, chunk.subarray(0, 32 - header.length)]);
       }
       checksum = hasher.digest('hex');
       ++stats.hashedFiles; stats.hashedBytes += Number(before.size);
       stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + Number(before.size);
-      const after = await fsp.lstat(file, { bigint: true });
-      if (!after.isFile() || identity(after) !== signature) throw new Error('preparation input changed while verifying');
+      const after = await fsp.stat(actual, { bigint: true });
+      if (!after.isFile() || identity(after) !== signature ||
+          inspected.gameRooted && await fsp.realpath(file) !== actual)
+        throw new Error('preparation input changed while verifying');
     }
     files[file] = { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) };
     session.data.files[file] = files[file];
@@ -56,7 +75,14 @@ async function preparationFiles(session, verifyHashes = false) {
   }
   function inspectSync(file, bytes, category = 'other') {
     file = path.resolve(file);
-    const stat = fs.statSync(file, { bigint: true });
+    const link = fs.lstatSync(file, { bigint: true });
+    let stat = link;
+    if (link.isSymbolicLink()) {
+      if (!containedGameFile(file)) throw new Error('preparation input symlink is not authorized');
+      const actual = fs.realpathSync(file);
+      if (!containedGameFile(actual)) throw new Error('preparation symlink target outside game root');
+      stat = fs.statSync(actual, { bigint: true });
+    }
     if (!stat.isFile()) throw new Error('preparation input is not a regular file');
     const signature = identity(stat), retained = known.get(signature), cached = previous[file];
     let checksum = retained?.hash || !verifyHashes && cached?.identity === signature && cached.hash;
@@ -131,11 +157,21 @@ async function preparationFiles(session, verifyHashes = false) {
     session.touch(path.dirname(file));
     return value;
   }
+  async function validateOutputs(directory, outputs, checksumOf, validate) {
+    for (const output of outputs) {
+      const expected = checksumOf(output);
+      if (!HASH.test(expected || '')) return false;
+      const file = path.join(directory, output.path);
+      const checked = await inspect(file, 'output');
+      if (checked.hash !== expected || !await validate(output, file, checked)) return false;
+    }
+    return true;
+  }
   async function save() {
     Object.assign(session.data.files, files);
     await session.checkpoint();
   }
-  return { hash, inspect, inspectSync, copyVerified, publish, validatedJson, save, stats, receipts: files,
+  return { hash, inspect, inspectSync, copyVerified, publish, validatedJson, validateOutputs, save, stats, receipts: files,
     writeManifest: session.writeManifest,
     publishManifest: session.publishManifest };
 

@@ -23,6 +23,9 @@ function stable(value) {
 function identity(value) {
   return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 }
+function hasPathPrefix(source, prefix) {
+  return typeof source === 'string' && source.toLowerCase().startsWith(prefix.toLowerCase());
+}
 async function hashFile(file) {
   const hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
@@ -30,7 +33,7 @@ async function hashFile(file) {
 }
 function validLosslessPrefixes(value = []) {
   if (!Array.isArray(value) || value.some(prefix => {
-    if (typeof prefix !== 'string' || !prefix.startsWith('img/') || prefix.includes('\\') || prefix.includes('\0')) return true;
+    if (typeof prefix !== 'string' || !hasPathPrefix(prefix, 'img/') || prefix.includes('\\') || prefix.includes('\0')) return true;
     const parts = (prefix.endsWith('/') ? prefix.slice(0, -1) : prefix).split('/');
     return parts.some(part => !part || part === '.' || part === '..');
   })) throw new Error('assetPreparation.losslessPrefixes must contain safe image path prefixes');
@@ -44,7 +47,7 @@ function astcSettings(value = {}) {
   return { enabled: value.enabled ?? false, quality: value.quality ?? 'medium' };
 }
 function safeSource(source) {
-  return typeof source === 'string' && source.startsWith('img/') &&
+  return typeof source === 'string' && hasPathPrefix(source, 'img/') &&
     !source.includes('\\') && !source.includes('\0') &&
     source.split('/').every(part => part && part !== '.' && part !== '..') && /\.png$/i.test(source);
 }
@@ -123,27 +126,27 @@ async function decryptFile(file, output, key, extension) {
 }
 async function automaticRecipe(file, source, sourceHash, header, frames = new Map()) {
   let grid;
+  const frame = frames.get(source.toLowerCase()) ?? frames.get(source);
   const filenameGrid = path.basename(source).match(/\[([1-9]\d*)x([1-9]\d*)\]\.png$/i);
   if (filenameGrid) {
     grid = filenameGrid.slice(1).map(Number);
     if (!grid.every(Number.isSafeInteger) || grid[0] > 4096 / grid[1]) return undefined;
-  } else if (source.startsWith('img/sv_actors/')) grid = [9, 6];
-  else if (source.startsWith('img/characters/')) {
+  } else if (hasPathPrefix(source, 'img/sv_actors/')) grid = [9, 6];
+  else if (hasPathPrefix(source, 'img/characters/')) {
     grid = /^[!$]*\$/.test(path.basename(source)) ? [3, 4] : [12, 8];
   }
-  if (!grid && !source.startsWith('img/parallaxes/')) return undefined;
+  if (!grid && !hasPathPrefix(source, 'img/parallaxes/')) return undefined;
   if (!header) {
     const handle = await fsp.open(file, 'r');
     header = Buffer.alloc(24);
     try { if ((await handle.read(header, 0, 24, 0)).bytesRead !== 24) return undefined; }
     finally { await handle.close(); }
   }
-  if (frames.has(source)) {
-    const frame = frames.get(source);
+  if (frame !== undefined) {
     if (!frame || header.length < 24 || !header.subarray(0, 8).equals(PNG)) return undefined;
     grid = [header.readUInt32BE(16) / frame.width, header.readUInt32BE(20) / frame.height];
     if (!grid.every(n => Number.isSafeInteger(n) && n > 0) || grid[0] > 4096 / grid[1]) return undefined;
-  } else if (!filenameGrid && source.startsWith('img/sv_actors/') &&
+  } else if (!filenameGrid && hasPathPrefix(source, 'img/sv_actors/') &&
       header.length >= 24 && header.subarray(0, 8).equals(PNG)) {
     const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
     grid = [[9, 6], [4, 6], [4, 8], [4, 1], [3, 4]].find(
@@ -170,10 +173,11 @@ function validRecipes(value) {
   if (!Array.isArray(value)) throw new Error('asset recipes must be an array');
   const sources = new Set();
   for (const recipe of value) {
-    if (!recipe || !safeSource(recipe.source) || !HASH.test(recipe.sourceHash) || sources.has(recipe.source)) {
+    const key = typeof recipe?.source === 'string' ? recipe.source.toLowerCase() : '';
+    if (!recipe || !safeSource(recipe.source) || !HASH.test(recipe.sourceHash) || sources.has(key)) {
       throw new Error('asset recipes require unique safe image paths and SHA-256 sourceHash');
     }
-    sources.add(recipe.source);
+    sources.add(key);
     if (!Array.isArray(recipe.grid) || recipe.grid.length !== 2 ||
         !recipe.grid.every(n => Number.isSafeInteger(n) && n > 0) || recipe.grid[0] * recipe.grid[1] > 4096) {
       throw new Error(`invalid asset recipe grid: ${recipe.source}`);
@@ -212,6 +216,7 @@ function validStorageDecision(value) {
 function validDescriptor(d) {
   if (!d || d.version !== 1 || !Number.isSafeInteger(d.width) || !Number.isSafeInteger(d.height) ||
       d.width < 1 || d.height < 1 || !Array.isArray(d.pages) || !Array.isArray(d.cells) || d.pages.length > 4096 || d.cells.length > 4096) return false;
+  if (d.workspaceConstrained !== undefined && typeof d.workspaceConstrained !== 'boolean') return false;
   if (d.compression !== undefined) {
     return d.compression === 'astc-4x4' && d.width <= 8192 && d.height <= 8192 &&
       d.width * d.height <= 32 * 1024 * 1024 && d.halo === 1 && d.uniform === undefined &&
@@ -275,12 +280,8 @@ async function cachedEntry(directory, key, sourceHash, files) {
       const pages = manifest.descriptor ? manifest.descriptor.pages : [];
       if (!manifest.outputs || Object.keys(manifest.outputs).length !== pages.length + (manifest.decrypted ? 1 : 0)) return false;
       const outputs = [...pages, ...(manifest.decrypted ? [{ path: manifest.decrypted }] : [])];
-      for (const page of outputs) {
-        const file = path.join(directory, page.path);
-        if (!HASH.test(manifest.outputs[page.path])) return false;
-        const checked = await files.inspect(file, 'output');
-        if (checked.hash !== manifest.outputs[page.path]) return false;
-        if (reused && checked.reused) continue;
+      return files.validateOutputs(directory, outputs, page => manifest.outputs[page.path], async (page, file, checked) => {
+        if (reused && checked.reused) return true;
         let header = checked.header;
         if (!header) {
           const handle = await fsp.open(file, 'r');
@@ -289,32 +290,35 @@ async function cachedEntry(directory, key, sourceHash, files) {
           finally { await handle.close(); }
         }
         if (page.path === manifest.decrypted) {
-          if (!mediaHeader(header, path.extname(page.path))) return false;
-        } else if (!pageHeaderMatches(header, page, checked.size)) return false;
-      }
-      return true;
+          return mediaHeader(header, path.extname(page.path));
+        }
+        return pageHeaderMatches(header, page, checked.size);
+      });
     });
   } catch (_) { return null; }
 }
 
-async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProgress = () => {},
+async function prepareAssets({ gameRoot, cacheRoot, recipes, native, onProgress = () => {},
   shouldCancel = () => false, logger = console, verifyHashes = false,
   workspaceBytes = 256 * 1024 * 1024,
   pageCodec = 'lz4',
-  losslessPrefixes = [],
+  losslessPrefixes,
   astc,
   preparationContext = 'live',
-  portableIndex = null, portableAssetRoot = null,
+  portableIndex = null, portableAssetRoot = null, policyOverrides = null,
   processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY, session = null }) {
   if (!session) {
     const run = await require('./preparation.cjs').prepareGameAssets({ gameRoot, cacheRoot, recipes, native,
       onProgress: value => { if (value.phase !== 'start') onProgress(value); }, shouldCancel, logger, verifyHashes, workspaceBytes, pageCodec, losslessPrefixes, astc,
-      preparationContext, portableIndex, portableAssetRoot, processorIdentity, maps: false });
+      preparationContext, portableIndex, portableAssetRoot, policyOverrides, processorIdentity, maps: false });
     if (run.images) run.images.releaseCacheLease = run.releaseCacheLease;
     return run.images;
   }
   cacheRoot = session.root;
-  losslessPrefixes = validLosslessPrefixes(losslessPrefixes);
+  policyOverrides ||= { astc: astc !== undefined, losslessPrefixes: losslessPrefixes !== undefined,
+    recipes: recipes !== undefined };
+  recipes ||= [];
+  losslessPrefixes = validLosslessPrefixes(losslessPrefixes || []);
   astc = astcSettings(astc);
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   if (!['png', 'lz4'].includes(pageCodec)) throw new Error('assetPreparation.pageCodec must be png or lz4');
@@ -360,7 +364,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     validRecipes(recipes);
     if (pageCodec === 'lz4') {
       if (native.assets?.preparationWorkspaceVersion !== 1 || typeof native.assets?.preparationLz4Version !== 'string')
-        throw new Error('LZ4 image preparation is unavailable in this addon');
+        throw new Error('LZ4 image preparation is unavailable in this addon; requires preparationWorkspaceVersion 1 and preparationLz4Version');
       processorIdentity = { ...processorIdentity, pageCodec: native.assets.preparationLz4Version };
     }
     if (!native.assets || typeof native.assets.processImage !== 'function' ||
@@ -368,7 +372,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       throw new Error('image preparation is unavailable in this addon');
     }
 
-    const frames = await yedSideviewFrames(async source => {
+    const discoveredFrames = await yedSideviewFrames(async source => {
       if (native.fs?.readBytes) {
         const bytes = native.fs.readBytes(source);
         return bytes === null ? null : Buffer.from(bytes);
@@ -379,6 +383,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       try { return await fsp.readFile(file); }
       catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     }, logger);
+    const frames = new Map([...discoveredFrames].map(([source, frame]) => [source.toLowerCase(), frame]));
     const automaticRecipes = { version: 1, sideview: [...frames].sort(([a], [b]) => a.localeCompare(b)) };
     report('discover');
     const sources = session.inventory.filter(source => safeSource(source) || decryptedSource(source));
@@ -408,18 +413,19 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         throw new Error('source changed while validating '+source);
       return current;
     }
-    const recipeMap = new Map(recipes.map(recipe => [recipe.source, recipe]));
+    const recipeMap = new Map(recipes.map(recipe => [recipe.source.toLowerCase(), recipe]));
     for (const source of sources) {
       if (cancelled()) break;
       report('validate', source);
-      let stage;
+      let stage, fallbackEntry;
+      let logicalSource, encrypted, sourceIdentity, sourceHash, directory, indexed, recipe;
       let sourcePhase = 'validate', outcome = 'ordinary-choice';
       try {
         const decryptedPath = decryptedSource(source);
-        const encrypted = decryptedPath !== null;
-        const logicalSource = decryptedPath || source;
+        encrypted = decryptedPath !== null;
+        logicalSource = decryptedPath || source;
         const extension = path.extname(logicalSource).toLowerCase();
-        const audioView = audioViewSupport && encrypted && source.startsWith('audio/');
+        const audioView = audioViewSupport && encrypted && hasPathPrefix(source, 'audio/');
         if (encrypted && (!settings.key || !(extension === '.png' ? settings.images : settings.audio) ||
             (!offline && !audioView && typeof native.assets.installDecrypted !== 'function'))) throw new Error('cached decryption is unavailable');
         if (encrypted && !audioView && fs.existsSync(path.join(gameRoot, logicalSource))) throw new Error('plaintext source path already exists');
@@ -432,9 +438,9 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           report('audio-view', source);
           continue;
         }
-        let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
+        sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
         const checkedSource = await files.inspect(file, 'source');
-        const sourceHash = checkedSource.hash;
+        sourceHash = checkedSource.hash;
         if (sourceIdentity !== undefined && native.assets.sourceIdentity(source) !== sourceIdentity) throw new Error('source changed while hashing');
         result.sourceBytes += checkedSource.size;
         const policy = portableIndex?.policies?.[source] || {};
@@ -443,27 +449,42 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         if (policy.astc !== undefined) astcSettings(policy.astc);
         if (policy.recipe !== undefined && (!policy.recipe || typeof policy.recipe !== 'object' || Array.isArray(policy.recipe)))
           throw new Error('invalid explicit image recipe');
-        let recipe = policy.recipe || recipeMap.get(logicalSource);
+        const explicitRecipe = recipeMap.get(logicalSource.toLowerCase());
+        recipe = policyOverrides.recipes && explicitRecipe ? explicitRecipe : policy.recipe || explicitRecipe;
         if (recipe) { recipe = { ...recipe, source: logicalSource, sourceHash }; validRecipes([recipe]); }
         if (!recipe && !encrypted) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header, frames);
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
-        const imageAstc = astcSettings({ ...astc, ...(policy.astc || {}) });
-        const allowAstc = imageAstc.enabled && !(policy.lossless ?? losslessPrefixes.some(prefix => logicalSource.startsWith(prefix)));
+        const imageAstc = astcSettings(policyOverrides.astc ? astc : policy.astc || astc);
+        const lossless = policyOverrides.losslessPrefixes
+          ? losslessPrefixes.some(prefix => hasPathPrefix(logicalSource, prefix))
+          : policy.lossless ?? losslessPrefixes.some(prefix => hasPathPrefix(logicalSource, prefix));
+        const allowAstc = imageAstc.enabled && !lossless;
         const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null, allowAstc,
-          automaticRecipes: { version: automaticRecipes.version, frame: frames.get(logicalSource) },
+          automaticRecipes: { version: automaticRecipes.version, frame: frames.get(logicalSource.toLowerCase()) },
           astcQuality: allowAstc ? imageAstc.quality : null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
-        const findIndexed = () => !session.repairSources.has(source) && indexedImages.get(source)?.find(record =>
-          record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
+        const findIndexed = () => !session.repairSources.has(source) && indexedImages.get(source)?.find(record => {
+          const constrained = record.workspaceConstrained === true || record.descriptor?.workspaceConstrained === true;
+          const cachedWorkspaceBytes = record.resolvedSettings?.workspaceBytes;
+          const resolvedSettings = { allowAstc, astcQuality: allowAstc ? imageAstc.quality : null, pageCodec,
+            ...(constrained ? { workspaceBytes: cachedWorkspaceBytes } : {}) };
+          return record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
           record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
-          (!record.resolvedSettings || identity(record.resolvedSettings) === identity({ allowAstc,
-            astcQuality: allowAstc ? imageAstc.quality : null, pageCodec })) &&
+          (!constrained || Number.isSafeInteger(cachedWorkspaceBytes) && cachedWorkspaceBytes >= workspaceBytes) &&
+          (!record.resolvedSettings || identity(record.resolvedSettings) === identity(resolvedSettings)) &&
           (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||
-            record.descriptor && validDescriptor(record.descriptor)));
-        let indexed = encrypted ? null : findIndexed();
+            record.descriptor && validDescriptor(record.descriptor));
+        });
+        indexed = encrypted ? null : findIndexed();
         {
-          let directory = session.directory('entries', key);
+          directory = session.directory('entries', key);
           let manifest = await cachedEntry(directory, key, sourceHash, files);
+          if (manifest?.workspaceConstrained && workspaceBytes > (manifest.workspaceBytes || 0)) {
+            fallbackEntry = { directory, manifest };
+            session.touch(directory);
+            directory = session.newDirectory('entries', key);
+            manifest = null;
+          }
           if (manifest && encrypted && manifest.decrypted !== 'source' + extension) manifest = null;
           if (manifest) {
             if (encrypted && extension === '.png' && !recipe)
@@ -486,7 +507,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               indexed = findIndexed();
             }
             if (cancelled()) break;
-            let descriptor = null, copied = false;
+            let descriptor = null, copied = false, processorWorkspaceConstrained = false;
             const indexedFallback = indexed?.descriptor === null;
             if (indexedFallback) ++result.indexedNegative;
             if (indexed?.descriptor && (indexed.descriptor.compression === 'astc-4x4' || indexed.descriptor.pages.every(p => p.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png'))) &&
@@ -511,7 +532,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
                 for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
               }
             }
-            if (recipe && (recipeMap.has(logicalSource) || policy.recipe)) {
+            if (recipe && (recipeMap.has(logicalSource.toLowerCase()) || policy.recipe)) {
               const header = (await files.inspect(input, 'source')).header;
               if (header?.subarray(0, 8).equals(PNG)) {
                 const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
@@ -525,10 +546,16 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               if (indexed) ++result.indexedLayoutAttempts;
               else ++result.unindexedProcessed;
               const processingStarted = performance.now();
-              try { descriptor = await native.assets.processImage(source, stage, recipe || null,
-                input, ...(native.assets.preparationWorkspaceVersion === 1
-                  ? [indexed ? indexed.descriptor : null, { workspaceBytes, allowAstc, astcQuality: imageAstc.quality, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
-                  : indexed ? [indexed.descriptor] : [])); }
+              try {
+                descriptor = await native.assets.processImage(source, stage, recipe || null,
+                  input, ...(native.assets.preparationWorkspaceVersion === 1
+                    ? [indexed ? indexed.descriptor : null, { workspaceBytes, allowAstc, astcQuality: imageAstc.quality, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
+                    : indexed ? [indexed.descriptor] : []));
+                if (descriptor?.resultVersion === 1 && descriptor.workspaceConstrained === true && descriptor.descriptor === null) {
+                  processorWorkspaceConstrained = true;
+                  descriptor = null;
+                }
+              }
               finally { result.processingMs += performance.now() - processingStarted; }
             }
             if (cancelled()) break;
@@ -544,7 +571,14 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             manifest = { version: CACHE_VERSION, key, source, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
               ...(decrypted ? { decrypted } : {}) };
             // Cache entries are disposable and hash-validated; locks, leases and indexes still flush.
-            files.writeManifest(stage, { ...manifest, settings: { recipe, allowAstc, astcQuality: imageAstc.quality }, processor: processorIdentity,
+            const workspaceConstrained = descriptor?.workspaceConstrained === true ||
+              indexed?.workspaceConstrained === true || indexed?.descriptor?.workspaceConstrained === true || processorWorkspaceConstrained;
+            const constrainedWorkspaceBytes = descriptor?.workspaceConstrained === true || processorWorkspaceConstrained ? workspaceBytes :
+              indexed?.resolvedSettings?.workspaceBytes;
+            files.writeManifest(stage, { ...manifest,
+              workspaceConstrained,
+              ...(workspaceConstrained ? { workspaceBytes: constrainedWorkspaceBytes ?? workspaceBytes } : {}),
+              settings: { recipe, allowAstc, astcQuality: imageAstc.quality }, processor: processorIdentity,
               dependencies: [{ source, hash: sourceHash }, ...(encrypted ? [{ source: 'data/System.json', hash: settings.hash }] : [])],
               outcome: descriptor ? copied ? 'reused-package' : 'generated' : 'ordinary-choice' });
             if (!await cachedEntry(stage, key, sourceHash, files)) throw new Error('prepared output validation failed');
@@ -552,6 +586,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             files.publishManifest(stage, directory);
             stage = null;
             if (!await cachedEntry(directory, key, sourceHash, files)) throw new Error('published output validation failed');
+            if (fallbackEntry) {
+              session.discard(fallbackEntry.directory);
+              fallbackEntry = null;
+            }
             result.generated += 1;
             outcome = descriptor ? copied ? 'reused-package' : 'generated' : 'ordinary-choice';
           }
@@ -561,7 +599,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               backingHash: manifest.decrypted ? manifest.outputs[manifest.decrypted] : sourceHash, storage: indexed.storage });
           if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
             encryptionSettingsSha256: encrypted ? settings.hash : null,
-            descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
+            descriptor: manifest.descriptor, workspaceConstrained: manifest.workspaceConstrained === true,
+            outputs: Object.fromEntries(Object.entries(manifest.outputs)
               .filter(([name]) => name !== manifest.decrypted)) });
           if (encrypted) settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
           if (manifest.decrypted) {
@@ -588,10 +627,44 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         }
         session.outcome('image:' + source, outcome);
       } catch (error) {
-        session.outcome('image:' + source, 'ordinary-failure', error.message);
-        result.fallback += 1;
-        result.failedFiles += 1;
-        logger.warn(`[pmjs] asset preparation fallback ${source}: ${error.message}`);
+        if (fallbackEntry && logicalSource && sourceHash) {
+          const { directory: oldDirectory, manifest } = fallbackEntry;
+          try {
+            sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
+            result.hits += 1;
+            outcome = manifest.descriptor ? 'reused-local' : 'ordinary-choice';
+            if (!manifest.descriptor && !manifest.decrypted) ++result.negativeHits;
+            if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
+              encryptionSettingsSha256: encrypted ? settings.hash : null,
+              descriptor: manifest.descriptor, workspaceConstrained: true,
+              outputs: Object.fromEntries(Object.entries(manifest.outputs).filter(([name]) => name !== manifest.decrypted)) });
+            if (manifest.decrypted) {
+              settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
+              result.decryptedEntries.push({ source, logicalSource, file: path.join(oldDirectory, manifest.decrypted),
+                sourceIdentity, sourceHash, settingsIdentity: settings.sourceIdentity,
+                settingsHash: settings.hash, fileHash: manifest.outputs[manifest.decrypted] });
+              result.cacheBytes += (await fsp.stat(path.join(oldDirectory, manifest.decrypted))).size;
+            }
+            if (manifest.descriptor) {
+              for (const page of manifest.descriptor.pages) result.cacheBytes += (await fsp.stat(path.join(oldDirectory, page.path))).size;
+              result.entries.push({ source: logicalSource, directory: oldDirectory, descriptor: manifest.descriptor,
+                sourceHash, sourceIdentity, backingHash: manifest.decrypted ? manifest.outputs[manifest.decrypted] : sourceHash,
+                pageHashes: manifest.descriptor.pages.map(page => manifest.outputs[page.path]),
+                ...(encrypted ? { decryptedFile: path.join(oldDirectory, manifest.decrypted) } : {}) });
+            } else if (!manifest.decrypted) ++result.fallback;
+            logger.warn(`[pmjs] workspace improvement failed for ${source}; reusing prior prepared output: ${error.message}`);
+          } catch (fallbackError) {
+            session.outcome('image:' + source, 'ordinary-failure', fallbackError.message);
+            result.fallback += 1;
+            result.failedFiles += 1;
+            logger.warn(`[pmjs] asset preparation fallback ${source}: ${fallbackError.message}`);
+          }
+        } else {
+          session.outcome('image:' + source, 'ordinary-failure', error.message);
+          result.fallback += 1;
+          result.failedFiles += 1;
+          logger.warn(`[pmjs] asset preparation fallback ${source}: ${error.message}`);
+        }
       } finally {
         if (stage) await fsp.rm(stage, { recursive: true, force: true });
       }

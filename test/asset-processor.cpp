@@ -522,6 +522,7 @@ int main() {
       }
       require(bytes(destination / actual.pages.front().path) == referencePng);
       require(stats.peakWorkspaceBytes <= budget && stats.liveWorkspaceBytes == 0);
+      if (budget == 0) require(stats.workspaceConstrained);
       require(stats.pngEncodes == actual.pages.size());
       if (budget <= 2048) {
         require(stats.sourceDecodes >= 3 && stats.temporaryFiles > 0 && stats.spillBytesRead > 0 && stats.spillBytesWritten > 0);

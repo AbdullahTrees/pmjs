@@ -155,11 +155,12 @@ napi_value arrayValue(napi_env env, const std::array<T, Size>& values) {
       "cannot write prepared asset array");
   return result;
 }
-napi_value descriptor(napi_env env, const PreparedAsset& asset) {
+napi_value descriptor(napi_env env, const PreparedAsset& asset, bool workspaceConstrained = false) {
   auto result = moduleObject(env);
   set(env, result, "version", number(env, 1));
   set(env, result, "width", number(env, asset.width)); set(env, result, "height", number(env, asset.height));
   set(env, result, "halo", number(env, asset.halo));
+  set(env, result, "workspaceConstrained", boolean(env, workspaceConstrained));
   if (!asset.compression.empty()) set(env, result, "compression", string(env, asset.compression));
   if (asset.uniform) set(env, result, "uniform", arrayValue(env, *asset.uniform));
   if (asset.blockGrid) set(env, result, "blockGrid", arrayValue(env, *asset.blockGrid));
@@ -218,6 +219,7 @@ struct AssetWork {
   std::filesystem::path staging;
   AssetRecipe recipe;
   AssetPreparationOptions options;
+  AssetPreparationStats statistics;
   std::optional<PreparedAsset> layout;
   std::optional<PreparedAsset> result;
   std::shared_ptr<ImageFileSource> storageSource;
@@ -242,6 +244,7 @@ void executeAsset(napi_env, void* opaque) noexcept {
       work.storage = ImageStore::classifyStorage(*pixels);
       return;
     }
+    work.options.statistics = &work.statistics;
     work.result = prepareAssetImage("/proc/self/fd/" + std::to_string(work.sourceFd), work.staging,
       work.recipe, work.layout ? &*work.layout : nullptr, work.options);
     struct stat current{};
@@ -260,7 +263,14 @@ void completeAsset(napi_env env, napi_status status, void* opaque) {
     if (!work->error.empty()) throw std::runtime_error(work->error);
     check(env, napi_resolve_deferred(env, work->deferred,
       work->storage ? storageDescriptor(env, *work->storage) :
-      work->unsupported ? null(env) : descriptor(env, *work->result)), "cannot resolve asset preparation");
+      work->unsupported && work->statistics.workspaceConstrained ? [&] {
+        napi_value result;
+        napi_create_object(env, &result);
+        set(env, result, "resultVersion", number(env, 1));
+        set(env, result, "descriptor", null(env));
+        set(env, result, "workspaceConstrained", boolean(env, true));
+        return result;
+      }() : work->unsupported ? null(env) : descriptor(env, *work->result, work->statistics.workspaceConstrained)), "cannot resolve asset preparation");
   } catch (const std::exception& error) {
     napi_value result;
     napi_value message = string(env, error.what());

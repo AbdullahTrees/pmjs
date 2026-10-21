@@ -85,6 +85,45 @@ test('a corrupt output is repaired without rebuilding an unrelated result', asyn
   assert.equal(fs.existsSync(directory), false);
 });
 
+test('a phase-wide image capability failure retains prior cache entries', async () => {
+  const f = fixture(), first = await f.run(), directory = first.images.entries[0].directory;
+  const processImage = f.options.native.assets.processImage;
+  delete f.options.native.assets.processImage;
+  const unavailable = await f.run();
+  assert.match(unavailable.images.error, /image preparation is unavailable/);
+  assert.equal(fs.existsSync(directory), true);
+  assert.equal(Object.keys(JSON.parse(fs.readFileSync(path.join(first.root, 'preparation-state.json'))).data.results).length, 1);
+  f.options.native.assets.processImage = processImage;
+  const recovered = await f.run();
+  assert.equal(recovered.images.generated, 0);
+  assert.equal(recovered.images.hits, 1);
+  assert.equal(f.jobs.length, 1);
+});
+
+test('VFS-authorized in-root symlinks are prepared while escaping targets are rejected', async () => {
+  const f = fixture(), source = path.join(f.gameRoot, 'img/pictures/linked.png');
+  fs.symlinkSync('a.png', source);
+  fs.symlinkSync(path.join(f.root, 'outside.png'), path.join(f.gameRoot, 'img/pictures/escape.png'));
+  fs.writeFileSync(path.join(f.root, 'outside.png'), PNG);
+  f.options.native.fs = { inventory: () => ['img/pictures/a.png', 'img/pictures/linked.png', 'img/pictures/escape.png'] };
+  const result = await f.run();
+  assert.equal(result.images.installed, 2);
+  assert.equal(result.images.failedFiles, 1);
+  assert.ok(f.warnings.some(message => message.includes('outside game root')));
+});
+
+test('uppercase VFS inventory paths are preserved and prepared', async () => {
+  const f = fixture();
+  fs.renameSync(path.join(f.gameRoot, 'img'), path.join(f.gameRoot, 'IMG'));
+  fs.renameSync(path.join(f.gameRoot, 'IMG/pictures'), path.join(f.gameRoot, 'IMG/Pictures'));
+  fs.renameSync(path.join(f.gameRoot, 'IMG/Pictures/a.png'), path.join(f.gameRoot, 'IMG/Pictures/A.png'));
+  f.options.native.fs = { inventory: () => ['IMG/Pictures/A.png'] };
+  const result = await f.run();
+  assert.equal(result.images.total, 1);
+  assert.equal(result.images.installed, 1);
+  assert.equal(f.jobs[0], 'IMG/Pictures/A.png');
+});
+
 test('a deliberate original decision is remembered for unchanged inputs', async () => {
   const f = fixture();
   f.options.native.assets.processImage = () => { f.jobs.push('declined'); return null; };
@@ -166,6 +205,39 @@ test('precise deferred invalidation repairs only the reported result', async () 
   assert.equal(f.jobs.filter(source => source.endsWith('/b.png')).length, 1);
 });
 
+test('live invalidation writes a small marker without reading or changing preparation state', async () => {
+  const f = fixture(), first = await f.run();
+  const stateFile = path.join(first.root, 'preparation-state.json');
+  const original = fs.readFileSync(stateFile, 'utf8');
+  const readFile = fs.promises.readFile;
+  fs.promises.readFile = function(file, ...args) {
+    assert.notEqual(String(file), stateFile, 'live invalidation must not parse the full state');
+    return readFile.call(this, file, ...args);
+  };
+  try { await first.invalidate('img/pictures/a.png'); }
+  finally { fs.promises.readFile = readFile; }
+  assert.equal(fs.readFileSync(stateFile, 'utf8'), original);
+  const directory = path.join(first.root, 'invalidations');
+  const files = fs.readdirSync(directory);
+  assert.equal(files.length, 1);
+  assert.ok(fs.statSync(path.join(directory, files[0])).size < 256);
+  assert.equal(f.warnings.length, 0);
+  await f.run();
+  assert.equal(f.jobs.length, 2, 'the failed result is repaired at startup');
+  assert.deepEqual(fs.readdirSync(directory), []);
+});
+
+test('concurrent and repeated live invalidations preserve every failed result', async () => {
+  const f = fixture(); fs.writeFileSync(path.join(f.gameRoot, 'img/pictures/b.png'), PNG);
+  const first = await f.run();
+  await Promise.all([first.invalidate('img/pictures/a.png'), first.invalidate('img/pictures/b.png')]);
+  await first.invalidate('img/pictures/a.png');
+  assert.equal(fs.readdirSync(path.join(first.root, 'invalidations')).length, 2);
+  await f.run();
+  assert.equal(f.jobs.length, 4);
+  assert.equal(f.warnings.length, 0);
+});
+
 test('a deleted asset leaves the inventory and its unused result is reclaimed', async () => {
   const f = fixture(), first = await f.run(), directory = first.images.entries[0].directory;
   fs.rmSync(path.join(f.gameRoot, 'img/pictures/a.png'));
@@ -234,12 +306,12 @@ test('an interrupted state publication keeps the previous committed state and li
   assert.equal((await f.run()).validation.hashedFiles, 0);
 });
 
-test('manifest settings override runtime defaults and invalid choices affect only their asset', async () => {
+test('runtime recipes override packaged defaults and invalid choices affect only their asset', async () => {
   const f = fixture(), seen = [], processImage = f.options.native.assets.processImage;
   f.options.native.assets.processImage = (...args) => { seen.push(args[2]); return processImage(...args); };
   fs.writeFileSync(path.join(f.gameRoot, 'img/pictures/b.png'), PNG);
-  const result = await f.run({ recipes: [{ source: 'img/pictures/a.png', sourceHash: hash(PNG), grid: [2,2] }],
-    portableIndex: { policies: { 'img/pictures/a.png': { recipe: { grid: [1,1] } },
+  const result = await f.run({ recipes: [{ source: 'img/pictures/a.png', sourceHash: hash(PNG), grid: [1,1] }],
+    portableIndex: { policies: { 'img/pictures/a.png': { recipe: { grid: [2,2] } },
       'img/pictures/b.png': { recipe: { grid: [0,1] } } }, images: [] } });
   assert.equal(result.images.installed, 1);
   assert.equal(result.images.failedFiles, 1);
@@ -313,14 +385,14 @@ test('lease publication failure falls back before prepared files can be used wit
 });
 
 
-test('malformed explicit compression choices fall back and explicit lossless choices override defaults', async () => {
+test('runtime compression and lossless settings override packaged defaults', async () => {
   const f = fixture(), settings = [], processImage = f.options.native.assets.processImage;
   f.options.native.assets.preparationWorkspaceVersion = 1;
   f.options.native.assets.processImage = (...args) => { settings.push(args[5]); return processImage(...args); };
   const invalid = await f.run({ portableIndex: { policies: { 'img/pictures/a.png': { astc: 'invalid' } }, images: [] } });
   assert.equal(invalid.images.installed, 0);
   assert.equal(f.jobs.length, 0);
-  const valid = await f.run({ astc: { enabled: true }, losslessPrefixes: ['img/pictures/'],
+  const valid = await f.run({ astc: { enabled: true }, losslessPrefixes: [],
     portableIndex: { policies: { 'img/pictures/a.png': { lossless: false } }, images: [] } });
   assert.equal(valid.images.installed, 1);
   assert.equal(settings[0].allowAstc, true);

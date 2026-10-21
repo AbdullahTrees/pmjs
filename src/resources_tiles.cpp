@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <unordered_set>
 #include <mutex>
 
@@ -50,6 +51,14 @@ struct ImageStore::TileCatalog {
   std::weak_ptr<TilePrototype> captured;
   std::shared_ptr<std::atomic<std::size_t>> accounting;
   std::size_t metadataBytes = 0;
+  mutable bool failureReported = false;
+  void reportFailure(const char* reason, const std::string& expected,
+      const std::string& actual) const {
+    if (failureReported) return;
+    failureReported = true;
+    std::fprintf(stderr, "[pmjs] preparation invalidation kind=tiles reason=%s identity=%s expected=\"%s\" actual=\"%s\"\n",
+      reason, descriptor.identity.c_str(), expected.c_str(), actual.c_str());
+  }
   ~TileCatalog() {
     if (accounting) accounting->fetch_sub(metadataBytes, std::memory_order_relaxed);
   }
@@ -109,7 +118,14 @@ std::string ImageStore::effectiveTileSet(const ImageFileSource& source, const st
   const auto set = tileSets_.find(identity);
   if (set != tileSets_.end()) for (const auto& entry : set->second->descriptor.sources)
     if (entry.identity == source.key()) return identity;
-  if (set != tileSets_.end()) { preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity); }
+  if (set != tileSets_.end()) {
+    const auto& catalog = *set->second;
+    const auto expected = std::find_if(catalog.descriptor.sources.begin(), catalog.descriptor.sources.end(),
+      [&](const auto& entry) { return entry.path == source.path(); });
+    catalog.reportFailure(expected == catalog.descriptor.sources.end() ? "source-not-in-map" : "source-identity-changed",
+      expected == catalog.descriptor.sources.end() ? "" : expected->identity, source.key());
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
+  }
   return {};
 }
 bool ImageStore::installTileSet(PreparedTileSet descriptor,
@@ -169,6 +185,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
   for (std::size_t i = 0; i < descriptor.sources.size(); ++i) {
     if (descriptor.sources[i].identity != source.key()) {
       if (descriptor.sources[i].path == source.path()) {
+        found->second->reportFailure("source-identity-changed", descriptor.sources[i].identity, source.key());
         preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
       }
       continue;
@@ -181,6 +198,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       for (std::size_t page = 0; page < descriptor.pages.size(); ++page) {
         auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
         if (!file || file->key() != found->second->pageIdentities[page]) {
+          found->second->reportFailure("page-identity-changed", found->second->pageIdentities[page], file ? file->key() : "missing");
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           preparationFailures_->record(identity);
           return nullptr;
@@ -190,6 +208,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       for (std::size_t entry = 0; entry < descriptor.sources.size(); ++entry) {
         auto file = captureTileFile(descriptor.sources[entry].snapshot);
         if (!file || file->key() != found->second->snapshotIdentities[entry]) {
+          found->second->reportFailure("snapshot-identity-changed", found->second->snapshotIdentities[entry], file ? file->key() : "missing");
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           preparationFailures_->record(identity);
           return nullptr;

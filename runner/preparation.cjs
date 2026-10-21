@@ -24,28 +24,35 @@ async function prepareGameAssets(options) {
   if (!session) return { cancelled: true, images: { cancelled: true }, portArtifacts: new Map() };
   const result = { cancelled: false, root: session.root, portArtifacts: new Map() };
   const phase = async (name, run) => {
-    session.phases.add(name);
+    session.startPhase(name);
     onProgress({ stage: name, phase: 'start', source: '', completed: 0, total: 0 });
     let value;
-    for (let attempt = 0; attempt < 2; ++attempt) {
-      value = await run(progress => onProgress({ ...progress, stage: name }));
-      const rejected = value?.activation?.rejected || [];
-      for (const item of rejected) {
-        logger.warn(`[pmjs] preparation ${name}/${item.id}: ${item.reason}; using original if repair fails`);
-        session.repairSources.add(item.id);
-        const encryptedSource = value.decryptedEntries?.find(entry => entry.logicalSource === item.id)?.source;
-        for (const record of Object.values(session.data.results))
-          if (record?.source === item.id || (encryptedSource && record?.source === encryptedSource) || record?.key === item.id) {
-            if (record.source) session.repairSources.add(record.source);
-            record.failed = true;
-            if (attempt === 1) session.outcome(name === 'maps' ? 'map:' + record.filename : 'image:' + record.source, 'ordinary-failure', item.reason);
+    try {
+      for (let attempt = 0; attempt < 2; ++attempt) {
+        value = await run(progress => onProgress({ ...progress, stage: name }));
+        const rejected = value?.activation?.rejected || [];
+        for (const item of rejected) {
+          logger.warn(`[pmjs] preparation ${name}/${item.id}: ${item.reason}; using original if repair fails`);
+          session.repairSources.add(item.id);
+          const encryptedSource = value.decryptedEntries?.find(entry => entry.logicalSource === item.id)?.source;
+          for (const record of Object.values(session.data.results))
+            if (record?.source === item.id || (encryptedSource && record?.source === encryptedSource) || record?.key === item.id) {
+              if (record.source) session.repairSources.add(record.source);
+              record.failed = true; ++session.invalidated;
+              if (attempt === 1) session.outcome(name === 'maps' ? 'map:' + record.filename : 'image:' + record.source, 'ordinary-failure', item.reason);
+            }
           }
+        await session.checkpoint();
+        if (!rejected.length || shouldCancel()) break;
       }
-      await session.checkpoint();
-      if (!rejected.length || shouldCancel()) break;
+      const cancelled = shouldCancel() || value?.cancelled;
+      session.finishPhase(name, cancelled ? 'cancelled' : value?.error ? 'failed' : 'completed');
+      options.onPhaseComplete?.(name, value);
+      return value;
+    } catch (error) {
+      session.finishPhase(name, shouldCancel() ? 'cancelled' : 'failed');
+      throw error;
     }
-    options.onPhaseComplete?.(name, value);
-    return value;
   };
   try {
     if (options.images !== false) result.images = await phase('images', onProgress => prepareAssets({
@@ -79,6 +86,7 @@ async function prepareGameAssets(options) {
     }
     result.records = session.data.results;
     result.outcomes = [...session.outcomes.values()];
+    result.invalidated = session.invalidated;
     result.outcomeCounts = {};
     for (const { outcome } of result.outcomes) result.outcomeCounts[outcome] = (result.outcomeCounts[outcome] || 0) + 1;
     result.validation = session.files.stats;

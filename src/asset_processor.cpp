@@ -167,19 +167,22 @@ class Workspace {
     stats.workspaceLimitBytes = limit_;
   }
   std::shared_ptr<Buffer> retain(std::size_t size) {
-    if (!size || size > limit_) return {};
+    if (!size) return {};
+    if (size > limit_) { stats.workspaceConstrained = true; return {}; }
     const auto now = std::chrono::steady_clock::now();
     if (size >= 8U * 1024U * 1024U || now - checked_ >= std::chrono::milliseconds(250)) {
       allowance_ = availableAllowance(); checked_ = now;
     }
     std::shared_ptr<Buffer> buffer;
     try { buffer = std::make_shared<Buffer>(); }
-    catch (const std::bad_alloc&) { return {}; }
+    catch (const std::bad_alloc&) { stats.workspaceConstrained = true; return {}; }
     std::lock_guard lock(mutex_);
     // The cap covers simultaneous preparation jobs, not just each worker.
-    if (processBytes_ > limit_ || size > limit_ - processBytes_ || size > allowance_) return {};
+    if (processBytes_ > limit_ || size > limit_ - processBytes_ || size > allowance_) {
+      stats.workspaceConstrained = true; return {};
+    }
     std::unique_ptr<std::uint8_t[]> bytes(new (std::nothrow) std::uint8_t[size]);
-    if (!bytes) return {};
+    if (!bytes) { stats.workspaceConstrained = true; return {}; }
     buffer->owner = this; buffer->bytes = std::move(bytes); buffer->size = size;
     processBytes_ += size; bytes_ += size;
     stats.liveWorkspaceBytes = bytes_;

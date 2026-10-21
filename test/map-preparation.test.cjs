@@ -9,6 +9,7 @@ const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 const { png } = require('./helpers/png.cjs');
 const { compileRpgMap, compileTiledMap, engineTilemap } = require('../runner/map-demand.cjs');
 const { prepareMaps, validTileDescriptor } = require('../runner/map-preparation.cjs');
+const { prepareGameAssets } = require('../runner/preparation.cjs');
 const { parse } = require('../runner/cli.cjs');
 const { validate } = require('../runner/index.cjs');
 const { fixture, core } = require('./helpers/map-preparation.cjs');
@@ -111,6 +112,66 @@ test('warm compilation preserves descriptors and map contracts; changed and dama
   const changedFlags=await prepareMaps(f);
   assert.equal(changedFlags.compilationHits,0);assert.notDeepEqual(changedFlags.index,beforeFlags);
 });
+
+test('map output invalidation reuses demand while demand invalidation recompiles it', async t => {
+  const f = fixture(t);
+  const first = await prepareGameAssets({ ...f, images: false, maps: true });
+  const identity = first.maps.index[1].identity;
+  assert.equal(f.jobs, 1);
+  await first.invalidate(identity);
+  const outputRepair = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(outputRepair.maps.compilationHits, 1);
+  assert.equal(f.jobs, 2);
+  const oldFormatIndex = readIndex(f);
+  delete Object.values(oldFormatIndex.mapInputs)[0].compilationKey;
+  writeIndex(f, oldFormatIndex);
+  await outputRepair.invalidate({ source: identity, mapDemand: true });
+  const demandRepair = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(demandRepair.maps.compilationHits, 0);
+  assert.equal(f.jobs, 3);
+  assert.equal((await prepareGameAssets({ ...f, images: false, maps: true })).maps.compilationHits, 1);
+});
+
+test('demand invalidation escalates an already failed map output record', async t => {
+  const f = fixture(t);
+  const first = await prepareGameAssets({ ...f, images: false, maps: true });
+  const identity = first.maps.index[1].identity;
+  await first.invalidate(identity);
+  await first.invalidate({ source: identity, mapDemand: true });
+  const repaired = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(repaired.maps.compilationHits, 0);
+  assert.equal(f.jobs, 2);
+});
+
+test('demand invalidation recompiles maps that shared a compilation identity', async t => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.gameRoot, 'data/Map002.json'), JSON.stringify(f.map));
+  const first = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(first.maps.index[1].identity, first.maps.index[2].identity);
+  assert.equal(f.jobs, 1);
+  await first.invalidate({ source: first.maps.index[1].identity, mapDemand: true });
+  const repaired = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(repaired.maps.selected, 2);
+  assert.equal(repaired.maps.compilationHits, 0);
+  assert.equal(f.jobs, 2);
+});
+
+test('a thrown map phase retains cached results and recovers on the next launch', async t => {
+  const f = fixture(t);
+  const first = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(first.maps.selected, 1);
+  const processTiles = f.native.assets.processTiles;
+  f.native.assets.processTiles = undefined;
+  const unavailable = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.match(unavailable.maps.error, /tile preparation unavailable/);
+  const state = JSON.parse(fs.readFileSync(path.join(cachePath(f), 'preparation-state.json')));
+  assert.equal(Object.keys(state.data.results).filter(name => name.startsWith('maps/')).length, 1);
+  f.native.assets.processTiles = processTiles;
+  const recovered = await prepareGameAssets({ ...f, images: false, maps: true });
+  assert.equal(recovered.maps.compilationHits, 1);
+  assert.equal(f.jobs, 1);
+});
+
 test('portable map metadata and atlas pages are checked against recipient inputs',async t=>{
   const f=fixture(t),cold=await prepareMaps(f);
   assert.equal(cold.selected,1);

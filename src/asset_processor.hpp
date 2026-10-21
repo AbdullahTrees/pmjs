@@ -52,6 +52,7 @@ struct AssetPreparationStats {
   std::uint64_t lz4Encodes = 0;
   std::uint64_t temporaryFiles = 0, spillBytesWritten = 0, spillBytesRead = 0;
   std::size_t workspaceLimitBytes = 0, peakWorkspaceBytes = 0, liveWorkspaceBytes = 0;
+  bool workspaceConstrained = false;
 };
 struct AssetPreparationOptions {
   std::size_t workspaceBytes = 256U * 1024U * 1024U;

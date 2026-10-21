@@ -123,6 +123,97 @@ test('workspace limits reach capable processors without invalidating cached outp
     await assert.rejects(prepareAssets({ ...f, workspaceBytes }), /workspaceBytes must be an integer/);
 });
 
+test('workspace-constrained cache entries are reconsidered after the budget increases', async () => {
+  const f = fixture(), original = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => {
+    const descriptor = await original(...args);
+    return { ...descriptor, workspaceConstrained: args[5].workspaceBytes === 0 };
+  };
+  assert.equal((await prepareAssets({ ...f, workspaceBytes: 0 })).generated, 1);
+  const improved = await prepareAssets({ ...f, workspaceBytes: 128 * 1024 * 1024 });
+  assert.equal(improved.generated, 1);
+  assert.equal(f.jobs, 2);
+  assert.equal((await prepareAssets({ ...f, workspaceBytes: 128 * 1024 * 1024 })).generated, 0);
+  assert.equal(f.jobs, 2);
+});
+
+test('a failed workspace upgrade keeps and installs the prior validated output', async () => {
+  const f = fixture(), processImage = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => ({ ...await processImage(...args), workspaceConstrained: args[5].workspaceBytes === 0 });
+  const first = await prepareAssets({ ...f, workspaceBytes: 0 });
+  const previousDirectory = first.entries[0].directory;
+  f.native.assets.processImage = async () => { throw new Error('simulated allocation failure'); };
+  const upgrade = await prepareAssets({ ...f, workspaceBytes: 128 * 1024 * 1024 });
+  assert.equal(upgrade.failedFiles, 0);
+  assert.equal(upgrade.generated, 0);
+  assert.equal(upgrade.installed, 1);
+  assert.equal(upgrade.entries[0].directory, previousDirectory);
+  assert.ok(fs.existsSync(path.join(previousDirectory, 'page-0.png')));
+});
+
+test('workspace-limited negative decisions are reconsidered when the budget increases', async () => {
+  const f = fixture(), processImage = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => args[5].workspaceBytes === 0
+    ? { resultVersion: 1, descriptor: null, workspaceConstrained: true }
+    : processImage(...args);
+  const constrained = await prepareAssets({ ...f, workspaceBytes: 0 });
+  assert.equal(constrained.fallback, 1);
+  assert.equal(constrained.generated, 1);
+  const improved = await prepareAssets({ ...f, workspaceBytes: 128 * 1024 * 1024 });
+  assert.equal(improved.installed, 1);
+  assert.equal(improved.generated, 1);
+  assert.equal(f.jobs, 1);
+});
+
+test('portable constrained layouts generated with a larger budget remain reusable on smaller devices', async () => {
+  const f = fixture(), original = f.native.assets.processImage, layouts = [];
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => { layouts.push(args[4]); return original(...args); };
+  const stage = path.join(f.root, 'portable-stage'); fs.mkdirSync(stage);
+  const descriptor = await original(f.source, stage);
+  descriptor.workspaceConstrained = true;
+  const portableIndex = { images: [{ source: f.source,
+    sourceHash: crypto.createHash('sha256').update(PNG).digest('hex'), recipe: null,
+    encryptionSettingsSha256: null, descriptor, outputs: [],
+    resolvedSettings: { allowAstc: false, astcQuality: null, pageCodec: 'png', workspaceBytes: 0 } }] };
+  await prepareAssets({ ...f, workspaceBytes: 0, portableIndex });
+  assert.equal(layouts[0], descriptor);
+});
+
+test('uppercase image directories remain eligible and receive automatic character recipes', async () => {
+  const f = fixture();
+  fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+  f.source = 'IMG/Characters/$actor.png';
+  fs.mkdirSync(path.dirname(path.join(f.gameRoot, f.source)), { recursive: true });
+  fs.writeFileSync(path.join(f.gameRoot, f.source), PNG);
+  const header = Buffer.alloc(24); header.set(Buffer.from([137,80,78,71,13,10,26,10]));
+  header.writeUInt32BE(3, 16); header.writeUInt32BE(4, 20);
+  assert.deepEqual((await automaticRecipe(null, f.source, '0'.repeat(64), header)).grid, [3, 4]);
+  const result = await prepareAssets(f);
+  assert.equal(result.total, 1);
+  assert.equal(result.installed, 1);
+});
+
+test('explicit runtime policies override portable defaults and change the effective cache key', async () => {
+  const f = fixture(), observed = [], original = f.native.assets.processImage;
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.processImage = async (...args) => { observed.push({ recipe: args[2], options: args[5] }); return original(...args); };
+  const packaged = { policies: { [f.source]: { recipe: { grid: [1, 1], backdrop: [0, 0, 0, 0] }, astc: { enabled: true }, lossless: true } }, images: [] };
+  await prepareAssets({ ...f, astc: { enabled: false }, losslessPrefixes: [],
+    recipes: [{ source: f.source, sourceHash: crypto.createHash('sha256').update(PNG).digest('hex'),
+      grid: [1, 1], backdrop: [1, 0, 0, 255] }], portableIndex: packaged });
+  assert.deepEqual(observed[0].recipe.grid, [1, 1]);
+  assert.deepEqual(observed[0].recipe.backdrop, [1, 0, 0, 255]);
+  assert.equal(observed[0].options.allowAstc, false);
+  await prepareAssets({ ...f, astc: { enabled: true }, losslessPrefixes: [], recipes: [], portableIndex: packaged });
+  assert.equal(observed.length, 2, 'changed effective settings regenerate the prepared result');
+  assert.equal(observed[1].options.allowAstc, true);
+  assert.deepEqual(observed[1].recipe.grid, [1, 1], 'an omitted per-asset runtime recipe leaves the packaged recipe as its default');
+});
+
 test('default LZ4 replaces PNG preparation, reuses warm pages and permits explicit PNG selection', async () => {
   const f = fixture(), original = f.native.assets.processImage;
   const { pageCodec, ...defaults } = f;
@@ -226,9 +317,10 @@ test('full verification detects edits hidden by unchanged metadata', async t => 
   const bytes = fs.readFileSync(file);
   bytes[bytes.length - 1] ^= 1;
   fs.writeFileSync(file, bytes);
-  const lstat = fs.promises.lstat;
+  const lstat = fs.promises.lstat, stat = fs.promises.stat;
   fs.promises.lstat = async (target, options) => target === file ? before : lstat(target, options);
-  t.after(() => { fs.promises.lstat = lstat; });
+  fs.promises.stat = async (target, options) => target === file ? before : stat(target, options);
+  t.after(() => { fs.promises.lstat = lstat; fs.promises.stat = stat; });
   const verified = await prepareAssets({ ...f, verifyHashes: true });
   assert.equal(verified.generated, 1);
   assert.ok(verified.validation.hashedFiles >= 2);
@@ -431,13 +523,13 @@ test('concurrent preparers serialize and reuse completed output', async () => {
     await processing;
     return original(...args);
   };
-  const progress = [[], []];
+  const progress = Array.from({ length: 12 }, () => []);
   const results = await Promise.all(progress.map(events => prepareAssets({ ...f, onProgress(value) {
     events.push(value);
     if (value.phase === 'wait') releaseProcessing();
   } })));
   assert.equal(results.reduce((sum, r) => sum + r.generated, 0), 1);
-  assert.equal(results.reduce((sum, r) => sum + r.hits, 0), 1);
+  assert.equal(results.reduce((sum, r) => sum + r.hits, 0), progress.length - 1);
   assert.equal(f.jobs, 1);
   assert.ok(progress.some(events => events.some(p => p.phase === 'wait')));
   progress.forEach((events, i) => assertProgress(events, results[i], 'complete'));
@@ -700,6 +792,18 @@ for (const engine of ['MV', 'MZ']) test(engine + ' audio views prepare without m
   const changed = await prepareAssets(f);
   assert.equal(changed.audioViews, 0);
   assert.equal(installed.at(-1).length, 0);
+});
+
+test('uppercase Audio inventory paths retain encrypted audio view preparation', async () => {
+  const f = encryptedFixture();
+  fs.renameSync(path.join(f.gameRoot, 'audio'), path.join(f.gameRoot, 'Audio'));
+  f.encryptedAudio = f.encryptedAudio.replace(/^audio\//, 'Audio/');
+  fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
+  const installed = [];
+  f.native.media = { installAudioViews(entries) { installed.push(entries); return entries.length; } };
+  const result = await prepareAssets(f);
+  assert.equal(result.audioViews, 1);
+  assert.equal(installed.at(-1)[0].source, f.encryptedAudio);
 });
 
 for (const engine of ['MV', 'MZ']) test(engine + ' default audio views replace materialized audio while retaining prepared images', async () => {
@@ -1018,6 +1122,19 @@ test('sideview metadata changes invalidate saved decisions and disabling the plu
   assert.deepEqual(f.observed.at(-1), [9, 6]);
   for (const result of [cold, warm, changed, disabled]) result.releaseCacheLease();
   assert.deepEqual(f.warnings, []);
+});
+
+test('YED metadata lookup and cache identity normalize mixed-case VFS paths', async () => {
+  const f = sideviewFixture();
+  fs.renameSync(path.join(f.gameRoot, 'img'), path.join(f.gameRoot, 'IMG'));
+  fs.renameSync(path.join(f.gameRoot, 'IMG/sv_actors'), path.join(f.gameRoot, 'IMG/SV_Actors'));
+  f.source = 'IMG/SV_Actors/custom.png';
+  const first = await prepareAssets(f);
+  assert.deepEqual(f.observed, [[4, 6]]);
+  f.writeSize(75);
+  const changed = await prepareAssets(f);
+  assert.equal(changed.generated, 1);
+  assert.deepEqual(f.observed, [[4, 6], [4, 8]]);
 });
 
 test('explicit recipes override YED grids and metadata overrides portable negative hints', async () => {

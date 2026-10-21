@@ -141,6 +141,45 @@ test('runner logs cold and validated warm preparation before boot and includes t
   assert.ok(lines.some(line => line.includes('preparation event=finish status=failed')));
 });
 
+test('normal shutdown waits for pending preparation invalidation persistence', async t => {
+  const options = fixture('globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};');
+  options.assetCacheRoot = path.join(options.gameRoot, 'cache');
+  fs.mkdirSync(path.join(options.gameRoot, 'img/pictures'), { recursive: true });
+  fs.writeFileSync(path.join(options.gameRoot, 'img/pictures/test.png'),
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64'));
+  const host = require(options.addon);
+  host.assets.processImage = () => null;
+  host.assets.installPrepared = () => 0;
+  let reported = false, failuresConsumed = false;
+  host.assets.consumePreparationInvalidations = () => reported ? 0 : (reported = true, 1);
+  host.assets.consumePreparationFailures = () => (failuresConsumed = true, ['img/pictures/test.png']);
+  let signalStarted;
+  const started = new Promise(resolve => { signalStarted = resolve; });
+  let releaseWrite;
+  const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+  const rename = fs.promises.rename;
+  t.mock.method(fs.promises, 'rename', async (from, to) => {
+    if (failuresConsumed && path.basename(path.dirname(String(to))) === 'invalidations') {
+      failuresConsumed = false;
+      signalStarted();
+      await writeGate;
+    }
+    return rename(from, to);
+  });
+  const lines = [];
+  t.mock.method(console, 'log', line => lines.push(line));
+  t.mock.method(console, 'warn', () => {});
+  const running = run(options);
+  await started;
+  let finished = false;
+  running.then(() => { finished = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  releaseWrite();
+  await running;
+  assert.equal(finished, true);
+});
+
 test('CLI parses the documented options including --config', () => {
   const value = parse(['--addon','a','--game-root','g','--bootstrap','b','--save-root','s',
     '--config','my-config.json','--width','640','--height','480','--image-warm-cache-bytes','1024',
@@ -611,6 +650,7 @@ test('preparation workspace accepts bounded byte limits', () => {
   assert.equal(validate({ ...options, assetPreparation: { pageCodec: 'lz4' } }).assetPreparation.pageCodec, 'lz4');
   assert.throws(() => validate({ ...options, assetPreparation: { pageCodec: 'lz4hc3' } }), /pageCodec must be png or lz4/);
   assert.equal(validate(options).assetPreparation.workspaceBytes, 256 * 1024 * 1024);
+  assert.equal(validate({ ...options, assetPreparation: null }).assetPreparation.workspaceBytes, 256 * 1024 * 1024);
   for (const workspaceBytes of [0, 64 * 1024 * 1024, 128 * 1024 * 1024, 256 * 1024 * 1024])
     assert.equal(validate({ ...options, assetPreparation: { workspaceBytes } }).assetPreparation.workspaceBytes, workspaceBytes);
   for (const workspaceBytes of [-1, 0.5, 268435457, NaN, '64'])

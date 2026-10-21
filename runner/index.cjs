@@ -27,6 +27,7 @@ function resolveDefaults(input) {
   let width = input.width;
   let height = input.height;
   let assetPreparation = {};
+  let configAssetPreparation = {};
   let preparedFrameCacheBytes = input.preparedFrameCacheBytes;
   let preparedCompactSampling = input.preparedCompactSampling;
   let preparedCropUploads = input.preparedCropUploads;
@@ -50,7 +51,10 @@ function resolveDefaults(input) {
     }
     assertDisableOptimizationsShape(cfg.disableOptimizations, configPath);
     configDirectory = path.dirname(configPath);
-    if (cfg.assetPreparation !== undefined) assetPreparation = cfg.assetPreparation;
+    if (cfg.assetPreparation !== undefined) {
+      assetPreparation = cfg.assetPreparation;
+      configAssetPreparation = cfg.assetPreparation;
+    }
     if (preparedFrameCacheBytes === undefined) preparedFrameCacheBytes = cfg.preparedFrameCacheBytes;
     if (preparedCompactSampling === undefined) preparedCompactSampling = cfg.preparedCompactSampling;
     if (preparedCropUploads === undefined) preparedCropUploads = cfg.preparedCropUploads;
@@ -88,8 +92,15 @@ function resolveDefaults(input) {
   if (!assetPreparation || typeof assetPreparation !== 'object' || Array.isArray(assetPreparation)) {
     throw new Error('assetPreparation must be an object');
   }
+  const inputAssetPreparation = input.assetPreparation !== null && typeof input.assetPreparation === 'object' && !Array.isArray(input.assetPreparation)
+    ? input.assetPreparation : {};
+  const policyOverrides = {
+    astc: Object.hasOwn(configAssetPreparation, 'astc') || Object.hasOwn(inputAssetPreparation, 'astc'),
+    losslessPrefixes: Object.hasOwn(configAssetPreparation, 'losslessPrefixes') || Object.hasOwn(inputAssetPreparation, 'losslessPrefixes'),
+    recipes: Object.hasOwn(configAssetPreparation, 'recipes') || Object.hasOwn(inputAssetPreparation, 'recipes') || input.assetRecipes !== undefined
+  };
   assetPreparation = { enabled: true, maps: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 256 * 1024 * 1024, ...assetPreparation,
-    ...(typeof input.assetPreparation === 'object' ? input.assetPreparation : {}) };
+    ...inputAssetPreparation };
   if (input.assetPreparation === 'on' || input.assetPreparation === 'off') {
     assetPreparation.enabled = input.assetPreparation === 'on';
   } else if (input.assetPreparation !== undefined && typeof input.assetPreparation !== 'object') {
@@ -121,7 +132,7 @@ function resolveDefaults(input) {
     assetPreparation.recipes = JSON.parse(fs.readFileSync(assetPreparation.recipes, 'utf8'));
   }
   assetPreparation.recipes = validRecipes(assetPreparation.recipes || []);
-  return { ...input, width, height, title, assetPreparation, preparationFonts,
+  return { ...input, width, height, title, assetPreparation, assetPolicyOverrides: policyOverrides, preparationFonts,
     preparedFrameCacheBytes, preparedCompactSampling, preparedCropUploads };
 }
 
@@ -420,9 +431,11 @@ async function prepareStartupAssets(options, native) {
   let preparation, preparationStatus = 'failed';
   try {
     const all = await prepareGameAssets({ gameRoot: options.gameRoot,
+      sourceRoots: [path.join(options.saveRoot, 'game-files', 'files')],
       cacheRoot: options.assetPreparation.cacheRoot, native,
       ...options.assetPreparation, images: options.assetPreparation.enabled,
       recipes: options.assetPreparation.recipes,
+      policyOverrides: options.assetPolicyOverrides,
       portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
       bundleRoot: options.bundleRoot, portDescriptors: options.portDescriptors, adapters: options.preparationAdapters,
       width: options.width, height: options.height, shouldCancel: () => cancelled,
@@ -437,6 +450,26 @@ async function prepareStartupAssets(options, native) {
       },
       onPhaseComplete: (stage, value) => { if (stage !== 'port') activeLog?.finish(value); }
     });
+    const imageResults = all.images || {}, mapResults = all.maps || {};
+    const outcomes = all.outcomes || [];
+    const refusalReasons = new Map();
+    for (const outcome of outcomes) if (outcome.reason)
+      refusalReasons.set(outcome.reason, (refusalReasons.get(outcome.reason) || 0) + 1);
+    const commonRefusals = [...refusalReasons].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3);
+    const cacheOutcomes = all.outcomeCounts || {};
+    console.log('[pmjs] preparation summary ' + JSON.stringify({
+      images: { discovered: imageResults.total || 0, prepared: imageResults.prepared || 0,
+        installed: imageResults.installed || 0, decrypted: imageResults.decrypted || 0,
+        storageDecisions: imageResults.storageEntries?.length || 0,
+        ordinaryChoices: outcomes.filter(value => value.id.startsWith('image:') && value.outcome === 'ordinary-choice').length,
+        failed: (imageResults.failedFiles || 0) + (imageResults.error ? 1 : 0) },
+      maps: { discovered: mapResults.total || mapResults.maps?.length || 0, selected: mapResults.selected || 0,
+        installed: mapResults.installed || 0, refused: mapResults.refused || 0,
+        failed: outcomes.filter(value => value.id.startsWith('map:') && value.outcome === 'ordinary-failure').length },
+      cache: { reused: cacheOutcomes['reused-local'] || 0, generated: cacheOutcomes.generated || 0,
+        imported: cacheOutcomes['reused-package'] || 0, invalidated: all.invalidated || 0 },
+      commonRefusals
+    }));
     preparation = { ...(all.images || {}), maps: all.maps, cancelled: all.cancelled,
       inventory: all.inventory, validation: all.validation, releaseCacheLease: all.releaseCacheLease,
       invalidate: all.invalidate };
@@ -501,15 +534,28 @@ async function runSession(input, diagnostics, setNative) {
     const entry = native.assets.preparedMapIndex?.[mapId];
     if (!entry || !invalidatePreparation || invalidatedMaps.has(entry.identity)) return;
     invalidatedMaps.add(entry.identity);
-    invalidatePreparation(entry.identity).catch(error => console.warn('[pmjs] cannot record map preparation failure: ' + error.message));
+    recordPreparationInvalidation({ source: entry.identity, mapDemand: true }, 'map preparation');
   };
+  const pendingInvalidationWrites = new Set();
+  function recordPreparationInvalidation(sources, label = 'preparation') {
+    if (!invalidatePreparation) return;
+    let write;
+    write = Promise.resolve().then(() => invalidatePreparation(sources))
+      .catch(error => console.warn(`[pmjs] cannot record ${label} failure: ` + error.message))
+      .finally(() => pendingInvalidationWrites.delete(write));
+    pendingInvalidationWrites.add(write);
+  }
+  async function drainPreparationInvalidations() {
+    while (pendingInvalidationWrites.size)
+      await Promise.allSettled([...pendingInvalidationWrites]);
+  }
   function flushPreparationInvalidations(force = false) {
     if (typeof native.assets.consumePreparationInvalidations === 'function')
       pendingInvalidations |= native.assets.consumePreparationInvalidations();
     if (!pendingInvalidations || (!force && performance.now() < retryInvalidationAt)) return;
     if (invalidatePreparation && typeof native.assets.consumePreparationFailures === 'function') {
       const failures = native.assets.consumePreparationFailures();
-      if (failures.length) invalidatePreparation(failures).catch(error => console.warn('[pmjs] cannot record preparation failure: ' + error.message));
+      if (failures.length) recordPreparationInvalidation(failures);
     }
     pendingInvalidations = 0;
     retryInvalidationAt = performance.now() + 1000;
@@ -695,6 +741,8 @@ async function runSession(input, diagnostics, setNative) {
       }
       schedule();
     });
+    flushPreparationInvalidations(true);
+    await drainPreparationInvalidations();
     if (globalThis.pmjsSteam) globalThis.pmjsSteam.flush();
     else if (globalThis.pmjsAchievements && globalThis.pmjsAchievements.initialized) globalThis.pmjsAchievements.flush();
     return { reload: reloadRequested };
@@ -706,6 +754,8 @@ async function runSession(input, diagnostics, setNative) {
     cancelFrameSchedule();
     if (dispatcher) dispatcher.stop();
     if (subprocesses) await subprocesses.stop();
+    try { flushPreparationInvalidations(true); } catch (_) {}
+    await drainPreparationInvalidations();
   }
 }
 

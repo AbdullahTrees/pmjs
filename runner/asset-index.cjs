@@ -10,6 +10,7 @@ const { COMPILER_VERSION } = require('./map-demand.cjs');
 
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const matchesPrefix = (source, prefix) => source.toLowerCase().startsWith(prefix.toLowerCase());
 
 function offlineFilesystem(gameRoot, derived) {
   const root = fs.realpathSync(gameRoot);
@@ -174,12 +175,16 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
       width: options.width, height: options.height,
       images: imageRecords.map(({ source, ...calculated }) => {
         const astc = astcSettings(options.assetPreparation.astc);
-        const lossless = (options.assetPreparation.losslessPrefixes || []).some(prefix => source.startsWith(prefix));
-        const recipe = options.assetPreparation.recipes.find(recipe => recipe.source === source || recipe.source === source.replace(/\.(png_|rpgmvp)$/i, '.png'));
+        const lossless = (options.assetPreparation.losslessPrefixes || []).some(prefix => matchesPrefix(source, prefix));
+        const logicalSource = source.replace(/\.(png_|rpgmvp)$/i, '.png').toLowerCase();
+        const recipe = options.assetPreparation.recipes.find(recipe =>
+          recipe.source.toLowerCase().replace(/\.(png_|rpgmvp)$/i, '.png') === logicalSource);
         const allowAstc = astc.enabled && !lossless;
         return { source, settings: { astc, lossless, ...(recipe ? { recipe } : {}) },
           calculated: { ...calculated, resolvedSettings: { allowAstc,
-            astcQuality: allowAstc ? astc.quality : null, pageCodec: options.assetPreparation.pageCodec } } };
+            astcQuality: allowAstc ? astc.quality : null, pageCodec: options.assetPreparation.pageCodec,
+            ...(calculated.workspaceConstrained || calculated.descriptor?.workspaceConstrained
+              ? { workspaceBytes: options.assetPreparation.workspaceBytes } : {}) } } };
       }), maps: maps && portableMaps(maps, includeAssets, output) };
     if (writeIndex) fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(index) + '\n');
     return { images: images.total, preparedImages: images.prepared,
@@ -205,7 +210,7 @@ function loadAssetIndex(file, native, options) {
         if (!record || typeof record.source !== 'string') continue;
         policies[record.source] = {
           ...(index.astc ? { astc: index.astc } : {}),
-          ...((index.losslessPrefixes || []).some(prefix => record.source.startsWith(prefix)) ? { lossless: true } : {}) };
+          ...((index.losslessPrefixes || []).some(prefix => matchesPrefix(record.source, prefix)) ? { lossless: true } : {}) };
       }
       for (const recipe of options.assetPreparation.recipes)
         policies[recipe.source] = { ...policies[recipe.source], recipe };
@@ -230,7 +235,7 @@ function loadAssetIndex(file, native, options) {
           const { storage, ...rest } = record;
           if (!rest.resolvedSettings) {
             const astc = astcSettings(index.astc);
-            const allowAstc = astc.enabled && !(index.losslessPrefixes || []).some(prefix => record.source.startsWith(prefix));
+            const allowAstc = astc.enabled && !(index.losslessPrefixes || []).some(prefix => matchesPrefix(record.source, prefix));
             rest.resolvedSettings = { allowAstc, astcQuality: allowAstc ? astc.quality : null, pageCodec: index.pageCodec || 'png' };
           }
           return index.sections?.imageStorage === 1 && index.imageStorageVersion === native.assets.imageStorageVersion &&
