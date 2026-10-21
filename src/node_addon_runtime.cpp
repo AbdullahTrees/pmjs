@@ -11,16 +11,37 @@
 #endif
 
 namespace pmjs::addon {
-napi_value allocatorStats(napi_env env, napi_callback_info) try {
+namespace {
 #if defined(__GLIBC__)
+struct AllocatorInfo {
+  std::size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost;
+};
+std::optional<AllocatorInfo> allocatorInfo() {
   // Keep the minimum libc requirement unchanged when built with an older SDK.
-  struct AllocatorInfo {
-    std::size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost;
-  };
   using Query = AllocatorInfo (*)();
   static const auto query = reinterpret_cast<Query>(dlsym(RTLD_DEFAULT, "mallinfo2"));
-  if (!query) return undefined(env);
-  const auto info = query();
+  return query ? std::optional<AllocatorInfo>(query()) : std::nullopt;
+}
+#endif
+}
+
+void trimPreparationMemory() noexcept {
+#if defined(__GLIBC__)
+  using Trim = int (*)(std::size_t);
+  static const auto trim = reinterpret_cast<Trim>(dlsym(RTLD_DEFAULT, "malloc_trim"));
+  if (!trim) return;
+  const auto info = allocatorInfo();
+  if (info && info->fordblks < 32U * 1024U * 1024U) return;
+  // Preparation frees large temporary buffers that worker arenas otherwise retain.
+  trim(128U * 1024U);
+#endif
+}
+
+napi_value allocatorStats(napi_env env, napi_callback_info) try {
+#if defined(__GLIBC__)
+  const auto snapshot = allocatorInfo();
+  if (!snapshot) return undefined(env);
+  const auto& info = *snapshot;
   const auto result = moduleObject(env);
   for (const auto& [name, value] : {
       std::pair{"arenaBytes", info.arena},

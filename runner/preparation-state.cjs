@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
 const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const installedLeases = new WeakMap();
+const maximumStateBytes = 48 * 1024 * 1024;
 const checksumText = value => crypto.createHash('sha256').update(value).digest('hex');
 const checksum = value => checksumText(JSON.stringify(value));
 const inside = (root, name) => {
@@ -15,6 +16,26 @@ const inside = (root, name) => {
     throw new Error('preparation path outside cache');
   return relative.split(path.sep).join('/');
 };
+
+async function readState(filename) {
+  if ((await fsp.stat(filename)).size > maximumStateBytes)
+    throw new Error('cached preparation state exceeds the memory budget');
+  return JSON.parse(await fsp.readFile(filename, 'utf8'));
+}
+
+async function writeState(handle, current, serializedData) {
+  await handle.writeFile(`{"version":1,"checksum":${JSON.stringify(current)},"data":`);
+  const buffer = Buffer.allocUnsafe(256 * 1024);
+  for (let offset = 0; offset < serializedData.length;) {
+    let end = Math.min(offset + buffer.length / 4, serializedData.length);
+    const last = serializedData.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) --end;
+    const length = buffer.write(serializedData.slice(offset, end));
+    await handle.writeFile(buffer.subarray(0, length));
+    offset = end;
+  }
+  await handle.writeFile('}\n');
+}
 
 async function inventory(gameRoot, native, cacheRoot) {
   if (native.fs?.inventory) return native.fs.inventory().filter(source => {
@@ -88,7 +109,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
     const filename = path.join(root, 'preparation-state.json');
     let saved = {};
     try {
-      const record = JSON.parse(await fsp.readFile(filename, 'utf8'));
+      const record = await readState(filename);
       if (record.version === 1 && record.checksum === checksum(record.data) &&
           record.data && ['files', 'results', 'indices'].every(key => record.data[key] &&
             typeof record.data[key] === 'object' && !Array.isArray(record.data[key]))) saved = record.data;
@@ -124,7 +145,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         try {
           const handle = await fsp.open(temporary, 'wx');
           try {
-            await handle.writeFile(`{\"version\":1,\"checksum\":${JSON.stringify(current)},\"data\":${serializedData}}\n`);
+            await writeState(handle, current, serializedData);
             await handle.sync();
           }
           finally { await handle.close(); }
@@ -271,7 +292,7 @@ async function applyPendingInvalidations({ root, native, logger = console }) {
       sources.push(marker.request);
     }
     const filename = path.join(root, 'preparation-state.json');
-    const saved = JSON.parse(await fsp.readFile(filename, 'utf8'));
+    const saved = await readState(filename);
     if (saved.version !== 1 || saved.checksum !== checksum(saved.data)) return;
     const requestsBySource = new Map();
     for (const value of sources) {
@@ -312,7 +333,11 @@ async function applyPendingInvalidations({ root, native, logger = console }) {
     const temporary = filename + '.stage-' + crypto.randomBytes(6).toString('hex');
     try {
       const handle = await fsp.open(temporary, 'wx');
-      try { await handle.writeFile(JSON.stringify({ ...saved, checksum: checksum(saved.data) }) + '\n'); await handle.sync(); }
+      try {
+        const serializedData = JSON.stringify(saved.data);
+        await writeState(handle, checksumText(serializedData), serializedData);
+        await handle.sync();
+      }
       finally { await handle.close(); }
       await fsp.rename(temporary, filename);
     } finally { await fsp.rm(temporary, { force: true }); }

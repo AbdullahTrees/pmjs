@@ -24,6 +24,8 @@
 
 namespace pmjs::addon {
 
+void trimPreparationMemory() noexcept;
+
 struct AsyncImageLoad;
 struct Video;
 struct AudioView {

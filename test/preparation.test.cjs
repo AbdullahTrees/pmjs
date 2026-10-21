@@ -54,6 +54,56 @@ test('publication relocates only declared image, map and port output receipts', 
   }
 });
 
+test('oversized cached state rebuilds without loading its contents', async t => {
+  const f = fixture(), first = await openPreparation({ ...f.options });
+  const filename = path.join(first.root, 'preparation-state.json');
+  await first.checkpoint();
+  await first.close();
+  fs.truncateSync(filename, 48 * 1024 * 1024 + 1);
+  const invalidations = path.join(first.root, 'invalidations');
+  fs.mkdirSync(invalidations, { recursive: true });
+  fs.writeFileSync(path.join(invalidations, '0'.repeat(64) + '.json'),
+    JSON.stringify({ version: 1, request: 'img/pictures/a.png' }));
+  const readFile = fs.promises.readFile;
+  let stateReads = 0;
+  t.mock.method(fs.promises, 'readFile', async (file, ...args) => {
+    if (String(file) === filename) ++stateReads;
+    return readFile(file, ...args);
+  });
+  const rebuilt = await openPreparation({ ...f.options });
+  t.after(() => rebuilt.close());
+  assert.equal(stateReads, 0, 'oversized metadata must be rejected before parsing');
+  assert.deepEqual(rebuilt.data.results, {});
+  assert.ok(f.warnings.some(message => message.includes('exceeds the memory budget')));
+});
+
+test('large state checkpoints use bounded write buffers and preserve Unicode at chunk boundaries', async t => {
+  const f = fixture(), session = await openPreparation({ ...f.options });
+  t.after(() => session.close());
+  session.data.failures.large = '';
+  const prefix = JSON.stringify(session.data).indexOf('"large":"') + '"large":"'.length;
+  const text = 'x'.repeat(64 * 1024 - prefix - 1) + '😺' + 'y'.repeat(1024 * 1024);
+  session.data.failures.large = text;
+  const open = fs.promises.open;
+  let largestWrite = 0;
+  t.mock.method(fs.promises, 'open', async (...args) => {
+    const handle = await open(...args);
+    if (String(args[0]).includes('preparation-state.json.stage-')) {
+      const writeFile = handle.writeFile.bind(handle);
+      handle.writeFile = async value => {
+        largestWrite = Math.max(largestWrite, Buffer.byteLength(value));
+        return writeFile(value);
+      };
+    }
+    return handle;
+  });
+  assert.equal(await session.checkpoint(), true);
+  const state = JSON.parse(fs.readFileSync(path.join(session.root, 'preparation-state.json')));
+  assert.equal(state.data.failures.large, text);
+  assert.equal(state.checksum, hash(JSON.stringify(state.data)));
+  assert.ok(largestWrite <= 256 * 1024, 'checkpoint writes must not allocate a full-state byte buffer');
+});
+
 test('successful finalization checkpoints once and close does not serialize state again', async t => {
   const f = fixture(), session = await openPreparation({ ...f.options });
   let serializations = 0;

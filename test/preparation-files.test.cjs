@@ -10,6 +10,20 @@ const { preparationFiles } = require('../runner/preparation-files.cjs');
 const copyFiles = () => preparationFiles({ data: { files: {} }, checkpoint: async () => {} });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
+test('synchronous verification retains an owned small header rather than the source buffer', async () => {
+  const root = temporaryDirectory('verified-header-'), source = path.join(root, 'source');
+  const bytes = Buffer.alloc(4 * 1024 * 1024, 73);
+  fs.writeFileSync(source, bytes);
+  const files = await copyFiles(), checked = files.inspectSync(source, bytes);
+  assert.equal(checked.hash, hash(bytes));
+  assert.equal(checked.header.length, 32);
+  assert.ok(checked.header.buffer.byteLength < bytes.byteLength, 'a header must not pin the full source allocation');
+  bytes.fill(0);
+  const reused = await files.inspect(source);
+  assert.equal(reused.reused, true);
+  assert.deepEqual(reused.header, Buffer.alloc(32, 73), 'caller mutation must not change the verified header');
+});
+
 test('verified copies publish without rereading staged or published bytes and invalidate on edits', async () => {
   const root = temporaryDirectory('verified-copy-'), source = path.join(root, 'source');
   const stage = path.join(root, 'stage'), published = path.join(root, 'published');

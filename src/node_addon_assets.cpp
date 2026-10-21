@@ -14,6 +14,9 @@
 
 namespace pmjs::addon {
 namespace {
+struct PreparationMemoryRelease {
+  ~PreparationMemoryRelease() { trimPreparationMemory(); }
+};
 struct PreparationLock {
   int fd = -1;
   void release() noexcept { if (fd >= 0) { ::close(fd); fd = -1; } }
@@ -230,6 +233,7 @@ struct AssetWork {
 std::uint32_t arrayLength(napi_env env, napi_value value, std::uint32_t limit);
 napi_value element(napi_env env, napi_value value, std::uint32_t index);
 void executeAsset(napi_env, void* opaque) noexcept {
+  PreparationMemoryRelease release;
   auto& work = *static_cast<AssetWork*>(opaque);
   try {
     if (work.storageSource) {
@@ -499,6 +503,7 @@ napi_value tileDescriptor(napi_env env, const PreparedTileAssets& asset) {
   return result;
 }
 void executeTiles(napi_env, void* opaque) noexcept {
+  PreparationMemoryRelease release;
   auto& work = *static_cast<TileWork*>(opaque);
   try {
     if (work.expected) work.verifiedRegions = verifyTileAssets(work.inputs, *work.expected, work.staging);

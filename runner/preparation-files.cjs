@@ -91,7 +91,7 @@ async function preparationFiles(session, verifyHashes = false) {
       ++stats.hashedFiles; stats.hashedBytes += bytes.length;
       stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + bytes.length;
     } else ++stats.reusedFiles;
-    const header = bytes.subarray(0, 32);
+    const header = Buffer.from(bytes.subarray(0, 32));
     files[file] = { identity: signature, hash: checksum, header: header.toString('base64') };
     session.data.files[file] = files[file];
     known.set(signature, { hash: checksum, header });
