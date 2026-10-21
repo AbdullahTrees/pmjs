@@ -10,7 +10,6 @@ import { createBundle, gameDeclarations, readBundle } from './game-bundle.mjs';
 import { startupFiles, runtimeIdentity as computeRuntimeIdentity } from '../runner/startup-files.cjs';
 import { measureLauncherCheck } from '../runner/startup-metrics.cjs';
 import { installConsoleLogging, startLauncherLog } from '../runner/logging.cjs';
-import portPreparation from '../runner/port-preparation.cjs';
 import { formatLauncherIdentity, formatLauncherEnvironment } from '../runner/launcher-info.cjs';
 
 const require = createRequire(import.meta.url);
@@ -82,27 +81,6 @@ const runtimeIdentity = pass => measureLauncherCheck('runtime', pass, () =>
 const gameInputs = (game, config, manifest, adapters, pass) => measureLauncherCheck('game-inputs', pass, () =>
   preparationInputs(game, config, manifest, adapters, verifiedHash), verification?.stats);
 
-function preparePortArtifacts({ game, bundle, adapters, cacheRoot }) {
-  const descriptors = bundle?.descriptor.portPreparation;
-  const processors = bundle ? portPreparation.discoverBundledProcessors(bundle.root) :
-    portPreparation.discoverAdapterProcessors(adapters);
-  if (!processors.length && !descriptors?.length) return new Map();
-  let assets;
-  try { assets = require(path.join(root, 'lib/pmjs_native.node')).assets; }
-  catch (error) {
-    console.warn(`[pmjs] port preparation codec unavailable: ${error.message}; original game path retained`);
-    return new Map();
-  }
-  if (typeof assets.compressPortArtifact !== 'function' ||
-      typeof assets.decompressPortArtifact !== 'function') {
-    console.warn('[pmjs] port preparation requires the generic LZ4 artifact codec; original game path retained');
-    return new Map();
-  }
-  return portPreparation.prepareForRun({ gameRoot: game, bundleRoot: bundle?.root,
-    cacheRoot, descriptors, adapters,
-    compressArtifact: assets.compressPortArtifact,
-    decompressArtifact: assets.decompressPortArtifact });
-}
 
 function matches(record, context) {
   try {
@@ -234,7 +212,6 @@ async function main() {
   const id = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
   const state = options['--state'] || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'pmjs', id);
   const saveRoot = options['--save-root'] || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local/share'), 'pmjs', id, 'saves');
-  const portCacheRoot = options['--asset-cache-root'] || path.join(saveRoot, 'asset-cache');
   const prepared = path.join(state, 'prepared.json');
   let previous;
   try { previous = JSON.parse(fs.readFileSync(prepared, 'utf8')); } catch { previous = null; }
@@ -257,13 +234,24 @@ async function main() {
   let record = command === 'prepare' || !previous || !matches(previous, context) ? prepare(context) : previous;
   verification.save();
   if (command === 'prepare') {
-    preparePortArtifacts({ game, bundle, adapters, cacheRoot: portCacheRoot });
+    const { prepareGameAssets } = require(path.join(share, 'runner/preparation.cjs'));
+    const { offlineFilesystem } = require(path.join(share, 'runner/asset-index.cjs'));
+    const { resolveDefaults } = require(path.join(share, 'runner/index.cjs'));
+    const filesystem = offlineFilesystem(game, new Map());
+    const addon = require(path.join(root, 'lib/pmjs_native.node'));
+    const defaults = resolveDefaults({ gameRoot: game, config, assetCacheRoot: options['--asset-cache-root'] });
+    const preparedIndex = require(path.join(share, 'runner/asset-index.cjs')).loadAssetIndex(bundle?.assetIndex, addon, defaults);
+    await prepareGameAssets({ ...defaults.assetPreparation, gameRoot: game,
+      cacheRoot: defaults.assetPreparation.cacheRoot || path.join(saveRoot, 'asset-cache'),
+      native: { assets: Object.assign(Object.create(addon.assets), filesystem.assets), fs: filesystem.fs },
+      width: defaults.width, height: defaults.height, images: defaults.assetPreparation.enabled,
+      preparationContext: 'offline', bundleRoot: bundle?.root, portDescriptors: bundle?.descriptor.portPreparation,
+      portableIndex: preparedIndex, portableAssetRoot: bundle?.root, adapters });
     console.log(`Prepared ${game}`); return;
   }
   const { runSupervised } = await import('../runner/supervisor.cjs');
   const result = await runSupervised(() => {
-    const portArtifacts = Object.fromEntries(preparePortArtifacts({
-      game, bundle, adapters, cacheRoot: portCacheRoot }));
+
     context.inputs = gameInputs(game, config, manifest, adapters, 'prelaunch');
     context.runtimeIdentity = runtimeIdentity('prelaunch');
     if (bundle) context.bundleBootstrapCurrent = bundle.bootstrapCurrent &&
@@ -273,7 +261,7 @@ async function main() {
     return { addon: path.join(root, 'lib/pmjs_native.node'), gameRoot: game,
     bootstrap: path.join(state, record.bootstrap), saveRoot, config: record.config || undefined,
     assetIndex: bundle?.assetIndex || undefined, assetCacheRoot: options['--asset-cache-root'],
-    portArtifacts, guestArguments };
+    bundleRoot: bundle?.root, portDescriptors: bundle?.descriptor.portPreparation, preparationAdapters: adapters, guestArguments };
   });
   if (result.signal) process.kill(process.pid, result.signal);
   else process.exitCode = result.code;

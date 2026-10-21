@@ -94,6 +94,10 @@ int main() try {
   require(vfs.readText("DATA/System.json") == "replacement", "overlay did not replace base");
   require(vfs.readText("created.bin")->size() == 4, "binary overlay read lost bytes");
   require(!vfs.exists("data/System.alias"), "deleted base file reappeared");
+  const auto inventory = vfs.inventory();
+  require(std::find(inventory.begin(), inventory.end(), "created.bin") != inventory.end(), "inventory missed overlay file");
+  require(std::find(inventory.begin(), inventory.end(), "data/system.JSON") != inventory.end(), "inventory lost overlay filename spelling");
+  require(std::none_of(inventory.begin(), inventory.end(), [](const auto& name) { return name == "data/System.alias"; }), "inventory exposed deleted source");
   require(vfs.isDirectory(".") && vfs.isDirectory("data"), "merged directory missing");
   const auto entries = vfs.readDirectory("data");
   require(entries && *entries == std::vector<std::string>{"system.JSON"},

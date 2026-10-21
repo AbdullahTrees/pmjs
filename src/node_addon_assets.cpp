@@ -2,6 +2,7 @@
 #include "asset_processor.hpp"
 #include "prepared_page.hpp"
 #include "tile_assets.hpp"
+#include "log.hpp"
 
 #include <cmath>
 #include <cerrno>
@@ -378,7 +379,9 @@ napi_value classifyImageStorage(napi_env env, napi_callback_info info) try {
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 
 napi_value installImageStorage(napi_env env, napi_callback_info info) try {
-  const auto args = arguments(env, info, 1);
+  const auto args = arguments(env, info, 2);
+  const bool detailed = args.size() > 1 && asBoolean(env, args[1]);
+  PreparationInstallReport report;
   auto& value = host(env);
   struct InstallGuard {
     ImageStore& images;
@@ -388,46 +391,58 @@ napi_value installImageStorage(napi_env env, napi_callback_info info) try {
   value.images.clearStorageDecisions();
   std::uint32_t installed = 0;
   for (std::uint32_t i = 0, n = arrayLength(env, args.at(0), 100000); i < n; ++i) {
-    const auto record = element(env, args[0], i);
-    const auto path = value.vfs.resolve(asString(env, property(env, record, "source")));
-    if (!path) continue;
-    const auto storage = property(env, record, "storage");
-    if (integer(env, property(env, storage, "version")) != 1) continue;
-    ImageStorageDecision decision;
-    decision.width = integer(env, property(env, storage, "width"));
-    decision.height = integer(env, property(env, storage, "height"));
-    decision.paletteBits = integer(env, property(env, storage, "paletteBits"));
-    decision.channels.channels = integer(env, property(env, storage, "channels"));
-    const auto source = integers<4>(env, property(env, storage, "source"));
-    const auto swizzle = integers<4>(env, property(env, storage, "swizzle"));
-    if (hasProperty(env, storage, "pixelFactsVersion") && integer(env, property(env, storage, "pixelFactsVersion")) == 1) {
-      decision.hasPixelFacts = true;
-      check(env, napi_get_value_bool(env, property(env, storage, "opaque"), &decision.opaque), "invalid opacity fact");
-      check(env, napi_get_value_bool(env, property(env, storage, "allZero"), &decision.allZero), "invalid zero fact");
-      auto regions = property(env, storage, "sparseRegions");
-      bool isArray = false;
-      check(env, napi_is_array(env, regions, &isArray), "invalid sparse regions");
-      if (isArray) {
-        decision.sparseRegions.emplace();
-        for (std::uint32_t r = 0, regionCount = arrayLength(env, regions, 64); r < regionCount; ++r)
-          decision.sparseRegions->push_back(integers<4>(env, element(env, regions, r)));
-      } else {
-        napi_valuetype type;
-        check(env, napi_typeof(env, regions, &type), "invalid sparse regions");
-        if (type != napi_null) throw std::runtime_error("invalid sparse regions");
+    std::string identifier = std::to_string(i);
+    try {
+      const auto before = installed;
+      const auto record = element(env, args[0], i);
+      identifier = asString(env, property(env, record, "source"));
+      const auto path = value.vfs.resolve(identifier);
+      if (!path) { report.rejected.emplace_back(identifier, "missing source"); continue; }
+      const auto storage = property(env, record, "storage");
+      if (integer(env, property(env, storage, "version")) != 1) { report.rejected.emplace_back(identifier, "unsupported storage version"); continue; }
+      ImageStorageDecision decision;
+      decision.width = integer(env, property(env, storage, "width"));
+      decision.height = integer(env, property(env, storage, "height"));
+      decision.paletteBits = integer(env, property(env, storage, "paletteBits"));
+      decision.channels.channels = integer(env, property(env, storage, "channels"));
+      const auto source = integers<4>(env, property(env, storage, "source"));
+      const auto swizzle = integers<4>(env, property(env, storage, "swizzle"));
+      if (hasProperty(env, storage, "pixelFactsVersion") && integer(env, property(env, storage, "pixelFactsVersion")) == 1) {
+        decision.hasPixelFacts = true;
+        check(env, napi_get_value_bool(env, property(env, storage, "opaque"), &decision.opaque), "invalid opacity fact");
+        check(env, napi_get_value_bool(env, property(env, storage, "allZero"), &decision.allZero), "invalid zero fact");
+        auto regions = property(env, storage, "sparseRegions");
+        bool isArray = false;
+        check(env, napi_is_array(env, regions, &isArray), "invalid sparse regions");
+        if (isArray) {
+          decision.sparseRegions.emplace();
+          for (std::uint32_t r = 0, regionCount = arrayLength(env, regions, 64); r < regionCount; ++r)
+            decision.sparseRegions->push_back(integers<4>(env, element(env, regions, r)));
+        } else {
+          napi_valuetype type;
+          check(env, napi_typeof(env, regions, &type), "invalid sparse regions");
+          if (type != napi_null) throw std::runtime_error("invalid sparse regions");
+        }
       }
-    }
-    bool valid = true;
-    for (int c = 0; c < 4; ++c) {
-      valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 && swizzle[c] < 6;
-      decision.channels.source[c] = static_cast<std::uint8_t>(source[c]);
-      decision.channels.swizzle[c] = static_cast<std::uint8_t>(swizzle[c]);
-    }
-    if (valid && value.images.installStorageDecision(*path,
-        asString(env, property(env, record, "sourceIdentity")), decision)) ++installed;
+      bool valid = true;
+      for (int c = 0; c < 4; ++c) {
+        valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 && swizzle[c] < 6;
+        decision.channels.source[c] = static_cast<std::uint8_t>(source[c]);
+        decision.channels.swizzle[c] = static_cast<std::uint8_t>(swizzle[c]);
+      }
+      const auto identity = asString(env, property(env, record, "sourceIdentity"));
+      const auto hash = hasProperty(env, record, "backingHash")
+        ? asString(env, property(env, record, "backingHash")) : std::string{};
+      if (valid && value.images.installStorageDecision(*path, identity, decision, hash)) ++installed;
+      else if (i - installed < 3)
+        Log(LogLevel::Warning) << "[pmjs] image storage installation rejected source=" << path->string()
+          << " expected=" << identity << " actual=" << Vfs::fileIdentity(*path);
+      if (installed != before) report.accepted.push_back(identifier);
+      else report.rejected.emplace_back(identifier, "storage decision or source checksum rejected");
+    } catch (const std::exception& error) { report.reject(env, identifier, error.what()); }
   }
   guard.complete = true;
-  return number(env, installed);
+  return detailed ? report.result(env) : number(env, installed);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
@@ -557,81 +572,89 @@ napi_value processTiles(napi_env env, napi_callback_info info) try {
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 
 napi_value installTileSetsImpl(napi_env env, napi_callback_info info, bool catalog) try {
-  const auto args = arguments(env, info, 2);
+  const auto args = arguments(env, info, 3);
   const bool capture = !catalog && args.size() > 1 && asBoolean(env, args[1]);
+  const bool detailed = args.size() > 2 && asBoolean(env, args[2]);
+  PreparationInstallReport report;
   auto& value = host(env);
   const auto count = arrayLength(env, args.at(0), 65536);
-  std::vector<PreparedTileSet> descriptors;
-  descriptors.reserve(count);
-  for (std::uint32_t i = 0; i < count; ++i) {
-    auto entry = element(env, args[0], i); PreparedTileSet setValue;
-    auto d = property(env, entry, "descriptor");
-    setValue.identity = asString(env, property(env, entry, "identity"));
-    setValue.directory = asString(env, property(env, entry, "directory"));
-    setValue.version = integer(env, property(env, d, "version"));
-    setValue.halo = integer(env, property(env, d, "halo"));
-    auto pages = property(env, d, "pages");
-    const auto pageCount = arrayLength(env, pages, 4096);
-    setValue.pages.reserve(pageCount);
-    for (std::uint32_t j = 0; j < pageCount; ++j) {
-      auto page = element(env, pages, j);
-      setValue.pages.push_back({asString(env, property(env, page, "path")),
-        integer(env, property(env, page, "width")), integer(env, property(env, page, "height"))});
-    }
-    auto sources = property(env, d, "sources");
-    const auto sourceCount = arrayLength(env, sources, 512);
-    setValue.sources.reserve(sourceCount);
-    for (std::uint32_t j = 0; j < sourceCount; ++j) {
-      auto source = element(env, sources, j); PreparedTileSource output;
-      const auto logical = asString(env, property(env, source, "source"));
-      auto path = value.vfs.resolve(logical);
-      if (!path) throw std::runtime_error("cannot resolve tile source");
-      output.path = *path; output.snapshot = asString(env, property(env, source, "snapshot"));
-      output.identity = asString(env, property(env, source, "sourceIdentity"));
-      output.width = integer(env, property(env, source, "width")); output.height = integer(env, property(env, source, "height"));
-      auto regions = property(env, source, "regions");
-      const auto regionCount = arrayLength(env, regions, 65536);
-      output.regions.reserve(regionCount);
-      for (std::uint32_t k = 0; k < regionCount; ++k) {
-        auto region = element(env, regions, k);
-        output.regions.push_back({integers<4>(env, property(env, region, "rect")),
-          integers<4>(env, property(env, region, "atlas")), integer(env, property(env, region, "page"))});
-      }
-      setValue.sources.push_back(std::move(output));
-    }
-    descriptors.push_back(std::move(setValue));
-  }
   value.images.clearTileSetIndex();
   std::uint32_t installed = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
-    std::vector<std::string> pages, snapshots;
-    if (catalog) {
-      auto entry = element(env, args[0], i);
-      for (const auto name : {"pageIdentities", "snapshotIdentities"}) {
-        auto list = property(env, entry, name);
-        auto& output = std::string(name) == "pageIdentities" ? pages : snapshots;
-        const auto size = arrayLength(env, list, 4096);
-        for (std::uint32_t j = 0; j < size; ++j) output.push_back(asString(env, element(env, list, j)));
+    std::string identifier = std::to_string(i);
+    try {
+      auto entry = element(env, args[0], i); PreparedTileSet setValue;
+      auto d = property(env, entry, "descriptor");
+      setValue.identity = asString(env, property(env, entry, "identity"));
+      identifier = setValue.identity;
+      setValue.directory = asString(env, property(env, entry, "directory"));
+      setValue.version = integer(env, property(env, d, "version"));
+      setValue.halo = integer(env, property(env, d, "halo"));
+      auto pageValues = property(env, d, "pages");
+      const auto pageCount = arrayLength(env, pageValues, 4096);
+      setValue.pages.reserve(pageCount);
+      for (std::uint32_t j = 0; j < pageCount; ++j) {
+        auto page = element(env, pageValues, j);
+        setValue.pages.push_back({asString(env, property(env, page, "path")),
+          integer(env, property(env, page, "width")), integer(env, property(env, page, "height"))});
       }
-    }
-    std::vector<std::string> capturedPages, capturedSnapshots;
-    if (value.images.installTileSet(std::move(descriptors[i]), catalog ? &pages : nullptr, catalog ? &snapshots : nullptr, capture ? &capturedPages : nullptr, capture ? &capturedSnapshots : nullptr)) {
-      ++installed;
-      if (capture) {
-        auto entry = element(env, args[0], i);
+      auto sources = property(env, d, "sources");
+      const auto sourceCount = arrayLength(env, sources, 512);
+      setValue.sources.reserve(sourceCount);
+      for (std::uint32_t j = 0; j < sourceCount; ++j) {
+        auto source = element(env, sources, j); PreparedTileSource output;
+        const auto logical = asString(env, property(env, source, "source"));
+        auto path = value.vfs.resolve(logical);
+        if (!path) throw std::runtime_error("cannot resolve tile source");
+        output.path = *path; output.snapshot = asString(env, property(env, source, "snapshot"));
+        output.identity = asString(env, property(env, source, "sourceIdentity"));
+        output.width = integer(env, property(env, source, "width")); output.height = integer(env, property(env, source, "height"));
+        auto regions = property(env, source, "regions");
+        const auto regionCount = arrayLength(env, regions, 65536);
+        output.regions.reserve(regionCount);
+        for (std::uint32_t k = 0; k < regionCount; ++k) {
+          auto region = element(env, regions, k);
+          output.regions.push_back({integers<4>(env, property(env, region, "rect")),
+            integers<4>(env, property(env, region, "atlas")), integer(env, property(env, region, "page"))});
+        }
+        setValue.sources.push_back(std::move(output));
+      }
+      std::vector<std::string> pages, snapshots;
+      if (catalog) {
         for (const auto name : {"pageIdentities", "snapshotIdentities"}) {
-          const auto& captured = std::string(name) == "pageIdentities" ? capturedPages : capturedSnapshots;
-          napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");
-          for (std::size_t j = 0; j < captured.size(); ++j) check(env, napi_set_element(env, list, j, string(env, captured[j])), "cannot set identity");
-          set(env, entry, name, list);
+          auto list = property(env, entry, name);
+          auto& output = std::string(name) == "pageIdentities" ? pages : snapshots;
+          const auto size = arrayLength(env, list, 4096);
+          for (std::uint32_t j = 0; j < size; ++j) output.push_back(asString(env, element(env, list, j)));
         }
       }
-    }
+      std::vector<std::string> capturedPages, capturedSnapshots;
+      if (value.images.installTileSet(std::move(setValue), catalog ? &pages : nullptr, catalog ? &snapshots : nullptr, capture ? &capturedPages : nullptr, capture ? &capturedSnapshots : nullptr)) {
+        ++installed;
+        report.accepted.push_back(identifier);
+        if (capture) {
+            for (const auto name : {"pageIdentities", "snapshotIdentities"}) {
+            const auto& captured = std::string(name) == "pageIdentities" ? capturedPages : capturedSnapshots;
+            napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");
+            for (std::size_t j = 0; j < captured.size(); ++j) check(env, napi_set_element(env, list, j, string(env, captured[j])), "cannot set identity");
+            set(env, entry, name, list);
+          }
+        }
+      } else report.rejected.emplace_back(identifier, "tile sources, pages or descriptor rejected");
+    } catch (const std::exception& error) { report.reject(env, identifier, error.what()); }
   }
-  return number(env, installed);
+  return detailed ? report.result(env) : number(env, installed);
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 napi_value installTileSets(napi_env env, napi_callback_info info) { return installTileSetsImpl(env, info, false); }
 napi_value installTileSetCatalog(napi_env env, napi_callback_info info) { return installTileSetsImpl(env, info, true); }
+napi_value consumePreparationFailures(napi_env env, napi_callback_info) try {
+  const auto failures = host(env).images.consumePreparationFailures();
+  napi_value result;
+  check(env, napi_create_array_with_length(env, failures.size(), &result), "cannot create preparation failures");
+  for (std::size_t i = 0; i < failures.size(); ++i)
+    check(env, napi_set_element(env, result, i, string(env, failures[i])), "cannot set preparation failure");
+  return result;
+} catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 napi_value consumePreparationInvalidations(napi_env env, napi_callback_info) try {
   auto& value = host(env);
   auto flags = value.images.consumePreparationInvalidations();
@@ -651,6 +674,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   method(env, assets, "tryAcquirePreparationLock", tryAcquirePreparationLock);
   method(env, assets, "releasePreparationLock", releasePreparationLock);
   method(env, assets, "consumePreparationInvalidations", consumePreparationInvalidations);
+  method(env, assets, "consumePreparationFailures", consumePreparationFailures);
   method(env, assets, "processImage", processImage);
   method(env, assets, "classifyImageStorage", classifyImageStorage);
   method(env, assets, "installImageStorage", installImageStorage);

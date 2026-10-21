@@ -3,8 +3,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { prepareAssets, astcSettings, validDescriptor, validStorageDecision } = require('./asset-preparation.cjs');
-const { prepareMaps, validTileDescriptor } = require('./map-preparation.cjs');
+const { astcSettings, validDescriptor, validStorageDecision } = require('./asset-preparation.cjs');
+const { validTileDescriptor } = require('./map-preparation.cjs');
+const { prepareGameAssets } = require('./preparation.cjs');
 const { COMPILER_VERSION } = require('./map-demand.cjs');
 
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -25,6 +26,7 @@ function offlineFilesystem(gameRoot, derived) {
   const exists = logical => file(logical) !== null;
   const assets = {
     sourcePath: logical => exists(logical) ? file(logical) : null,
+    addDerived: (logical, file) => derived.set(logical, file),
     sourceIdentity: logical => {
       if (!exists(logical)) return null;
       const stat = fs.statSync(file(logical));
@@ -33,19 +35,24 @@ function offlineFilesystem(gameRoot, derived) {
   };
   const game = {
     exists,
+    isDirectory: logical => { try { return fs.statSync(path.join(root, logical)).isDirectory(); } catch { return false; } },
     readBytes: logical => exists(logical) ? fs.readFileSync(file(logical)) : null,
-    readDirectory: logical => fs.existsSync(file(logical)) ? fs.readdirSync(file(logical)) : null
+    readDirectory: logical => {
+      const directory = logical === '.' || !logical ? root : file(logical);
+      return directory && fs.statSync(directory).isDirectory() ? fs.readdirSync(directory) : null;
+    }
   };
   return { assets, fs: game };
 }
 
-function portableMaps(result, cacheRoot, includeAssets, output) {
+function portableMaps(result, includeAssets, output) {
   const mapInputs = Object.fromEntries(Object.entries(result.mapInputs || {}).map(([name, entry]) =>
     [name, { ...entry, dependencies: entry.dependencies.map(({ logical, hash }) => ({ logical, hash })) }]));
   const entries = [];
   for (const [mapId, selected] of Object.entries(result.index)) {
-    const directory = path.join(cacheRoot, 'maps/entries', selected.identity);
-    const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
+    const entry = result.entries.find(item => item.identity === selected.identity);
+    const directory = entry.directory;
+    const manifest = entry;
     if (!validTileDescriptor(manifest.descriptor)) throw new Error('invalid generated map descriptor');
     const pages = manifest.outputs.map(page => {
       const source = path.join(directory, page.path);
@@ -63,49 +70,39 @@ function portableMaps(result, cacheRoot, includeAssets, output) {
   return { compiler: COMPILER_VERSION, compilations: result.compilations || {}, mapInputs, entries };
 }
 
-async function generateAssetIndex({ root, gameRoot, config, options, output, includeAssets, shouldCancel = () => false }) {
+async function generateAssetIndex({ root, gameRoot, options, output, includeAssets, portDescriptors = [], includePortAssets = false, writeIndex = true, shouldCancel = () => false }) {
   const nativeAddon = require(path.join(root, 'lib/pmjs_native.node'));
   const cacheRoot = path.join(output, '.preparation');
-  if (!options.assetPreparation.enabled) {
-    const empty = { schema: 2, kind: 'pmjs-asset-index',
-      sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
-      pageCodec: options.assetPreparation.pageCodec,
-      pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
-      losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
-      astc: astcSettings(options.assetPreparation.astc),
-      imageStorageVersion: nativeAddon.assets.imageStorageVersion,
-      processor: nativeAddon.assets.preparationVersion,
-      tileProcessor: nativeAddon.assets.tilePreparationVersion,
-      configSha256: config ? hash(config) : null, width: options.width, height: options.height,
-      recipesIdentity: identity(options.assetPreparation.recipes), images: [], negativeHints: [], maps: null };
-    fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(empty) + '\n');
-    return { images: 0, preparedImages: 0, maps: 0, warnings: [], warningCount: 0 };
-  }
   const derived = new Map();
   const filesystem = offlineFilesystem(gameRoot, derived);
   const native = { assets: Object.assign(Object.create(nativeAddon.assets), filesystem.assets), fs: filesystem.fs };
   const warnings = [];
   const logger = { warn: message => warnings.push(message) };
   try {
-    const images = await prepareAssets({ gameRoot, cacheRoot, native,
-      recipes: options.assetPreparation.recipes, preparationContext: 'offline',
-      pageCodec: options.assetPreparation.pageCodec,
-      pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
-      losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
-      astc: astcSettings(options.assetPreparation.astc), workspaceBytes: options.assetPreparation.workspaceBytes,
-      verifyHashes: true, logger, shouldCancel });
-    if (images.cancelled) throw new Error('image preparation cancelled');
+    const prepared = await prepareGameAssets({ gameRoot, cacheRoot, native,
+      ...options.assetPreparation, images: options.assetPreparation.enabled,
+      maps: options.assetPreparation.enabled && options.assetPreparation.maps,
+      preparationContext: 'offline', verifyHashes: true, logger, shouldCancel,
+      width: options.width, height: options.height, bundleRoot: output, portDescriptors });
+    const images = prepared.images || { total: 0, prepared: 0, decisions: [], entries: [], decryptedEntries: [] };
+    let maps = prepared.maps || null;
+    if (prepared.cancelled) throw new Error('asset preparation cancelled');
     if (images.error) warnings.push('[pmjs] image index incomplete: ' + images.error);
-    for (const entry of images.decryptedEntries) derived.set(entry.logicalSource, entry.file);
-    const hasMaps = fs.existsSync(path.join(gameRoot, 'data')) &&
-      fs.readdirSync(path.join(gameRoot, 'data')).some(name => /^Map\d+\.json$/i.test(name));
-    let maps = options.assetPreparation.maps && hasMaps ?
-      await prepareMaps({ gameRoot, cacheRoot, native, width: options.width, height: options.height,
-        preparationContext: 'offline', verifyHashes: true, logger, shouldCancel }) : null;
-    if (maps?.cancelled) throw new Error('map preparation cancelled');
-    if (maps?.error) {
-      warnings.push('[pmjs] map index unavailable: ' + maps.error);
-      maps = null;
+    if (maps?.error) { warnings.push('[pmjs] map index unavailable: ' + maps.error); maps = null; }
+    for (const desc of portDescriptors) {
+      desc.outputs = [];
+      for (const record of Object.values(prepared.records || {})) {
+        if (!record.id?.startsWith(desc.id + '/')) continue;
+        const value = { id: record.id.slice(desc.id.length + 1), source: record.source, sourceSha256: record.sourceHash };
+        const file = prepared.portArtifacts.get(record.id);
+        if (file && includePortAssets) {
+          value.file = 'assets/ports/' + desc.id + '/' + value.id + '.pma1';
+          value.sha256 = hash(file);
+          fs.mkdirSync(path.dirname(path.join(output, value.file)), { recursive: true });
+          fs.copyFileSync(file, path.join(output, value.file));
+        }
+        desc.outputs.push(value);
+      }
     }
     const imageEntries = new Map();
     images.entries.forEach((entry, index) => {
@@ -165,8 +162,8 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
       }
       imageRecords.push({ ...decision, descriptor, ...(storage ? { storage } : {}), outputs });
     }
-    const index = { schema: 2, kind: 'pmjs-asset-index',
-      sections: { imageStorage: 1, images: 1, negativeHints: 1, mapCompilation: 1, tileOutputs: 1 },
+    const index = { schema: 3, kind: 'pmjs-asset-index',
+      sections: { imageStorage: 1, images: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
       pageCodecVersion: options.assetPreparation.pageCodec === 'lz4' ? nativeAddon.assets.preparationLz4Version : null,
       losslessPrefixes: options.assetPreparation.losslessPrefixes || [],
@@ -174,12 +171,17 @@ async function generateAssetIndex({ root, gameRoot, config, options, output, inc
       imageStorageVersion: nativeAddon.assets.imageStorageVersion,
       processor: nativeAddon.assets.preparationVersion,
       tileProcessor: nativeAddon.assets.tilePreparationVersion,
-      configSha256: config ? hash(config) : null, width: options.width, height: options.height,
-      recipesIdentity: identity(options.assetPreparation.recipes),
-      images: imageRecords, negativeHints: imageRecords.filter(record => record.descriptor === null &&
-        record.recipe === null && record.encryptionSettingsSha256 === null && record.source.endsWith('.png'))
-        .map(record => record.source), maps: maps && portableMaps(maps, cacheRoot, includeAssets, output) };
-    fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(index) + '\n');
+      width: options.width, height: options.height,
+      images: imageRecords.map(({ source, ...calculated }) => {
+        const astc = astcSettings(options.assetPreparation.astc);
+        const lossless = (options.assetPreparation.losslessPrefixes || []).some(prefix => source.startsWith(prefix));
+        const recipe = options.assetPreparation.recipes.find(recipe => recipe.source === source || recipe.source === source.replace(/\.(png_|rpgmvp)$/i, '.png'));
+        const allowAstc = astc.enabled && !lossless;
+        return { source, settings: { astc, lossless, ...(recipe ? { recipe } : {}) },
+          calculated: { ...calculated, resolvedSettings: { allowAstc,
+            astcQuality: allowAstc ? astc.quality : null, pageCodec: options.assetPreparation.pageCodec } } };
+      }), maps: maps && portableMaps(maps, includeAssets, output) };
+    if (writeIndex) fs.writeFileSync(path.join(output, 'asset-index.json'), JSON.stringify(index) + '\n');
     return { images: images.total, preparedImages: images.prepared,
       maps: maps?.selected || 0, warnings: warnings.slice(0, 3), warningCount: warnings.length };
   } finally {
@@ -191,14 +193,30 @@ function loadAssetIndex(file, native, options) {
   try {
     if (!file || fs.statSync(file).size > 64 * 1024 * 1024) return null;
     const index = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (![1, 2].includes(index.schema) || index.kind !== 'pmjs-asset-index') return null;
+    if (![1, 2, 3].includes(index.schema) || index.kind !== 'pmjs-asset-index') return null;
+    const policies = {};
+    if (index.schema === 3 && Array.isArray(index.images)) {
+      index.images = index.images.filter(record => record && typeof record.source === 'string').map(record => {
+        policies[record.source] = record.settings || {};
+        return { ...record.calculated, source: record.source };
+      });
+    } else {
+      for (const record of Array.isArray(index.images) ? index.images : []) {
+        if (!record || typeof record.source !== 'string') continue;
+        policies[record.source] = {
+          ...(index.astc ? { astc: index.astc } : {}),
+          ...((index.losslessPrefixes || []).some(prefix => record.source.startsWith(prefix)) ? { lossless: true } : {}) };
+      }
+      for (const recipe of options.assetPreparation.recipes)
+        policies[recipe.source] = { ...policies[recipe.source], recipe };
+    }
     const legacy = index.schema === 1;
     const imageCompatible = (legacy || index.sections?.images === 1) &&
       Array.isArray(index.images) && index.images.length <= 100000 &&
       JSON.stringify(index.processor) === JSON.stringify(native.assets.preparationVersion) &&
-      index.recipesIdentity === identity(options.assetPreparation.recipes) &&
-      JSON.stringify(index.losslessPrefixes || []) === JSON.stringify(options.assetPreparation.losslessPrefixes || []) &&
-      JSON.stringify(astcSettings(index.astc)) === JSON.stringify(astcSettings(options.assetPreparation.astc)) &&
+      (index.schema === 3 || index.recipesIdentity === identity(options.assetPreparation.recipes) &&
+        JSON.stringify(index.losslessPrefixes || []) === JSON.stringify(options.assetPreparation.losslessPrefixes || []) &&
+        JSON.stringify(astcSettings(index.astc)) === JSON.stringify(astcSettings(options.assetPreparation.astc))) &&
       (legacy || index.pageCodec === options.assetPreparation.pageCodec) &&
       (legacy || index.pageCodec !== 'lz4' || typeof native.assets.preparationLz4Version === 'string' &&
         index.pageCodecVersion === native.assets.preparationLz4Version);
@@ -207,9 +225,14 @@ function loadAssetIndex(file, native, options) {
     const tilesCompatible = (legacy || index.sections?.tileOutputs === 1) &&
       index.tileProcessor === native.assets.tilePreparationVersion &&
       index.width === options.width && index.height === options.height;
-    return { ...index, images: imageCompatible ? index.images.filter(record => record && typeof record.source === 'string')
+    return { ...index, policies, images: imageCompatible ? index.images.filter(record => record && typeof record.source === 'string')
         .map(record => {
           const { storage, ...rest } = record;
+          if (!rest.resolvedSettings) {
+            const astc = astcSettings(index.astc);
+            const allowAstc = astc.enabled && !(index.losslessPrefixes || []).some(prefix => record.source.startsWith(prefix));
+            rest.resolvedSettings = { allowAstc, astcQuality: allowAstc ? astc.quality : null, pageCodec: index.pageCodec || 'png' };
+          }
           return index.sections?.imageStorage === 1 && index.imageStorageVersion === native.assets.imageStorageVersion &&
             index.imageStorageVersion === 1 && validStorageDecision(storage) ? { ...rest, storage } : rest;
         }) : [],
@@ -220,4 +243,4 @@ function loadAssetIndex(file, native, options) {
   } catch { return null; }
 }
 
-module.exports = { generateAssetIndex, loadAssetIndex };
+module.exports = { generateAssetIndex, loadAssetIndex, offlineFilesystem };

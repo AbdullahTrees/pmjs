@@ -20,6 +20,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <utility>
 
 namespace pmjs::addon {
 
@@ -99,6 +100,36 @@ std::array<float, Size> floatArray(napi_env env,
 
 void method(napi_env env, napi_value object, const char* name, napi_callback callback);
 napi_value moduleObject(napi_env env);
+struct PreparationInstallReport {
+  std::vector<std::string> accepted;
+  std::vector<std::pair<std::string, std::string>> rejected;
+  void reject(napi_env env, const std::string& id, const std::string& reason) {
+    bool pending = false;
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
+      napi_value exception;
+      napi_get_and_clear_last_exception(env, &exception);
+    }
+    rejected.emplace_back(id, reason);
+  }
+  napi_value result(napi_env env) const {
+    auto output = moduleObject(env);
+    napi_value good, bad;
+    check(env, napi_create_array_with_length(env, accepted.size(), &good), "cannot create accepted preparation list");
+    check(env, napi_create_array_with_length(env, rejected.size(), &bad), "cannot create rejected preparation list");
+    for (std::size_t i = 0; i < accepted.size(); ++i)
+      check(env, napi_set_element(env, good, i, string(env, accepted[i])), "cannot set accepted preparation");
+    for (std::size_t i = 0; i < rejected.size(); ++i) {
+      auto item = moduleObject(env);
+      check(env, napi_set_named_property(env, item, "id", string(env, rejected[i].first)), "cannot set preparation id");
+      check(env, napi_set_named_property(env, item, "reason", string(env, rejected[i].second)), "cannot set preparation reason");
+      check(env, napi_set_element(env, bad, i, item), "cannot set rejected preparation");
+    }
+    check(env, napi_set_named_property(env, output, "accepted", good), "cannot set accepted preparation list");
+    check(env, napi_set_named_property(env, output, "rejected", bad), "cannot set rejected preparation list");
+    return output;
+  }
+};
+
 void registerRuntimeBindings(napi_env env, napi_value exports);
 void registerPlatformBindings(napi_env env, napi_value exports);
 void registerGraphicsBindings(napi_env env, napi_value exports);

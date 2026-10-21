@@ -683,8 +683,10 @@ std::array<std::uint8_t, 4> preparedColor(napi_env env, napi_value object, const
 }
 
 napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool catalog) try {
-  const auto args = arguments(env, info, 2);
+  const auto args = arguments(env, info, 3);
   const bool capture = !catalog && args.size() > 1 && asBoolean(env, args[1]);
+  const bool detailed = args.size() > 2 && asBoolean(env, args[2]);
+  PreparationInstallReport report;
   auto& value = host(env);
   std::uint32_t count = 0;
   check(env, napi_get_array_length(env, args.at(0), &count), "prepared entries must be an array");
@@ -693,119 +695,128 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
   std::uint32_t installed = 0;
   std::uint32_t missingSource = 0, changedSource = 0, missingPage = 0, invalidEntry = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
-    napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid prepared entry");
-    const auto sourceName = asString(env, property(env, entry, "source"));
-    const auto path = value.vfs.resolve(sourceName);
-    if (!path) { ++missingSource; continue; }
-    const auto directory = std::filesystem::path(asString(env, property(env, entry, "directory")));
-    if (!directory.is_absolute()) throw std::runtime_error("prepared directory must be absolute");
-    const auto object = property(env, entry, "descriptor");
-    PreparedImageDescriptor descriptor;
-    descriptor.version = asInt32(env, property(env, object, "version"));
-    if (hasProperty(env, object, "compression")) descriptor.compression = asString(env, property(env, object, "compression"));
-    descriptor.width = asInt32(env, property(env, object, "width"));
-    descriptor.height = asInt32(env, property(env, object, "height"));
-    if (hasProperty(env, object, "halo")) descriptor.halo = asInt32(env, property(env, object, "halo"));
-    if (hasProperty(env, object, "uniform")) descriptor.uniform = preparedColor(env, object, "uniform");
-    if (hasProperty(env, object, "blockGrid")) descriptor.blockGrid = preparedArray<3>(env, object, "blockGrid");
-    if (hasProperty(env, object, "blockChannels")) descriptor.blockChannels = asInt32(env, property(env, object, "blockChannels"));
-    if (hasProperty(env, object, "compactEligible")) {
-      bool eligible = false;
-      check(env, napi_get_value_bool(env, property(env, object, "compactEligible"), &eligible), "invalid compact eligibility");
-      descriptor.compactEligible = eligible;
-    }
-    if (hasProperty(env, object, "pages")) {
-      const auto pages = property(env, object, "pages"); std::uint32_t size = 0;
-      check(env, napi_get_array_length(env, pages, &size), "invalid prepared pages");
-      if (size > 10000) throw std::runtime_error("too many prepared pages");
-      for (std::uint32_t j = 0; j < size; ++j) {
-        napi_value page; check(env, napi_get_element(env, pages, j, &page), "invalid prepared page");
-        descriptor.pages.push_back({asString(env, property(env, page, "path")),
-          asInt32(env, property(env, page, "width")), asInt32(env, property(env, page, "height"))});
-        if (hasProperty(env, page, "storage")) {
-          auto storage = property(env, page, "storage");
-          ImageStorageDecision known;
-          known.width = asInt32(env, property(env, storage, "width"));
-          known.height = asInt32(env, property(env, storage, "height"));
-          known.channels.channels = asInt32(env, property(env, storage, "channels"));
-          const auto source = preparedArray<4>(env, storage, "source");
-          const auto swizzle = preparedArray<4>(env, storage, "swizzle");
-          bool valid = known.width == descriptor.pages.back().width && known.height == descriptor.pages.back().height &&
-            (known.channels.channels == 1 || known.channels.channels == 2 || known.channels.channels == 4);
-          for (int c = 0; c < 4; ++c) {
-            valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 &&
-              (swizzle[c] < known.channels.channels || swizzle[c] == 4 || swizzle[c] == 5);
-            known.channels.source[c] = source[c]; known.channels.swizzle[c] = swizzle[c];
+    std::string identifier = std::to_string(i);
+    try {
+      const auto before = installed;
+      napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid prepared entry");
+      const auto sourceName = asString(env, property(env, entry, "source"));
+      identifier = sourceName;
+      const auto path = value.vfs.resolve(sourceName);
+      if (!path) { ++missingSource; report.rejected.emplace_back(identifier, "missing source"); continue; }
+      const auto directory = std::filesystem::path(asString(env, property(env, entry, "directory")));
+      if (!directory.is_absolute()) throw std::runtime_error("prepared directory must be absolute");
+      const auto object = property(env, entry, "descriptor");
+      PreparedImageDescriptor descriptor;
+      descriptor.version = asInt32(env, property(env, object, "version"));
+      if (hasProperty(env, object, "compression")) descriptor.compression = asString(env, property(env, object, "compression"));
+      descriptor.width = asInt32(env, property(env, object, "width"));
+      descriptor.height = asInt32(env, property(env, object, "height"));
+      if (hasProperty(env, object, "halo")) descriptor.halo = asInt32(env, property(env, object, "halo"));
+      if (hasProperty(env, object, "uniform")) descriptor.uniform = preparedColor(env, object, "uniform");
+      if (hasProperty(env, object, "blockGrid")) descriptor.blockGrid = preparedArray<3>(env, object, "blockGrid");
+      if (hasProperty(env, object, "blockChannels")) descriptor.blockChannels = asInt32(env, property(env, object, "blockChannels"));
+      if (hasProperty(env, object, "compactEligible")) {
+        bool eligible = false;
+        check(env, napi_get_value_bool(env, property(env, object, "compactEligible"), &eligible), "invalid compact eligibility");
+        descriptor.compactEligible = eligible;
+      }
+      if (hasProperty(env, object, "pages")) {
+        const auto pages = property(env, object, "pages"); std::uint32_t size = 0;
+        check(env, napi_get_array_length(env, pages, &size), "invalid prepared pages");
+        if (size > 10000) throw std::runtime_error("too many prepared pages");
+        for (std::uint32_t j = 0; j < size; ++j) {
+          napi_value page; check(env, napi_get_element(env, pages, j, &page), "invalid prepared page");
+          descriptor.pages.push_back({asString(env, property(env, page, "path")),
+            asInt32(env, property(env, page, "width")), asInt32(env, property(env, page, "height"))});
+          if (hasProperty(env, page, "storage")) {
+            auto storage = property(env, page, "storage");
+            ImageStorageDecision known;
+            known.width = asInt32(env, property(env, storage, "width"));
+            known.height = asInt32(env, property(env, storage, "height"));
+            known.channels.channels = asInt32(env, property(env, storage, "channels"));
+            const auto source = preparedArray<4>(env, storage, "source");
+            const auto swizzle = preparedArray<4>(env, storage, "swizzle");
+            bool valid = known.width == descriptor.pages.back().width && known.height == descriptor.pages.back().height &&
+              (known.channels.channels == 1 || known.channels.channels == 2 || known.channels.channels == 4);
+            for (int c = 0; c < 4; ++c) {
+              valid &= source[c] >= 0 && source[c] < 4 && swizzle[c] >= 0 &&
+                (swizzle[c] < known.channels.channels || swizzle[c] == 4 || swizzle[c] == 5);
+              known.channels.source[c] = source[c]; known.channels.swizzle[c] = swizzle[c];
+            }
+            if (valid) descriptor.pages.back().storage = known;
           }
-          if (valid) descriptor.pages.back().storage = known;
         }
       }
-    }
-    if (hasProperty(env, object, "cells")) {
-      const auto cells = property(env, object, "cells"); std::uint32_t size = 0;
-      check(env, napi_get_array_length(env, cells, &size), "invalid prepared cells");
-      if (size > 10000) throw std::runtime_error("too many prepared cells");
-      for (std::uint32_t j = 0; j < size; ++j) {
-        napi_value cell; check(env, napi_get_element(env, cells, j, &cell), "invalid prepared cell");
-        PreparedImageCell item;
-        item.rect = preparedArray<4>(env, cell, "rect"); item.crop = preparedArray<4>(env, cell, "crop");
-        item.fill = preparedColor(env, cell, "fill");
-        if (hasProperty(env, cell, "page")) item.page = asInt32(env, property(env, cell, "page"));
-        if (hasProperty(env, cell, "atlas")) item.atlas = preparedArray<4>(env, cell, "atlas");
-        descriptor.cells.push_back(item);
+      if (hasProperty(env, object, "cells")) {
+        const auto cells = property(env, object, "cells"); std::uint32_t size = 0;
+        check(env, napi_get_array_length(env, cells, &size), "invalid prepared cells");
+        if (size > 10000) throw std::runtime_error("too many prepared cells");
+        for (std::uint32_t j = 0; j < size; ++j) {
+          napi_value cell; check(env, napi_get_element(env, cells, j, &cell), "invalid prepared cell");
+          PreparedImageCell item;
+          item.rect = preparedArray<4>(env, cell, "rect"); item.crop = preparedArray<4>(env, cell, "crop");
+          item.fill = preparedColor(env, cell, "fill");
+          if (hasProperty(env, cell, "page")) item.page = asInt32(env, property(env, cell, "page"));
+          if (hasProperty(env, cell, "atlas")) item.atlas = preparedArray<4>(env, cell, "atlas");
+          descriptor.cells.push_back(item);
+        }
       }
-    }
-    const auto identity = asString(env, property(env, entry, "sourceIdentity"));
-    std::vector<std::string> identities;
-    if (catalog) {
-      const auto pages = property(env, entry, "pageIdentities"); std::uint32_t size = 0;
-      check(env, napi_get_array_length(env, pages, &size), "invalid page identities");
-      if (size != descriptor.pages.size()) throw std::runtime_error("page identity count mismatch");
-      for (std::uint32_t j = 0; j < size; ++j) {
-        napi_value item; check(env, napi_get_element(env, pages, j, &item), "invalid page identity");
-        identities.push_back(asString(env, item));
+      const auto identity = asString(env, property(env, entry, "sourceIdentity"));
+      std::vector<std::string> identities;
+      if (catalog) {
+        const auto pages = property(env, entry, "pageIdentities"); std::uint32_t size = 0;
+        check(env, napi_get_array_length(env, pages, &size), "invalid page identities");
+        if (size != descriptor.pages.size()) throw std::runtime_error("page identity count mismatch");
+        for (std::uint32_t j = 0; j < size; ++j) {
+          napi_value item; check(env, napi_get_element(env, pages, j, &item), "invalid page identity");
+          identities.push_back(asString(env, item));
+        }
       }
-    }
-    const auto backingHash = hasProperty(env, entry, "backingHash") ?
-      asString(env, property(env, entry, "backingHash")) : std::string{};
-    std::vector<std::string> pageHashes;
-    const bool hashedPages = hasProperty(env, entry, "pageHashes");
-    if (hashedPages) {
-      const auto hashes = property(env, entry, "pageHashes"); std::uint32_t size = 0;
-      check(env, napi_get_array_length(env, hashes, &size), "invalid page hashes");
-      if (size != descriptor.pages.size()) throw std::runtime_error("page hash count mismatch");
-      for (std::uint32_t j = 0; j < size; ++j) {
-        napi_value item; check(env, napi_get_element(env, hashes, j, &item), "invalid page hash");
-        pageHashes.push_back(asString(env, item));
+      const auto backingHash = hasProperty(env, entry, "backingHash") ?
+        asString(env, property(env, entry, "backingHash")) : std::string{};
+      std::vector<std::string> pageHashes;
+      const bool hashedPages = hasProperty(env, entry, "pageHashes");
+      if (hashedPages) {
+        const auto hashes = property(env, entry, "pageHashes"); std::uint32_t size = 0;
+        check(env, napi_get_array_length(env, hashes, &size), "invalid page hashes");
+        if (size != descriptor.pages.size()) throw std::runtime_error("page hash count mismatch");
+        for (std::uint32_t j = 0; j < size; ++j) {
+          napi_value item; check(env, napi_get_element(env, hashes, j, &item), "invalid page hash");
+          pageHashes.push_back(asString(env, item));
+        }
       }
+      std::vector<std::string> captured;
+      std::vector<std::filesystem::path> pagePaths;
+      pagePaths.reserve(descriptor.pages.size());
+      for (const auto& page : descriptor.pages) pagePaths.push_back(directory / page.path);
+      if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr, backingHash, hashedPages ? &pageHashes : nullptr)) {
+        ++installed;
+        if (capture) {
+          napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");
+          for (std::size_t j = 0; j < captured.size(); ++j) check(env, napi_set_element(env, list, j, string(env, captured[j])), "cannot set identity");
+          check(env, napi_set_named_property(env, entry, "pageIdentities", list), "cannot set page identities");
+        }
+      } else if (const auto current = Vfs::fileIdentity(*path); current != identity) {
+        if (changedSource < 3)
+          Log(LogLevel::Warning) << "[pmjs] prepared source identity differs " << sourceName
+            << " expected=" << identity << " actual=" << current << '\n';
+        ++changedSource;
+      } else if (std::any_of(pagePaths.begin(), pagePaths.end(), [](const auto& file) {
+        std::error_code error;
+        return !std::filesystem::is_regular_file(file, error);
+      })) ++missingPage;
+      else ++invalidEntry;
+      if (installed != before) report.accepted.push_back(identifier);
+      else report.rejected.emplace_back(identifier, "source, pages or descriptor rejected");
+    } catch (const std::exception& error) {
+      report.reject(env, identifier, error.what()); ++invalidEntry;
     }
-    std::vector<std::string> captured;
-    std::vector<std::filesystem::path> pagePaths;
-    pagePaths.reserve(descriptor.pages.size());
-    for (const auto& page : descriptor.pages) pagePaths.push_back(directory / page.path);
-    if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr, backingHash, hashedPages ? &pageHashes : nullptr)) {
-      ++installed;
-      if (capture) {
-        napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");
-        for (std::size_t j = 0; j < captured.size(); ++j) check(env, napi_set_element(env, list, j, string(env, captured[j])), "cannot set identity");
-        check(env, napi_set_named_property(env, entry, "pageIdentities", list), "cannot set page identities");
-      }
-    } else if (const auto current = Vfs::fileIdentity(*path); current != identity) {
-      if (changedSource < 3)
-        Log(LogLevel::Warning) << "[pmjs] prepared source identity differs " << sourceName
-          << " expected=" << identity << " actual=" << current << '\n';
-      ++changedSource;
-    } else if (std::any_of(pagePaths.begin(), pagePaths.end(), [](const auto& file) {
-      std::error_code error;
-      return !std::filesystem::is_regular_file(file, error);
-    })) ++missingPage;
-    else ++invalidEntry;
   }
   if (installed != count)
     Log(LogLevel::Warning) << "[pmjs] prepared install failures missing_source=" << missingSource
       << " changed_source=" << changedSource << " missing_page=" << missingPage
       << " invalid_entry=" << invalidEntry << '\n';
-  return number(env, installed);
+  return detailed ? report.result(env) : number(env, installed);
 } catch (const std::exception& error) {
   napi_throw_error(env, nullptr, error.what()); return nullptr;
 }
@@ -830,30 +841,41 @@ napi_value preparationSourcePath(napi_env env, napi_callback_info info) try {
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 
 napi_value installDecryptedAssetsImpl(napi_env env, napi_callback_info info, bool catalog) try {
-  const auto args = arguments(env, info, 2);
+  const auto args = arguments(env, info, 3);
   const bool capture = !catalog && args.size() > 1 && asBoolean(env, args[1]);
+  const bool detailed = args.size() > 2 && asBoolean(env, args[2]);
+  PreparationInstallReport report;
   std::uint32_t count = 0;
   check(env, napi_get_array_length(env, args.at(0), &count), "decrypted entries must be an array");
   if (count > 100000) throw std::runtime_error("too many decrypted entries");
   std::vector<Vfs::DerivedFile> entries;
+  std::vector<napi_value> records;
   for (std::uint32_t i = 0; i < count; ++i) {
-    napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid decrypted entry");
-    entries.push_back({asString(env, property(env, entry, "logicalSource")),
-      asString(env, property(env, entry, "source")), "data/System.json",
-      asString(env, property(env, entry, "file")),
-      asString(env, property(env, entry, "sourceIdentity")),
-      asString(env, property(env, entry, "settingsIdentity")),
-      catalog ? asString(env, property(env, entry, "fileIdentity")) : std::string{},
-      hasProperty(env, entry, "sourceHash") ? asString(env, property(env, entry, "sourceHash")) : std::string{},
-      hasProperty(env, entry, "settingsHash") ? asString(env, property(env, entry, "settingsHash")) : std::string{},
-      hasProperty(env, entry, "fileHash") ? asString(env, property(env, entry, "fileHash")) : std::string{}});
+    std::string id = std::to_string(i);
+    try {
+      napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid decrypted entry");
+      id = asString(env, property(env, entry, "source"));
+      entries.push_back({asString(env, property(env, entry, "logicalSource")), id, "data/System.json",
+        asString(env, property(env, entry, "file")),
+        asString(env, property(env, entry, "sourceIdentity")),
+        asString(env, property(env, entry, "settingsIdentity")),
+        catalog ? asString(env, property(env, entry, "fileIdentity")) : std::string{},
+        hasProperty(env, entry, "sourceHash") ? asString(env, property(env, entry, "sourceHash")) : std::string{},
+        hasProperty(env, entry, "settingsHash") ? asString(env, property(env, entry, "settingsHash")) : std::string{},
+        hasProperty(env, entry, "fileHash") ? asString(env, property(env, entry, "fileHash")) : std::string{}});
+      records.push_back(entry);
+    } catch (const std::exception& error) { report.reject(env, id, error.what()); }
   }
-  host(env).vfs.installDerivedFiles(entries, catalog);
-  if (capture) for (std::uint32_t i = 0; i < count; ++i) {
-    napi_value entry; check(env, napi_get_element(env, args[0], i, &entry), "invalid decrypted entry");
-    check(env, napi_set_named_property(env, entry, "fileIdentity", string(env, host(env).vfs.derivedIdentity(entries[i].logical))), "cannot set file identity");
+  host(env).vfs.installDerivedFiles(entries, catalog, &report.rejected);
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const auto identity = host(env).vfs.derivedIdentity(entries[i].logical);
+    bool rejected = false;
+    for (const auto& failure : report.rejected) if (failure.first == entries[i].source) rejected = true;
+    if (identity.empty() || rejected) continue;
+    report.accepted.push_back(entries[i].source);
+    if (capture) check(env, napi_set_named_property(env, records[i], "fileIdentity", string(env, identity)), "cannot set file identity");
   }
-  return undefined(env);
+  return detailed ? report.result(env) : undefined(env);
 } catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
 
 napi_value installDecryptedAssets(napi_env env, napi_callback_info info) { return installDecryptedAssetsImpl(env, info, false); }

@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { performance } = require('node:perf_hooks');
 const { writeJson } = require('./preparation-files.cjs');
-const HASH = /^[a-f0-9]{64}$/;
+const HASH = /^[a-f0-9]{64}(?:-[a-f0-9]{12})?$/;
 
 async function readJson(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (_) { return null; }

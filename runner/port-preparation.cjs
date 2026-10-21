@@ -9,12 +9,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_PROCESSOR_FILES = 32;
 const MAX_DISCOVERED_FILES = 100000;
 const MAX_OUTPUTS = 4096;
-const CACHE_MAX_BYTES = 256 * 1024 * 1024;
 const PROCESSOR_SUFFIX = '.pmjs-processor.cjs';
-const DECLINED = 'declined';
-const CACHE_DIRECTORY = 'port-preparation';
-const CACHE_MAX_ENTRIES = 128;
-const CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const ID = /^[a-z][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -92,31 +87,17 @@ function discoverAdapterProcessors(adapterFiles) {
 function discoverBundledProcessors(bundleRoot) {
   return bundleRoot ? scanProcessorFiles([path.join(bundleRoot, 'preparation')]) : [];
 }
-// Discovery is build-time only. Source paths in the resulting bundle are explicit,
-// so a recipient does not need to rescan the game or execute discovery at boot.
-function scanGameFiles(root) {
-  const files = [];
-  function visit(dir, prefix) {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const logical = prefix + entry.name;
-      if (entry.isDirectory()) visit(path.join(dir, entry.name), logical + '/');
-      else if (entry.isFile()) files.push(logical);
-      // Do not traverse symlinks, sockets, or special files.
-      if (files.length > MAX_DISCOVERED_FILES) throw new Error('too many game files for port discovery');
-    }
-  }
-  visit(fs.realpathSync(root), '');
-  return files.sort();
-}
-function selectedOutputs(processor, gameRoot) {
+function selectedOutputs(processor, files, sourcePath, inspect) {
   if (typeof processor.discover !== 'function') return processor.outputs;
-  const files = scanGameFiles(gameRoot);
+  if (files.length > MAX_DISCOVERED_FILES) throw new Error('too many game files for port discovery');
   const fileSet = new Set(files);
   const read = name => {
     if (!fileSet.has(name)) throw new Error('undeclared discovery source: ' + name);
-    const filename = fileInside(gameRoot, name);
+    const filename = sourcePath(name);
     if (fs.statSync(filename).size > MAX_INPUT_BYTES) throw new Error('oversized port input');
-    return fs.readFileSync(filename);
+    const bytes = fs.readFileSync(filename);
+    inspect?.(name, filename, bytes);
+    return bytes;
   };
   const selected = processor.discover({ files, read });
   if (!Array.isArray(selected) || selected.length > MAX_OUTPUTS)
@@ -136,36 +117,7 @@ function selectedOutputs(processor, gameRoot) {
       generate: bytes => processor.generate(bytes, { id, source: item.source }) };
   });
 }
-function outputsFor(processor, gameRoot, entries, include, compressArtifact) {
-  const outputs = [];
-  for (const entry of entries) {
-    const source = fileInside(gameRoot, entry.source);
-    if (fs.statSync(source).size > MAX_INPUT_BYTES) throw new Error('oversized port input');
-    const bytes = fs.readFileSync(source);
-    const record = { id: entry.id, source: entry.source, sourceSha256: hash(bytes) };
-    if (include) {
-      try {
-        const produced = entry.generate(bytes);
-        if (produced !== null && produced !== undefined) {
-          if (!Buffer.isBuffer(produced) && !(produced instanceof Uint8Array))
-            throw new Error('port processor output must be binary');
-          if (produced.length > MAX_OUTPUT_BYTES) throw new Error('oversized port output');
-          const data = Buffer.from(produced);
-          const encoded = compressArtifact ? Buffer.from(compressArtifact(data)) : data;
-          record.sha256 = hash(encoded);
-          record.file = `assets/ports/${processor.id}/${entry.id}.pma1`;
-          record.data = encoded;
-        }
-      } catch (error) {
-        console.warn(`[pmjs] port preparation ${processor.id}/${entry.id} skipped during bundling: ${error.message}`);
-      }
-    }
-    outputs.push(record);
-  }
-  return outputs;
-}
-function buildPortPreparation({ gameRoot, bundleRoot, processors = [], adapters = [], include = false,
-  compressArtifact }) {
+function buildPortPreparation({ bundleRoot, processors = [], adapters = [] }) {
   processors = [...new Set([...processors, ...discoverAdapterProcessors(adapters)])];
   const descriptors = [];
   const used = new Set();
@@ -174,18 +126,6 @@ function buildPortPreparation({ gameRoot, bundleRoot, processors = [], adapters 
     const processor = loadProcessor(absolute);
     // A package may be built without the user's game files. Keep the processor
     // in the bundle; the device will discover eligible inputs on first launch.
-    let selected = [];
-    try { selected = selectedOutputs(processor, gameRoot); }
-    catch (error) {
-      console.warn(`[pmjs] port preparation ${processor.id} discovery skipped during bundling: ${error.message}`);
-    }
-    selected = selected.filter(entry => {
-      try { fileInside(gameRoot, entry.source); return true; }
-      catch (error) {
-        console.warn(`[pmjs] port preparation ${processor.id}/${entry.id} source skipped: ${error.message}`);
-        return false;
-      }
-    });
     if (used.has(processor.id)) throw new Error('duplicate port processor ID: ' + processor.id);
     used.add(processor.id);
     const directory = `preparation/${processor.id}`;
@@ -204,15 +144,7 @@ function buildPortPreparation({ gameRoot, bundleRoot, processors = [], adapters 
       record.sha256 = hash(fs.readFileSync(target));
       packagedFiles.push(record);
     }
-    const records = outputsFor(processor, gameRoot, selected, include, compressArtifact);
-    for (const record of records) {
-      if (record.data) {
-        const output = path.join(bundleRoot, record.file);
-        fs.mkdirSync(path.dirname(output), { recursive: true });
-        fs.writeFileSync(output, record.data, { flag: 'wx' });
-      }
-      delete record.data;
-    }
+    const records = [];
     descriptors.push({ id: processor.id, version: processor.version,
       processor: entryFile, processorSha256: hash(fs.readFileSync(destination)),
       ...(packagedFiles.length ? { files: packagedFiles } : {}),
@@ -273,211 +205,125 @@ function verifyPortDescriptor(bundleRoot, records, verifyOutputs = true) {
   }
   return names;
 }
-function readCacheEntry(output, signature, decompressArtifact) {
-  if (fs.existsSync(signature)) {
-    const marker = fs.readFileSync(signature, 'utf8').trim();
-    if (marker === DECLINED) return fs.existsSync(output) ? null : DECLINED;
-  }
-  if (fs.existsSync(output) && fs.statSync(output).isFile() &&
-      fs.statSync(output).size <= MAX_OUTPUT_BYTES + 1024 * 1024 && fs.existsSync(signature) &&
-      fs.readFileSync(signature, 'utf8') === hash(fs.readFileSync(output))) {
-    try {
-      const bytes = fs.readFileSync(output);
-      const decoded = decompressArtifact ? decompressArtifact(bytes) : bytes;
-      if (decoded && decoded.length <= MAX_OUTPUT_BYTES) return 'data';
-    } catch (_) {}
-  }
-  return null;
-}
-function pruneCache(cacheRoot, keep) {
-  const root = path.join(cacheRoot, CACHE_DIRECTORY);
-  let directories;
-  try { directories = fs.readdirSync(root, { withFileTypes: true }); }
-  catch { return; }
-  const now = Date.now();
-  for (const directory of directories) {
-    if (!directory.isDirectory()) continue;
-    const dir = path.join(root, directory.name);
-    const entries = new Map();
-    for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith('.pma1') && !name.endsWith('.pma1.sha256')) continue;
-      const basename = name.endsWith('.sha256') ? name.slice(0, -7) : name;
-      let record = entries.get(basename);
-      if (!record) { record = { output: path.join(dir, basename), bytes: 0, mtime: 0 }; entries.set(basename, record); }
-      try {
-        const stats = fs.lstatSync(path.join(dir, name));
-        if (!stats.isFile()) continue;
-        record.bytes += stats.size;
-        record.mtime = Math.max(record.mtime, stats.mtimeMs);
-      } catch (_) {}
-    }
-    const records = [...entries.values()].sort((a,b) => b.mtime - a.mtime);
-    let count = 0, bytes = 0;
-    for (const record of records) {
-      const retained = keep.has(record.output);
-      if (retained) { count++; bytes += record.bytes; continue; }
-      if (now - record.mtime <= CACHE_MAX_AGE_MS &&
-          count < CACHE_MAX_ENTRIES && bytes + record.bytes <= CACHE_MAX_BYTES) {
-        count++; bytes += record.bytes; continue;
-      }
-      try {
-        fs.rmSync(record.output, { force: true });
-        fs.rmSync(record.output + '.sha256', { force: true });
-      } catch (_) { /* next preparation can retry cleanup */ }
-    }
-  }
-}
-function processorIdentity(desc, processor) {
-  // Helpers are part of the executable processor, not merely packaging metadata.
-  return hash(Buffer.from(JSON.stringify({ main: desc.processorSha256,
-    files: (desc.files || []).map(item => [item.path, item.sha256]).sort(),
-    version: processor.version })));
-}
-function processorRecords({ bundleRoot, descriptors, adapters, logger }) {
-  if (Array.isArray(descriptors) && descriptors.length) {
-    try {
-      verifyPortDescriptor(bundleRoot, descriptors, false);
-      for (const desc of descriptors) {
-        const processor = loadProcessor(fileInside(bundleRoot, desc.processor));
-        if (processor.id !== desc.id ||
-            desc.version !== undefined && processor.version !== desc.version)
-          throw new Error('port processor manifest changed');
-      }
-      return descriptors;
-    }
-    catch (error) { logger.warn(`[pmjs] preparation manifest invalid; scanning adapters: ${error.message}`); }
-  }
+async function processorRecords({ bundleRoot, descriptors, adapters, logger, files }) {
+  if (Array.isArray(descriptors) && descriptors.length) return descriptors.filter(desc => {
+    const valid = desc && ID.test(desc.id) && relative(desc.processor);
+    if (!valid) logger.warn('[pmjs] invalid optional port processor declaration');
+    return valid;
+  });
   const filenames = [...discoverBundledProcessors(bundleRoot), ...discoverAdapterProcessors(adapters)];
   const records = [];
   for (const filename of [...new Set(filenames)]) {
     try {
-      const processor = loadProcessor(filename);
-      const files = (processor.files || []).map(name => {
+      delete require.cache[filename];
+      const processor = loadProcessor(filename), helpers = [];
+      for (const name of processor.files || []) {
         const file = fileInside(path.dirname(filename), name);
-        return { path: name, sha256: hash(fs.readFileSync(file)) };
-      });
-      const base = bundleRoot && filename.startsWith(path.resolve(bundleRoot) + path.sep)
-        ? path.resolve(bundleRoot) : null;
-      const relativeName = base ? path.relative(base, filename).split(path.sep).join('/') : null;
-      records.push({ id: processor.id, version: processor.version,
-        processor: relativeName || filename,
-        processorSha256: hash(fs.readFileSync(filename)),
-        ...(files.length ? { files } : {}), outputs: [],
-        sourceFile: filename });
-    } catch (error) {
-      // A malformed optional processor cannot prevent ordinary game startup.
-      console.warn(`[pmjs] ignoring invalid port processor ${filename}: ${error.message}`);
-    }
+        helpers.push({ path: name, sha256: await files.hash(file, 'processor') });
+      }
+      records.push({ id: processor.id, version: processor.version, sourceFile: filename,
+        processorSha256: await files.hash(filename, 'processor'), files: helpers, outputs: [] });
+    } catch (error) { logger.warn(`[pmjs] ignoring invalid port processor ${filename}: ${error.message}`); }
   }
   return records;
 }
-function prepareForRun({ gameRoot, bundleRoot, cacheRoot, descriptors, adapters = [],
-  compressArtifact, decompressArtifact, logger = console }) {
-  const resolved = new Map();
-  if (descriptors !== undefined && (!Array.isArray(descriptors) || descriptors.length > 32)) {
-    logger.warn('[pmjs] invalid optional port preparation manifest; original game path retained');
-    descriptors = undefined;
-  }
-  const used = new Set();
-  const records = processorRecords({ bundleRoot, descriptors, adapters, logger });
+
+async function prepareForRun({ gameRoot, bundleRoot, descriptors, adapters = [],
+  compressArtifact, decompressArtifact, logger = console, session = null }) {
+  if (!session) throw new Error('port preparation requires a preparation session');
+  const resolved = new Map(), assets = session.native.assets, files = session.files;
+  const sourcePath = logical => assets.sourcePath?.(logical) || fileInside(gameRoot, logical);
+  const records = await processorRecords({ bundleRoot, descriptors, adapters, logger, files });
   for (const desc of records) {
-    // Runtime validates optional components independently; packaging stays strict.
     try {
-      if (!desc.sourceFile) verifyPortDescriptor(bundleRoot, [desc], false);
       const processorFile = desc.sourceFile || fileInside(bundleRoot, desc.processor);
-      let processor = loadProcessor(processorFile);
-      if (processor.id !== desc.id || desc.version !== undefined && processor.version !== desc.version)
-        throw new Error('port processor manifest changed');
-      if (Array.isArray(processor.outputs) && processor.outputs.length && desc.outputs?.length) {
-        const expected = processor.outputs.map(item => [item.id, item.source]).sort();
-        const actual = desc.outputs.map(item => [item.id, item.source]).sort();
-        if (JSON.stringify(expected) !== JSON.stringify(actual))
-          throw new Error('port processor manifest changed');
+      const processorHash = await files.hash(processorFile, 'processor');
+      if (desc.processorSha256 && processorHash !== desc.processorSha256)
+        throw new Error('port processor checksum changed');
+      const helpers = [];
+      for (const item of desc.files || []) {
+        const filename = fileInside(desc.sourceFile ? path.dirname(processorFile) : bundleRoot, item.path);
+        const checksum = await files.hash(filename, 'processor');
+        if (checksum !== item.sha256) throw new Error('port processor helper checksum changed');
+        helpers.push([item.path, checksum]);
+        delete require.cache[filename];
       }
-      let outputs = desc.outputs || [];
-      // A manifest is only a fast path. Changed or removed inputs invalidate
-      // its inventory, so rerun discovery against the installed game tree.
-      if (outputs.length && outputs.some(record => {
-        try { return hash(fs.readFileSync(fileInside(gameRoot, record.source))) !== record.sourceSha256; }
-        catch { return true; }
-      }) && typeof processor.discover === 'function') {
-        outputs = selectedOutputs(processor, gameRoot).map(entry => ({
-          id: entry.id, source: entry.source,
-          sourceSha256: hash(fs.readFileSync(fileInside(gameRoot, entry.source)))
-        }));
-      }
-      if (!outputs.length) {
-        outputs = selectedOutputs(processor, gameRoot).map(entry => ({
-          id: entry.id, source: entry.source,
-          sourceSha256: hash(fs.readFileSync(fileInside(gameRoot, entry.source)))
-        }));
-      }
-      for (const record of outputs) {
+      delete require.cache[processorFile];
+      const processor = loadProcessor(processorFile);
+      if (processor.id !== desc.id || desc.version !== undefined && processor.version !== desc.version) throw new Error('port processor identity changed');
+      const identity = hash(Buffer.from(JSON.stringify([processorHash, helpers, processor.version])));
+      const discoveryInputs = [];
+      const outputs = selectedOutputs(processor, session.inventory, sourcePath, (source, filename, bytes) => {
+        discoveryInputs.push({ source, file: filename, hash: files.inspectSync(filename, bytes, 'port-discovery').hash });
+      });
+      for (const entry of outputs) {
+        if (session.shouldCancel()) break;
+        const id = desc.id + '/' + entry.id;
         try {
-          const input = fs.readFileSync(fileInside(gameRoot, record.source));
-          if (input.length > MAX_INPUT_BYTES) throw new Error('oversized port input');
-          const inputHash = hash(input);
-          if (record.file && inputHash === record.sourceSha256) {
-            try {
-              const bytes = fs.readFileSync(fileInside(bundleRoot, record.file));
-              if (hash(bytes) === record.sha256 &&
-                  (!decompressArtifact || decompressArtifact(bytes))) {
-                resolved.set(`${desc.id}/${record.id}`, fileInside(bundleRoot, record.file));
-                used.add(fileInside(bundleRoot, record.file));
-                continue;
-              }
-              throw new Error('packaged hash differs from pmjs.json');
-            } catch (packagingFailure) {
-              logger.warn(`[pmjs] port preparation ${desc.id}/${record.id}: ` +
-                `packaged data unusable, regenerating locally (${packagingFailure.message})`);
+          const input = sourcePath(entry.source), inputHash = await files.hash(input, 'port-input');
+          const key = hash(Buffer.from(JSON.stringify([identity, entry.id, inputHash, discoveryInputs.map(input => [input.source, input.hash])])));
+          let directory = session.directory('port/' + desc.id, key);
+          let output = path.join(directory, 'data.pma1');
+          const previous = session.readManifest(directory);
+          if (previous?.sourceHash === inputHash && previous.processor === identity) {
+            if (previous.descriptor === null) { session.touch(directory); session.outcome('port:' + id, 'ordinary-choice'); continue; }
+            if (await files.hash(output, 'output').catch(() => null) === previous.outputs['data.pma1']) {
+              session.touch(directory); session.outcome('port:' + id, 'reused-local'); resolved.set(id, output); continue;
             }
           }
-          const key = hash(Buffer.from([processorIdentity(desc, processor), record.id, inputHash].join(':')));
-          const output = path.join(cacheRoot, CACHE_DIRECTORY, desc.id, `${key}.pma1`);
-          const signature = `${output}.sha256`;
-          const entryState = readCacheEntry(output, signature, decompressArtifact);
-          if (entryState === 'data') {
-            resolved.set(`${desc.id}/${record.id}`, output);
-            used.add(output);
-            continue;
+          if (fs.existsSync(directory)) directory = session.newDirectory('port/' + desc.id, key);
+          output = path.join(directory, 'data.pma1');
+          const dependencies = [{ source: entry.source, hash: inputHash }, ...discoveryInputs.map(({ source, hash }) => ({ source, hash }))];
+          let encoded, outcome = 'generated';
+          const packaged = desc.outputs?.find(record => record.id === entry.id && record.source === entry.source && record.sourceSha256 === inputHash);
+          if (packaged?.file) {
+            try {
+              const candidate = fileInside(bundleRoot, packaged.file);
+              if (await files.hash(candidate, 'package') !== packaged.sha256) throw new Error('packaged output checksum mismatch');
+              {
+                const bytes = await fs.promises.readFile(candidate);
+                if (!decompressArtifact || decompressArtifact(bytes)) { encoded = bytes; outcome = 'reused-package'; }
+              }
+            } catch (error) { logger.warn(`[pmjs] port preparation ${id}: packaged output unavailable: ${error.message}`); }
           }
-          if (entryState === DECLINED) continue; // known-declined source content
-          const entry = processor.outputs?.find(v => v.id === record.id);
-          const value = entry ? entry.generate(input) : processor.generate(input,
-            { id: record.id, source: record.source });
-          if (value === null || value === undefined) {
-            fs.mkdirSync(path.dirname(signature), { recursive: true });
-            fs.writeFileSync(signature, DECLINED);
-            continue;
+          if (!encoded) {
+            const bytes = await fs.promises.readFile(input);
+            if (bytes.length > MAX_INPUT_BYTES) throw new Error('port input exceeds preparation limit');
+            const value = entry.generate ? entry.generate(bytes) : processor.generate(bytes, { id: entry.id, source: entry.source });
+            if (value === null) {
+              const record = { id, key, source: entry.source, sourceHash: inputHash, processor: identity, dependencies, outcome: 'ordinary-choice', descriptor: null, outputs: {} };
+              session.data.results[path.relative(session.root, directory).split(path.sep).join('/')] = record;
+              session.touch(directory); session.outcome('port:' + id, 'ordinary-choice');
+              continue;
+            }
+            if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array) || !value.length || value.length > MAX_OUTPUT_BYTES)
+              throw new Error('invalid port preparation output');
+            encoded = compressArtifact ? Buffer.from(compressArtifact(value)) : Buffer.from(value);
           }
-          if ((!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) ||
-              !value.length || value.length > MAX_OUTPUT_BYTES)
-            throw new Error('invalid prepared port data');
-          fs.mkdirSync(path.dirname(output), { recursive: true });
-          const temp = `${output}.${process.pid}.tmp`;
+          for (const dependency of discoveryInputs)
+            if (await files.hash(sourcePath(dependency.source), 'port-discovery') !== dependency.hash) throw new Error('port discovery input changed while preparing');
+          if (await files.hash(input, 'port-input') !== inputHash) throw new Error('port input changed while preparing');
+          await fs.promises.mkdir(path.dirname(directory), { recursive: true });
+          const stage = await fs.promises.mkdtemp(path.join(path.dirname(directory), '.stage-'));
           try {
-            const encoded = compressArtifact ? Buffer.from(compressArtifact(Buffer.from(value))) : Buffer.from(value);
-            if (!encoded.length || encoded.length > MAX_OUTPUT_BYTES + 1024 * 1024)
-              throw new Error('invalid compressed port data');
-            fs.writeFileSync(temp, encoded);
-            fs.renameSync(temp, output);
-            fs.writeFileSync(signature, hash(encoded));
-          } finally { fs.rmSync(temp, { force: true }); }
-          resolved.set(`${desc.id}/${record.id}`, output);
-          used.add(output);
-        } catch (error) {
-          logger.warn(`[pmjs] port preparation ${desc.id}/${record.id} unavailable: ${error.message}`);
-          // Missing or unsuitable derivations must leave the game's normal path working.
-        }
+            await fs.promises.writeFile(path.join(stage, 'data.pma1'), encoded, { flag: 'wx' });
+            const outputHash = await files.hash(path.join(stage, 'data.pma1'), 'output');
+            files.writeManifest(stage, { id, key, source: entry.source, sourceHash: inputHash, processor: identity,
+              dependencies, outcome, descriptor: { id }, outputs: { 'data.pma1': outputHash } });
+            await fs.promises.rename(stage, directory);
+            files.publishManifest(stage, directory);
+            await files.hash(output, 'output');
+            session.outcome('port:' + id, outcome);
+            resolved.set(id, output);
+          } finally { await fs.promises.rm(stage, { recursive: true, force: true }); }
+        } catch (error) { session.outcome('port:' + id, 'ordinary-failure', error.message); logger.warn(`[pmjs] port preparation ${id} unavailable: ${error.message}`); }
       }
-    } catch (descriptorFailure) {
-      logger.warn(`[pmjs] port preparation ${desc?.id || '<invalid>'} unavailable: ${descriptorFailure.message}`);
-    }
+    } catch (error) { logger.warn(`[pmjs] port preparation ${desc.id} unavailable: ${error.message}`); }
   }
-  try { pruneCache(cacheRoot, used); }
-  catch (error) { logger.warn('[pmjs] port cache cleanup skipped: ' + error.message); }
+  await files.save();
   return resolved;
 }
+
 function reader(files, decompressArtifact) {
   return name => {
     const file = typeof name === 'string' &&

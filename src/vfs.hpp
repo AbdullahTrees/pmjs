@@ -42,7 +42,8 @@ class Vfs {
   explicit Vfs(std::filesystem::path root);
 
   static std::string fileIdentity(const std::filesystem::path& path);
-  void installDerivedFiles(const std::vector<DerivedFile>& files, bool catalog = false);
+  void installDerivedFiles(const std::vector<DerivedFile>& files, bool catalog = false,
+      std::vector<std::pair<std::string, std::string>>* rejected = nullptr);
   std::string derivedIdentity(const std::string& path) const;
   std::optional<std::filesystem::path> resolveDerived(const std::string& path) const;
 
@@ -58,6 +59,7 @@ class Vfs {
   std::optional<std::vector<std::uint8_t>> readBytes(const std::string& path) const;
   std::unique_ptr<FileReader> openRead(const std::string& path, std::uint64_t start = 0) const;
   std::optional<std::vector<std::string>> readDirectory(const std::string& path) const;
+  std::vector<std::string> inventory() const;
   bool exists(const std::string& path) const;
   bool isDirectory(const std::string& path) const;
   const std::filesystem::path& root() const { return root_; }

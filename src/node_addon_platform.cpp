@@ -282,6 +282,15 @@ napi_value isDirectory(napi_env env, napi_callback_info info) try {
   napi_throw_type_error(env, nullptr, error.what()); return nullptr;
 }
 
+napi_value inventory(napi_env env, napi_callback_info) try {
+  const auto files = host(env).vfs.inventory();
+  napi_value result;
+  check(env, napi_create_array_with_length(env, files.size(), &result), "cannot create file inventory");
+  for (std::size_t i = 0; i < files.size(); ++i)
+    check(env, napi_set_element(env, result, i, string(env, files[i])), "cannot set inventory entry");
+  return result;
+} catch (const std::exception& error) { napi_throw_error(env, nullptr, error.what()); return nullptr; }
+
 napi_value readDirectory(napi_env env, napi_callback_info info) try {
   auto args = arguments(env, info, 1);
   auto entries = host(env).vfs.readDirectory(asString(env, args.at(0)));
@@ -401,6 +410,7 @@ void registerPlatformBindings(napi_env env, napi_value exports) {
   method(env, fs, "openRead", openRead);
   method(env, fs, "openReadAsync", openReadAsync);
   method(env, fs, "readDirectory", readDirectory);
+  method(env, fs, "inventory", inventory);
   method(env, fs, "exists", exists);
   method(env, fs, "resolvePath", resolvePath);
   method(env, fs, "isDirectory", isDirectory);

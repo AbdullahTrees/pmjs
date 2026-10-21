@@ -78,7 +78,10 @@ async function main() {
   for (const source of ['../outside.png', '/tmp/outside.png']) {
     const unsafe = structuredClone(set);
     unsafe.descriptor.sources[0].source = source;
-    assert.throws(() => native.assets.installTileSetCatalog([unsafe]), /cannot resolve tile source/);
+    const rejected = native.assets.installTileSetCatalog([unsafe, set], false, true);
+    assert.deepEqual(rejected.accepted, [set.identity]);
+    assert.equal(rejected.rejected.length, 1);
+    assert.match(rejected.rejected[0].reason, /cannot resolve tile source/);
   }
   const [view, shared] = await Promise.all([native.images.loadAsync('source.png',false,'set-a'),native.images.loadAsync('source.png',false,'set-a')]);
   assert.equal(view.handle,shared.handle);

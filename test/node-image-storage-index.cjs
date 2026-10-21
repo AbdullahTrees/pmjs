@@ -121,10 +121,35 @@ const handles = [];
       assert.equal(native.images.isOpaque(image.handle), !['zero', 'sparse', 'rgba'].includes(f.name));
     }
     const warm = await prepareAssets(preparation);
-    assert.equal(warm.catalogHit, true);
+    assert.equal(warm.validation.hashedFiles, 0);
     assert.equal(warm.storageEntries.length, fixtures.length);
     assert.ok(warm.entries.find(e => e.source === sheet.source).descriptor.pages.every(p => p.storage),
       'warm catalogs preserve page layouts');
+    for (const handle of handles.splice(0)) native.images.release(handle);
+    drawPacket(native, spritePacket(native, { handle: 0 }, { count: 0 }), false);
+    const gray = fixtures.find(f => f.name === 'gray');
+    const record = cold.storageEntries.find(entry => entry.source === gray.source);
+    const changedField = (identity, fromEnd) => {
+      const fields = identity.split(':');
+      fields[fields.length - fromEnd] = String(BigInt(fields[fields.length - fromEnd]) + 1n);
+      return fields.join(':');
+    };
+    const drifted = { ...record, sourceIdentity: changedField(record.sourceIdentity, 6) };
+    const legacy = { ...drifted };
+    delete legacy.backingHash;
+    assert.equal(native.assets.installImageStorage([legacy]), 0, 'inode recovery requires a checksum');
+    assert.equal(native.assets.installImageStorage([{ ...drifted, backingHash: '0'.repeat(64) }]), 0,
+      'inode recovery rejects a content mismatch');
+    assert.equal(native.assets.installImageStorage([{ ...drifted, backingHash: 'invalid' }]), 0);
+    assert.equal(native.assets.installImageStorage([{ ...record,
+      sourceIdentity: changedField(record.sourceIdentity, 5) }]), 0, 'size changes cannot use inode recovery');
+    assert.equal(native.assets.installImageStorage([drifted]), 1, 'verified inode drift preserves storage decisions');
+    const before = native.images.memory().storageDecisionHits;
+    const recovered = native.images.load(gray.source);
+    handles.push(recovered.handle);
+    assert.equal(native.images.memory().storageDecisionHits, before + 1,
+      'recovered decisions bind to the current file identity');
+    console.log('Image storage identity recovery passed');
     const lz4Output = path.join(root, 'lz4-bundle');
     fs.mkdirSync(lz4Output);
     const lz4Options = { ...options, assetPreparation: { ...options.assetPreparation, pageCodec: 'lz4' } };
@@ -162,7 +187,7 @@ const handles = [];
       'indexed sparse page was promoted to dense storage');
     const reused = await prepareAssets({ ...preparation, pageCodec: 'lz4',
       portableIndex: lz4Index, portableAssetRoot: lz4Output, cacheRoot: path.join(root, 'bundled-cache') });
-    assert.equal(reused.catalogHit, true, 'sparse pages did not survive warm catalog validation');
+    assert.equal(reused.validation.hashedFiles, 0, 'unchanged pages were hashed again');
     console.log('Offline channel/8-bit/16-bit/RGBA decisions, native activation and warm catalog passed');
   } finally {
     for (const handle of handles) native.images.release(handle);

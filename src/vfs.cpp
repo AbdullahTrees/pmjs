@@ -222,30 +222,39 @@ bool matchesDependency(const std::filesystem::path& path, std::string& expected,
 }
 }
 
-void Vfs::installDerivedFiles(const std::vector<DerivedFile>& files, bool catalog) {
+void Vfs::installDerivedFiles(const std::vector<DerivedFile>& files, bool catalog,
+    std::vector<std::pair<std::string, std::string>>* rejected) {
   auto index = std::make_shared<std::unordered_map<std::string, DerivedFile>>();
   for (auto file : files) {
-    file.identityMutex = std::make_shared<std::mutex>();
-    if ((!file.sourceHash.empty() && !validContentHash(file.sourceHash)) ||
-        (!file.settingsHash.empty() && !validContentHash(file.settingsHash)) ||
-        (!file.fileHash.empty() && !validContentHash(file.fileHash)))
-      throw std::runtime_error("invalid derived content hash");
-    const auto key = normalize(file.logical);
-    const auto source = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.source);
-    const auto settings = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.settings);
-    if (catalog) {
-      if (!key || !normalize(file.source) || !normalize(file.settings) || !file.file.is_absolute() ||
-          file.sourceIdentity.empty() || file.settingsIdentity.empty() || file.fileIdentity.empty())
-        throw std::runtime_error("invalid derived catalog entry");
-    } else {
-      if (!key || !source || !settings || !file.file.is_absolute() ||
-          file.sourceIdentity.empty() || file.settingsIdentity.empty() ||
-          !matchesDependency(*source, file.sourceIdentity, file.sourceHash) ||
-          !matchesDependency(*settings, file.settingsIdentity, file.settingsHash)) continue;
-      file.fileIdentity = fileIdentity(file.file);
+    try {
+      file.identityMutex = std::make_shared<std::mutex>();
+      if ((!file.sourceHash.empty() && !validContentHash(file.sourceHash)) ||
+          (!file.settingsHash.empty() && !validContentHash(file.settingsHash)) ||
+          (!file.fileHash.empty() && !validContentHash(file.fileHash)))
+        throw std::runtime_error("invalid derived content hash");
+      const auto key = normalize(file.logical);
+      const auto source = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.source);
+      const auto settings = catalog ? std::optional<std::filesystem::path>{} : resolveOriginal(file.settings);
+      if (catalog) {
+        if (!key || !normalize(file.source) || !normalize(file.settings) || !file.file.is_absolute() ||
+            file.sourceIdentity.empty() || file.settingsIdentity.empty() || file.fileIdentity.empty())
+          throw std::runtime_error("invalid derived catalog entry");
+      } else {
+        if (!key || !source || !settings || !file.file.is_absolute() ||
+            file.sourceIdentity.empty() || file.settingsIdentity.empty() ||
+            !matchesDependency(*source, file.sourceIdentity, file.sourceHash) ||
+            !matchesDependency(*settings, file.settingsIdentity, file.settingsHash)) {
+          if (rejected) rejected->emplace_back(file.source, "derived source or settings changed");
+          continue;
+        }
+        file.fileIdentity = fileIdentity(file.file);
+      }
+      if (!file.fileIdentity.empty() && !index->emplace(*key, std::move(file)).second)
+        throw std::runtime_error("duplicate derived file path");
+    } catch (const std::exception& error) {
+      if (!rejected) throw;
+      rejected->emplace_back(file.source, error.what());
     }
-    if (!file.fileIdentity.empty() && !index->emplace(*key, std::move(file)).second)
-      throw std::runtime_error("duplicate derived file path");
   }
   std::atomic_store(&derived_, std::shared_ptr<const std::unordered_map<std::string, DerivedFile>>(std::move(index)));
 }
@@ -394,6 +403,25 @@ std::optional<std::vector<std::string>> Vfs::readDirectory(const std::string& pa
   for (const auto& [child, name] : merged) entries.push_back(name);
   std::sort(entries.begin(), entries.end());
   return entries;
+}
+
+std::vector<std::string> Vfs::inventory() const {
+  std::unordered_map<std::string, std::string> files;
+  const auto overlay = std::atomic_load(&overlay_);
+  const auto collect = [&](const Vfs& owner) {
+    for (const auto& [key, file] : owner.files_) {
+      const auto selected = resolveOriginal(key);
+      if (selected && *selected == file)
+        files[key] = file.lexically_relative(owner.root_).generic_string();
+    }
+  };
+  collect(*this);
+  if (overlay) collect(*overlay->files);
+  std::vector<std::string> result;
+  result.reserve(files.size());
+  for (const auto& [key, logical] : files) result.push_back(logical);
+  std::sort(result.begin(), result.end());
+  return result;
 }
 
 bool Vfs::exists(const std::string& path) const {

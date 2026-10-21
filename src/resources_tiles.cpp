@@ -109,7 +109,7 @@ std::string ImageStore::effectiveTileSet(const ImageFileSource& source, const st
   const auto set = tileSets_.find(identity);
   if (set != tileSets_.end()) for (const auto& entry : set->second->descriptor.sources)
     if (entry.identity == source.key()) return identity;
-  if (set != tileSets_.end()) preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+  if (set != tileSets_.end()) { preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity); }
   return {};
 }
 bool ImageStore::installTileSet(PreparedTileSet descriptor,
@@ -168,8 +168,9 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
   const auto& descriptor = found->second->descriptor;
   for (std::size_t i = 0; i < descriptor.sources.size(); ++i) {
     if (descriptor.sources[i].identity != source.key()) {
-      if (descriptor.sources[i].path == source.path())
-        preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+      if (descriptor.sources[i].path == source.path()) {
+        preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
+      }
       continue;
     }
     auto load = std::make_shared<TileLoad>();
@@ -181,6 +182,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
         auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
         if (!file || file->key() != found->second->pageIdentities[page]) {
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+          preparationFailures_->record(identity);
           return nullptr;
         }
         prototype->pages.push_back(std::move(file));
@@ -189,6 +191,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
         auto file = captureTileFile(descriptor.sources[entry].snapshot);
         if (!file || file->key() != found->second->snapshotIdentities[entry]) {
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+          preparationFailures_->record(identity);
           return nullptr;
         }
         prototype->snapshots.push_back(std::move(file));

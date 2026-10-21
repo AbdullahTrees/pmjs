@@ -432,6 +432,7 @@ if(BUILD_TESTING)
     node-scene
     node-resident-scenery-tiles
     node-image-storage-index
+    node-preparation-install
     node-sprite-byte-precision
     node-pixi4-clear
     node-window-layer-clears

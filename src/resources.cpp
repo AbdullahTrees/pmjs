@@ -593,6 +593,8 @@ struct ImageStore::PreparedLoad {
   bool validated = false;
   std::shared_ptr<ImageFileSource> sourceToVerify, original;
   std::shared_ptr<std::atomic<unsigned>> invalidations;
+  std::shared_ptr<PreparationFailures> failures;
+  std::string sourceName;
   std::optional<ImagePixels> pixels;
 };
 
@@ -928,8 +930,9 @@ ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) {
 }
 
 bool ImageStore::installStorageDecision(const std::filesystem::path& path,
-    const std::string& sourceIdentity, ImageStorageDecision decision) {
+    const std::string& sourceIdentity, ImageStorageDecision decision, const std::string& backingHash) {
   if (sourceIdentity.empty() || decision.width <= 0 || decision.height <= 0 ||
+      (!backingHash.empty() && !validContentHash(backingHash)) ||
       decision.width > 8192 || decision.height > 8192 ||
       (decision.paletteBits != 0 && decision.paletteBits != 8 && decision.paletteBits != 16) ||
       (decision.channels.channels != 1 && decision.channels.channels != 2 && decision.channels.channels != 4)) return false;
@@ -948,8 +951,11 @@ bool ImageStore::installStorageDecision(const std::filesystem::path& path,
     }
   }
   const auto source = openFile(path);
-  if (!source || source->key() != sourceIdentity) return false;
-  storageDecisions_[sourceIdentity] = decision;
+  if (!source) return false;
+  if (source->key() != sourceIdentity &&
+      (!inodeOnlyChange(sourceIdentity, source->key()) ||
+       !fileContentMatches(source->path(), source->key(), backingHash))) return false;
+  storageDecisions_[source->key()] = decision;
   return true;
 }
 
@@ -1555,6 +1561,7 @@ std::optional<ImageInfo> ImageStore::lookupAstc(ImageHandle handle, bool premult
     const auto bytes = page ? readCapturedBytes(*page) : std::nullopt;
     if (!bytes || !validAstc4x4(*bytes, slot.width, slot.height)) {
       preparationInvalidations_->fetch_or(1, std::memory_order_relaxed);
+      preparationFailures_->record(slot.sourcePath.string());
       return fallback("astc-invalid");
     }
     while (glGetError() != GL_NO_ERROR) {}
@@ -2104,11 +2111,13 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
   if (!prototype && found != preparedSources_.end() && found->second->sourceIdentity != source.key() &&
       !(validContentHash(found->second->sourceHash) && inodeOnlyChange(found->second->sourceIdentity, source.key()))) {
     preparationInvalidations_->fetch_or(1, std::memory_order_relaxed);
+    preparationFailures_->record(source.path().string());
     return nullptr;
   }
   if (!prototype && found == preparedSources_.end()) return nullptr;
   auto load = std::make_shared<PreparedLoad>();
   load->invalidations = preparationInvalidations_;
+  load->failures = preparationFailures_; load->sourceName = source.path().string();
   if (!prototype) prototype = found->second;
   struct stat current{};
   if (fstat(source.descriptor_, &current) != 0 ||
@@ -2116,6 +2125,7 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
       current.st_mtim.tv_sec != source.modifiedSeconds_ ||
       current.st_mtim.tv_nsec != source.modifiedNanoseconds_) {
     preparationInvalidations_->fetch_or(1, std::memory_order_relaxed);
+    preparationFailures_->record(source.path().string());
     return nullptr;
   }
   load->backing = std::make_shared<PreparedBacking>();
@@ -2148,6 +2158,7 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
     if (!file || (file->key() != page.identity &&
         !(validContentHash(page.expectedHash) && inodeOnlyChange(page.identity, file->key())))) {
       preparationInvalidations_->fetch_or(1, std::memory_order_relaxed);
+    preparationFailures_->record(source.path().string());
       return nullptr;
     }
     PreparedBacking::Page captured;
@@ -2171,6 +2182,7 @@ bool ImageStore::validatePrepared(PreparedLoad& load, bool retainCpu) {
   if (!load.validated) {
     const auto invalid = [&load]() {
       if (load.invalidations) load.invalidations->fetch_or(1, std::memory_order_relaxed);
+      if (load.failures) load.failures->record(load.sourceName);
       return false;
     };
     if (load.sourceToVerify) {

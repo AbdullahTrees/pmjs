@@ -6,9 +6,6 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { pipeline } = require('node:stream/promises');
-const { preparationFiles, writeJson } = require('./preparation-files.cjs');
-const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
-const { catalogInvalidator, readCatalog, publishCatalog, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 const { yedSideviewFrames } = require('./yed-sideview-recipes.cjs');
 
 const CACHE_VERSION = 1;
@@ -69,7 +66,7 @@ function sourceFile(native, gameRoot, source) {
   }
   return path.join(gameRoot, source);
 }
-async function encryptionSettings(native, gameRoot) {
+async function encryptionSettings(native, gameRoot, files) {
   try {
     const file = sourceFile(native, gameRoot, 'data/System.json');
     if (!fs.existsSync(file)) return { images: false, audio: false, key: null };
@@ -85,7 +82,7 @@ async function encryptionSettings(native, gameRoot) {
     const system = JSON.parse(data);
     return { images: system.hasEncryptedImages === true, audio: system.hasEncryptedAudio === true,
       key: /^[a-f0-9]{32}$/i.test(system.encryptionKey) ? Buffer.from(system.encryptionKey, 'hex') : null,
-      hash: crypto.createHash('sha256').update(data).digest('hex'), sourceIdentity };
+      hash: files.inspectSync(file, data, 'settings').hash, sourceIdentity };
   } catch (_) { return { images: false, audio: false, key: null }; }
 }
 function mediaHeader(bytes, extension) {
@@ -268,41 +265,6 @@ function validDescriptor(d) {
   }
   return area === d.width * d.height || (d.uniform !== undefined && d.cells.length === 0 && d.pages.length === 0);
 }
-async function discover(gameRoot, cacheRoot) {
-  const result = [];
-  const root = await fsp.realpath(gameRoot);
-  const entryDirectory = path.resolve(cacheRoot, 'entries');
-  const ownedEntries = await fsp.realpath(entryDirectory).catch(() => entryDirectory);
-  async function visit(relative) {
-    const directory = path.join(root, relative);
-    if (directory === ownedEntries) return;
-    let files;
-    try { files = await fsp.readdir(directory, { withFileTypes: true }); }
-    catch (error) { if (error.code === 'ENOENT') return; throw error; }
-    for (const entry of files.sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-      const name = relative + '/' + entry.name;
-      if (entry.isDirectory()) await visit(name);
-      else if (entry.isFile() && (safeSource(name) || decryptedSource(name))) result.push(name);
-    }
-  }
-  await visit('img');
-  await visit('audio');
-  return result;
-}
-async function readJson(file) {
-  try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch (_) { return null; }
-}
-
-const installedLeases = new WeakMap();
-
-async function createImageLease(cacheRoot, keys, assets) {
-  const releaseLease = await createLease(cacheRoot, keys);
-  function release() {
-    releaseLease();
-    if (installedLeases.get(assets) === release) installedLeases.delete(assets);
-  }
-  return release;
-}
 async function cachedEntry(directory, key, sourceHash, files) {
   try {
     return await files.validatedJson(path.join(directory, 'manifest.json'), async (manifest, reused) => {
@@ -343,7 +305,15 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
   astc,
   preparationContext = 'live',
   portableIndex = null, portableAssetRoot = null,
-  processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY }) {
+  processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY, session = null }) {
+  if (!session) {
+    const run = await require('./preparation.cjs').prepareGameAssets({ gameRoot, cacheRoot, recipes, native,
+      onProgress: value => { if (value.phase !== 'start') onProgress(value); }, shouldCancel, logger, verifyHashes, workspaceBytes, pageCodec, losslessPrefixes, astc,
+      preparationContext, portableIndex, portableAssetRoot, processorIdentity, maps: false });
+    if (run.images) run.images.releaseCacheLease = run.releaseCacheLease;
+    return run.images;
+  }
+  cacheRoot = session.root;
   losslessPrefixes = validLosslessPrefixes(losslessPrefixes);
   astc = astcSettings(astc);
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
@@ -352,9 +322,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     throw new Error('assetPreparation.workspaceBytes must be an integer from 0 to 268435456');
   const offline = preparationContext === 'offline';
   const audioViewSupport = !offline && typeof native?.media?.installAudioViews === 'function';
-  const audioSettings = audioViewSupport ? await encryptionSettings(native, gameRoot) : null;
-  const negativeHints = new Set((portableIndex?.negativeHints || []).filter(source =>
-    safeSource(source) && source.endsWith('.png')));
+  const audioSettings = audioViewSupport ? await encryptionSettings(native, gameRoot, session.files) : null;
   const indexedImages = new Map();
   for (const record of portableIndex?.images || []) {
     const records = indexedImages.get(record.source);
@@ -367,12 +335,9 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
     indexedNegative: 0, indexedLayoutAttempts: 0, indexedZeroPage: 0,
     indexedPageCopies: 0, unindexedProcessed: 0, processingMs: 0,
     cancelled: false, entries: [], decryptedEntries: [], audioViewEntries: [], audioViews: 0, decisions: [], storageEntries: [], durationMs: 0 };
-  const catalogFile = path.join(cacheRoot, 'catalog-'+identity(path.resolve(gameRoot))+'.json');
-  result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
-  let release;
-  let catalogNegativeHits = 0;
-  let indexedNegativeSkips = 0;
-  let terminalPhase = 'complete';
+
+
+  let terminalPhase = 'complete', activationStarted = false;
   const report = (phase, source = '', terminal = false) => onProgress({
     phase, source, terminal, completed: result.completed, total: result.total,
     remaining: result.total - result.completed, generated: result.generated, hits: result.hits,
@@ -415,60 +380,9 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     }, logger);
     const automaticRecipes = { version: 1, sideview: [...frames].sort(([a], [b]) => a.localeCompare(b)) };
-    const storageRecords = (portableIndex?.images || []).filter(record => validStorageDecision(record.storage));
-    const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), processorIdentity, recipes, losslessPrefixes, astc,
-      automaticRecipes,
-      ...(storageRecords.length ? { imageStorage: identity(storageRecords
-        .map(record => [record.source, record.sourceHash, record.storage])) } : {}),
-      contentIdentity: 1, ...(audioViewSupport ? { audioViewVersion: 1, audioSettingsHash: audioSettings.hash || null } : {}) };
-    const catalogCapable = typeof native.assets.installPreparedCatalog === 'function' &&
-      typeof native.assets.installDerivedCatalog === 'function';
-    result.catalogStatus = offline ? 'offline' : verifyHashes ? 'verify-hashes' :
-      catalogCapable ? 'checking' : 'unsupported';
-    if (!offline && !verifyHashes && catalogCapable) {
-      await fsp.mkdir(cacheRoot, { recursive: true });
-      report('wait');
-      release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
-      if (!release) return result;
-      report('catalog');
-      const catalog = await readCatalog(catalogFile, binding, cacheRoot, reason => { result.catalogStatus = reason; });
-      if (catalog && !cancelled()) {
-        let lease;
-        try {
-          report('install');
-          lease = await createImageLease(cacheRoot, catalog.keys, native.assets);
-          await native.assets.installDerivedCatalog(catalog.decryptedEntries);
-          if (audioViewSupport && native.media.installAudioViews(catalog.audioViewEntries || []) !== (catalog.audioViewEntries || []).length)
-            throw new Error('incomplete audio view installation');
-          if (audioViewSupport && (await encryptionSettings(native, gameRoot)).hash !== audioSettings.hash)
-            throw new Error('audio encryption settings changed during preparation');
-          const storageEntries = catalog.storageEntries || [];
-          if ((await native.assets.installImageStorage?.(storageEntries) || 0) !== storageEntries.length)
-            throw new Error('incomplete image storage catalog installation');
-          const installed = await native.assets.installPreparedCatalog(catalog.entries);
-          if (installed !== catalog.entries.length) throw new Error('incomplete image catalog installation');
-          if (cancelled()) throw new Error('catalog installation cancelled');
-          const previous = installedLeases.get(native.assets);
-          installedLeases.set(native.assets, lease);
-          if (previous) previous();
-          Object.assign(result, catalog.summary, { entries: catalog.entries, storageEntries, decryptedEntries: catalog.decryptedEntries,
-            audioViewEntries: catalog.audioViewEntries || [],
-            generated: 0, failedFiles: 0, installFailures: 0, catalogHit: true, catalogStatus: 'hit', releaseCacheLease: lease });
-          report('install');
-          return result;
-        } catch (error) {
-          result.catalogStatus = 'install-rejected';
-          result.catalogError = error.message;
-          if (lease) lease();
-          await clearIndexes();
-        }
-      }
-      await release(); release = undefined;
-      if (cancelled()) return result;
-    }
     report('discover');
-    const sources = await discover(gameRoot, cacheRoot);
-    const settings = await encryptionSettings(native, gameRoot);
+    const sources = session.inventory.filter(source => safeSource(source) || decryptedSource(source));
+    const settings = await encryptionSettings(native, gameRoot, session.files);
     result.total = sources.length;
     report('discover');
     if (cancelled()) return result;
@@ -483,11 +397,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
       return result;
     }
     await fsp.mkdir(path.join(cacheRoot, 'entries'), { recursive: true });
-    report('wait');
-    release = await acquireLock(cacheRoot, cancelled, () => report('wait'), native.assets);
-    if (!release) return result;
     report('validate');
-    const files = await preparationFiles(cacheRoot, verifyHashes);
+    const files = session.files;
     result.validation = files.stats;
     async function refreshIdentity(source, expectedHash, previous) {
       const current = native.assets.sourceIdentity?.(source);
@@ -497,14 +408,12 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         throw new Error('source changed while validating '+source);
       return current;
     }
-    const indexName = 'index-' + identity(path.resolve(gameRoot)) + '.json';
     const recipeMap = new Map(recipes.map(recipe => [recipe.source, recipe]));
-    const keys = [];
     for (const source of sources) {
       if (cancelled()) break;
       report('validate', source);
       let stage;
-      let sourcePhase = 'validate';
+      let sourcePhase = 'validate', outcome = 'ordinary-choice';
       try {
         const decryptedPath = decryptedSource(source);
         const encrypted = decryptedPath !== null;
@@ -524,48 +433,47 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
           continue;
         }
         let sourceIdentity = typeof native.assets.sourceIdentity === 'function' ? native.assets.sourceIdentity(source) : undefined;
-        const hintedNegative = !offline && !verifyHashes && !encrypted && extension === '.png' &&
-          !recipeMap.has(logicalSource) && !frames.has(logicalSource) && negativeHints.has(source) &&
-          !indexedImages.get(source)?.some(record => validStorageDecision(record.storage));
-        const checkedSource = hintedNegative ? { hash: null, size: 0 } : await files.inspect(file, 'source');
+        const checkedSource = await files.inspect(file, 'source');
         const sourceHash = checkedSource.hash;
         if (sourceIdentity !== undefined && native.assets.sourceIdentity(source) !== sourceIdentity) throw new Error('source changed while hashing');
         result.sourceBytes += checkedSource.size;
-        let recipe = recipeMap.get(logicalSource);
-        if (!recipe && !encrypted && !hintedNegative) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header, frames);
+        const policy = portableIndex?.policies?.[source] || {};
+        if (typeof policy !== 'object' || Array.isArray(policy) ||
+            policy.lossless !== undefined && typeof policy.lossless !== 'boolean') throw new Error('invalid image policy');
+        if (policy.astc !== undefined) astcSettings(policy.astc);
+        if (policy.recipe !== undefined && (!policy.recipe || typeof policy.recipe !== 'object' || Array.isArray(policy.recipe)))
+          throw new Error('invalid explicit image recipe');
+        let recipe = policy.recipe || recipeMap.get(logicalSource);
+        if (recipe) { recipe = { ...recipe, source: logicalSource, sourceHash }; validRecipes([recipe]); }
+        if (!recipe && !encrypted) recipe = await automaticRecipe(file, logicalSource, sourceHash, checkedSource.header, frames);
         if (recipe && recipe.sourceHash !== sourceHash) throw new Error('recipe source hash changed');
-        const allowAstc = astc.enabled && !losslessPrefixes.some(prefix => logicalSource.startsWith(prefix));
+        const imageAstc = astcSettings({ ...astc, ...(policy.astc || {}) });
+        const allowAstc = imageAstc.enabled && !(policy.lossless ?? losslessPrefixes.some(prefix => logicalSource.startsWith(prefix)));
         const key = identity({ version: CACHE_VERSION, processorIdentity, sourceHash, source, recipe: recipe || null, allowAstc,
           automaticRecipes: { version: automaticRecipes.version, frame: frames.get(logicalSource) },
-          astcQuality: allowAstc ? astc.quality : null,
+          astcQuality: allowAstc ? imageAstc.quality : null,
           ...(encrypted ? { encryption: { version: 1, settingsHash: settings.hash }, characterLayout: 'mz-standard-v1' } : {}) });
-        const findIndexed = () => indexedImages.get(source)?.find(record =>
+        const findIndexed = () => !session.repairSources.has(source) && indexedImages.get(source)?.find(record =>
           record.sourceHash === sourceHash && identity(record.recipe) === identity(recipe || null) &&
           record.encryptionSettingsSha256 === (encrypted ? settings.hash : null) &&
+          (!record.resolvedSettings || identity(record.resolvedSettings) === identity({ allowAstc,
+            astcQuality: allowAstc ? imageAstc.quality : null, pageCodec })) &&
           (record.descriptor === null && Array.isArray(record.outputs) && !record.outputs.length ||
             record.descriptor && validDescriptor(record.descriptor)));
-        let indexed = hintedNegative ? { descriptor: null } : encrypted ? null : findIndexed();
-        // A matching negative decision needs no prepared backing or cache entry.
-        // The ordinary loader will read the original source if it is requested.
-        const indexedNegativeSkip = !offline && !encrypted && extension === '.png' && indexed?.descriptor === null;
-        if (indexedNegativeSkip) {
-          if (validStorageDecision(indexed.storage))
-            result.storageEntries.push({ source: logicalSource, sourceIdentity, storage: indexed.storage });
-          ++result.indexedNegative;
-          ++result.fallback;
-          ++catalogNegativeHits;
-          ++indexedNegativeSkips;
-        } else {
-          const directory = path.join(cacheRoot, 'entries', key);
+        let indexed = encrypted ? null : findIndexed();
+        {
+          let directory = session.directory('entries', key);
           let manifest = await cachedEntry(directory, key, sourceHash, files);
           if (manifest && encrypted && manifest.decrypted !== 'source' + extension) manifest = null;
           if (manifest) {
             if (encrypted && extension === '.png' && !recipe)
               recipe = await automaticRecipe(path.join(directory, manifest.decrypted), logicalSource, sourceHash, undefined, frames);
             result.hits += 1;
+            outcome = manifest.descriptor ? 'reused-local' : 'ordinary-choice';
             if (!manifest.descriptor && !manifest.decrypted) result.negativeHits += 1;
           } else {
             sourcePhase = 'prepare';
+            if (fs.existsSync(directory)) directory = session.newDirectory('entries', key);
             report('prepare', source);
             if (cancelled()) break;
             stage = await fsp.mkdtemp(path.join(cacheRoot, 'entries', '.stage-'));
@@ -603,13 +511,23 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
                 for (const page of pages) await fsp.rm(path.join(stage, page.path), { force: true });
               }
             }
+            if (recipe && (recipeMap.has(logicalSource) || policy.recipe)) {
+              const header = (await files.inspect(input, 'source')).header;
+              if (header?.subarray(0, 8).equals(PNG)) {
+                const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
+                const [columns, rows] = recipe.grid;
+                if (width % columns || height % rows || recipe.crop &&
+                    (recipe.crop[0] + recipe.crop[2] > width / columns || recipe.crop[1] + recipe.crop[3] > height / rows))
+                  throw new Error('explicit image recipe is not applicable to the current dimensions');
+              }
+            }
             if (!copied && !indexedFallback && extension === '.png') {
               if (indexed) ++result.indexedLayoutAttempts;
               else ++result.unindexedProcessed;
               const processingStarted = performance.now();
               try { descriptor = await native.assets.processImage(source, stage, recipe || null,
                 input, ...(native.assets.preparationWorkspaceVersion === 1
-                  ? [indexed ? indexed.descriptor : null, { workspaceBytes, allowAstc, astcQuality: astc.quality, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
+                  ? [indexed ? indexed.descriptor : null, { workspaceBytes, allowAstc, astcQuality: imageAstc.quality, ...(pageCodec === 'lz4' ? { pageCodec } : {}) }]
                   : indexed ? [indexed.descriptor] : [])); }
               finally { result.processingMs += performance.now() - processingStarted; }
             }
@@ -626,23 +544,26 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
             manifest = { version: CACHE_VERSION, key, source, sourceHash, descriptor, descriptorHash: identity(descriptor), outputs,
               ...(decrypted ? { decrypted } : {}) };
             // Cache entries are disposable and hash-validated; locks, leases and indexes still flush.
-            await writeJson(path.join(stage, 'manifest.json'), manifest, false);
+            files.writeManifest(stage, { ...manifest, settings: { recipe, allowAstc, astcQuality: imageAstc.quality }, processor: processorIdentity,
+              dependencies: [{ source, hash: sourceHash }, ...(encrypted ? [{ source: 'data/System.json', hash: settings.hash }] : [])],
+              outcome: descriptor ? copied ? 'reused-package' : 'generated' : 'ordinary-choice' });
             if (!await cachedEntry(stage, key, sourceHash, files)) throw new Error('prepared output validation failed');
-            await fsp.rm(directory, { recursive: true, force: true });
             await fsp.rename(stage, directory);
+            files.publishManifest(stage, directory);
             stage = null;
             if (!await cachedEntry(directory, key, sourceHash, files)) throw new Error('published output validation failed');
             result.generated += 1;
+            outcome = descriptor ? copied ? 'reused-package' : 'generated' : 'ordinary-choice';
           }
           sourceIdentity = await refreshIdentity(source, sourceHash, sourceIdentity);
           if (validStorageDecision(indexed?.storage))
-            result.storageEntries.push({ source: logicalSource, sourceIdentity, storage: indexed.storage });
+            result.storageEntries.push({ source: logicalSource, sourceIdentity,
+              backingHash: manifest.decrypted ? manifest.outputs[manifest.decrypted] : sourceHash, storage: indexed.storage });
           if (offline) result.decisions.push({ source, sourceHash, recipe: recipe || null,
             encryptionSettingsSha256: encrypted ? settings.hash : null,
             descriptor: manifest.descriptor, outputs: Object.fromEntries(Object.entries(manifest.outputs)
               .filter(([name]) => name !== manifest.decrypted)) });
           if (encrypted) settings.sourceIdentity = await refreshIdentity('data/System.json', settings.hash, settings.sourceIdentity);
-          keys.push(key);
           if (manifest.decrypted) {
             result.decryptedEntries.push({ source, logicalSource, file: path.join(directory, manifest.decrypted),
               sourceIdentity, sourceHash, settingsIdentity: settings.sourceIdentity,
@@ -663,9 +584,11 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
               backingHash: manifest.decrypted ? manifest.outputs[manifest.decrypted] : sourceHash,
               pageHashes: manifest.descriptor.pages.map(page => manifest.outputs[page.path]),
               ...(encrypted ? { decryptedFile: path.join(directory, manifest.decrypted) } : {}) });
-          } else if (!manifest.decrypted) { result.fallback += 1; ++catalogNegativeHits; }
+          } else if (!manifest.decrypted) { result.fallback += 1; }
         }
+        session.outcome('image:' + source, outcome);
       } catch (error) {
+        session.outcome('image:' + source, 'ordinary-failure', error.message);
         result.fallback += 1;
         result.failedFiles += 1;
         logger.warn(`[pmjs] asset preparation fallback ${source}: ${error.message}`);
@@ -691,12 +614,10 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         await files.save();
         return result;
       }
-      const releaseCacheLease = await createImageLease(cacheRoot, keys, native.assets);
-      const previousLease = installedLeases.get(native.assets);
-      installedLeases.set(native.assets, releaseCacheLease);
-      result.releaseCacheLease = releaseCacheLease;
+      activationStarted = true;
       if (native.assets.installDecrypted) {
-        await native.assets.installDecrypted(result.decryptedEntries, catalogCapable);
+        const derivedReport = await native.assets.installDecrypted(result.decryptedEntries, false, true);
+        result.activation = derivedReport?.rejected ? derivedReport : undefined;
         result.decrypted = result.decryptedEntries.filter(entry => native.assets.hasDecrypted(entry.logicalSource)).length;
         result.installFailures += result.decryptedEntries.length - result.decrypted;
         result.fallback += result.decryptedEntries.length - result.decrypted;
@@ -710,7 +631,7 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         });
       }
       if (audioViewSupport) {
-        if ((await encryptionSettings(native, gameRoot)).hash !== audioSettings.hash)
+        if ((await encryptionSettings(native, gameRoot, session.files)).hash !== audioSettings.hash)
           throw new Error('audio encryption settings changed during preparation');
         result.audioViews = native.media.installAudioViews(result.audioViewEntries);
         result.fallback += result.audioViewEntries.length - result.audioViews;
@@ -723,69 +644,29 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes = [], native, onProg
         entry.sourceIdentity = native.assets.sourceIdentity(entry.source);
         return true;
       });
-      if ((await native.assets.installImageStorage?.(result.storageEntries) || 0) !== result.storageEntries.length)
-        throw new Error('incomplete image storage installation');
-      const installed = await native.assets.installPrepared(result.entries, catalogCapable);
-      if (previousLease) previousLease();
+      const storage = native.assets.installImageStorage ? await native.assets.installImageStorage(result.storageEntries, true) : null;
+      const installed = await native.assets.installPrepared(result.entries, false, true);
+      result.activation = { accepted: installed?.accepted || [], rejected: [...(result.activation?.rejected || []), ...(storage?.rejected || []), ...(installed?.rejected || [])] };
       result.prepared = result.entries.length;
-      result.installed = Number.isInteger(installed) ? installed : result.entries.length;
+      result.installed = installed?.accepted ? installed.accepted.length : Number.isInteger(installed) ? installed : result.entries.length;
       result.fallback += result.prepared - result.installed;
       result.installFailures += result.prepared - result.installed;
       if (result.installed < result.prepared) {
         logger.warn(`[pmjs] prepared image index installed ${result.installed}/${result.prepared}; remaining images use ordinary loading`);
       }
-      if (catalogCapable && result.installed === result.entries.length && result.decrypted === result.decryptedEntries.length && result.audioViews === result.audioViewEntries.length) {
-        report('publish');
-        const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
-        summary.hits = keys.length + indexedNegativeSkips + result.audioViews;
-        summary.negativeHits = catalogNegativeHits;
-        await publishCatalog(catalogFile, binding, cacheRoot, { keys, entries: result.entries, storageEntries: result.storageEntries,
-          decryptedEntries: result.decryptedEntries, audioViewEntries: result.audioViewEntries, summary });
-      }
       report('cleanup');
       await files.save();
-      const indexStage = path.join(cacheRoot, '.' + indexName + '-' + crypto.randomBytes(6).toString('hex'));
-      await writeJson(indexStage, { version: CACHE_VERSION, keys });
-      await fsp.rename(indexStage, path.join(cacheRoot, indexName));
-      const retained = new Set(keys);
-      for (const filename of await fsp.readdir(cacheRoot)) {
-        if (!/^(index|catalog)-/.test(filename) || !filename.endsWith('.json') || filename === indexName) continue;
-        const other = await readJson(path.join(cacheRoot, filename));
-        for (const key of retainedCatalogKeys(other)) retained.add(key);
-      }
-      const mapRoot = path.join(cacheRoot, 'maps');
-      for (const filename of await fsp.readdir(mapRoot).catch(() => [])) {
-        if (!/^catalog-[a-f0-9]{64}\.json$/.test(filename)) continue;
-        const catalog = await readJson(path.join(mapRoot, filename));
-        for (const key of retainedCatalogKeys(catalog)) retained.add(key);
-      }
-      if (fs.existsSync(mapRoot)) await retainLeases(mapRoot, retained);
-      await retainLeases(cacheRoot, retained);
-      for (const name of await fsp.readdir(path.join(cacheRoot, 'entries'))) {
-        if (name.startsWith('.stage-') || (HASH.test(name) && !retained.has(name))) {
-          await fsp.rm(path.join(cacheRoot, 'entries', name), { recursive: true, force: true });
-        }
-      }
+
     }
   } catch (error) {
     terminalPhase = 'error';
     result.error = error.message;
-    if (result.releaseCacheLease) {
-      result.releaseCacheLease(); delete result.releaseCacheLease;
-      await clearIndexes();
-      result.installed = result.decrypted = result.audioViews = 0;
-    }
     result.fallback += result.total - result.completed;
     logger.warn(`[pmjs] asset preparation unavailable: ${error.message}`);
   } finally {
-    if (release) {
-      try { await release(); }
-      catch (error) { logger.warn(`[pmjs] cannot release asset preparation lock: ${error.message}`); }
-    }
     result.durationMs = performance.now() - started;
     cancelled();
-    if (result.cancelled && result.releaseCacheLease) {
-      result.releaseCacheLease(); delete result.releaseCacheLease;
+    if (result.cancelled && activationStarted) {
       await clearIndexes();
       result.installed = result.decrypted = result.audioViews = 0;
     }

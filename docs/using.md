@@ -46,10 +46,29 @@ use the same palette backing. Pixel reads return original RGBA bytes without
 promoting the GPU texture. Writes and unsupported samplers, including mipmaps
 and blur, use ordinary texture storage.
 
-Image and map preparation use kernel file locks in their cache directories. If
-a cache stays busy for 15 seconds, preparation falls back to the original assets.
-The lock releases automatically when its process exits; leave `.prepare.lock`
-in place so all preparers continue to lock the same file.
+Every launch inventories the effective game filesystem, including writable
+replacements and deleted files. Image, map and adapter processors share this
+inventory and one preparation lock. A supplied index provides per-asset settings;
+unlisted assets use automatic defaults. Changed source contents retain explicit
+settings and discard calculated layouts and output descriptions.
+
+Local validation and results live in `preparation-state.json`, under the
+`preparation-v1` cache namespace. Unchanged file metadata reuses saved checksums;
+new or changed metadata triggers hashing, with each shared file hashed once per
+preparation run. `assetPreparation.verifyHashes: true` rereads inputs and outputs.
+The supplied index remains unchanged. Logs distinguish local reuse, package reuse,
+generation, an ordinary-loading choice and fallback after failure.
+
+Preparation publishes complete output generations and atomically saves state after
+each phase and orderly cancellation. Individual failures retry on the next launch;
+a native rejection gets one repair attempt during the current launch. Other valid
+results remain usable. Leases protect outputs used by running processes from
+cleanup. Older cache bookkeeping is ignored and causes a one-time rebuild. Obsolete image
+and map outputs are reclaimed after their existing locks and leases allow it.
+
+If the cache stays busy for 15 seconds, preparation falls back to the original
+assets. The kernel lock releases automatically when its process exits; leave
+`.prepare.lock` in place so all preparers continue to lock the same file.
 
 The `preserveBitmapReloadPixels` configuration option defaults to `true`;
 it keeps the previous image visible while that image reloads. Set it to
@@ -72,8 +91,10 @@ pmjs /path/to/bundle --game /path/to/game
 ```
 
 PMJS stores any refreshed bootstrap in your cache; moving a bundle does not
-require editing it. An asset index may speed preparation when it matches the
-recipient's game and runtime. If it does not match, ordinary preparation runs.
+require editing it. An asset index can supply reusable calculated results and
+packaged outputs for matching inputs and processor formats. Missing, stale or
+damaged results are prepared locally; invalid explicit settings warn for that
+asset and use ordinary loading.
 
 ## System requirements
 

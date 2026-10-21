@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
+const { temporaryDirectory } = require('./helpers/temp.cjs');
 const path = require('node:path');
 const { png } = require('./helpers/png.cjs');
 const { prepareAssets } = require('../runner/asset-preparation.cjs');
@@ -12,7 +12,7 @@ const engine = process.argv[3] || 'MZ';
 assert.ok(engine === 'MV' || engine === 'MZ');
 const imageSource = 'img/characters/!$actor.' + (engine === 'MV' ? 'rpgmvp' : 'png_');
 const audioExtension = engine === 'MV' ? '.rpgmvo' : '.ogg_';
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pmjs-prepared-media-'));
+const root = temporaryDirectory('pmjs-prepared-media-');
 const gameRoot = path.join(root, 'game');
 for (const directory of ['data', 'img/characters', 'img/pictures', 'audio/bgm', 'audio/se']) {
   fs.mkdirSync(path.join(gameRoot, directory), { recursive: true });
@@ -67,17 +67,18 @@ async function main() {
     path.join(gameRoot, imageSource), null, { pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
   assert.equal(native.assets.preparationVersion.processor, 'images-v15-sparse-palette-astcenc4.7');
   assert.equal(cold.decrypted, 3);
+  const partial = native.assets.installDecrypted([{ ...cold.decryptedEntries[0], source: 'invalid', fileHash: 'bad' }, ...cold.decryptedEntries], false, true);
+  assert.equal(partial.accepted.length, 3);
+  assert.equal(partial.rejected.length, 1);
+  assert.equal(partial.rejected[0].id, 'invalid');
   assert.equal(cold.installed, pageCodec === 'lz4' ? 2 : 1);
   assert.equal(cold.fallback, pageCodec === 'lz4' ? 0 : 1, 'LZ4 retains standalone pages; PNG requires a layout saving');
-  const directories = fs.readdirSync(path.join(options.cacheRoot, 'entries'));
-  const negative = directories.map(name => path.join(options.cacheRoot, 'entries', name))
-    .find(directory => {
-      const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json')));
-      return manifest.descriptor === null && !manifest.decrypted;
-    });
+  const stateRoot = path.join(options.cacheRoot, 'preparation-v1', fs.readdirSync(path.join(options.cacheRoot, 'preparation-v1'))[0]);
+  const records = Object.entries(JSON.parse(fs.readFileSync(path.join(stateRoot, 'preparation-state.json'))).data.results);
+  const negative = records.find(([, record]) => record.descriptor === null && !record.decrypted);
   if (pageCodec === 'png') {
     assert.ok(negative, 'unprofitable image decision was not cached');
-    assert.deepEqual(fs.readdirSync(negative), ['manifest.json'], 'rejected pages and temporary tiles leaked');
+    assert.deepEqual(fs.readdirSync(path.join(stateRoot, negative[0])), [], 'rejected pages and temporary tiles leaked');
   } else assert.equal(negative, undefined, 'LZ4 standalone page was negatively cached');
   assert.equal(cold.entries[0].descriptor.cells.length, 12, 'all character cells retained');
   assert.deepEqual(Buffer.from(native.fs.readBytes('audio/bgm/tone.ogg')), wav);
@@ -97,13 +98,14 @@ async function main() {
   assert.equal(native.media.playAudio(music.handle, true, 0), true);
   assert.equal(native.media.playAudio(effect.handle, false, 0), true);
   const warm = await prepareAssets({ ...options, workspaceBytes: 128 * 1024 * 1024 });
-  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.validation.hashedFiles, 0);
   assert.equal(warm.generated, 0);
   assert.equal(warm.hits, 4);
   assert.equal(warm.negativeHits, pageCodec === 'lz4' ? 0 : 1);
   assert.equal(warm.decrypted, 3);
+  native.assets.installDecrypted(warm.decryptedEntries, true);
   const drifted = warm.decryptedEntries.map(entry => {
-    const drift = identity => { const parts = identity.split(':'); parts[parts.length - 6] = String(BigInt(parts[parts.length - 6]) + 1n); return parts.join(':'); };
+    const drift = identity => { if (!identity) return identity; const parts = identity.split(':'); parts[parts.length - 6] = String(BigInt(parts[parts.length - 6]) + 1n); return parts.join(':'); };
     return { ...entry, sourceIdentity: drift(entry.sourceIdentity), settingsIdentity: drift(entry.settingsIdentity), fileIdentity: drift(entry.fileIdentity) };
   });
   native.assets.installDerivedCatalog(drifted);
@@ -118,7 +120,7 @@ async function main() {
   const replacementPixels = Buffer.alloc(16, 255);
   native.fs.writeBytes('img/characters/!$actor.png', png(2, 2, replacementPixels));
   const overridden = await prepareAssets(options);
-  assert.equal(overridden.catalogHit, true, 'overlays are checked at use time');
+  assert.ok(overridden.validation.hashedFiles > 0, 'new overlay files are inventoried before preparation');
   const changedImage = await native.images.loadAsync('img/characters/!$actor.png');
   assert.deepEqual([changedImage.width, changedImage.height], [2, 2]);
   native.images.release(changedImage.handle);
@@ -126,7 +128,7 @@ async function main() {
     encryptionKey: 'ff'.repeat(16) }));
   native.assets.consumePreparationInvalidations();
   assert.equal(native.assets.hasDecrypted('audio/bgm/tone.ogg'), false);
-  assert.equal(native.assets.consumePreparationInvalidations(), 3, 'changed encryption settings invalidate both catalogs');
+  assert.equal(native.assets.consumePreparationInvalidations(), 3, 'changed encryption settings invalidate affected prepared resources');
   assert.equal(native.assets.hasDecrypted('img/characters/!$actor.png'), true,
     'explicit plaintext replacements remain readable independently of encryption settings');
   fs.rmSync(options.cacheRoot, { recursive: true, force: true });

@@ -24,7 +24,7 @@
   var stats = { selected: 0, refused: 0, reasons: Object.create(null) };
   function refuse(reason) { stats.refused++; stats.reasons[reason] = (stats.reasons[reason] || 0)+1; return ''; }
   function stale(reason) {
-    if (typeof NativeHost.assets.invalidateMapCatalog === 'function') NativeHost.assets.invalidateMapCatalog();
+    if (typeof NativeHost.assets.invalidateMapCatalog === 'function') NativeHost.assets.invalidateMapCatalog($gameMap.mapId());
     return refuse(reason);
   }
   function hash(value) { return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex'); }

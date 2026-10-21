@@ -35,11 +35,19 @@ completed bundle wherever you need it.
 ## Asset preparation
 
 By default, PMJS prepares the game in a private temporary cache and puts
-`asset-index.json` in the bundle. The index records image and map preparation
-decisions, logical source paths, content hashes, and the processor versions
-needed to check them. It contains no original game files, decrypted sources,
-source snapshots, or decoded pixel buffers. PMJS checks each relevant input
-before reuse and prepares normally when a record is stale or unsuitable.
+`asset-index.json` in the bundle. Packaging uses the same preparation coordinator
+as launch, with activation disabled. Schema 3 separates each image's `settings`
+from `calculated` facts. Compression requirements and explicit recipes belong in
+settings; content hashes, palettes, layouts and output descriptions are calculated.
+Runtime configuration provides defaults, then explicit per-asset settings apply.
+Older supported schemas are normalized when loaded.
+
+The index records logical source paths and relevant processor versions. It contains
+no original game files, decrypted sources, source snapshots or decoded pixel buffers.
+Every launch inventories installed files, validates relevant dependencies and outputs,
+and prepares uncovered or stale results locally. The portable index is never edited.
+Adapter processors discover from that same inventory, including new files; their
+artifacts share local validation, persistence and cleanup with images and maps.
 
 Image preparation is lossless by default. Opt into lossy ASTC 4×4 compression
 for all supported image assets in your configuration:

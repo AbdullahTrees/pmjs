@@ -4,7 +4,7 @@ const hostProcess = process;
 const { createSubprocesses } = require('./subprocess.cjs');
 const { reader: portArtifactReader } = require('./port-preparation.cjs');
 
-const { prepareMaps } = require('./map-preparation.cjs');
+const { prepareGameAssets } = require('./preparation.cjs');
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -12,7 +12,7 @@ const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
 const { measureStartup } = require('./startup-metrics.cjs');
 const { createStorage, createGameFilesystem } = require('./storage.cjs');
-const { prepareAssets, validRecipes, astcSettings, validLosslessPrefixes } = require('./asset-preparation.cjs');
+const { validRecipes, astcSettings, validLosslessPrefixes } = require('./asset-preparation.cjs');
 const hostTimers = require('node:timers');
 const { createDiagnostics } = require('./diagnostics.cjs');
 
@@ -333,7 +333,7 @@ function createPreparationLog(details, { log = message => console.log(message), 
     if (current.phase !== value.phase) {
       phases[current.phase] = (phases[current.phase] || 0) + time - phaseStarted;
       phaseStarted = time;
-      if (!(value.phase in phases) || /^(map-)?(discover|wait|catalog|install|publish|cleanup)$/.test(value.phase))
+      if (!(value.phase in phases) || /^(map-)?(discover|wait|install|publish|cleanup)$/.test(value.phase))
         emit('phase', `phase=${value.phase} elapsed_ms=${elapsed(time - started)} source=${JSON.stringify(value.source || '')}`);
     }
     current = value;
@@ -358,9 +358,8 @@ function createPreparationLog(details, { log = message => console.log(message), 
         result.failedFiles || result.installFailures || result.installed < result.prepared ? 'partial' : 'complete';
       const reused = (result.hits || 0) + (result.indexedNegative || 0) + (result.compilationHits || 0);
       const cache = status !== 'complete' ? 'incomplete' : result.generated ? (reused ? 'mixed' : 'cold') :
-        (reused || result.catalogHit ? 'warm' : 'empty');
-      emit('finish', `status=${status} cache=${cache} catalog_hit=${result.catalogHit === true} ` +
-        `catalog=${result.catalogStatus || 'not-checked'} duration_ms=${elapsed(time - started)} ` +
+        (reused ? 'warm' : 'empty');
+      emit('finish', `status=${status} cache=${cache} duration_ms=${elapsed(time - started)} ` +
         `codec=${details.codec} verify_hashes=${details.verifyHashes} cache_root=${JSON.stringify(details.cacheRoot)} ` +
         `generated=${result.generated || 0} hits=${result.hits || 0} fallback=${result.fallback ?? result.refused ?? 0} ` +
         `total=${result.total ?? result.maps?.length ?? 0} prepared=${result.prepared ?? result.selected ?? 0} ` +
@@ -372,7 +371,7 @@ function createPreparationLog(details, { log = message => console.log(message), 
         `snapshot_bytes=${result.additionalSnapshotBytes || 0} processing_ms=${(result.processingMs || 0).toFixed(1)} ` +
         `early_refusals=${result.earlyRefusals || 0} ` +
         `phase_ms=${JSON.stringify(Object.fromEntries(Object.entries(phases).map(([phase, ms]) => [phase, Number(elapsed(ms))])))} ` +
-        `error=${JSON.stringify(error?.message || result.error || result.catalogError || '')}`);
+        `error=${JSON.stringify(error?.message || result.error || '')}`);
     }
   };
 }
@@ -420,53 +419,28 @@ async function prepareStartupAssets(options, native) {
   }, 16);
   let preparation, preparationStatus = 'failed';
   try {
-    activeLog = createPreparationLog({ stage: 'images', codec: options.assetPreparation.pageCodec,
-      cacheRoot: options.assetPreparation.cacheRoot, verifyHashes: options.assetPreparation.verifyHashes });
-    preparation = await prepareAssets({ gameRoot: options.gameRoot,
-      cacheRoot: options.assetPreparation.cacheRoot, recipes: options.assetPreparation.recipes, native,
+    const all = await prepareGameAssets({ gameRoot: options.gameRoot,
+      cacheRoot: options.assetPreparation.cacheRoot, native,
+      ...options.assetPreparation, images: options.assetPreparation.enabled,
+      recipes: options.assetPreparation.recipes,
       portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
-      verifyHashes: options.assetPreparation.verifyHashes,
-      workspaceBytes: options.assetPreparation.workspaceBytes,
-      pageCodec: options.assetPreparation.pageCodec,
-      losslessPrefixes: options.assetPreparation.losslessPrefixes,
-      astc: options.assetPreparation.astc,
-      shouldCancel: () => cancelled,
+      bundleRoot: options.bundleRoot, portDescriptors: options.portDescriptors, adapters: options.preparationAdapters,
+      width: options.width, height: options.height, shouldCancel: () => cancelled,
       onProgress: progress => {
-        activeLog.progress(progress);
-        current = progress;
-        try { showProgress(); }
-        catch (error) { failPreparation(error); }
-      } });
-    activeLog.finish(preparation, preparationFailed ? preparationError : undefined);
-    console.log(`[pmjs] asset preparation generated=${preparation.generated} hits=${preparation.hits} ` +
-      `decrypted=${preparation.decrypted} audio_views=${preparation.audioViews} fallback=${preparation.fallback} ` +
-      `indexed_negative=${preparation.indexedNegative} indexed_layout_attempts=${preparation.indexedLayoutAttempts} ` +
-      `indexed_zero_page=${preparation.indexedZeroPage} indexed_page_copies=${preparation.indexedPageCopies} ` +
-      `unindexed_processed=${preparation.unindexedProcessed} ` +
-      `hashed_files=${preparation.validation?.hashedFiles || 0} hashed_bytes=${preparation.validation?.hashedBytes || 0} ` +
-      `reused_files=${preparation.validation?.reusedFiles || 0} duration_ms=${preparation.durationMs.toFixed(1)}`);
-    if (!cancelled && options.assetPreparation.maps) {
-      activeLog = createPreparationLog({ stage: 'maps', codec: 'png',
-        cacheRoot: path.join(options.assetPreparation.cacheRoot, 'maps'), verifyHashes: options.assetPreparation.verifyHashes });
-      current = { phase: 'map-discover', completed: 0, total: 0 };
-      preparation.maps = await prepareMaps({ gameRoot: options.gameRoot,
-        cacheRoot: options.assetPreparation.cacheRoot, native, width: options.width, height: options.height,
-        portableIndex: portableIndex?.maps,
-        portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
-        verifyHashes: options.assetPreparation.verifyHashes,
-        shouldCancel: () => cancelled, onProgress: progress => {
-          activeLog.progress(progress); current = progress;
-          try { showProgress(); }
-          catch (error) { failPreparation(error); }
-        } });
-      const maps = preparation.maps;
-      activeLog.finish(maps, preparationFailed ? preparationError : undefined);
-      console.log(`[pmjs] map preparation generated=${maps.generated} hits=${maps.hits} ` +
-        `compilation_hits=${maps.compilationHits} selected=${maps.selected} ` +
-        `indexed_copies=${maps.indexedCopies} native_packs=${maps.nativePacks} ` +
-        `hashed_files=${maps.validation?.hashedFiles || 0} hashed_bytes=${maps.validation?.hashedBytes || 0} ` +
-        `reused_files=${maps.validation?.reusedFiles || 0} duration_ms=${maps.durationMs.toFixed(1)}`);
-    }
+        if (progress.phase === 'start') {
+          activeLog = createPreparationLog({ stage: progress.stage, codec: options.assetPreparation.pageCodec,
+            cacheRoot: options.assetPreparation.cacheRoot, verifyHashes: options.assetPreparation.verifyHashes });
+          stageBaseline = null;
+        }
+        activeLog?.progress(progress); current = progress;
+        try { showProgress(); } catch (error) { failPreparation(error); }
+      },
+      onPhaseComplete: (stage, value) => { if (stage !== 'port') activeLog?.finish(value); }
+    });
+    preparation = { ...(all.images || {}), maps: all.maps, cancelled: all.cancelled,
+      inventory: all.inventory, validation: all.validation, releaseCacheLease: all.releaseCacheLease,
+      invalidate: all.invalidate };
+    options.portArtifacts = Object.fromEntries(all.portArtifacts);
     preparationStatus = preparationFailed ? 'failed' :
       cancelled || preparation.cancelled || preparation.maps?.cancelled ? 'cancelled' :
         preparation.error || preparation.maps?.error ? 'failed' :
@@ -480,8 +454,7 @@ async function prepareStartupAssets(options, native) {
   }
   if (preparationFailed) throw preparationError;
   return { preparation, cancelled,
-    invalidateImages: preparation.invalidateCatalog,
-    invalidateMaps: preparation.maps && preparation.maps.invalidateCatalog };
+    invalidate: preparation.invalidate };
 }
 
 async function runSession(input, diagnostics, setNative) {
@@ -519,28 +492,40 @@ async function runSession(input, diagnostics, setNative) {
   if (scan) console.log(`[pmjs] startup stage=vfs-index statistics=${JSON.stringify(scan)}`);
   console.log(`[pmjs] startup stage=host-initialized elapsed_ms=${(performance.now() - startupStarted).toFixed(1)}`);
   let pendingInvalidations = 0, retryInvalidationAt = 0;
-  let invalidateImages, invalidateMaps;
+  let invalidatePreparation;
   let dispatcher;
   let subprocesses, reloadRequested = false, finishSession;
   let cancelFrameSchedule = () => {};
-  native.assets.invalidateMapCatalog = () => { pendingInvalidations |= 2; };
+  const invalidatedMaps = new Set();
+  native.assets.invalidateMapCatalog = mapId => {
+    const entry = native.assets.preparedMapIndex?.[mapId];
+    if (!entry || !invalidatePreparation || invalidatedMaps.has(entry.identity)) return;
+    invalidatedMaps.add(entry.identity);
+    invalidatePreparation(entry.identity).catch(error => console.warn('[pmjs] cannot record map preparation failure: ' + error.message));
+  };
   function flushPreparationInvalidations(force = false) {
     if (typeof native.assets.consumePreparationInvalidations === 'function')
       pendingInvalidations |= native.assets.consumePreparationInvalidations();
     if (!pendingInvalidations || (!force && performance.now() < retryInvalidationAt)) return;
-    if ((pendingInvalidations & 1) && invalidateImages && invalidateImages()) pendingInvalidations &= ~1;
-    if ((pendingInvalidations & 2) && invalidateMaps && invalidateMaps()) pendingInvalidations &= ~2;
+    if (invalidatePreparation && typeof native.assets.consumePreparationFailures === 'function') {
+      const failures = native.assets.consumePreparationFailures();
+      if (failures.length) invalidatePreparation(failures).catch(error => console.warn('[pmjs] cannot record preparation failure: ' + error.message));
+    }
+    pendingInvalidations = 0;
     retryInvalidationAt = performance.now() + 1000;
   }
   try {
     native.storage = createStorage(options.saveRoot);
     native.fs = createGameFilesystem(native.fs, path.join(options.saveRoot, 'game-files'));
-    if (options.assetPreparation.enabled) {
+    if (options.assetPreparation.enabled || options.portDescriptors?.length || options.preparationAdapters?.length) {
       diagnostics.stage('asset-preparation');
       const startup = await prepareStartupAssets(options, native);
-      invalidateImages = startup.invalidateImages;
-      invalidateMaps = startup.invalidateMaps;
+      invalidatePreparation = startup.invalidate;
       const { entries, decryptedEntries, releaseCacheLease, invalidateCatalog, ...preparationStats } = startup.preparation;
+      if (preparationStats.maps) {
+        const { entries: mapEntries, ...mapStats } = preparationStats.maps;
+        preparationStats.maps = mapStats;
+      }
       native.assets.preparationStats = preparationStats;
       if (startup.cancelled || startup.preparation.cancelled) { native.runtime.quit(); return; }
     } else if (native.assets && typeof native.assets.installPrepared === 'function') {

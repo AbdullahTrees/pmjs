@@ -7,6 +7,7 @@
 #include <deque>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -19,6 +20,16 @@ using ImageEncryptionKey = std::array<std::uint8_t, 16>;
 ImageEncryptionKey imageEncryptionKey(const std::string& hex);
 
 struct SparsePalettePage;
+
+struct PreparationFailures {
+  std::mutex mutex;
+  std::unordered_set<std::string> sources;
+  void record(const std::string& source) { const std::lock_guard lock(mutex); sources.insert(source); }
+  std::vector<std::string> consume() {
+    const std::lock_guard lock(mutex);
+    std::vector<std::string> result(sources.begin(), sources.end()); sources.clear(); return result;
+  }
+};
 
 using ImageHandle = std::uint32_t;
 constexpr std::uint32_t canvasHandleTag = 0x80000000U;
@@ -193,7 +204,8 @@ class ImageStore {
       std::optional<ImageEncryptionKey> encryptionKey = std::nullopt);
   static ImageStorageDecision classifyStorage(const ImagePixels& pixels);
   bool installStorageDecision(const std::filesystem::path& path,
-      const std::string& sourceIdentity, ImageStorageDecision decision);
+      const std::string& sourceIdentity, ImageStorageDecision decision,
+      const std::string& backingHash = {});
   void clearStorageDecisions() { storageDecisions_.clear(); }
   std::uint64_t storageDecisionHits() const { return storageDecisionHits_; }
   static std::size_t decodedStorageBytes(const ImagePixels& pixels);
@@ -220,6 +232,7 @@ class ImageStore {
   const std::unordered_map<std::string, std::uint64_t>& tileFallbacks() const { return tileFallbacks_; }
   std::size_t tileMetadataBytes() const { return tileMetadataBytes_->load(std::memory_order_relaxed); }
   void noteTileLoadFallback() { if (tileDiagnostics_) ++tileFallbacks_["page-validation"]; }
+  std::vector<std::string> consumePreparationFailures() { return preparationFailures_->consume(); }
   unsigned consumePreparationInvalidations() { return preparationInvalidations_->exchange(0, std::memory_order_relaxed); }
   void clearPreparedIndex() { preparedSources_.clear(); }
   bool installPrepared(const std::filesystem::path& sourcePath,
@@ -537,6 +550,7 @@ class ImageStore {
   bool promoteToRgba(Slot& slot, const void* replacement = nullptr);
   std::deque<Slot> slots_;
   std::unordered_map<std::string, ImageHandle> pathCache_;
+  std::shared_ptr<PreparationFailures> preparationFailures_ = std::make_shared<PreparationFailures>();
   std::shared_ptr<std::atomic<unsigned>> preparationInvalidations_ = std::make_shared<std::atomic<unsigned>>(0);
   std::unordered_map<std::string, std::shared_ptr<PreparedBacking>> preparedSources_;
   std::size_t liveCount_ = 0;

@@ -19,9 +19,9 @@ function fixture(source) {
     saveRoot: path.join(root, 'save'), width: 320, height: 240, title: 'Test' };
 }
 function native(polls = [true, false]) {
-  let now = 0;
+  let now = 0, guestInput = false;
   const locks = new Map();
-  return { initialize() {}, pollEvents: () => polls.shift() ?? false,
+  return { initialize() {}, pollEvents: () => !guestInput || (polls.shift() ?? false),
     finishLogicStep() {}, beginFrame() {}, renderFrame() {}, swapFrame() {},
     runtime: { env() { return ''; }, monotonicNow: () => (now += 100), quit() {} },
     fs: { mountWritableOverlay() {}, updateWritableOverlay() {}, readText() { return null; } },
@@ -35,7 +35,7 @@ function native(polls = [true, false]) {
       },
       releasePreparationLock(token) { if (locks.get(token.root) === token) locks.delete(token.root); }
     },
-    input: { snapshot() { return {}; }, consumePressed() {} }, canvas: {}, media: {} };
+    input: { snapshot() { guestInput = true; return {}; }, consumePressed() {} }, canvas: {}, media: {} };
 }
 
 test('supervisor heartbeat uses its captured Node process, not the guest process replacement', () => {
@@ -62,7 +62,7 @@ test('preparation logs bounded heartbeats, current work and phase durations with
   const lines = [];
   const reporter = createPreparationLog({ stage: 'images', codec: 'lz4', cacheRoot: '/cache', verifyHashes: false },
     { now: () => clock, log: line => lines.push(line) });
-  reporter.progress({ phase: 'catalog', completed: 0, total: 2 });
+  reporter.progress({ phase: 'validate', completed: 0, total: 2 });
   clock = 2000;
   reporter.progress({ phase: 'prepare', source: 'img/a\n.png', completed: 0, total: 2 });
   clock = 9999; reporter.heartbeat();
@@ -74,10 +74,10 @@ test('preparation logs bounded heartbeats, current work and phase durations with
   reporter.heartbeat();
   assert.equal(lines.filter(line => line.includes('event=progress')).length, 1);
   clock = 12000;
-  reporter.finish({ generated: 2, installed: 2, catalogStatus: 'missing', validation: { hashedFiles: 2, hashedBytes: 400 } });
-  assert.match(lines.at(-1), /status=complete cache=cold catalog_hit=false catalog=missing duration_ms=12000.0/);
+  reporter.finish({ generated: 2, installed: 2, validation: { hashedFiles: 2, hashedBytes: 400 } });
+  assert.match(lines.at(-1), /status=complete cache=cold duration_ms=12000.0/);
   assert.match(lines.at(-1), /hashed_files=2 hashed_bytes=400/);
-  assert.match(lines.at(-1), /phase_ms=\{"start":0,"catalog":2000,"prepare":10000\}/);
+  assert.match(lines.at(-1), /phase_ms=\{"start":0,"validate":2000,"prepare":10000\}/);
   const count = lines.length;
   clock = 30000; reporter.heartbeat(); reporter.finish({});
   assert.equal(lines.length, count);
@@ -85,8 +85,7 @@ test('preparation logs bounded heartbeats, current work and phase durations with
 
 test('preparation summaries distinguish cache reuse, partial generation, failure and cancellation', () => {
   for (const [result, expected] of [
-    [{ generated: 0, hits: 20, catalogHit: true, catalogStatus: 'hit' }, 'status=complete cache=warm catalog_hit=true catalog=hit'],
-    [{ generated: 0, hits: 20, catalogStatus: 'binding-mismatch' }, 'status=complete cache=warm catalog_hit=false catalog=binding-mismatch'],
+    [{ generated: 0, hits: 20 }, 'status=complete cache=warm'],
     [{ generated: 1, hits: 20 }, 'status=complete cache=mixed'],
     [{ generated: 1, indexedNegative: 20 }, 'status=complete cache=mixed'],
     [{ generated: 0 }, 'status=complete cache=empty'],
@@ -131,6 +130,8 @@ test('runner logs cold and validated warm preparation before boot and includes t
     lines.length = 0;
   }
   options.mapPreparation = 'on';
+  fs.mkdirSync(path.join(options.gameRoot, 'data'), { recursive: true });
+  fs.writeFileSync(path.join(options.gameRoot, 'data/Map001.json'), '{}');
   booted = false;
   await run(options);
   const imageFinish = lines.findIndex(line => line.includes('stage=images event=finish'));
@@ -544,7 +545,7 @@ test('preparation cancellation polls the host, waits for its worker and prevents
   `);
   await run(f);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'closed');
-  assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/entries')), []);
+  assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/preparation-v1', fs.readdirSync(path.join(f.saveRoot, 'asset-cache/preparation-v1'))[0], 'entries')), []);
 });
 
 for (const failure of ['poll', 'presentation', 'progress callback']) {
@@ -598,7 +599,7 @@ for (const failure of ['poll', 'presentation', 'progress callback']) {
     assert.equal(host.settled, true);
     assert.equal(host.jobs, 1);
     assert.equal(host.closed, true);
-    assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/entries')), []);
+    assert.deepEqual(fs.readdirSync(path.join(f.saveRoot, 'asset-cache/preparation-v1', fs.readdirSync(path.join(f.saveRoot, 'asset-cache/preparation-v1'))[0], 'entries')), []);
   });
 }
 

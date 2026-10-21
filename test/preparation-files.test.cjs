@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const test = require('node:test');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { preparationFiles } = require('../runner/preparation-files.cjs');
+const copyFiles = () => preparationFiles({ data: { files: {} }, checkpoint: async () => {} });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
 test('verified copies publish without rereading staged or published bytes and invalidate on edits', async () => {
@@ -14,7 +15,7 @@ test('verified copies publish without rereading staged or published bytes and in
   const stage = path.join(root, 'stage'), published = path.join(root, 'published');
   fs.mkdirSync(stage);
   const bytes = Buffer.alloc(700 * 1024, 73); fs.writeFileSync(source, bytes);
-  const files = await preparationFiles(root), expected = hash(bytes);
+  const files = await copyFiles(), expected = hash(bytes);
   const checked = await files.copyVerified(source, path.join(stage, 'page'), expected);
   assert.equal(checked.size, bytes.length);
   assert.equal(await files.hash(path.join(stage, 'page')), expected);
@@ -30,7 +31,7 @@ test('replacement of a staged object cannot inherit its verification receipt', a
   const root = temporaryDirectory('copy-replacement-'), source = path.join(root, 'source');
   const stage = path.join(root, 'stage'), published = path.join(root, 'published');
   fs.writeFileSync(source, 'original');
-  const files = await preparationFiles(root), expected = hash('original');
+  const files = await copyFiles(), expected = hash('original');
   await files.copyVerified(source, stage, expected);
   fs.writeFileSync(stage + '.replacement', 'replaced'); fs.renameSync(stage + '.replacement', stage);
   await files.publish(stage, published);
@@ -41,7 +42,7 @@ test('replacement of a staged object cannot inherit its verification receipt', a
 test('checksum mismatch and failed publication never create a verified published object', async () => {
   const root = temporaryDirectory('copy-failure-'), source = path.join(root, 'source');
   const stage = path.join(root, 'stage'); fs.writeFileSync(source, 'original');
-  const files = await preparationFiles(root);
+  const files = await copyFiles();
   await assert.rejects(files.copyVerified(source, stage, hash('wrong')), /checksum differs/);
   assert.equal(fs.existsSync(stage), false);
   await files.copyVerified(source, stage, hash('original'));
@@ -55,7 +56,7 @@ test('checksum mismatch and failed publication never create a verified published
 for (const mode of ['mutate', 'replace', 'interrupt', 'replace-output']) test('copy rejects ' + mode + ' during streaming', async t => {
   const root = temporaryDirectory('copy-mutation-'), source = path.join(root, 'source'), target = path.join(root, 'stage');
   const bytes = Buffer.alloc(700 * 1024, 73); fs.writeFileSync(source, bytes);
-  const files = await preparationFiles(root), open = fs.promises.open;
+  const files = await copyFiles(), open = fs.promises.open;
   let changed = false;
   t.mock.method(fs.promises, 'open', async (...args) => {
     const handle = await open(...args);

@@ -16,16 +16,9 @@ async function writeJson(file, value, flush = true) {
   } finally { await handle.close(); }
 }
 
-async function preparationFiles(directory, verifyHashes = false) {
-  const index = path.join(directory, 'verified-files.json');
-  let previous = {}, previousHash;
-  try {
-    const saved = JSON.parse(await fsp.readFile(index, 'utf8'));
-    if (saved.version === 1 && saved.files && saved.hash === digest(JSON.stringify(saved.files))) {
-      previous = saved.files; previousHash = saved.hash;
-    }
-  } catch (_) { /* Missing or interrupted receipts require full verification. */ }
-  const files = {}, known = new Map(), jsonValues = new Map();
+async function preparationFiles(session, verifyHashes = false) {
+  const previous = session.data.files;
+  const files = {}, known = new Map();
   const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, jsonReads: 0, jsonReuses: 0,
     copiedFiles: 0, copiedBytes: 0, publicationReuses: 0, hashedBytesByCategory: {} };
   function identity(stat) {
@@ -38,8 +31,8 @@ async function preparationFiles(directory, verifyHashes = false) {
     const signature = identity(before);
     const cached = previous[file];
     const retained = known.get(signature);
-    let header = retained?.header;
-    let checksum = !verifyHashes && (retained?.hash ||
+    let header = retained?.header || (cached?.header ? Buffer.from(cached.header, "base64") : undefined);
+    let checksum = (retained?.hash || !verifyHashes &&
       cached && cached.identity === signature && HASH.test(cached.hash) && cached.hash);
     const reused = !!checksum;
     if (reused) ++stats.reusedFiles;
@@ -56,9 +49,27 @@ async function preparationFiles(directory, verifyHashes = false) {
       const after = await fsp.lstat(file, { bigint: true });
       if (!after.isFile() || identity(after) !== signature) throw new Error('preparation input changed while verifying');
     }
-    files[file] = { identity: signature, hash: checksum };
+    files[file] = { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) };
+    session.data.files[file] = files[file];
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, reused, size: Number(before.size), header };
+  }
+  function inspectSync(file, bytes, category = 'other') {
+    file = path.resolve(file);
+    const stat = fs.statSync(file, { bigint: true });
+    if (!stat.isFile()) throw new Error('preparation input is not a regular file');
+    const signature = identity(stat), retained = known.get(signature), cached = previous[file];
+    let checksum = retained?.hash || !verifyHashes && cached?.identity === signature && cached.hash;
+    if (!checksum) {
+      checksum = digest(bytes);
+      ++stats.hashedFiles; stats.hashedBytes += bytes.length;
+      stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + bytes.length;
+    } else ++stats.reusedFiles;
+    const header = bytes.subarray(0, 32);
+    files[file] = { identity: signature, hash: checksum, header: header.toString('base64') };
+    session.data.files[file] = files[file];
+    known.set(signature, { hash: checksum, header });
+    return { hash: checksum, size: bytes.length, header };
   }
   async function hash(file, category) { return (await inspect(file, category)).hash; }
   async function copyVerified(source, target, expectedHash, category = 'import') {
@@ -115,34 +126,19 @@ async function preparationFiles(directory, verifyHashes = false) {
     ++stats.publicationReuses;
   }
   async function validatedJson(file, validate) {
-    file = path.resolve(file);
-    const before = await fsp.lstat(file, { bigint: true });
-    if (!before.isFile()) return null;
-    const signature = identity(before), cached = previous[file] || jsonValues.get(signature);
-    const reused = !verifyHashes && cached?.identity === signature && cached.json !== undefined;
-    let value, checksum;
-    if (reused) { value = cached.json; checksum = cached.hash; ++stats.jsonReuses; }
-    else {
-      const bytes = await fsp.readFile(file);
-      value = JSON.parse(bytes); checksum = digest(bytes); ++stats.jsonReads;
-    }
-    if (!await validate(value, reused)) return null;
-    const after = await fsp.lstat(file, { bigint: true });
-    if (!after.isFile() || identity(after) !== signature) return null;
-    files[file] = { identity: signature, hash: checksum, json: value };
-    jsonValues.set(signature, files[file]);
+    const value = session.readManifest(path.dirname(file));
+    if (!value || !await validate(value, !verifyHashes)) return null;
+    session.touch(path.dirname(file));
     return value;
   }
   async function save() {
-    const checksum = digest(JSON.stringify(files));
-    if (checksum === previousHash) return;
-    const temporary = index + '.stage-' + crypto.randomBytes(6).toString('hex');
-    try {
-      await fsp.writeFile(temporary, JSON.stringify({ version: 1, files, hash: checksum }) + '\n', { flag: 'wx' });
-      await fsp.rename(temporary, index);
-    } finally { await fsp.rm(temporary, { force: true }); }
+    Object.assign(session.data.files, files);
+    await session.checkpoint();
   }
-  return { hash, inspect, copyVerified, publish, validatedJson, save, stats };
+  return { hash, inspect, inspectSync, copyVerified, publish, validatedJson, save, stats, receipts: files,
+    writeManifest: session.writeManifest,
+    publishManifest: session.publishManifest };
+
 }
 
 module.exports = { preparationFiles, writeJson };

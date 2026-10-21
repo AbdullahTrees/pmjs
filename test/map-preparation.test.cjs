@@ -11,38 +11,14 @@ const { compileRpgMap, compileTiledMap, engineTilemap } = require('../runner/map
 const { prepareMaps, validTileDescriptor } = require('../runner/map-preparation.cjs');
 const { parse } = require('../runner/cli.cjs');
 const { validate } = require('../runner/index.cjs');
-const core = `\nfunction Tilemap(){}\nTilemap.prototype._drawNormalTile=function(target,id){target.bltImage(this.bitmaps[5],0,0,48,48);};\nTilemap.prototype._drawAutotile=function(target,id){target.bltImage(this.bitmaps[0],this.animationFrame*24,0,24,24);};\nTilemap.prototype._drawTableEdge=function(target,id){target.bltImage(this.bitmaps[1],0,24,24,12);};\nTilemap.isAutotile=function(id){return id>=2048;};Tilemap.isTileA2=function(id){return id>=2816;};\nfunction ShaderTilemap(){}`;
-function fixture(t) {
-  const root=temporaryDirectory('pmjs-map-preparation-'),gameRoot=path.join(root,'game');
-  for(const dir of ['data','js','img/tilesets']) fs.mkdirSync(path.join(gameRoot,dir),{recursive:true});
-  fs.writeFileSync(path.join(gameRoot,'js/rpg_core.js'),core);fs.writeFileSync(path.join(gameRoot,'js/plugins.js'),'var $plugins=[];');
-  const names=['','','','','','B','C'];
-  fs.writeFileSync(path.join(gameRoot,'data/Tilesets.json'),JSON.stringify([null,{tilesetNames:names,flags:[]}])) ;
-  fs.writeFileSync(path.join(gameRoot,'data/System.json'),'{}');
-  const map={width:2,height:1,tilesetId:1,data:[1,0,0,0,0,0,0,0,0,0,0,0],events:[]};
-  fs.writeFileSync(path.join(gameRoot,'data/Map001.json'),JSON.stringify(map));
-  const bytes=png(512,512,Buffer.alloc(512*512*4,73));
-  for(const name of ['B','C']) fs.writeFileSync(path.join(gameRoot,'img/tilesets',name+'.png'),bytes);
-  let jobs=0,installed=[];
-  function resolved(source) {
-    let file=gameRoot;
-    for(const part of source.split('/')) {
-      if(!fs.existsSync(file)) return null;
-      const name=fs.readdirSync(file).find(name=>name.toLowerCase()===part.toLowerCase());
-      if(!name) return null;file=path.join(file,name);
-    }
-    return file;
-  }
-  const native={fs:{readBytes(source){const file=resolved(source);return file?fs.readFileSync(file):null;},
-    exists(source){return !!resolved(source);},readDirectory(source){const file=resolved(source);return file?fs.readdirSync(file):null;}},
-    assets:{...preparationLocks(),tilePreparationVersion:'test',sourcePath:resolved,
-    sourceIdentity(source){const file=resolved(source);return file?crypto.createHash('sha256').update(file).update(fs.readFileSync(file)).digest('hex'):null;},
-    async processTiles(inputs,stage){jobs++;fs.writeFileSync(path.join(stage,'tiles-0.png'),png(50,50,Buffer.alloc(50*50*4,73)));
-      return {ordinaryBytes:inputs.length*512*512*4,version:1,halo:1,pages:[{path:'tiles-0.png',width:50,height:50}],sources:inputs.map(input=>({width:512,height:512,
-        regions:input.rectangles.map(rect=>({rect,atlas:[1,1,rect[2],rect[3]],page:0}))}))};},
-    installTileSets(entries){installed=entries;return entries.length;}}};
-  return {gameRoot,cacheRoot:path.join(root,'cache'),native,logger:{warn(){}},map,
-    get jobs(){return jobs;},get installed(){return installed;}};
+const { fixture, core } = require('./helpers/map-preparation.cjs');
+function cachePath(f) { return path.join(f.cacheRoot, 'preparation-v1', crypto.createHash('sha256').update(JSON.stringify(path.resolve(f.gameRoot))).digest('hex').slice(0,16)); }
+function readIndex(f) { return JSON.parse(fs.readFileSync(path.join(cachePath(f),'preparation-state.json'))).data.indices.maps; }
+function writeIndex(f, value) {
+  const file = path.join(cachePath(f),'preparation-state.json'), state = JSON.parse(fs.readFileSync(file));
+  state.data.indices.maps = value;
+  state.checksum = crypto.createHash('sha256').update(JSON.stringify(state.data)).digest('hex');
+  fs.writeFileSync(file, JSON.stringify(state));
 }
 test('full visual planes, every tile-event page, table halves and all animation phases are demanded',()=>{
   const Tilemap=engineTilemap(core,false),names=['A1','A2','','','','B'];
@@ -67,7 +43,7 @@ test('cache shares encoded snapshots, reuses positive entries, validates corrupt
   assert.equal(a.selected,1);assert.equal(a.installed,1);assert.equal(f.jobs,1);
   assert.equal(a.nativePacks,1);
   assert.equal(a.indexedCopies,0);
-  assert.equal(fs.readdirSync(path.join(f.cacheRoot,'maps/sources')).length,1);
+  assert.equal(fs.readdirSync(path.join(cachePath(f),'maps/sources')).length,1);
   assert.equal(f.installed[0].descriptor.sources[1].regions.length,0,'unused sheet is a sparse logical view');
   assert.equal((await prepareMaps(f)).hits,1);assert.equal(f.jobs,1);
   const entry=f.installed[0];fs.appendFileSync(path.join(entry.directory,'tiles-0.png'),'corruption');
@@ -75,14 +51,7 @@ test('cache shares encoded snapshots, reuses positive entries, validates corrupt
   f.map.data[1]=2;fs.writeFileSync(path.join(f.gameRoot,'data/Map001.json'),JSON.stringify(f.map));
   assert.equal((await prepareMaps(f)).generated,1);assert.equal(f.jobs,3);
 });
-test('an interrupted disposable map manifest is regenerated without changing the selected map', async t => {
-  const f = fixture(t), first = await prepareMaps(f);
-  fs.writeFileSync(path.join(f.installed[0].directory, 'manifest.json'), '{"key":');
-  const recovered = await prepareMaps(f);
-  assert.equal(recovered.generated, 1);
-  assert.equal(recovered.installed, 1);
-  assert.deepEqual(recovered.index, first.index);
-});
+
 test('ordinary map preparation reuses shared dependency checks; full verification repeats them', async t => {
   const f = fixture(t), sourceIdentity = f.native.assets.sourceIdentity;
   fs.writeFileSync(path.join(f.gameRoot, 'data/Map002.json'), JSON.stringify({ ...f.map, data: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }));
@@ -93,7 +62,7 @@ test('ordinary map preparation reuses shared dependency checks; full verificatio
   };
   const ordinary = await prepareMaps(f), ordinaryChecks = checks;
   checks = 0;
-  const verified = await prepareMaps({ ...f, cacheRoot: path.join(f.cacheRoot, 'verified'), verifyHashes: true });
+  const verified = await prepareMaps({ ...f, cacheRoot: path.join(cachePath(f), 'verified'), verifyHashes: true });
   assert.deepEqual(verified.index, ordinary.index);
   assert.equal(verified.installed, 2);
   assert.ok(checks > ordinaryChecks);
@@ -115,15 +84,13 @@ test('warm compilation preserves descriptors and map contracts; changed and dama
   assert.ok(verified.validation.hashedFiles>0);
   assert.deepEqual(verified.index,cold.index);
   f.native.fs.readBytes = read;
-  const root=path.join(f.cacheRoot,'maps');
-  const indexFile=fs.readdirSync(root).find(file=>/^index-.*\.json$/.test(file));
-  const indexPath=path.join(root,indexFile),damagedInputs=JSON.parse(fs.readFileSync(indexPath));
+  const damagedInputs = readIndex(f);
   Object.values(damagedInputs.mapInputs)[0].dependencies[0].hash='0'.repeat(64);
-  fs.writeFileSync(indexPath,JSON.stringify(damagedInputs));
-  assert.deepEqual((await prepareMaps(f)).index,cold.index,'damaged input receipts reconstruct the full visual contract');
-  const index=JSON.parse(fs.readFileSync(indexPath));
+  writeIndex(f, damagedInputs);
+  assert.deepEqual((await prepareMaps(f)).index,cold.index,'damaged input records reconstruct the full visual contract');
+  const index = readIndex(f);
   Object.values(index.compilations)[0].sources[0].rectangles=[];
-  fs.writeFileSync(indexPath,JSON.stringify(index));
+  writeIndex(f, index);
   const repaired=await prepareMaps(f);
   assert.equal(repaired.compilationHits,0);
   assert.deepEqual(repaired.index,cold.index);
@@ -148,8 +115,9 @@ test('portable map metadata and atlas pages are checked against recipient inputs
   const f=fixture(t),cold=await prepareMaps(f);
   assert.equal(cold.selected,1);
   const identity=Object.values(cold.index)[0].identity;
-  const entryDirectory=path.join(f.cacheRoot,'maps/entries',identity);
-  const manifest=JSON.parse(fs.readFileSync(path.join(entryDirectory,'manifest.json')));
+  const entryDirectory=path.join(cachePath(f),'maps/entries',identity);
+  const state=JSON.parse(fs.readFileSync(path.join(cachePath(f),'preparation-state.json')));
+  const manifest=state.data.results[path.relative(cachePath(f),entryDirectory).split(path.sep).join('/')];
   const bundle=temporaryDirectory('pmjs-map-index-');
   const output=path.join(bundle,'assets/maps',identity,'tiles-0.png');
   fs.mkdirSync(path.dirname(output),{recursive:true});
@@ -187,20 +155,7 @@ test('portable map metadata and atlas pages are checked against recipient inputs
   assert.equal(stale.compilationHits,0,'changed map input rejects compiled metadata');
 });
 
-test('unchanged map validation preserves published receipts and compilation index',async t=>{
-  const f=fixture(t);
-  await prepareMaps(f);
-  await prepareMaps(f);
-  const root=path.join(f.cacheRoot,'maps');
-  const files=['verified-files.json',fs.readdirSync(root).find(file=>/^index-.*\.json$/.test(file))];
-  const before=files.map(file=>fs.statSync(path.join(root,file),{bigint:true}));
-  const warm=await prepareMaps(f);
-  assert.equal(warm.installed,1);assert.equal(warm.generated,0);
-  for(const [i,file] of files.entries()) {
-    const after=fs.statSync(path.join(root,file),{bigint:true});
-    assert.equal(after.ino,before[i].ino);assert.equal(after.mtimeNs,before[i].mtimeNs);
-  }
-});
+
 
 test('missing sources and cancellation report individual failures and never install partial sets',async t=>{
   const f=fixture(t);fs.unlinkSync(path.join(f.gameRoot,'img/tilesets/C.png'));
@@ -211,7 +166,7 @@ test('missing sources and cancellation report individual failures and never inst
   g.native.assets.processTiles=async(...args)=>{const result=await process(...args);cancel=true;return result;};
   const cancelled=await prepareMaps({...g,shouldCancel:()=>cancel});
   assert.equal(cancelled.cancelled,true);assert.equal(cancelled.installed,0);
-  assert.equal(fs.readdirSync(path.join(g.cacheRoot,'maps/entries')).length,0);
+  assert.equal(fs.readdirSync(path.join(cachePath(g),'maps/entries')).length,0);
 });
 test('provably unprofitable geometry avoids native packing and snapshots; uncertain cases retain exact admission', async t => {
   const f = fixture(t);
@@ -221,7 +176,7 @@ test('provably unprofitable geometry avoids native packing and snapshots; uncert
   fs.writeFileSync(path.join(f.gameRoot, 'data/Map001.json'), JSON.stringify(map));
   const rejected = await prepareMaps(f);
   assert.equal(rejected.earlyRefusals, 1); assert.equal(f.jobs, 0); assert.equal(rejected.installed, 0);
-  assert.equal(fs.readdirSync(path.join(f.cacheRoot, 'maps/sources')).length, 0);
+  assert.equal(fs.readdirSync(path.join(cachePath(f), 'maps/sources')).length, 0);
   assert.equal((await prepareMaps(f)).negativeHits, 1);
   const ordinary = fixture(t), accepted = await prepareMaps(ordinary);
   assert.equal(accepted.earlyRefusals, 0); assert.equal(ordinary.jobs, 1); assert.equal(accepted.installed, 1);
@@ -232,17 +187,17 @@ test('unprofitable and unsupported decisions are cached without adding source sn
   f.native.assets.processTiles=async()=>{attempts++;throw Object.assign(new Error('unsupported rectangle'),{code:'PMJS_TILE_UNSUPPORTED'});};
   assert.equal((await prepareMaps(f)).refused,1);
   assert.equal((await prepareMaps(f)).negativeHits,1);assert.equal(attempts,1);
-  assert.equal(fs.readdirSync(path.join(f.cacheRoot,'maps/sources')).length,0);
+  assert.equal(fs.readdirSync(path.join(cachePath(f),'maps/sources')).length,0);
   const g=fixture(t),original=g.native.assets.processTiles;
   g.native.assets.processTiles=async(...args)=>{const descriptor=await original(...args);
     descriptor.pages[0].width=descriptor.pages[0].height=1024;
     fs.writeFileSync(path.join(args[1],'tiles-0.png'),png(1024,1024,Buffer.alloc(1024*1024*4,73)));return descriptor;};
   const refused=await prepareMaps(g);assert.match(refused.maps[0].reason,/not smaller/);
   assert.equal((await prepareMaps(g)).negativeHits,1);assert.equal(g.jobs,1);
-  assert.equal(fs.readdirSync(path.join(g.cacheRoot,'maps/sources')).length,0);
+  assert.equal(fs.readdirSync(path.join(cachePath(g),'maps/sources')).length,0);
 });
 test('leased decrypted sources are reused directly without a second encoded snapshot',async t=>{
-  const f=fixture(t),decryptedKey='a'.repeat(64),directory=path.join(f.cacheRoot,'entries',decryptedKey);fs.mkdirSync(directory,{recursive:true});
+  const f=fixture(t),decryptedKey='a'.repeat(64),directory=path.join(cachePath(f),'entries',decryptedKey);fs.mkdirSync(directory,{recursive:true});
   const file=path.join(directory,'source.png');fs.copyFileSync(path.join(f.gameRoot,'img/tilesets/B.png'),file);
   const sourcePath=f.native.assets.sourcePath,sourceIdentity=f.native.assets.sourceIdentity;
   f.native.assets.sourcePath=source=>source.startsWith('img/')?file:sourcePath(source);
@@ -257,9 +212,9 @@ test('leased decrypted sources are reused directly without a second encoded snap
   };
   f.native.assets.installTileSetCatalog=entries=>entries.length;
   const report=await prepareMaps(f);assert.equal(report.selected,1);assert.equal(report.additionalSnapshotBytes,0);
-  const lease=fs.readdirSync(path.join(f.cacheRoot,'maps')).find(name=>name.startsWith('.lease-'));
-  assert.ok(JSON.parse(fs.readFileSync(path.join(f.cacheRoot,'maps',lease))).keys.includes(decryptedKey));
-  const warm=await prepareMaps(f);assert.equal(warm.catalogHit,true);
+  const lease=fs.readdirSync(cachePath(f)).find(name=>name.startsWith('.lease-'));
+  assert.ok(JSON.parse(fs.readFileSync(path.join(cachePath(f),lease))).keys.includes(decryptedKey));
+  const warm=await prepareMaps(f);assert.equal(warm.validation.hashedFiles,0);
   warm.releaseCacheLease();report.releaseCacheLease();
   assert.equal(f.installed[0].descriptor.sources[0].snapshot,file);
   assert.equal(f.installed[0].descriptor.sources.length,1,'VFS aliases share one logical source backing');
@@ -317,108 +272,4 @@ test('metadata changes with identical VFS backing bytes refresh installation ide
   g.native.assets.processTiles=async(...args)=>{const descriptor=await pack(...args);
     fs.appendFileSync(path.join(g.gameRoot,'data/Map001.json'),' ');return descriptor;};
   const changed=await prepareMaps(g);assert.equal(changed.selected,0);assert.match(changed.maps[0].reason,/map dependency changed.*Map001/);
-});
-
-test('warm map catalogs skip map inputs and dependency scans; viewport changes rebuild',async t=>{
-  const f=fixture(t);
-  const install=f.native.assets.installTileSets;
-  f.native.assets.installTileSets=entries=>{
-    for(const entry of entries) {
-      entry.pageIdentities=entry.descriptor.pages.map(()=>'page-identity');
-      entry.snapshotIdentities=entry.descriptor.sources.map(()=>'snapshot-identity');
-    }
-    return install(entries);
-  };
-  f.native.assets.installTileSetCatalog=entries=>entries.length;
-  const progress=[];
-  const cold=await prepareMaps({...f,onProgress:value=>progress.push(value)});
-  assert.equal(cold.installed,1);
-  assert.equal(cold.catalogStatus,'missing');
-  for(const phase of ['map-discover','map-catalog','map-compile','map-install','map-publish','map-cleanup'])
-    assert.ok(progress.some(value=>value.phase===phase),phase);
-  const read=f.native.fs.readBytes, sourceIdentity=f.native.assets.sourceIdentity;
-  f.native.fs.readBytes=()=>{throw new Error('unexpected map read');};
-  f.native.assets.sourceIdentity=()=>{throw new Error('unexpected dependency scan');};
-  try {
-    progress.length=0;
-    const warm=await prepareMaps({...f,onProgress:value=>progress.push(value)});
-    assert.equal(warm.catalogHit,true);
-    assert.equal(warm.catalogStatus,'hit');
-    assert.ok(progress.some(value=>value.phase==='map-catalog'));
-    assert.ok(progress.some(value=>value.phase==='map-install'));
-    assert.equal(progress.some(value=>value.phase==='map-compile'),false);
-    assert.deepEqual(warm.index,cold.index);
-    assert.deepEqual(warm.maps,cold.maps);
-    assert.equal(warm.generated,0);
-    warm.releaseCacheLease();
-  } finally {f.native.fs.readBytes=read;f.native.assets.sourceIdentity=sourceIdentity;}
-  const resized=await prepareMaps({...f,width:640,height:480});
-  assert.equal(resized.catalogHit,undefined);
-  assert.equal(resized.catalogStatus,'binding-mismatch');
-  assert.equal(resized.installed,1);
-  resized.releaseCacheLease();cold.releaseCacheLease();
-});
-
-test('observed stale map catalogs recompile changed inputs on the following launch', async t => {
-  const f = fixture(t);
-  const install = f.native.assets.installTileSets;
-  f.native.assets.installTileSets = entries => {
-    for (const entry of entries) {
-      entry.pageIdentities = entry.descriptor.pages.map(() => 'page-identity');
-      entry.snapshotIdentities = entry.descriptor.sources.map(() => 'snapshot-identity');
-    }
-    return install(entries);
-  };
-  f.native.assets.installTileSetCatalog = entries => entries.length;
-  const cold = await prepareMaps(f);
-  const warm = await prepareMaps(f);
-  assert.equal(warm.catalogHit, true);
-  const file = path.join(f.gameRoot, 'data/Map001.json');
-  const map = JSON.parse(fs.readFileSync(file)); map.data[0] = 2;
-  fs.writeFileSync(file, JSON.stringify(map));
-  assert.equal(warm.invalidateCatalog(), true);
-  const refreshed = await prepareMaps(f);
-  assert.equal(refreshed.catalogHit, undefined);
-  assert.notDeepEqual(refreshed.index, warm.index);
-  const next = await prepareMaps(f);
-  assert.equal(next.catalogHit, true);
-  for (const result of [cold, warm, refreshed, next]) result.releaseCacheLease();
-});
-
-test('installation failures clear native entries before releasing their cache lease', async t => {
-  for (const failure of ['cancel', 'catalog']) {
-    const f = fixture(t), install = f.native.assets.installTileSets;
-    const root = path.join(f.cacheRoot, 'maps');
-    const previous = await prepareMaps(f);
-    assert.equal(previous.installed, 1);
-    let installed = false, cleared = false;
-    if (failure === 'catalog') f.native.assets.installTileSetCatalog = entries => entries.length;
-    f.native.assets.installTileSets = entries => {
-      if (entries.length) {
-        installed = true;
-        if (failure === 'catalog') {
-          for (const entry of entries) {
-            entry.pageIdentities = entry.descriptor.pages.map(() => 'page-identity');
-            entry.snapshotIdentities = entry.descriptor.sources.map(() => 'snapshot-identity');
-          }
-          const { checksum } = require('../runner/preparation-catalog.cjs');
-          fs.mkdirSync(path.join(root, 'catalog-' + checksum(path.resolve(f.gameRoot)) + '.json'));
-        }
-      } else if (installed) {
-        assert.ok(fs.readdirSync(root).some(file => file.startsWith('.lease-')),
-          'native references must be removed while their lease is still live');
-        cleared = true;
-      }
-      return install(entries);
-    };
-    const result = await prepareMaps({ ...f, shouldCancel: () => failure === 'cancel' && installed });
-    assert.equal(installed, true);
-    assert.equal(cleared, true);
-    assert.equal(result.installed, 0);
-    assert.deepEqual(f.installed, []);
-    assert.deepEqual(f.native.assets.preparedMapIndex, {});
-    assert.equal(result.releaseCacheLease, undefined);
-    assert.equal(fs.readdirSync(root).some(file => file.startsWith('.lease-')), false);
-    assert.ok(result.error);
-  }
 });

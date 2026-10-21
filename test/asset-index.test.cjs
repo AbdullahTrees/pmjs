@@ -117,3 +117,19 @@ test('LZ4 container versions invalidate image outputs without discarding indepen
   delete f.index.pageCodecVersion;
   assert.equal(f.load().images.length, 1, 'PNG outputs do not depend on the LZ4 container');
 });
+
+
+test('portable settings survive incompatible calculated image data', () => {
+  const f = fixture();
+  f.index.schema = 3;
+  const settings = { recipe: { grid: [3,4] }, lossless: true, astc: { enabled: false } };
+  f.index.images = [{ source: 'img/pictures/a.png', settings, calculated: { sourceHash: 'old', outputs: [] } }];
+  assert.deepEqual(f.load().policies['img/pictures/a.png'], settings);
+  assert.equal(f.load().images[0].sourceHash, 'old');
+  f.options.assetPreparation.recipes = [{ source: 'img/pictures/other.png', grid: [1,1] }];
+  assert.equal(f.load().images.length, 1, 'unrelated settings do not invalidate all calculated records');
+  f.native.assets.preparationVersion = { processor: 2 };
+  const loaded = f.load();
+  assert.deepEqual(loaded.images, []);
+  assert.deepEqual(loaded.policies['img/pictures/a.png'], settings);
+});

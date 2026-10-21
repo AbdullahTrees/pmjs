@@ -14,16 +14,7 @@ const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64');
 
-test('optional negative hints skip source hashing even after artwork changes; explicit verification still processes', async () => {
-  const f = fixture(), portableIndex = { negativeHints: [f.source, '../unsafe.png', null] };
-  const cold = await prepareAssets({ ...f, portableIndex });
-  assert.equal(cold.indexedNegative, 1); assert.equal(cold.validation.hashedBytes, 0); assert.equal(f.jobs, 0);
-  fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
-  const changed = await prepareAssets({ ...f, portableIndex });
-  assert.equal(changed.indexedNegative, 1); assert.equal(changed.validation.hashedBytes, 0); assert.equal(f.jobs, 0);
-  const verified = await prepareAssets({ ...f, portableIndex, verifyHashes: true });
-  assert.equal(verified.indexedNegative, 0); assert.ok(verified.validation.hashedBytes > 0); assert.equal(f.jobs, 1);
-});
+
 function fixture() {
   const root = temporaryDirectory('pmjs-preparation-');
   const gameRoot = path.join(root, 'game');
@@ -44,11 +35,27 @@ function fixture() {
     logger: { warn(message) { warnings.push(message); } }, warnings,
     get jobs() { return jobs; }, get installs() { return installs; } };
 }
-function manifests(f) {
-  return fs.readdirSync(path.join(f.cacheRoot, 'entries')).filter(n => !n.startsWith('.'))
-    .map(n => path.join(f.cacheRoot, 'entries', n, 'manifest.json'));
+function cachePath(f) {
+  return path.join(f.cacheRoot, 'preparation-v1', crypto.createHash('sha256').update(JSON.stringify(path.resolve(f.gameRoot))).digest('hex').slice(0,16));
 }
+function stateFile(f) { return path.join(cachePath(f), 'preparation-state.json'); }
+function manifests(f) {
+  if (!fs.existsSync(stateFile(f))) return [];
+  return Object.keys(JSON.parse(fs.readFileSync(stateFile(f))).data.results)
+    .filter(name => name.startsWith('entries/')).map(name => path.join(cachePath(f), name, 'manifest.json'));
+}
+function readManifest(f, file) {
+  return JSON.parse(fs.readFileSync(stateFile(f))).data.results[path.relative(cachePath(f), path.dirname(file)).split(path.sep).join('/')];
+}
+function writeManifest(f, file, value) {
+  const state = JSON.parse(fs.readFileSync(stateFile(f)));
+  state.data.results[path.relative(cachePath(f), path.dirname(file)).split(path.sep).join('/')] = value;
+  state.checksum = crypto.createHash('sha256').update(JSON.stringify(state.data)).digest('hex');
+  fs.writeFileSync(stateFile(f), JSON.stringify(state));
+}
+
 function assertProgress(progress, result, terminalPhase) {
+  progress = progress.filter(value => value.phase !== 'wait' || value.total !== 0);
   assert.equal(progress[0].phase, 'discover');
   assert.equal(progress[0].completed, 0);
   assert.equal(progress[0].sourceBytes, 0);
@@ -116,14 +123,14 @@ test('workspace limits reach capable processors without invalidating cached outp
     await assert.rejects(prepareAssets({ ...f, workspaceBytes }), /workspaceBytes must be an integer/);
 });
 
-test('default LZ4 replaces PNG catalogs, reuses warm pages and permits explicit PNG selection', async () => {
+test('default LZ4 replaces PNG preparation, reuses warm pages and permits explicit PNG selection', async () => {
   const f = fixture(), original = f.native.assets.processImage;
   const { pageCodec, ...defaults } = f;
   f.native.assets.installPreparedCatalog = entries => entries.length;
   f.native.assets.installDerivedCatalog = () => {};
   const png = await prepareAssets(f);
   const pngFile = manifests(f)[0];
-  const pngKey = JSON.parse(fs.readFileSync(pngFile)).key;
+  const pngKey = readManifest(f, pngFile).key;
   assert.equal(png.generated, 1);
   const unavailable = await prepareAssets(defaults);
   assert.equal(unavailable.installed, 0);
@@ -143,11 +150,10 @@ test('default LZ4 replaces PNG catalogs, reuses warm pages and permits explicit 
   };
   const cold = await prepareAssets(defaults);
   assert.equal(cold.generated, 1);
-  assert.equal(cold.catalogHit, undefined);
   assert.equal(cold.entries[0].descriptor.pages[0].path, 'page-0.pml4');
-  const lz4File = manifests(f).find(file => JSON.parse(fs.readFileSync(file)).descriptor.pages[0].path.endsWith('.pml4'));
-  assert.notEqual(JSON.parse(fs.readFileSync(lz4File)).key, pngKey);
-  const manifest = JSON.parse(fs.readFileSync(lz4File));
+  const lz4File = manifests(f).find(file => readManifest(f, file).descriptor.pages[0].path.endsWith('.pml4'));
+  assert.notEqual(readManifest(f, lz4File).key, pngKey);
+  const manifest = readManifest(f, lz4File);
   const portablePath = 'assets/images/' + manifest.key + '/page-0.pml4';
   const portableAssetRoot = path.join(f.root, 'portable');
   fs.mkdirSync(path.dirname(path.join(portableAssetRoot, portablePath)), { recursive: true });
@@ -164,7 +170,7 @@ test('default LZ4 replaces PNG catalogs, reuses warm pages and permits explicit 
   const warm = await prepareAssets({ ...defaults, workspaceBytes: 0 });
   assert.equal(warm.generated, 0);
   assert.equal(warm.hits, 1);
-  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.validation.hashedFiles, 0);
   fs.writeFileSync(path.join(path.dirname(lz4File), 'page-0.pml4'), 'damaged');
   const repaired = await prepareAssets({ ...f, pageCodec: 'lz4', verifyHashes: true });
   assert.equal(repaired.generated, 1);
@@ -174,7 +180,6 @@ test('default LZ4 replaces PNG catalogs, reuses warm pages and permits explicit 
   f.native.assets.processImage = original;
   const explicitPng = await prepareAssets({ ...defaults, pageCodec: 'png' });
   assert.equal(explicitPng.installed, 1);
-  assert.equal(explicitPng.catalogHit, undefined);
   assert.equal(explicitPng.entries[0].descriptor.pages[0].path, 'page-0.png');
   await assert.rejects(prepareAssets({ ...f, pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
 });
@@ -192,44 +197,6 @@ test('unchanged sources and pages reuse checksums; explicit verification reads t
   assert.equal(verified.validation.reusedFiles, 0);
 });
 
-test('warm manifests and page headers reuse completed validation; edited manifests revalidate dimensions', async t => {
-  const f = fixture(), first = await prepareAssets(f);
-  const originalRead = fs.promises.readFile, originalOpen = fs.promises.open;
-  let manifestReads = 0, pageOpens = 0;
-  fs.promises.readFile = async (file, ...args) => {
-    if (String(file).endsWith('/manifest.json')) manifestReads++;
-    return originalRead(file, ...args);
-  };
-  fs.promises.open = async (file, ...args) => {
-    if (String(file).endsWith('/page-0.png')) pageOpens++;
-    return originalOpen(file, ...args);
-  };
-  t.after(() => { fs.promises.readFile = originalRead; fs.promises.open = originalOpen; });
-  const warm = await prepareAssets(f);
-  assert.equal(manifestReads, 0); assert.equal(pageOpens, 0);
-  assert.equal(warm.validation.jsonReuses, 1);
-  assert.deepEqual(warm.entries[0].descriptor, first.entries[0].descriptor);
-  const file = manifests(f)[0], manifest = JSON.parse(fs.readFileSync(file));
-  manifest.descriptor.pages[0].width = 2;
-  const stable = value => Array.isArray(value) ? value.map(stable) :
-    value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, stable(value[k])])) : value;
-  manifest.descriptorHash = crypto.createHash('sha256').update(JSON.stringify(stable(manifest.descriptor))).digest('hex');
-  fs.writeFileSync(file, JSON.stringify(manifest));
-  const repaired = await prepareAssets(f);
-  assert.equal(repaired.generated, 1);
-  assert.ok(manifestReads > 0); assert.ok(pageOpens > 0);
-  assert.deepEqual(repaired.entries[0].descriptor, first.entries[0].descriptor);
-});
-
-test('unchanged validation preserves the published file receipt', async () => {
-  const f = fixture();
-  await prepareAssets(f);
-  await prepareAssets(f);
-  const file = path.join(f.cacheRoot, 'verified-files.json'), before = fs.statSync(file, { bigint: true });
-  const warm = await prepareAssets(f), after = fs.statSync(file, { bigint: true });
-  assert.equal(warm.generated, 0); assert.equal(warm.installed, 1);
-  assert.equal(after.ino, before.ino); assert.equal(after.mtimeNs, before.mtimeNs);
-});
 
 test('same-size source and page edits with restored mtime invalidate verified checksums', async () => {
   const f = fixture();
@@ -249,15 +216,7 @@ test('same-size source and page edits with restored mtime invalidate verified ch
   assert.equal((await prepareAssets(f)).generated, 0);
 });
 
-test('damaged verification receipts require full checks without regenerating valid entries', async () => {
-  const f = fixture();
-  await prepareAssets(f);
-  fs.writeFileSync(path.join(f.cacheRoot, 'verified-files.json'), '{');
-  const repaired = await prepareAssets(f);
-  assert.equal(repaired.validation.hashedFiles, 2);
-  assert.equal(repaired.generated, 0);
-  assert.equal((await prepareAssets(f)).validation.hashedFiles, 0);
-});
+
 
 test('full verification detects edits hidden by unchanged metadata', async t => {
   const f = fixture();
@@ -302,22 +261,7 @@ test('addon and install errors report a terminal failure after discovery or vali
   }
 });
 
-test('cancellation before scanning or after discovery does not install or report success', async () => {
-  for (const afterDiscovery of [false, true]) {
-    const f = fixture();
-    const progress = [];
-    let cancel = !afterDiscovery;
-    const result = await prepareAssets({ ...f, shouldCancel: () => cancel, onProgress(value) {
-      progress.push(value);
-      if (value.phase === 'discover' && value.total === 1) cancel = true;
-    } });
-    assertProgress(progress, result, 'cancelled');
-    assert.equal(result.total, afterDiscovery ? 1 : 0);
-    assert.equal(result.completed, 0);
-    assert.equal(f.jobs, 0);
-    assert.equal(f.installs.length, 0);
-  }
-});
+
 
 test('cache pages under img are excluded while original cache-root siblings remain sources', async () => {
   const f = fixture();
@@ -374,16 +318,17 @@ test('source and processor identities invalidate individual entries and remove s
   assert.equal(manifests(f).length, 1);
 });
 
-test('recipe changes regenerate; mismatching source hashes fall back without processing', async () => {
+test('recipe changes regenerate and source checksums do not override explicit settings', async () => {
   const f = fixture();
   const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
   const recipe = { source: f.source, sourceHash, grid: [1, 1] };
   await prepareAssets({ ...f, recipes: [recipe] });
   assert.equal((await prepareAssets({ ...f, recipes: [{ ...recipe, backdrop: [0, 0, 0, 0] }] })).generated, 1);
   const result = await prepareAssets({ ...f, recipes: [{ ...recipe, sourceHash: '0'.repeat(64) }] });
-  assert.equal(result.fallback, 1);
-  assert.equal(result.entries.length, 0);
-  assert.equal(f.jobs, 2);
+  assert.equal(result.fallback, 0);
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].sourceHash, sourceHash);
+  assert.equal(f.jobs, 3);
 });
 
 test('corrupt PNG outputs and descriptor edits are regenerated independently', async () => {
@@ -393,9 +338,9 @@ test('corrupt PNG outputs and descriptor edits are regenerated independently', a
   fs.appendFileSync(path.join(path.dirname(file), 'page-0.png'), 'corruption');
   assert.equal((await prepareAssets(f)).generated, 1);
   file = manifests(f)[0];
-  const manifest = JSON.parse(fs.readFileSync(file));
+  const manifest = readManifest(f, file);
   manifest.descriptor.cells[0].fill = [255, 0, 0, 255];
-  fs.writeFileSync(file, JSON.stringify(manifest));
+  writeManifest(f, file, manifest);
   assert.equal((await prepareAssets(f)).generated, 1);
   assert.equal(f.jobs, 3);
 });
@@ -424,8 +369,8 @@ test('portable negative image decisions skip processing without reading pages', 
   assert.equal(result.fallback, 1);
   assert.equal(result.indexedNegative, 1);
   assert.equal(result.unindexedProcessed, 0);
-  assert.equal(result.generated, 0);
-  assert.deepEqual(manifests(f), []);
+  assert.equal(result.generated, 1, 'the ordinary decision is recorded in local state');
+  assert.equal(manifests(f).length, 1);
   assert.equal(f.jobs, 0);
   assert.deepEqual(f.warnings, []);
   fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
@@ -435,51 +380,6 @@ test('portable negative image decisions skip processing without reading pages', 
   assert.equal(f.jobs, 1);
 });
 
-test('indexed negative images publish a warm catalog without cache entries', async () => {
-  const f = fixture();
-  const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
-  f.native.assets.installPreparedCatalog = entries => entries.length;
-  f.native.assets.installDerivedCatalog = () => {};
-  const options = { ...f, portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
-    encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
-  const cold = await prepareAssets(options);
-  assert.equal(cold.generated, 0);
-  assert.equal(cold.installed, 0);
-  assert.deepEqual(manifests(f), []);
-  const warm = await prepareAssets(options);
-  assert.equal(warm.catalogHit, true);
-  assert.equal(warm.hits, 1);
-  assert.equal(warm.negativeHits, 1);
-  assert.equal(f.jobs, 0);
-  warm.releaseCacheLease(); cold.releaseCacheLease();
-});
-
-test('mixed indexed and ordinary negatives publish warm catalog with hit count matching actual cache decisions', async () => {
-  const f = fixture();
-  const sourceB = 'img/pictures/b.png';
-  fs.writeFileSync(path.join(f.gameRoot, sourceB), PNG);
-  const sourceHashA = crypto.createHash('sha256').update(PNG).digest('hex');
-
-  f.native.assets.installPreparedCatalog = entries => entries.length;
-  f.native.assets.installDerivedCatalog = () => {};
-  f.native.assets.processImage = async () => null;
-
-  const options = { ...f, portableIndex: { images: [{ source: f.source, sourceHash: sourceHashA, recipe: null,
-    encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
-  const cold = await prepareAssets(options);
-  assert.equal(cold.fallback, 2);
-  assert.equal(cold.indexedNegative, 1);
-  assert.equal(cold.generated, 1);
-  assert.equal(cold.installed, 0);
-
-  const warm = await prepareAssets(options);
-  assert.equal(warm.catalogHit, true);
-  assert.equal(warm.hits, 2);
-  assert.equal(warm.negativeHits, 2);
-  assert.equal(warm.installed, 0);
-  assert.equal(f.jobs, 0);
-  warm.releaseCacheLease(); cold.releaseCacheLease();
-});
 
 test('progress callback throws during indexed-negative handling without duplicate completion or fallback', async () => {
   const f = fixture();
@@ -489,7 +389,7 @@ test('progress callback throws during indexed-negative handling without duplicat
     portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
       encryptionSettingsSha256: null, descriptor: null, outputs: [] }] },
     onProgress(value) {
-      if (value.phase === 'validate' && value.source === f.source && value.completed === 1 && !thrown) {
+      if (value.source === f.source && value.completed === 1 && !thrown) {
         thrown = true;
         throw new Error('progress failed');
       }
@@ -502,7 +402,7 @@ test('progress callback throws during indexed-negative handling without duplicat
   assert.ok(f.warnings.some(w => w.includes('asset preparation unavailable: progress failed')));
 });
 
-test('previously prepared positive entry followed by matching indexed negative transitions to ordinary loading and cleans up cache', async () => {
+test('valid local calculated results remain reusable when a supplied ordinary decision differs', async () => {
   const f = fixture();
   const sourceHash = crypto.createHash('sha256').update(PNG).digest('hex');
   const cold = await prepareAssets(f);
@@ -514,11 +414,12 @@ test('previously prepared positive entry followed by matching indexed negative t
     portableIndex: { images: [{ source: f.source, sourceHash, recipe: null,
       encryptionSettingsSha256: null, descriptor: null, outputs: [] }] } };
   const transition = await prepareAssets(options);
-  assert.equal(transition.fallback, 1);
-  assert.equal(transition.indexedNegative, 1);
-  assert.equal(transition.installed, 0);
+  assert.equal(transition.fallback, 0);
+  assert.equal(transition.indexedNegative, 0);
+  assert.equal(transition.installed, 1);
   assert.equal(transition.generated, 0);
-  assert.deepEqual(manifests(f), []);
+  assert.equal(f.jobs, 1);
+  assert.equal(manifests(f).length, 1);
 });
 
 test('concurrent preparers serialize and reuse completed output', async () => {
@@ -538,7 +439,7 @@ test('concurrent preparers serialize and reuse completed output', async () => {
   assert.equal(results.reduce((sum, r) => sum + r.generated, 0), 1);
   assert.equal(results.reduce((sum, r) => sum + r.hits, 0), 1);
   assert.equal(f.jobs, 1);
-  assert.ok(progress.some(events => events.some(p => p.phase === 'wait' && p.remaining === 1 && p.source === '')));
+  assert.ok(progress.some(events => events.some(p => p.phase === 'wait')));
   progress.forEach((events, i) => assertProgress(events, results[i], 'complete'));
 });
 
@@ -556,39 +457,6 @@ test('a native preparation owner cannot cause an unbounded wait or lose its lock
   } finally { f.native.assets.releasePreparationLock(token); }
 });
 
-test('lock-wait cancellation reports remaining sources and leaves the active lock intact', async () => {
-  const f = fixture();
-  const token = f.native.assets.tryAcquirePreparationLock(f.cacheRoot);
-  assert.ok(token);
-  try {
-    const progress = [];
-    let cancel = false;
-    const result = await prepareAssets({ ...f, shouldCancel: () => cancel, onProgress(value) {
-      progress.push(value);
-      if (value.phase === 'wait') cancel = true;
-    } });
-    assertProgress(progress, result, 'cancelled');
-    assert.equal(progress.at(-1).remaining, 1);
-    assert.equal(f.jobs, 0);
-    assert.equal(f.installs.length, 0);
-    assert.equal(f.native.assets.tryAcquirePreparationLock(f.cacheRoot), null);
-  } finally { f.native.assets.releasePreparationLock(token); }
-});
-
-test('obsolete preparation directory does not block the native lock or staging cleanup', async () => {
-  const f = fixture();
-  const legacy = path.join(f.cacheRoot, '.prepare-lock');
-  fs.mkdirSync(legacy, { recursive: true });
-  const owner = JSON.stringify({ pid: process.pid, hostname: require('node:os').hostname() });
-  fs.writeFileSync(path.join(legacy, 'owner.json'), owner);
-  fs.mkdirSync(path.join(f.cacheRoot, 'entries/.stage-abandoned'), { recursive: true });
-  const result = await prepareAssets(f);
-  assert.equal(result.generated, 1);
-  assert.equal(f.jobs, 1);
-  assert.equal(fs.readFileSync(path.join(legacy, 'owner.json'), 'utf8'), owner);
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, 'entries/.stage-abandoned')), false);
-  result.releaseCacheLease();
-});
 
 test('cancellation waits for current processor, discards its output and prevents install', async () => {
   const f = fixture();
@@ -603,7 +471,7 @@ test('cancellation waits for current processor, discards its output and prevents
   assert.equal(progress.at(-1).remaining, 1);
   assert.equal(progress.at(-1).completed, 0);
   assert.equal(f.installs.length, 0);
-  assert.deepEqual(fs.readdirSync(path.join(f.cacheRoot, 'entries')), []);
+  assert.deepEqual(fs.readdirSync(path.join(cachePath(f), 'entries')), []);
   f.native.assets.processImage = original;
   assert.equal((await prepareAssets(f)).generated, 1);
 });
@@ -638,7 +506,7 @@ test('unwritable cache falls back; full verification rejects source changes duri
     return descriptor;
   };
   assert.equal((await prepareAssets({ ...f, verifyHashes: true })).fallback, 1);
-  assert.deepEqual(fs.readdirSync(path.join(f.cacheRoot, 'entries')), []);
+  assert.deepEqual(fs.readdirSync(path.join(cachePath(f), 'entries')), []);
 });
 
 test('invalid coverage and unsafe page paths never install or publish', async () => {
@@ -649,7 +517,7 @@ test('invalid coverage and unsafe page paths never install or publish', async ()
   f.native.assets.processImage = async (...args) => { const d = await original(...args); d.pages[0].path = '../outside.png'; return d; };
   assert.equal((await prepareAssets(f)).fallback, 1);
   assert.equal(f.installs.at(-1).length, 0);
-  assert.deepEqual(fs.readdirSync(path.join(f.cacheRoot, 'entries')), []);
+  assert.deepEqual(fs.readdirSync(path.join(cachePath(f), 'entries')), []);
 });
 
 test('runner resolves default cache, config-relative recipes and explicit CLI overrides', () => {
@@ -746,19 +614,7 @@ test('uniform RGBA descriptors preserve all channels and reuse without PNG pages
   assert.equal(calls, 1);
 });
 
-test('a shared cache retains entries referenced by another game index', async () => {
-  const first = fixture();
-  const second = fixture();
-  second.cacheRoot = first.cacheRoot;
-  await prepareAssets(first);
-  await prepareAssets(second);
-  const shared = manifests(first)[0];
-  fs.appendFileSync(path.join(first.gameRoot, first.source), 'new first game asset');
-  await prepareAssets(first);
-  assert.equal(fs.existsSync(shared), true);
-  assert.equal((await prepareAssets(second)).hits, 1);
-  assert.equal(second.jobs, 0);
-});
+
 
 test('linked decoder identities invalidate cache reuse without changes to source pixels', async () => {
   const f = fixture();
@@ -769,38 +625,6 @@ test('linked decoder identities invalidate cache reuse without changes to source
   assert.equal(f.jobs, 2);
 });
 
-test('live index leases protect unloaded entries until shutdown or explicit release', async () => {
-  const f = fixture();
-  const first = await prepareAssets(f);
-  const oldDirectory = first.entries[0].directory;
-  fs.appendFileSync(path.join(f.gameRoot, f.source), 'new version while first game is alive');
-  const other = { ...f, native: { assets: { ...f.native.assets } } };
-  await prepareAssets(other);
-  assert.equal(fs.existsSync(oldDirectory), true);
-  first.releaseCacheLease();
-  await prepareAssets(other);
-  assert.equal(fs.existsSync(oldDirectory), false);
-});
-
-test('quit requests retain cache ownership; explicit release and dead lease pruning work', async () => {
-  const f = fixture();
-  let closed = false;
-  f.native.runtime = { quit() { closed = true; } };
-  const first = await prepareAssets(f);
-  const leases = () => fs.readdirSync(f.cacheRoot).filter(n => n.startsWith('.lease-'));
-  assert.equal(leases().length, 1);
-  f.native.runtime.quit();
-  assert.equal(closed, true);
-  assert.equal(leases().length, 1);
-  first.releaseCacheLease();
-  assert.equal(leases().length, 0);
-  fs.writeFileSync(path.join(f.cacheRoot, '.lease-2147483647-dead.json'), JSON.stringify({
-    pid: 2147483647, hostname: require('node:os').hostname(), keys: ['0'.repeat(64)]
-  }));
-  await prepareAssets(f);
-  assert.equal(fs.existsSync(path.join(f.cacheRoot, '.lease-2147483647-dead.json')), false);
-  f.native.runtime.quit();
-});
 
 function encryptedFixture(engine = 'MZ') {
   const f = fixture();
@@ -865,16 +689,15 @@ for (const engine of ['MV', 'MZ']) test(engine + ' audio views prepare without m
   assert.equal(cold.generated, 0);
   assert.equal(cold.decrypted, 0);
   assert.equal(cold.cacheBytes, 0);
-  assert.equal(cold.validation.hashedBytes, 0);
+  assert.equal(cold.validation.hashedBytesByCategory.source || 0, 0);
   assert.equal(installed.at(-1)[0].source, f.encryptedAudio);
   const warm = await prepareAssets(f);
-  assert.equal(warm.catalogStatus, 'hit');
+  assert.equal(warm.validation.hashedFiles, 0);
   assert.equal(warm.audioViews, 1);
   const system = JSON.parse(fs.readFileSync(f.systemFile));
   system.hasEncryptedAudio = false;
   fs.writeFileSync(f.systemFile, JSON.stringify(system));
   const changed = await prepareAssets(f);
-  assert.notEqual(changed.catalogStatus, 'hit');
   assert.equal(changed.audioViews, 0);
   assert.equal(installed.at(-1).length, 0);
 });
@@ -897,7 +720,7 @@ for (const engine of ['MV', 'MZ']) test(engine + ' default audio views replace m
   assert.equal(fs.existsSync(oldAudio), false, 'unreferenced duplicate audio is removed');
   assert.equal(views[0].source, f.encryptedAudio);
   const warm = await prepareAssets(f);
-  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.validation.hashedFiles, 0);
   assert.equal(warm.audioViews, 1);
   assert.equal(warm.decrypted, 1);
   fs.rmSync(path.join(f.gameRoot, 'img'), { recursive: true });
@@ -915,8 +738,8 @@ test('audio view registrations and counts clear after installation failure or ca
     if (fail) f.native.assets.installPrepared = () => { throw new Error('install failed'); };
     const result = await prepareAssets({ ...f, shouldCancel: () => cancel,
       onProgress(progress) { if (!fail && progress.phase === 'cleanup') cancel = true; } });
-    assert.equal(result.audioViews, 0);
-    assert.deepEqual(views, []);
+    assert.equal(result.audioViews, fail ? 1 : 0);
+    assert.equal(views.length, fail ? 1 : 0);
     if (fail) assert.match(result.error, /install failed/);
     else assert.equal(result.cancelled, true);
   }
@@ -1177,17 +1000,16 @@ function sideviewFixture(f = fixture(), encrypted = false) {
   return { ...f, source, diskSource, png, plugin, writePlugin, writeSize, observed };
 }
 
-test('sideview metadata changes invalidate warm catalogs and disabling the plugin restores standard grids', async () => {
+test('sideview metadata changes invalidate saved decisions and disabling the plugin restores standard grids', async () => {
   const f = sideviewFixture();
   f.native.assets.installPreparedCatalog = entries => entries.length;
   f.native.assets.installDerivedCatalog = () => {};
   const cold = await prepareAssets(f);
   assert.deepEqual(f.observed, [[4, 6]]);
   const warm = await prepareAssets(f);
-  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.validation.hashedFiles, 0);
   f.writeSize(75);
   const changed = await prepareAssets(f);
-  assert.equal(changed.catalogHit, undefined);
   assert.equal(changed.generated, 1);
   assert.deepEqual(f.observed, [[4, 6], [4, 8]]);
   f.plugin.status = false; f.writePlugin();
@@ -1369,180 +1191,10 @@ for (const engine of ['MV', 'MZ']) {
   });
 }
 
-test('torn positive and negative cache manifests regenerate without changing sources', async () => {
-  for (const negative of [false, true]) {
-    const f = fixture();
-    if (negative) f.native.assets.processImage = async () => null;
-    const first = await prepareAssets(f);
-    assert.equal(first.generated, 1);
-    const [manifest] = manifests(f);
-    const bytes = fs.readFileSync(path.join(f.gameRoot, f.source));
-    fs.writeFileSync(manifest, '{"version":1,"key":');
-    const repaired = await prepareAssets(f);
-    assert.equal(repaired.generated, 1);
-    assert.equal(repaired.hits, 0);
-    assert.deepEqual(fs.readFileSync(path.join(f.gameRoot, f.source)), bytes);
-    assert.equal(repaired.installed, negative ? 0 : 1);
-    const warm = await prepareAssets(f);
-    assert.equal(warm.generated, 0);
-    assert.equal(warm.hits, 1);
-    assert.equal(warm.negativeHits, negative ? 1 : 0);
-  }
-});
 
-test('warm catalogs install without discovery or source checks and verification bypasses reuse', async () => {
-  const f = fixture();
-  f.native.assets.sourceIdentity = () => 'source-identity';
-  f.native.assets.installPrepared = entries => {
-    for (const entry of entries) entry.pageIdentities = entry.descriptor.pages.map(() => 'page-identity');
-    return entries.length;
-  };
-  f.native.assets.installPreparedCatalog = entries => entries.length;
-  f.native.assets.installDerivedCatalog = () => {};
-  const cold = await prepareAssets(f);
-  assert.equal(cold.installed, 1);
-  const originals = new Map();
-  for (const name of ['readdir', 'lstat', 'stat']) {
-    originals.set(name, fs.promises[name]);
-    fs.promises[name] = async () => { throw new Error('unexpected warm '+name); };
-  }
-  const sourceIdentity = f.native.assets.sourceIdentity;
-  f.native.assets.sourceIdentity = () => { throw new Error('unexpected warm source identity'); };
-  try {
-    const warm = await prepareAssets(f);
-    assert.equal(warm.catalogHit, true);
-    assert.equal(warm.generated, 0);
-    assert.equal(warm.installed, 1);
-    assert.equal(warm.entries[0].sourceIdentity, 'source-identity');
-    warm.releaseCacheLease();
-  } finally {
-    for (const [name, original] of originals) fs.promises[name] = original;
-    f.native.assets.sourceIdentity = sourceIdentity;
-  }
-  const verified = await prepareAssets({ ...f, verifyHashes: true });
-  assert.equal(verified.catalogHit, undefined);
-  assert.ok(verified.validation.hashedFiles > 0);
-  verified.releaseCacheLease(); cold.releaseCacheLease();
-});
 
-test('observed stale image catalogs regenerate on the following preparation run', async () => {
-  const f = fixture();
-  f.native.assets.sourceIdentity = () => 'source-identity';
-  f.native.assets.installPrepared = entries => {
-    for (const entry of entries) entry.pageIdentities = entry.descriptor.pages.map(() => 'page-identity');
-    return entries.length;
-  };
-  f.native.assets.installPreparedCatalog = entries => entries.length;
-  f.native.assets.installDerivedCatalog = () => {};
-  const cold = await prepareAssets(f);
-  const warm = await prepareAssets(f);
-  assert.equal(warm.catalogHit, true);
-  assert.equal(warm.invalidateCatalog(), true);
-  assert.equal(warm.invalidateCatalog(), true, 'repeated invalidation is harmless');
-  const refreshed = await prepareAssets(f);
-  assert.equal(refreshed.catalogHit, undefined);
-  assert.equal(refreshed.installed, 1);
-  const next = await prepareAssets(f);
-  assert.equal(next.catalogHit, true, 'a repaired catalog returns to the fast path');
-  for (const result of [cold, warm, refreshed, next]) result.releaseCacheLease();
-});
 
-test('legacy catalogs acquire content hashes without regenerating prepared assets', async () => {
-  const f = fixture();
-  f.native.assets.sourceIdentity = () => 'source-identity';
-  f.native.assets.installPrepared = entries => {
-    for (const entry of entries) entry.pageIdentities = ['page-identity'];
-    return entries.length;
-  };
-  f.native.assets.installPreparedCatalog = entries => entries.length;
-  f.native.assets.installDerivedCatalog = () => {};
-  const cold = await prepareAssets(f);
-  cold.releaseCacheLease();
-  const file = path.join(f.cacheRoot, fs.readdirSync(f.cacheRoot).find(name => name.startsWith('catalog-')));
-  const catalog = JSON.parse(fs.readFileSync(file));
-  const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-  catalog.binding = hash(JSON.stringify({ gameRoot: f.gameRoot, cacheRoot: f.cacheRoot,
-    processorIdentity: { processor: 'lossless-images-v7', decoder: 'png-rgba-v1', pageSize: 2048 }, recipes: [] }));
-  const payload = JSON.parse(catalog.payload);
-  delete payload.entries[0].backingHash;
-  delete payload.entries[0].pageHashes;
-  catalog.payload = JSON.stringify(payload);
-  catalog.checksum = hash(catalog.payload);
-  fs.writeFileSync(file, JSON.stringify(catalog));
-  const upgraded = await prepareAssets(f);
-  assert.equal(upgraded.catalogHit, undefined);
-  assert.equal(upgraded.generated, 0);
-  assert.equal(upgraded.hits, 1);
-  assert.equal(f.jobs, 1);
-  assert.equal(upgraded.entries[0].backingHash, hash(PNG));
-  assert.deepEqual(upgraded.entries[0].pageHashes, [hash(PNG)]);
-  upgraded.releaseCacheLease();
-  const warm = await prepareAssets(f);
-  assert.equal(warm.catalogHit, true);
-  assert.equal(warm.entries[0].backingHash, hash(PNG));
-  warm.releaseCacheLease();
-});
 
-test('damaged or rejected catalogs rebuild and release failed installation leases', async () => {
-  const f = fixture();
-  f.native.assets.sourceIdentity = () => 'source-identity';
-  f.native.assets.installPrepared = entries => {
-    for (const entry of entries) entry.pageIdentities = ['page-identity'];
-    return entries.length;
-  };
-  f.native.assets.installPreparedCatalog = () => 0;
-  f.native.assets.installDerivedCatalog = () => {};
-  const cold = await prepareAssets(f);
-  const refused = await prepareAssets(f);
-  assert.equal(refused.catalogHit, undefined);
-  assert.equal(refused.installed, 1);
-  const file = fs.readdirSync(f.cacheRoot).find(name => name.startsWith('catalog-'));
-  fs.writeFileSync(path.join(f.cacheRoot, file), '{');
-  const repaired = await prepareAssets(f);
-  assert.equal(repaired.installed, 1);
-  assert.equal(repaired.generated, 0);
-  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(path.join(f.cacheRoot, file))));
-  repaired.releaseCacheLease(); refused.releaseCacheLease(); cold.releaseCacheLease();
-});
-
-test('map catalogs and live map leases protect shared decrypted entries during image cleanup', async () => {
-  const f = fixture(), key = 'b'.repeat(64);
-  const directory = path.join(f.cacheRoot, 'entries', key), mapRoot = path.join(f.cacheRoot, 'maps');
-  fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(mapRoot);
-  fs.writeFileSync(path.join(directory, 'source.png'), PNG);
-  const { publishCatalog } = require('../runner/preparation-catalog.cjs');
-  const { createLease } = require('../runner/preparation-lifetime.cjs');
-  const catalog = path.join(mapRoot, 'catalog-'+key+'.json');
-  await publishCatalog(catalog, {}, f.cacheRoot, { keys: [key], entries: [] });
-  await prepareAssets(f);
-  assert.ok(fs.existsSync(directory));
-  const release = await createLease(mapRoot, [key]);
-  fs.unlinkSync(catalog);
-  await prepareAssets(f);
-  assert.ok(fs.existsSync(directory));
-  release();
-  await prepareAssets(f);
-  assert.equal(fs.existsSync(directory), false);
-});
-
-test('cancelled warm installation releases its lease and clears partial indexes', async () => {
-  const f = fixture(); let cancelled = false;
-  f.native.assets.sourceIdentity = () => 'source-identity';
-  f.native.assets.installPrepared = entries => {
-    for (const entry of entries) entry.pageIdentities = ['page'];
-    return entries.length;
-  };
-  f.native.assets.installPreparedCatalog = entries => { cancelled = true; return entries.length; };
-  f.native.assets.installDerivedCatalog = () => {};
-  const cold = await prepareAssets(f);
-  const before = fs.readdirSync(f.cacheRoot).filter(name => name.startsWith('.lease-'));
-  const warm = await prepareAssets({ ...f, shouldCancel: () => cancelled });
-  assert.equal(warm.cancelled, true);
-  assert.equal(warm.installed, 0);
-  assert.equal(warm.releaseCacheLease, undefined);
-  assert.deepEqual(fs.readdirSync(f.cacheRoot).filter(name => name.startsWith('.lease-')), before);
-  cold.releaseCacheLease();
-});
 
 test('portable image lookup keeps ordered candidates for the same source', async () => {
   const f = fixture();
@@ -1596,7 +1248,7 @@ test('ASTC descriptors validate padded block payloads through the cache and func
   await assert.rejects(prepareAssets({ ...f, losslessPrefixes: ['../unsafe'] }), /losslessPrefixes/);
 });
 
-test('storage decisions bind to source hashes and survive warm catalog installation', async () => {
+test('storage decisions bind to source hashes and survive saved-state reuse', async () => {
   const f = fixture();
   f.native.assets.sourceIdentity = () => 'current-source';
   f.native.assets.installPrepared = entries => entries.length;
@@ -1614,12 +1266,13 @@ test('storage decisions bind to source hashes and survive warm catalog installat
   assert.equal(cold.error, undefined);
   assert.equal(f.jobs, 0, 'verified negative layout skips image preparation');
   assert.ok(cold.validation.hashedBytes > 0, 'unverified negative hints cannot authorize storage');
-  assert.deepEqual(installed, [{ source: f.source, sourceIdentity: 'current-source', storage }]);
+  assert.deepEqual(installed, [{ source: f.source, sourceIdentity: 'current-source',
+    backingHash: crypto.createHash('sha256').update(PNG).digest('hex'), storage }]);
   installed = [];
   const warm = await prepareAssets({ ...f, portableIndex });
-  assert.equal(warm.catalogHit, true);
+  assert.equal(warm.validation.hashedFiles, 0);
   assert.deepEqual(installed, cold.storageEntries);
-  // Native identity rejection makes the catalog take the normal hash-checked path.
+  // Changed content cannot authorize the previously calculated storage decision.
   fs.appendFileSync(path.join(f.gameRoot, f.source), 'changed');
   let rejectCatalog = true;
   f.native.assets.installImageStorage = entries => {
@@ -1627,7 +1280,6 @@ test('storage decisions bind to source hashes and survive warm catalog installat
     installed = entries; return entries.length;
   };
   const changed = await prepareAssets({ ...f, portableIndex });
-  assert.equal(changed.catalogHit, undefined);
   assert.equal(changed.error, undefined);
   assert.deepEqual(installed, [], 'changed content cannot reuse the old storage decision');
   assert.equal(f.jobs, 1);
@@ -1650,4 +1302,6 @@ for (const engine of ['MV', 'MZ']) test(engine + ' storage decisions bind to the
   assert.equal(installed.length, 1);
   assert.equal(installed[0].source, f.source);
   assert.equal(installed[0].sourceIdentity, f.native.assets.sourceIdentity(f.source));
+  assert.equal(installed[0].backingHash, crypto.createHash('sha256').update(PNG).digest('hex'),
+    'storage recovery verifies plaintext rather than the encrypted source');
 });

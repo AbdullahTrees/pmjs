@@ -6,20 +6,10 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
 const { performance } = require('node:perf_hooks');
-const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
-const { preparationFiles, writeJson } = require('./preparation-files.cjs');
-const { catalogInvalidator, readCatalog, publishCatalog, checksum, retainedCatalogKeys } = require('./preparation-catalog.cjs');
 const { COMPILER_VERSION, mapContract, geometryEstimate, engineTilemap, compileRpgMap, compileTiledMap } = require('./map-demand.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const identity = object => hash(JSON.stringify(object));
-async function digest(file) {
-  const hasher = crypto.createHash('sha256');
-  for await (const chunk of fs.createReadStream(file)) hasher.update(chunk);
-  return hasher.digest('hex');
-}
 const HASH = /^[a-f0-9]{64}$/;
-const installedLeases = new WeakMap();
-async function readJson(file) { return JSON.parse(await fsp.readFile(file, 'utf8')); }
 
 async function ordinaryUpperBound(inputs, renderer, files) {
   if (renderer === 'mz') return inputs.length * 1024 * 1024 * 4;
@@ -70,7 +60,7 @@ async function validateEntry(directory, key, files) {
     for (const page of manifest.outputs) {
       if (!/^tiles-\d+\.png$/.test(page.path) || !HASH.test(page.hash)) return false;
       const file = path.join(directory, page.path);
-      const checked = files ? await files.inspect(file, 'output') : { hash: await digest(file), reused: false };
+      const checked = await files.inspect(file, 'output');
       if (checked.hash !== page.hash) return false;
       if (reused && checked.reused) continue;
       let bytes = checked.header;
@@ -87,13 +77,11 @@ async function validateEntry(directory, key, files) {
     return true;
   }
   try {
-    if (files) return await files.validatedJson(file, validate);
-    const manifest = await readJson(file);
-    return await validate(manifest, false) ? manifest : null;
+    return await files.validatedJson(file, validate);
   } catch (_) { return null; }
 }
 
-function gameInputs(native) {
+function gameInputs(native, files) {
   if (!native.fs || typeof native.fs.readBytes !== 'function' || typeof native.fs.readDirectory !== 'function')
     throw new Error('game filesystem unavailable for map preparation');
   function read(logical) {
@@ -104,7 +92,9 @@ function gameInputs(native) {
     const capturedIdentity = native.assets.sourceIdentity(logical);
     if (capturedIdentity !== sourceIdentity && (native.assets.sourcePath(logical) !== file || hash(fs.readFileSync(file)) !== hash(bytes)))
       throw new Error('game input changed while reading '+logical);
-    return { bytes, dependency: { logical, file, sourceIdentity: capturedIdentity, hash: hash(bytes) } };
+    const checked = files.inspectSync(file, bytes, 'map-input');
+    if (native.assets.sourceIdentity(logical) !== capturedIdentity) throw new Error('game input changed while recording '+logical);
+    return { bytes, dependency: { logical, file, sourceIdentity: capturedIdentity, hash: checked.hash } };
   }
   return { read, exists: logical => native.fs.exists(logical),
     directory: logical => native.fs.readDirectory(logical) || [] };
@@ -123,7 +113,7 @@ async function engineContract(game, mz) {
     dependencies.push(source.dependency);
     plugins.push({ name: plugin.name, parameters: plugin.parameters, hash: source.dependency.hash });
   }
-  return { Tilemap: engineTilemap(source, mz), dependencies, identity: { engine: hash(source), plugins } };
+  return { Tilemap: engineTilemap(source, mz), dependencies, identity: { engine: engine.dependency.hash, plugins } };
 }
 async function resolveTiled(game, map) {
   const clone = structuredClone(map), dependencies = [];
@@ -136,7 +126,15 @@ async function resolveTiled(game, map) {
 }
 async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 624,
   shouldCancel = () => false, onProgress = () => {}, logger = console, verifyRegions = false, verifyHashes = false,
-  preparationContext = 'live', portableIndex = null, portableAssetRoot = null }) {
+  preparationContext = 'live', portableIndex = null, portableAssetRoot = null, session = null }) {
+  if (!session) {
+    const run = await require('./preparation.cjs').prepareGameAssets({ gameRoot, cacheRoot, native, width, height,
+      shouldCancel, onProgress: value => { if (value.phase !== 'start') onProgress(value); }, logger, verifyRegions, verifyHashes, preparationContext,
+      portableIndex: { maps: portableIndex }, portableAssetRoot, images: false, maps: true });
+    if (run.maps) run.maps.releaseCacheLease = run.releaseCacheLease;
+    return run.maps;
+  }
+  cacheRoot = session.root;
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   const offline = preparationContext === 'offline';
   const indexedMaps = new Map();
@@ -147,10 +145,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
   const result = { enabled: true, selected: 0, refused: 0, generated: 0, hits: 0, negativeHits: 0,
     installed: 0, compilationHits: 0, indexedCopies: 0, nativePacks: 0, earlyRefusals: 0, processingMs: 0,
     verifiedRegions: 0, identityRefreshes: 0, snapshotBytes: 0, additionalSnapshotBytes: 0, pageBytes: 0, durationMs: 0, cancelled: false, maps: [], index: {} };
-  const catalogFile = path.join(root, 'catalog-'+checksum(path.resolve(gameRoot))+'.json');
-  result.invalidateCatalog = catalogInvalidator(catalogFile, logger);
-  let release;
-  let files;
+  const files = session.files;
   const digest = file => files.hash(file, 'map-input');
   const entries = [], keys = [], snapshots = new Map(), sourceDependencies = new Map();
   async function captureSnapshot(input) {
@@ -185,59 +180,28 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         (!offline && typeof native.assets.installTileSets !== 'function'))
       throw new Error('tile preparation unavailable in this addon');
 
-    const binding = { gameRoot: path.resolve(gameRoot), cacheRoot: path.resolve(cacheRoot), width, height,
-      engine: native.fs?.exists?.('js/rmmz_core.js') ? 'mz' : 'mv',
-      compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion };
-    const catalogCapable = typeof native.assets.installTileSetCatalog === 'function';
-    result.catalogStatus = offline ? 'offline' : verifyHashes ? 'verify-hashes' :
-      verifyRegions ? 'verify-regions' : catalogCapable ? 'checking' : 'unsupported';
-    if (!offline && !verifyHashes && !verifyRegions && catalogCapable) {
-      await fsp.mkdir(root, { recursive: true });
-      report('wait', '', 0, 0);
-      release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, 0), native.assets);
-      if (!release) { result.cancelled = true; return result; }
-      report('catalog', '', 0, 0);
-      const catalog = await readCatalog(catalogFile, binding, cacheRoot, reason => { result.catalogStatus = reason; });
-      if (catalog && !shouldCancel()) {
-        let lease;
-        try {
-          report('install', '', 0, catalog.maps.length);
-          lease = await createLease(root, catalog.keys);
-          const installed = native.assets.installTileSetCatalog(catalog.entries);
-          if (installed !== catalog.entries.length || shouldCancel()) throw new Error('incomplete tile catalog installation');
-          const previous = installedLeases.get(native.assets);
-          installedLeases.set(native.assets, lease);
-          if (previous) previous();
-          native.assets.preparedMapIndex = catalog.index;
-          Object.assign(result, catalog.summary, { generated: 0, compilationHits: 0, identityRefreshes: 0, additionalSnapshotBytes: 0, index: catalog.index, maps: catalog.maps, catalogHit: true, catalogStatus: 'hit', releaseCacheLease: lease });
-          return result;
-        } catch (error) {
-          result.catalogStatus = 'install-rejected';
-          result.catalogError = error.message;
-          native.assets.installTileSets([]); native.assets.preparedMapIndex = {};
-          const previous = installedLeases.get(native.assets);
-          installedLeases.delete(native.assets);
-          if (previous && previous !== lease) previous();
-          if (lease) lease();
-        }
-      }
-      await release(); release = undefined;
-      if (shouldCancel()) { result.cancelled = true; return result; }
+    const data = session.inventory.filter(file => /^data\/Map\d+\.json$/i.test(file)).map(file => file.slice(5)).sort();
+    if (!data.length) {
+      if (!offline) { native.assets.installTileSets([]); native.assets.preparedMapIndex = {}; }
+      session.data.indices.maps = null;
+      result.entries = [];
+      result.validation = files.stats;
+      return result;
     }
     report('discover', '', 0, 0);
-    const game = gameInputs(native), mz = game.exists('js/rmmz_core.js');
+    const game = gameInputs(native, files), mz = game.exists('js/rmmz_core.js');
     const systemInput = game.read('data/System.json'), sheetsInput = game.read('data/Tilesets.json');
     const system = JSON.parse(systemInput.bytes), sheets = JSON.parse(sheetsInput.bytes);
     const contract = await engineContract(game, mz);
     const sharedDependencies = [...contract.dependencies, systemInput.dependency, sheetsInput.dependency];
-    const data = game.directory('data').filter(file => /^Map\d+\.json$/i.test(file)).sort();
     const checkedDependencies = new Map();
     async function validateDependencies(dependencies) {
       for (const dependency of dependencies) {
+        const before = dependency.logical && native.assets.sourceIdentity(dependency.logical);
         const checked = checkedDependencies.get(dependency.file);
         if (!verifyHashes && checked && checked.hash === dependency.hash &&
-            checked.logical === dependency.logical && checked.sourceIdentity === dependency.sourceIdentity) continue;
-        const before = dependency.logical && native.assets.sourceIdentity(dependency.logical);
+            checked.logical === dependency.logical && checked.sourceIdentity === dependency.sourceIdentity &&
+            (!dependency.logical || before === checked.sourceIdentity)) continue;
         if (dependency.logical && native.assets.sourcePath(dependency.logical) !== dependency.file ||
             await digest(dependency.file) !== dependency.hash)
           throw new Error('map dependency changed during preparation: '+(dependency.logical || dependency.file));
@@ -252,14 +216,8 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     }
     await fsp.mkdir(path.join(root, 'entries'), { recursive: true });
     await fsp.mkdir(path.join(root, 'sources'), { recursive: true });
-    report('wait', '', 0, data.length);
-    release = await acquireLock(root, shouldCancel, () => report('wait', '', 0, data.length), native.assets);
-    if (!release) { result.cancelled = true; return result; }
     report('validate', '', 0, data.length);
-    files = await preparationFiles(root, verifyHashes);
     result.validation = files.stats;
-    const indexFile = path.join(root, 'index-'+identity({ title: system.gameTitle || '',
-      engine: mz ? 'mz' : 'mv', plugins: contract.identity.plugins.map(plugin => plugin.name) })+'.json');
     let imported = null;
     if (portableIndex?.compiler === COMPILER_VERSION &&
         portableIndex.compilations && typeof portableIndex.compilations === 'object' &&
@@ -283,7 +241,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         compilationsHash: identity(portableIndex.compilations), mapInputs: rebound,
         mapInputsHash: identity(rebound) };
     }
-    const previousIndex = await readJson(indexFile).catch(() => null) || imported;
+    const previousIndex = session.data.indices.maps || imported;
     const previousCompilations = previousIndex?.compilations &&
       previousIndex.compilationsHash === identity(previousIndex.compilations) ? previousIndex.compilations : {};
     const previousInputs = previousIndex?.mapInputs &&
@@ -306,6 +264,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
       if (shouldCancel()) { result.cancelled = true; break; }
       const filename = data[index], mapId = Number(filename.match(/\d+/)[0]);
       report('compile', filename, index, data.length);
+      let declined = false;
       let stage, row = { mapId, filename, selected: false };
       try {
         const tiledFile = 'maps/Map'+mapId+'.json';
@@ -350,7 +309,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         const refusalKey = compilationKey(dependencies);
         const refusalDirectory = path.join(root,'entries',refusalKey);
         const refusal = await validateEntry(refusalDirectory,refusalKey,files);
-        if (refusal) { keys.push(refusalKey); ++result.hits; ++result.negativeHits; throw new Error(refusal.reason); }
+        if (refusal) { declined = true; keys.push(refusalKey); ++result.hits; ++result.negativeHits; throw new Error(refusal.reason); }
         try {
           const cached = previousCompilations[refusalKey];
           if (demand) ++result.compilationHits;
@@ -362,14 +321,15 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           } else demand = compile();
           if (!demand.sources.length) throw new Error('no compact tile demand');
         } catch (error) {
+          declined = true;
           keys.push(refusalKey);
           stage = await fsp.mkdtemp(path.join(root,'entries','.stage-'));
-          await writeJson(path.join(stage,'manifest.json'), { compiler: COMPILER_VERSION, key: refusalKey,
-            descriptor: null, descriptorHash: identity(null), outputs: [], reason: error.message }, false);
-          await validateDependencies(dependencies);
+          files.writeManifest(stage, { filename, compiler: COMPILER_VERSION, key: refusalKey,
+            descriptor: null, descriptorHash: identity(null), outputs: [], reason: error.message });
+          await validateDependencies([...sharedDependencies, ...dependencies]);
           if (shouldCancel()) { result.cancelled=true; break; }
           await fsp.rm(refusalDirectory,{recursive:true,force:true});
-          await fsp.rename(stage,refusalDirectory); stage=null; ++result.generated;
+          await fsp.rename(stage,refusalDirectory); files.publishManifest(stage, refusalDirectory); stage=null; ++result.generated;
           throw error;
         }
         const prepared = { ...demand }, visual = { ...demand.contract };
@@ -407,11 +367,13 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
         const key = identity({ compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
           demand, dependencies: dependencies.map(dependency => dependency.hash), contract: contract.identity, width, height, sources: inputs.map(({ source, sourceHash }) => ({ source, sourceHash })) });
         keys.push(key);
-        const directory = path.join(root, 'entries', key);
+        let directory = session.directory('maps/entries', key);
         let manifest = await validateEntry(directory, key,files);
+        let outcome = manifest ? 'reused-local' : 'generated';
         if (manifest) { ++result.hits; if (!manifest.descriptor) ++result.negativeHits; }
         else {
           report('pack', filename, index, data.length);
+          if (fs.existsSync(directory)) directory = session.newDirectory('maps/entries', key);
           stage = await fsp.mkdtemp(path.join(root, 'entries', '.stage-'));
           let descriptor, reason;
           const geometryBytes = geometryEstimate(demand, width, height);
@@ -422,7 +384,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
             reason = 'packed allocations and geometry are not smaller';
             ++result.earlyRefusals;
           }
-          if (!reason && portableAssetRoot && Array.isArray(portableIndex?.entries)) {
+          if (!reason && !session.repairSources.has(key) && portableAssetRoot && Array.isArray(portableIndex?.entries)) {
             const indexed = indexedMaps.get(key);
             if (indexed && validTileDescriptor(indexed.descriptor) &&
                 indexed.descriptor.sources.length === inputs.length &&
@@ -441,7 +403,7 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
                     throw new Error('indexed map page header differs');
                 }
                 descriptor = indexed.descriptor;
-                ++result.indexedCopies;
+                ++result.indexedCopies; outcome = 'reused-package';
               } catch (_) {
                 for (const page of indexed.descriptor.pages)
                   await fsp.rm(path.join(stage, page.path), { force: true });
@@ -468,33 +430,36 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
           }
           const outputs = [];
           for (const page of descriptor ? descriptor.pages : []) outputs.push({ path: page.path, hash: await files.hash(path.join(stage, page.path), 'output') });
-          manifest = { compiler: COMPILER_VERSION, key, descriptor, descriptorHash: identity(descriptor), outputs,
+          manifest = { filename, compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
+            dependencies: [...sharedDependencies, ...dependencies, ...inputs].map(input => ({ source: input.logical || input.source, hash: input.hash || input.sourceHash })),
+            settings: { width, height }, outcome: descriptor ? outcome : 'ordinary-choice', key, descriptor, descriptorHash: identity(descriptor), outputs,
             reason, estimates: { pageBytes, geometryBytes, metadataBytes, ordinaryBytes, compactBytes } };
-          // Disposable entries are validated on reuse; durable publication belongs to the final index/catalog.
-          await writeJson(path.join(stage, 'manifest.json'), manifest, false);
+          // Publish the complete result only after its outputs validate.
+          files.writeManifest(stage, manifest);
           if (!await validateEntry(stage, key,files)) throw new Error('tile output validation failed');
           if (shouldCancel()) { result.cancelled = true; break; }
-          await validateDependencies(dependencies);
-          await fsp.rm(directory, { recursive: true, force: true });
-          await fsp.rename(stage, directory); stage = null; ++result.generated;
+          await validateDependencies([...sharedDependencies, ...dependencies]);
+          await fsp.rename(stage, directory); files.publishManifest(stage, directory); stage = null; ++result.generated;
           if (!await validateEntry(directory, key,files)) throw new Error('published tile output validation failed');
         }
-        await validateDependencies(dependencies);
+        await validateDependencies([...sharedDependencies, ...dependencies, ...inputs.map(input => sourceDependencies.get(input.source)).filter(Boolean)]);
         Object.assign(row, manifest.estimates);
-        if (!manifest.descriptor) throw new Error(manifest.reason);
+        if (!manifest.descriptor) { declined = true; throw new Error(manifest.reason); }
         for (const input of inputs) input.snapshot = await captureSnapshot(input);
         if (verifyRegions) result.verifiedRegions += await native.assets.processTiles(inputs, directory, manifest.descriptor);
         const descriptor = structuredClone(manifest.descriptor);
         descriptor.sources.forEach((source, i) => Object.assign(source, {
           source: inputs[i].source, snapshot: inputs[i].snapshot, sourceHash: inputs[i].sourceHash, sourceIdentity: inputs[i].sourceIdentity }));
-        entries.push({ identity: key, directory, descriptor });
+        entries.push({ identity: key, directory, descriptor, outputs: manifest.outputs });
         result.index[mapId] = { identity: key, renderer: demand.renderer, contractHash: identity(demand.contract),
           animationPhases: demand.animationPhases, sources: inputs.map(input => input.source),
           tileWidth: demand.tileWidth, tileHeight: demand.tileHeight };
         row.selected = true; ++result.selected;
+        session.outcome('map:' + filename, outcome);
         for (const page of descriptor.pages) result.pageBytes += (await fsp.stat(path.join(directory, page.path))).size;
       } catch (error) {
         row.reason = error.message; ++result.refused;
+        session.outcome('map:' + filename, declined ? 'ordinary-choice' : 'ordinary-failure', error.message);
         logger.warn('[pmjs] map preparation ordinary '+filename+': '+error.message);
       } finally {
         if (stage) await fsp.rm(stage, { recursive: true, force: true });
@@ -504,60 +469,32 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
     }
     if (!result.cancelled) {
       report('validate', '', data.length, data.length);
-      await validateDependencies([...sharedDependencies, ...sourceDependencies.values()]);
       await files.save();
       for (const entry of entries) for (const source of entry.descriptor.sources)
         source.sourceIdentity = sourceDependencies.get(source.source).sourceIdentity;
-      const retentionKeys = [...keys, ...snapshots.keys()];
-      for (const snapshot of snapshots.values()) {
-        const relative = path.relative(path.resolve(cacheRoot), snapshot);
-        const match = /^entries\/([a-f0-9]{64})\//.exec(relative);
-        if (match) retentionKeys.push(match[1]);
-      }
       if (!offline) {
         report('install', '', data.length, data.length);
-        result.releaseCacheLease = await createLease(root, retentionKeys);
-        result.installed = native.assets.installTileSets(entries, catalogCapable);
-        if (result.installed !== entries.length) throw new Error('some tile sets were not installed');
+        const installed = native.assets.installTileSets(entries, false, true);
+        result.activation = installed?.accepted ? installed : { accepted: entries.slice(0, installed).map(entry => entry.identity), rejected: [] };
+        result.installed = result.activation.accepted.length;
+        for (const [mapId, prepared] of Object.entries(result.index))
+          if (!result.activation.accepted.includes(prepared.identity)) delete result.index[mapId];
       } else result.installed = entries.length;
-      if (shouldCancel()) { result.cancelled = true; throw new Error("map preparation cancelled"); }
+      if (shouldCancel()) { result.cancelled = true; throw new Error('map preparation cancelled'); }
       if (!offline) native.assets.preparedMapIndex = result.index;
-      if (!offline && catalogCapable) {
-        report('publish', '', data.length, data.length);
-        const summary = Object.fromEntries(Object.entries(result).filter(([, value]) => typeof value === 'number'));
-        summary.hits = result.maps.length;
-        await publishCatalog(catalogFile, binding, cacheRoot, { keys: retentionKeys, entries, index: result.index, maps: result.maps, summary });
-      }
-
-      if (!offline) {
-        const previousLease = installedLeases.get(native.assets);
-        installedLeases.set(native.assets, result.releaseCacheLease);
-        if (previousLease) previousLease();
-      }
+      result.entries = entries;
       report('cleanup', '', data.length, data.length);
-      const nextIndex = { keys, snapshots: [...snapshots.keys()],
+      const retainedKeys = [...keys];
+      for (const snapshot of snapshots.values()) {
+        const match = /^entries\/([^/]+)\//.exec(path.relative(cacheRoot, snapshot).split(path.sep).join('/'));
+        if (match) retainedKeys.push(match[1]);
+      }
+      const nextIndex = { keys: retainedKeys, snapshots: [...snapshots.keys()],
         compilations, compilationsHash: identity(compilations), mapInputs, mapInputsHash: identity(mapInputs) };
       result.compilations = compilations;
       result.mapInputs = mapInputs;
-      if (previousCompilations !== previousIndex?.compilations || previousInputs !== previousIndex?.mapInputs ||
-          previousIndex?.compilationsHash !== nextIndex.compilationsHash ||
-          previousIndex?.mapInputsHash !== nextIndex.mapInputsHash ||
-          identity(previousIndex.keys || []) !== identity(keys) || identity(previousIndex.snapshots || []) !== identity(nextIndex.snapshots)) {
-        const stagedIndex = indexFile+'.stage-'+process.pid;
-        await fsp.rm(stagedIndex, { force: true });
-        await writeJson(stagedIndex, nextIndex);
-        await fsp.rename(stagedIndex, indexFile);
-      }
-      const retained = new Set([...keys, ...snapshots.keys()]);
-      for (const file of await fsp.readdir(root)) if (/^(index|catalog)-[a-f0-9]{64}\.json$/.test(file) && file !== path.basename(indexFile)) {
-        const index = await readJson(path.join(root, file)).catch(() => null);
-        for (const key of retainedCatalogKeys(index)) retained.add(key);
-      }
-      await retainLeases(root, retained);
-      for (const file of await fsp.readdir(path.join(root, 'entries'))) if (file.startsWith('.stage-') || HASH.test(file) && !retained.has(file))
-        await fsp.rm(path.join(root, 'entries', file), { recursive: true, force: true });
-      for (const file of await fsp.readdir(path.join(root, 'sources'))) if (/^[a-f0-9]{64}\.png$/.test(file) && !retained.has(file.slice(0,-4)))
-        await fsp.rm(path.join(root, 'sources', file), { force: true });
+      session.data.indices.maps = nextIndex;
+      await files.save();
 
     }
   } catch (error) {
@@ -565,16 +502,11 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
       native.assets.installTileSets && native.assets.installTileSets([]);
       native.assets.preparedMapIndex = {};
     }
-    const installedLease = installedLeases.get(native.assets);
-    installedLeases.delete(native.assets);
-    if (installedLease && installedLease !== result.releaseCacheLease) installedLease();
-    if (result.releaseCacheLease) { result.releaseCacheLease(); delete result.releaseCacheLease; }
     result.error = error.message;
     for (const row of result.maps) if (row.selected) { row.selected = false; row.reason = error.message; }
     result.refused += result.selected; result.selected = result.installed = 0; result.index = {};
     logger.warn('[pmjs] map preparation unavailable: '+error.message);
   } finally {
-    if (release) await release();
     result.durationMs = performance.now()-started;
   }
   return result;
