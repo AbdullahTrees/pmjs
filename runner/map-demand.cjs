@@ -3,7 +3,7 @@
 const vm = require('node:vm');
 const path = require('node:path');
 
-const COMPILER_VERSION = 'map-demand-v5';
+const COMPILER_VERSION = 'map-demand-v6';
 function mapContract(map, tileset, tileWidth, tileHeight) {
   return { width: map.width, height: map.height, data: map.data, tilesetId: map.tilesetId, scrollType: map.scrollType,
     events: (map.events || []).map(event => event && (event.pages || []).map(page => page.image && page.image.tileId || 0)),

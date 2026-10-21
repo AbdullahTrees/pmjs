@@ -130,6 +130,42 @@ test('warm compilation preserves descriptors and map contracts; changed and dama
   assert.equal(changedFlags.compilationHits,0);assert.notDeepEqual(changedFlags.index,beforeFlags);
 });
 
+test('large Tiled maps keep bounded cached contracts across reuse, changes and legacy migration', async t => {
+  const f = { ...fixture(t), width: 64, height: 64 };
+  fs.mkdirSync(path.join(f.gameRoot, 'maps'));
+  const map = { width: 256, height: 256, tilewidth: 48, tileheight: 48,
+    tilesets: [{ firstgid: 1, image: 'B.png', columns: 10, tilewidth: 48, tileheight: 48 }],
+    layers: [{ data: Array(256 * 256).fill(1) }] };
+  const source = path.join(f.gameRoot, 'maps/Map1.json');
+  fs.writeFileSync(source, JSON.stringify(map));
+  const cold = await prepareMaps(f);
+  assert.equal(cold.installed, 1);
+  assert.equal(cold.index[1].contractHash, crypto.createHash('sha256').update(JSON.stringify(map)).digest('hex'));
+  const cached = readIndex(f);
+  assert.ok(JSON.stringify(cached).length < 16 * 1024, 'cached metadata must not retain tile layers');
+  const read = f.native.fs.readBytes;
+  f.native.fs.readBytes = logical => {
+    assert.notEqual(logical, 'maps/Map1.json', 'warm preparation must reuse verified demand');
+    return read(logical);
+  };
+  const warm = await prepareMaps(f);
+  assert.equal(warm.compilationHits, 1);
+  assert.deepEqual(warm.index, cold.index);
+  f.native.fs.readBytes = read;
+  cached.compiler = 'map-demand-v5';
+  cached.mapInputs['Map001.json'].contract = map;
+  writeIndex(f, cached);
+  const migrated = await prepareMaps(f);
+  assert.equal(migrated.compilationHits, 0);
+  assert.deepEqual(migrated.index, cold.index);
+  assert.ok(JSON.stringify(readIndex(f)).length < 16 * 1024);
+  map.layers[0].data[0] = 2;
+  fs.writeFileSync(source, JSON.stringify(map));
+  const changed = await prepareMaps(f);
+  assert.equal(changed.compilationHits, 0);
+  assert.notEqual(changed.index[1].contractHash, cold.index[1].contractHash);
+});
+
 test('map output invalidation reuses demand while demand invalidation recompiles it', async t => {
   const f = fixture(t);
   const first = await prepareGameAssets({ ...f, images: false, maps: true });

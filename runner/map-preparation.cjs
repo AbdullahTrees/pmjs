@@ -237,10 +237,11 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         if (dependencies.length === entry.dependencies.length)
           rebound[name] = { ...entry, dependencies };
       }
-      imported = { compilations: portableIndex.compilations,
+      imported = { compiler: COMPILER_VERSION, compilations: portableIndex.compilations,
         compilationsHash: identity(portableIndex.compilations), mapInputs: rebound,
         mapInputsHash: identity(rebound) };
     }
+    if (session.data.indices.maps?.compiler !== COMPILER_VERSION) session.data.indices.maps = null;
     const previousIndex = session.data.indices.maps || imported;
     const recompileMapInputs = new Set(previousIndex?.recompileMapInputs || []);
     const previousCompilations = previousIndex?.compilations &&
@@ -277,17 +278,8 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
           dependencies = await unchangedDependencies(cachedInputs).catch(() => null);
           if (dependencies) {
             const cached = previousCompilations[compilationKey(dependencies)];
-            if (cached && cachedInputs.contract) {
-              let visual = cachedInputs.contract;
-              if (cached.renderer !== 'tiled') {
-                const { tileWidth, tileHeight, ...map } = visual;
-                const tileset = sheets[map.tilesetId];
-                visual = { ...map, tilesetNames: tileset.tilesetNames,
-                  flags: tileset.flags, tileWidth, tileHeight };
-              }
-              const { renderer, ...prepared } = cached;
-              delete prepared.contract;
-              demand = { renderer, contract: visual, ...prepared };
+            if (cached && HASH.test(cachedInputs.contractHash)) {
+              demand = { ...cached, contractHash: cachedInputs.contractHash };
             }
           }
         }
@@ -337,11 +329,12 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
           await fsp.rename(stage,refusalDirectory); files.publishManifest(stage, refusalDirectory); stage=null; ++result.generated;
           throw error;
         }
-        const prepared = { ...demand }, visual = { ...demand.contract };
-        delete prepared.contract;
-        compilations[refusalKey] = prepared;
-        if (demand.renderer !== 'tiled') { delete visual.tilesetNames; delete visual.flags; }
-        mapInputs[filename] = { tiled, dependencies, contract: visual, compilationKey: refusalKey };
+        if (demand.contract) {
+          demand.contractHash = identity(demand.contract);
+          delete demand.contract;
+        }
+        compilations[refusalKey] = { ...demand };
+        mapInputs[filename] = { tiled, dependencies, contractHash: demand.contractHash, compilationKey: refusalKey };
         row.renderer = demand.renderer;
         row.features = demand.features;
         let inputs = [];
@@ -455,7 +448,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         descriptor.sources.forEach((source, i) => Object.assign(source, {
           source: inputs[i].source, snapshot: inputs[i].snapshot, sourceHash: inputs[i].sourceHash, sourceIdentity: inputs[i].sourceIdentity }));
         entries.push({ identity: key, directory, descriptor, outputs: manifest.outputs });
-        result.index[mapId] = { identity: key, renderer: demand.renderer, contractHash: identity(demand.contract),
+        result.index[mapId] = { identity: key, renderer: demand.renderer, contractHash: demand.contractHash,
           animationPhases: demand.animationPhases, sources: inputs.map(input => input.source),
           tileWidth: demand.tileWidth, tileHeight: demand.tileHeight };
         row.selected = true; ++result.selected;
@@ -493,7 +486,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         const match = /^entries\/([^/]+)\//.exec(path.relative(cacheRoot, snapshot).split(path.sep).join('/'));
         if (match) retainedKeys.push(match[1]);
       }
-      const nextIndex = { keys: retainedKeys, snapshots: [...snapshots.keys()],
+      const nextIndex = { compiler: COMPILER_VERSION, keys: retainedKeys, snapshots: [...snapshots.keys()],
         compilations, compilationsHash: identity(compilations), mapInputs, mapInputsHash: identity(mapInputs),
         recompileMapInputs: [...recompileMapInputs] };
       result.compilations = compilations;
