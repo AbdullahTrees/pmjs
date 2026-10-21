@@ -133,6 +133,19 @@ test('browser callback errors report and preserve subsequent work', async t => {
   assert.deepEqual(fatals, []); assert.deepEqual(trace, ['next', 'raf']);
 });
 
+test('uncaught-mode callback errors are logged like NW.js and preserve subsequent work', async t => {
+  const { context, errors, fatals } = fixture(t), trace = [];
+  const logged = t.mock.method(console, 'error', () => {});
+  context.PMJS.tasks.enqueue(() => { throw new Error('ENOENT: /save/optional-state.json'); }, { errorMode: 'uncaught' });
+  context.PMJS.tasks.enqueue(() => trace.push('next'));
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(fatals, []);
+  assert.deepEqual(errors, [], 'NW.js does not route Node callback exceptions to window.onerror');
+  assert.deepEqual(trace, ['next']);
+  assert.equal(logged.mock.callCount(), 1);
+  assert.match(logged.mock.calls[0].arguments[0], /uncaught exception in Node callback/);
+});
+
 test('fatal callbacks stop delivery and discard retained results', async t => {
   const { context, fatals } = fixture(t), trace = [];
   context.PMJS.tasks.enqueue(() => { throw new Error('node callback'); });

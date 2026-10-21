@@ -89,11 +89,14 @@ test('warm images become listener-ready before twenty saturated frames', () => {
   assert.ok(trace.every(row => row[2] < 20), JSON.stringify(trace));
 });
 
-test('runner rejects a throwing Node filesystem completion instead of delivering more guest work', () => {
-  runGuest(`
-    fsModule.readFile('file',()=>{throw new Error('fatal filesystem callback');});
-    function complete(){return false;}
-  `, { expectedError: /fatal filesystem callback/ });
+test('runner logs a throwing Node filesystem callback like NW.js and keeps delivering guest work', () => {
+  const trace = runGuest(`
+    fsModule.readFile('file',()=>{throw new Error('filesystem callback');});
+    fsModule.readFile('file',()=>trace.push('next'));
+    requestAnimationFrame(()=>trace.push('raf'));
+    function complete(){return trace.includes('next')&&trace.includes('raf');}
+  `);
+  assert.deepEqual([...trace].sort(), ['next', 'raf']);
 });
 
 for (const renderHz of [30, 60]) test('runner service Promise readiness precedes the host ticker, rate=' + renderHz, () => {
