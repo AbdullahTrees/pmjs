@@ -87,6 +87,14 @@ for (const host of [false, true]) {
   });
 }
 
+test('browser event listeners mark returned Promises for browser rejection reporting', t => {
+  const context = fixture(t), target = new context.EventTarget();
+  const returned = Promise.resolve('handled later');
+  target.addEventListener('click', () => returned);
+  target.dispatchEvent({ type: 'click' });
+  assert.equal(context.PMJS.tasks.guestPromiseOrigin(returned), 'browser');
+});
+
 test('host dispatch observes removal in a listener microtask', async t => {
   const context = fixture(t), target = new context.EventTarget(), trace = [];
   const later = () => trace.push('B');

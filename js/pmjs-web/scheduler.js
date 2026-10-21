@@ -10,6 +10,7 @@
   var frameTasks = 0, frameStartedAt = 0, idleWaiters = [];
   var stopListeners = new Set();
   var nodeListenerExceptions = new WeakMap();
+  var guestPromiseOrigins = new WeakMap();
   var runningTask = false;
   var rafs = new Map(), timers = new Map(), timerWake = null;
 
@@ -25,6 +26,12 @@
     var marker = {};
     nodeListenerExceptions.set(marker, error);
     return marker;
+  }
+  function trackGuestPromise(value, origin) {
+    if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+      guestPromiseOrigins.set(value, origin);
+    }
+    return value;
   }
   function wrapNodeEmitter(emitter, synchronousMethods) {
     // Tag only guest listener throws so unrelated failures in the same I/O task stay fatal.
@@ -47,7 +54,7 @@
         if (methods.indexOf(property) >= 0) return function(event, listener) {
           if (typeof listener !== 'function') return target[property].call(target, event, listener);
           var wrapped = function() {
-            try { return listener.apply(guestEmitter, arguments); }
+            try { return trackGuestPromise(listener.apply(guestEmitter, arguments), 'node'); }
             catch (error) {
               if (synchronousDispatch) throw error;
               if (runningTask) throw nodeListenerException(error);
@@ -174,7 +181,10 @@
       frameTasks++;
     }
     runningTask = true;
-    try { entry.callback(); }
+    try {
+      var result = entry.callback();
+      if (entry.options.errorMode === 'uncaught') trackGuestPromise(result, 'node');
+    }
     catch (error) {
       runningTask = false;
       if (nodeListenerExceptions.has(error)) reportUncaught(nodeListenerExceptions.get(error));
@@ -192,6 +202,8 @@
     enqueue: enqueue,
     invoke: invoke,
     nodeListenerException: nodeListenerException,
+    trackGuestPromise: trackGuestPromise,
+    guestPromiseOrigin: function(promise) { return guestPromiseOrigins.get(promise); },
     wrapNodeEmitter: wrapNodeEmitter,
     invokeRendering: function(callback, errorMode) { return invoke(callback, errorMode, true); },
     idle: function() {

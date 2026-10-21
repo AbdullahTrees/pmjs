@@ -228,8 +228,8 @@ var fsModule = {
     if (typeof callback !== 'function') throw new TypeError('readFile requires a callback');
     PMJS.tasks.enqueue(function() {
       Promise.resolve().then(function() { return fsReadContentsAsync(path, options); }).then(
-        function(result) { deliverNodeCallback(function() { callback(null, result); }); },
-        function(error) { deliverNodeCallback(function() { callback(error, null); }); });
+        function(result) { deliverNodeCallback(function() { return callback(null, result); }); },
+        function(error) { deliverNodeCallback(function() { return callback(error, null); }); });
     });
   },
   createReadStream: function(path, options) { return new FsReadStream(path, options); },
@@ -251,7 +251,7 @@ var fsModule = {
     if (typeof options === 'function') { callback = options; options = undefined; }
     var error = null;
     try { fsModule.writeFileSync(path, contents, options); } catch (caught) { error = caught; }
-    deliverNodeCallback(function() { if (callback) callback(error); });
+    deliverNodeCallback(function() { if (callback) return callback(error); });
   },
   appendFileSync: function(path, contents, options) {
     var previous;
@@ -276,7 +276,7 @@ var fsModule = {
     if (typeof options === 'function') { callback = options; options = undefined; }
     var error = null;
     try { fsModule.mkdirSync(path, options); } catch (caught) { error = caught; }
-    deliverNodeCallback(function() { if (callback) callback(error); });
+    deliverNodeCallback(function() { if (callback) return callback(error); });
   },
   unlinkSync: function(path) {
     var writable = writablePath(path);
@@ -289,7 +289,7 @@ var fsModule = {
   unlink: function(path, callback) {
     var error = null;
     try { fsModule.unlinkSync(path); } catch (caught) { error = caught; }
-    deliverNodeCallback(function() { if (callback) callback(error); });
+    deliverNodeCallback(function() { if (callback) return callback(error); });
   },
   renameSync: function(from, to) {
     var source = writablePath(from);
@@ -306,7 +306,7 @@ var fsModule = {
   rename: function(from, to, callback) {
     var error = null;
     try { fsModule.renameSync(from, to); } catch (caught) { error = caught; }
-    deliverNodeCallback(function() { if (callback) callback(error); });
+    deliverNodeCallback(function() { if (callback) return callback(error); });
   },
   readdirSync: function(path, options) {
     if (!fsModule.statSync(path).isDirectory()) throw Object.assign(new Error('ENOTDIR: ' + path),
@@ -349,7 +349,7 @@ var fsModule = {
     if (typeof callback !== 'function') throw new TypeError('stat requires a callback');
     var result, error = null;
     try { result = fsModule.statSync(path, options); } catch (caught) { error = caught; }
-    deliverNodeCallback(function() { callback(error, result); });
+    deliverNodeCallback(function() { return callback(error, result); });
   }
 };
 
@@ -374,8 +374,8 @@ fsModule.constants = globalThis.__pmjsBuiltinRequire('fs').constants;
     var result, error = null;
     try { result = fsModule[name + 'Sync'].apply(fsModule, args); } catch (caught) { error = caught; }
     deliverNodeCallback(function() {
-      if (['access', 'rmdir', 'rm', 'appendFile', 'copyFile'].indexOf(name) >= 0) callback(error);
-      else callback(error, result);
+      if (['access', 'rmdir', 'rm', 'appendFile', 'copyFile'].indexOf(name) >= 0) return callback(error);
+      return callback(error, result);
     });
   };
 });

@@ -16,7 +16,9 @@ function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
   }
   function wrap(child, callbackHandlesErrors = false) {
     children.add(child);
-    const result = new EventEmitter();
+    const emitter = new EventEmitter();
+    const result = typeof tasks().wrapNodeEmitter === 'function'
+      ? tasks().wrapNodeEmitter(emitter, ['emit']) : emitter;
     result.pid = child.pid;
     result.stdin = child.stdin;
     result.kill = child.kill.bind(child);

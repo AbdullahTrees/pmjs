@@ -2,6 +2,7 @@
 
 const hostProcess = process;
 const { createSubprocesses } = require('./subprocess.cjs');
+const { installPromiseRejectionBridge } = require('./promise-rejections.cjs');
 const { reader: portArtifactReader } = require('./port-preparation.cjs');
 
 const { prepareGameAssets } = require('./preparation.cjs');
@@ -294,6 +295,7 @@ async function runSession(input, diagnostics, setNative) {
   let pendingInvalidations = 0, retryInvalidationAt = 0;
   let invalidatePreparation;
   let dispatcher;
+  let removePromiseRejectionBridge;
   let subprocesses, reloadRequested = false, finishSession;
   let cancelFrameSchedule = () => {};
   const invalidatedMaps = new Set();
@@ -435,6 +437,17 @@ async function runSession(input, diagnostics, setNative) {
         typeof globalThis.__pmjsRender !== 'function') {
       throw new Error('bootstrap did not install __pmjsTick and __pmjsRender');
     }
+    removePromiseRejectionBridge = installPromiseRejectionBridge(hostProcess, {
+      getTasks: () => dispatcher,
+      reportUnhandled: (reason, promise, origin) => {
+        if (typeof globalThis.pmjsReportUnhandledPromiseRejection !== 'function') throw reason;
+        globalThis.pmjsReportUnhandledPromiseRejection(reason, promise, origin);
+      },
+      reportHandled: (promise, origin) => {
+        if (typeof globalThis.pmjsReportHandledPromiseRejection !== 'function') return;
+        globalThis.pmjsReportHandledPromiseRejection(promise, origin);
+      }
+    });
 
     if (reloadRequested) return { reload: true };
     const period = timing.renderPeriod;
@@ -518,6 +531,7 @@ async function runSession(input, diagnostics, setNative) {
     try { native.runtime.quit(); } catch (_) {}
     throw error;
   } finally {
+    if (removePromiseRejectionBridge) removePromiseRejectionBridge();
     cancelFrameSchedule();
     if (dispatcher) dispatcher.stop();
     if (subprocesses) await subprocesses.stop();

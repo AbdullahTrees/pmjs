@@ -27,6 +27,8 @@ function unavailableDevTools() {
 }
 var NwEventEmitter = globalThis.__pmjsBuiltinRequire('events').EventEmitter;
 var nativeWindow = new NwEventEmitter();
+var guestNativeWindow = typeof PMJS.tasks.wrapNodeEmitter === 'function'
+  ? PMJS.tasks.wrapNodeEmitter(nativeWindow, ['emit']) : nativeWindow;
 if (NativeHost.runtime.interceptWindowClose) NativeHost.runtime.interceptWindowClose(true);
 function dispatchNodeEmitterEvent(emitter, event, args) {
   try { return emitter.emit.apply(emitter, [event].concat(args || [])); }
@@ -113,19 +115,21 @@ Object.assign(nativeApp, { argv: [], fullArgv: [], dataPath: '/save', manifest: 
   crashBrowser: compatibilityCountedNoop('App.crashBrowser'),
   setCrashDumpDir: compatibilityCountedNoop('App.setCrashDumpDir') });
 var nativeScreen = new NwEventEmitter();
+var guestNativeScreen = typeof PMJS.tasks.wrapNodeEmitter === 'function'
+  ? PMJS.tasks.wrapNodeEmitter(nativeScreen, ['emit']) : nativeScreen;
 nativeScreen.Init = function() {
   nativeScreen.screens = typeof NativeHost.runtime.screens === 'function' ? NativeHost.runtime.screens() : [{ id: 0, bounds: { x: 0, y: 0, width: screen.width, height: screen.height },
     work_area: { x: 0, y: 0, width: screen.availWidth, height: screen.availHeight }, scaleFactor: 1 }];
 };
 var nativeNwGui = {
   App: nativeApp,
-  Window: { get: function() { return nativeWindow; }, open: function(url) {
+  Window: { get: function() { return guestNativeWindow; }, open: function(url) {
     if (/^(https?:\/\/|mailto:)/i.test(String(url))) { openNativeExternal(url); return; }
     var error = new Error('Secondary HTML windows are unavailable');
     error.code = 'ERR_NW_UNSUPPORTED_WINDOW';
     throw error;
   } },
-  Screen: nativeScreen,
+  Screen: guestNativeScreen,
   Shell: { openExternal: function(url) { return openNativeExternal(url); },
     openItem: compatibilityCountedNoop('Shell.openItem'),
     showItemInFolder: compatibilityCountedNoop('Shell.showItemInFolder') },
@@ -166,7 +170,7 @@ globalThis.__pmjsAfterPresent = function() {
       data = Buffer.from(png ? NativeHost.canvas.encodePng(canvas) : NativeHost.canvas.encodeJpeg(canvas, 0.9));
       if (request.datatype !== 'buffer') data = (request.datatype === 'datauri' ? 'data:image/' + (png ? 'png' : 'jpeg') + ';base64,' : '') + data.toString('base64');
     } finally { NativeHost.canvas.release(canvas); }
-    PMJS.tasks.enqueue(function() { request.callback(data); }, { errorMode: 'uncaught' });
+    PMJS.tasks.enqueue(function() { return request.callback(data); }, { errorMode: 'uncaught' });
   });
 };
 var previousNwFullscreen = NativeHost.runtime.isFullscreen();
@@ -333,6 +337,7 @@ var hostProcessPid = typeof process !== 'undefined' ? process.pid : undefined;
 var guestArguments = NativeHost.runtime.arguments || [];
 var nwCompatVersion = PMJS.config.nwVersion || (globalThis.PMJS_RUNTIME_ENGINE === 'mz' ? '0.48.4' : '0.29.0');
 var guestProcess = new NwEventEmitter();
+var guestNodeMajor = globalThis.PMJS_RUNTIME_ENGINE === 'mz' ? 14 : 9;
 Object.assign(guestProcess, {
   pid: hostProcessPid,
   platform: nativePlatform.platform,
@@ -343,7 +348,7 @@ Object.assign(guestProcess, {
   cwd: function() { return '/game'; },
   nextTick: function(callback) {
     var args = Array.prototype.slice.call(arguments, 1);
-    PMJS.tasks.enqueue(function() { callback.apply(undefined, args); }, { errorMode: 'uncaught' });
+    PMJS.tasks.enqueue(function() { return callback.apply(undefined, args); }, { errorMode: 'uncaught' });
   },
   hrtime: hostProcessHrtime,
   execPath: '/game/pmjs',
@@ -356,6 +361,65 @@ globalThis.pmjsReportNodeException = function(error) {
     guestProcess.emit('uncaughtException', error);
   } else {
     console.error('[pmjs] uncaught exception in Node callback:', error);
+  }
+};
+var guestUnhandledPromiseIds = new Map();
+var guestUnhandledPromiseId = 0;
+var guestUnhandledDeprecationWarned = false;
+function emitGuestPromiseWarning(name, message, code, stack) {
+  var warning = new Error(message);
+  warning.name = name;
+  if (code) warning.code = code;
+  if (stack) warning.stack = stack;
+  if (!guestProcess.emit('warning', warning)) {
+    console.warn((warning.code ? '[' + warning.code + '] ' : '') + (warning.stack || warning));
+  }
+}
+function rejectedValueText(reason) {
+  try { return reason && reason.stack ? reason.stack : String(reason); }
+  catch (_) { return '<unprintable rejection reason>'; }
+}
+function rejectedValueStack(reason) {
+  try { return reason && reason.stack; }
+  catch (_) { return undefined; }
+}
+globalThis.pmjsReportUnhandledPromiseRejection = function(reason, promise, origin) {
+  if (origin === 'browser') {
+    var event = { type: 'unhandledrejection', reason: reason, promise: promise,
+      cancelable: true, defaultPrevented: false,
+      preventDefault: function() { this.defaultPrevented = true; } };
+    if (typeof globalThis.dispatchEvent === 'function') globalThis.dispatchEvent(event);
+    if (!event.defaultPrevented) console.error('[pmjs] unhandled promise rejection:', reason);
+    return;
+  }
+  var id = ++guestUnhandledPromiseId;
+  guestUnhandledPromiseIds.set(promise, id);
+  if (guestProcess.emit('unhandledRejection', reason, promise)) return;
+  emitGuestPromiseWarning('UnhandledPromiseRejectionWarning', rejectedValueText(reason));
+  var modeHint = guestNodeMajor >= 12
+    ? ' To terminate the node process on unhandled promise rejection, use the CLI flag `--unhandled-rejections=strict` (see https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode).'
+    : '';
+  emitGuestPromiseWarning('UnhandledPromiseRejectionWarning',
+    'Unhandled promise rejection. This error originated either by throwing inside of an async function without a catch block, ' +
+    'or by rejecting a promise which was not handled with .catch().' + modeHint + ' (rejection id: ' + id + ')', null,
+    rejectedValueStack(reason));
+  if (!guestUnhandledDeprecationWarned) {
+    guestUnhandledDeprecationWarned = true;
+    emitGuestPromiseWarning('DeprecationWarning', 'Unhandled promise rejections are deprecated. In the future, promise ' +
+      'rejections that are not handled will terminate the Node.js process with a non-zero exit code.', 'DEP0018');
+  }
+};
+globalThis.pmjsReportHandledPromiseRejection = function(promise, origin) {
+  if (origin === 'browser') {
+    var event = { type: 'rejectionhandled', promise: promise };
+    if (typeof globalThis.dispatchEvent === 'function') globalThis.dispatchEvent(event);
+    return;
+  }
+  var id = guestUnhandledPromiseIds.get(promise);
+  guestUnhandledPromiseIds.delete(promise);
+  if (!guestProcess.emit('rejectionHandled', promise) && id !== undefined) {
+    emitGuestPromiseWarning('PromiseRejectionHandledWarning',
+      'Promise rejection was handled asynchronously (rejection id: ' + id + ')');
   }
 };
 var packageText = NativeHost.fs.readText('package.json');

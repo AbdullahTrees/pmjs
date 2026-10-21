@@ -29,8 +29,8 @@ test('guest process retains monotonic tuple, difference and bigint clocks', () =
 });
 
 test('guest uncaught Node exceptions reach process listeners and preserve later work', async t => {
-  const logs = [];
-  const guestConsole = Object.assign({}, console, { error(...args) { logs.push(args); } });
+  const logs = [], warnings = [];
+  const guestConsole = Object.assign({}, console, { error(...args) { logs.push(args); }, warn(...args) { warnings.push(args); } });
   const context = vm.createContext({ process, performance, console: guestConsole,
     PMJS: { config: {} }, __pmjsBuiltinRequire: require,
     location: {},
@@ -72,6 +72,44 @@ test('guest uncaught Node exceptions reach process listeners and preserve later 
   await context.PMJS.tasks.idle();
   assert.deepEqual(nextTickArguments, [nextTickError]);
   assert.deepEqual(trace, ['continued', 'continued after log', 'continued after nextTick']);
+
+  const returnedPromise = Promise.resolve('node callback result');
+  context.PMJS.tasks.enqueue(() => returnedPromise, { errorMode: 'uncaught' });
+  await context.PMJS.tasks.idle();
+  assert.equal(context.PMJS.tasks.guestPromiseOrigin(returnedPromise), 'node');
+
+  const emitter = new (require('node:events').EventEmitter)();
+  const guestEmitter = context.PMJS.tasks.wrapNodeEmitter(emitter, ['emit']);
+  const listenerPromise = Promise.resolve('event listener result');
+  guestEmitter.on('event', () => listenerPromise);
+  guestEmitter.emit('event');
+  assert.equal(context.PMJS.tasks.guestPromiseOrigin(listenerPromise), 'node');
+
+  const reason = new Error('rejection reason'), rejectedPromise = Promise.resolve();
+  let nodeUnhandled, nodeHandled, browserUnhandled, browserHandled;
+  context.process.once('unhandledRejection', (received, promise) => { nodeUnhandled = [received, promise]; });
+  context.process.once('rejectionHandled', promise => { nodeHandled = promise; });
+  context.dispatchEvent = event => {
+    if (event.type === 'unhandledrejection') { browserUnhandled = event; event.preventDefault(); }
+    if (event.type === 'rejectionhandled') browserHandled = event;
+  };
+  context.pmjsReportUnhandledPromiseRejection(reason, rejectedPromise, 'node');
+  context.pmjsReportHandledPromiseRejection(rejectedPromise, 'node');
+  context.pmjsReportUnhandledPromiseRejection(reason, rejectedPromise, 'browser');
+  context.pmjsReportHandledPromiseRejection(rejectedPromise, 'browser');
+  assert.deepEqual(nodeUnhandled, [reason, rejectedPromise]);
+  assert.equal(nodeHandled, rejectedPromise);
+  assert.equal(browserUnhandled.reason, reason);
+  assert.equal(browserUnhandled.promise, rejectedPromise);
+  assert.equal(browserHandled.type, 'rejectionhandled');
+
+  const unobservedPromise = Promise.resolve();
+  context.pmjsReportUnhandledPromiseRejection(reason, unobservedPromise, 'node');
+  context.pmjsReportHandledPromiseRejection(unobservedPromise, 'node');
+  const warningText = warnings.map(args => String(args[0])).join('\n');
+  assert.match(warningText, /UnhandledPromiseRejectionWarning/);
+  assert.match(warningText, /DEP0018/);
+  assert.match(warningText, /PromiseRejectionHandledWarning/);
 });
 
 test('read stream listener exceptions unwind the event without making internal tasks nonfatal', async t => {

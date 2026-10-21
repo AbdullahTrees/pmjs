@@ -99,6 +99,25 @@ test('runner logs a throwing Node filesystem callback like NW.js and keeps deliv
   assert.deepEqual([...trace].sort(), ['next', 'raf']);
 });
 
+test('async filesystem callback rejections use their own guest route and keep the worker alive', () => {
+  const trace = runGuest(`
+    globalThis.pmjsReportUnhandledPromiseRejection=(reason,promise,origin)=>{
+      trace.push(['rejection',reason.message,origin,promise instanceof Promise]);
+    };
+    const target=new EventTarget();
+    target.addEventListener('click',async()=>{throw new Error('async browser listener');});
+    target.dispatchEvent({type:'click'});
+    fsModule.readFile('file',async()=>{throw new Error('async filesystem callback');});
+    setTimeout(()=>trace.push('continued'),0);
+    function complete(){return trace.some(x=>Array.isArray(x)&&x[0]==='rejection')&&trace.includes('continued');}
+  `);
+  assert.deepEqual(trace.filter(entry => Array.isArray(entry)).map(entry => entry.slice(1)).sort(), [
+    ['async browser listener', 'browser', true],
+    ['async filesystem callback', 'node', true]
+  ]);
+  assert.ok(trace.includes('continued'));
+});
+
 test('readFile rejects a missing callback synchronously before scheduling or reading', () => {
   const trace = runGuest(`
     let scheduled=0,reads=0;

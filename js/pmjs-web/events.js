@@ -40,7 +40,10 @@ function pmjsReportEventError(error) {
 function pmjsInvokeEventHandler(target, handler, event) {
   if (typeof handler !== 'function') return;
   try {
-    handler.call(target, event);
+    var result = handler.call(target, event);
+    if (PMJS.tasks && typeof PMJS.tasks.trackGuestPromise === 'function') {
+      PMJS.tasks.trackGuestPromise(result, 'browser');
+    }
   } catch (error) {
     pmjsReportEventError(error);
   }
