@@ -303,7 +303,7 @@ function validDescriptor(d) {
 }
 async function cachedEntry(directory, key, sourceHash, files) {
   try {
-    return await files.validatedJson(path.join(directory, 'manifest.json'), async (manifest, reused) => {
+    return await files.validatedManifest(directory, async (manifest, reused) => {
       if (!manifest || manifest.version !== CACHE_VERSION || manifest.key !== key || manifest.sourceHash !== sourceHash ||
           manifest.descriptorHash !== identity(manifest.descriptor)) return false;
       if (manifest.decrypted !== undefined && !/^source\.(png|ogg|m4a)$/.test(manifest.decrypted)) return false;
@@ -610,7 +610,6 @@ async function prepareAssetsPhase({ gameRoot, cacheRoot, recipes, native, onProg
             await fsp.rename(stage, directory);
             files.publishManifest(stage, directory);
             stage = null;
-            if (!await cachedEntry(directory, key, sourceHash, files)) throw new Error('published output validation failed');
             if (fallbackEntry) {
               session.discard(fallbackEntry.directory);
               fallbackEntry = null;

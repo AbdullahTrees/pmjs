@@ -50,7 +50,6 @@ function validTileDescriptor(d) {
   return true;
 }
 async function validateEntry(directory, key, files) {
-  const file = path.join(directory, 'manifest.json');
   async function validate(manifest, reused) {
     if (manifest.key !== key || manifest.compiler !== COMPILER_VERSION ||
         manifest.descriptorHash !== identity(manifest.descriptor) ||
@@ -73,7 +72,7 @@ async function validateEntry(directory, key, files) {
     });
   }
   try {
-    return await files.validatedJson(file, validate);
+    return await files.validatedManifest(directory, validate);
   } catch (_) { return null; }
 }
 
@@ -446,7 +445,6 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
           if (shouldCancel()) { result.cancelled = true; break; }
           await validateDependencies([...sharedDependencies, ...dependencies]);
           await fsp.rename(stage, directory); files.publishManifest(stage, directory); stage = null; ++result.generated;
-          if (!await validateEntry(directory, key,files)) throw new Error('published tile output validation failed');
         }
         await validateDependencies([...sharedDependencies, ...dependencies, ...inputs.map(input => sourceDependencies.get(input.source)).filter(Boolean)]);
         Object.assign(row, manifest.estimates);

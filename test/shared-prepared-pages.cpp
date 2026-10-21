@@ -79,6 +79,24 @@ int main() {
   const std::filesystem::path root(directory);
   try {
     const auto a = fixture(root,"first"), b = fixture(root,"second");
+    {
+      const auto source = root / "block-grid.png", directory = root / "block-grid";
+      std::filesystem::create_directory(directory);
+      std::vector<std::uint8_t> pixels(128 * 64 * 4);
+      write(source,128,64,pixels);
+      pmjs::PreparedImageDescriptor descriptor;
+      descriptor.width=128; descriptor.height=64; descriptor.blockGrid=std::array<int,3>{64,128,64};
+      descriptor.cells={
+        {{0,0,64,64},{0,0,0,0},{0,0,0,0},{0,0,0,0},-1},
+        {{64,0,64,64},{0,0,0,0},{0,0,0,0},{0,0,0,0},-1}
+      };
+      pmjs::ImageStore images;
+      require(images.installPrepared(source,directory,descriptor),"native fixed-grid descriptor rejected");
+      auto overlapping=descriptor;
+      overlapping.cells[1].rect=overlapping.cells[0].rect;
+      pmjs::ImageStore rejects;
+      require(!rejects.installPrepared(source,directory,overlapping),"native fixed-grid overlap accepted");
+    }
     const auto shifted = fixture(root,"shifted",10), hidden = fixture(root,"hidden",9,242);
     const auto potA = fixture(root,"pot-first",9,241,64,64), potB = fixture(root,"pot-second",9,241,64,64);
     const auto spriteA = fixture(root,"sprite-first",9,0,64,64,0), spriteB = fixture(root,"sprite-second",9,0,64,64,0);

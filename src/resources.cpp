@@ -2066,16 +2066,42 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
     }
     area += static_cast<std::size_t>(r[2]) * r[3];
   }
+  if (!validBlockGrid(descriptor)) return false;
   if (!astc && !descriptor.uniform) {
     if (area != static_cast<std::size_t>(descriptor.width) * descriptor.height) return false;
-    for (std::size_t i = 0; i < descriptor.cells.size(); ++i)
-      for (std::size_t j = 0; j < i; ++j) {
-        const auto& a = descriptor.cells[i].rect; const auto& b = descriptor.cells[j].rect;
-        if (a[0] < b[0] + b[2] && b[0] < a[0] + a[2] &&
-            a[1] < b[1] + b[3] && b[1] < a[1] + a[3]) return false;
+    if (descriptor.blockGrid) {
+      constexpr int block = 64;
+      const auto& grid = *descriptor.blockGrid;
+      const int frameWidth = grid[1], frameHeight = grid[2];
+      const int blocksPerFrameX = (frameWidth + block - 1) / block;
+      const int blocksPerFrameY = (frameHeight + block - 1) / block;
+      const int blocksAcross = blocksPerFrameX * (descriptor.width / frameWidth);
+      const int totalBlocks = blocksAcross * blocksPerFrameY * (descriptor.height / frameHeight);
+      std::vector<std::uint8_t> occupied(static_cast<std::size_t>(totalBlocks));
+      for (const auto& cell : descriptor.cells) {
+        const auto& r = cell.rect;
+        const int frameX = r[0] / frameWidth, frameY = r[1] / frameHeight;
+        const int localX = r[0] % frameWidth, localY = r[1] % frameHeight;
+        const int firstX = frameX * blocksPerFrameX + localX / block;
+        const int lastX = frameX * blocksPerFrameX + (localX + r[2] + block - 1) / block;
+        const int firstY = frameY * blocksPerFrameY + localY / block;
+        const int lastY = frameY * blocksPerFrameY + (localY + r[3] + block - 1) / block;
+        for (int y = firstY; y < lastY; ++y)
+          for (int x = firstX; x < lastX; ++x) {
+            const auto index = static_cast<std::size_t>(y) * blocksAcross + x;
+            if (occupied[index]) return false;
+            occupied[index] = 1;
+          }
       }
+    } else {
+      for (std::size_t i = 0; i < descriptor.cells.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j) {
+          const auto& a = descriptor.cells[i].rect; const auto& b = descriptor.cells[j].rect;
+          if (a[0] < b[0] + b[2] && b[0] < a[0] + a[2] &&
+              a[1] < b[1] + b[3] && b[1] < a[1] + a[3]) return false;
+        }
+    }
   }
-  if (!validBlockGrid(descriptor)) return false;
   if (descriptor.blockChannels && (!descriptor.blockGrid || *descriptor.blockChannels < 0 || *descriptor.blockChannels > 2)) return false;
   for (const auto& page : descriptor.pages) {
     if (page.width <= 0 || page.height <= 0 || page.width > (astc ? 8192 : 2048) || page.height > (astc ? 8192 : 2048) ||

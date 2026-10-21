@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 const { prepareGameAssets } = require('../runner/preparation.cjs');
+const { openPreparation } = require('../runner/preparation-state.cjs');
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==', 'base64');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 function fixture() {
@@ -30,6 +31,41 @@ function fixture() {
   return { root, gameRoot, jobs, installed, warnings, options,
     async run(extra = {}) { const result = await prepareGameAssets({ ...options, ...extra }); result.releaseCacheLease?.(); return result; } };
 }
+
+test('publication relocates only declared image, map and port output receipts', async t => {
+  const f = fixture();
+  const session = await openPreparation({ ...f.options });
+  t.after(() => session.close());
+  for (const [parent, key, outputs, declared] of [
+    ['entries', 'image', { 'source.png': hash(PNG), 'page-0.png': hash(PNG) }, ['source.png', 'page-0.png']],
+    ['maps/entries', 'map', [{ path: 'tiles-0.png', hash: hash(PNG) }], ['tiles-0.png']],
+    ['port/sample', 'port', { 'data.pma1': hash(PNG) }, ['data.pma1']],
+  ]) {
+    const stage = session.newDirectory(parent, key), destination = stage + '-published';
+    await fs.promises.mkdir(stage, { recursive: true });
+    for (const name of [...declared, 'unlisted.tmp']) fs.writeFileSync(path.join(stage, name), PNG);
+    for (const name of [...declared, 'unlisted.tmp']) await session.files.hash(path.join(stage, name));
+    session.writeManifest(stage, { key, outputs });
+    await fs.promises.rename(stage, destination);
+    session.files.publishManifest(stage, destination);
+    for (const name of declared) assert.ok(session.files.receipts[path.join(destination, name)]);
+    assert.ok(session.files.receipts[path.join(stage, 'unlisted.tmp')], 'unlisted receipt stays outside the published result');
+    for (const name of declared) assert.equal(session.files.receipts[path.join(stage, name)], undefined);
+  }
+});
+
+test('successful finalization checkpoints once and close does not serialize state again', async t => {
+  const f = fixture(), session = await openPreparation({ ...f.options });
+  let serializations = 0;
+  const data = session.data;
+  Object.defineProperty(data, 'toJSON', { value() {
+    ++serializations;
+    return { files: data.files, results: data.results, indices: data.indices, failures: data.failures };
+  } });
+  await session.finish();
+  await session.close();
+  assert.equal(serializations, 1);
+});
 
 test('one state reuses unchanged inputs and outputs after a fresh inventory', async () => {
   const f = fixture();
@@ -175,6 +211,27 @@ test('damaged local state rebuilds without relying on old cache receipts', async
   assert.equal(repaired.images.installed, 1);
   assert.equal(f.jobs.length, 2);
   assert.ok(f.warnings.some(message => message.includes('state unavailable')));
+});
+
+for (const mode of ['rename-failure', 'interrupted-after-rename']) test('image publication recovers from ' + mode, async t => {
+  const f = fixture();
+  await f.run();
+  fs.appendFileSync(path.join(f.gameRoot, 'img/pictures/a.png'), 'changed');
+  const rename = fs.promises.rename;
+  const stub = t.mock.method(fs.promises, 'rename', async (from, to) => {
+    if (path.basename(String(from)).startsWith('.stage-') && path.dirname(String(to)).endsWith(path.sep + 'entries')) {
+      if (mode === 'interrupted-after-rename') await rename(from, to);
+      throw Object.assign(new Error(mode), { code: 'EIO' });
+    }
+    return rename(from, to);
+  });
+  const interrupted = await f.run();
+  stub.mock.restore();
+  assert.equal(interrupted.images.installed, 0);
+  assert.equal(f.installed.length, 0, 'failed publication never installs a partial entry');
+  const recovered = await f.run();
+  assert.equal(recovered.images.installed, 1);
+  assert.equal(f.jobs.length, 3, 'the interrupted generation is safely rebuilt');
 });
 
 test('cancellation keeps completed results and discards the unfinished stage', async () => {

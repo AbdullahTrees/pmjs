@@ -151,10 +151,10 @@ async function preparationFiles(session, verifyHashes = false) {
     known.set(signature, known.get(receipt.identity) || { hash: receipt.hash });
     ++stats.publicationReuses;
   }
-  async function validatedJson(file, validate) {
-    const value = session.readManifest(path.dirname(file));
+  async function validatedManifest(directory, validate) {
+    const value = session.readManifest(directory);
     if (!value || !await validate(value, !verifyHashes)) return null;
-    session.touch(path.dirname(file));
+    session.touch(directory);
     return value;
   }
   async function validateOutputs(directory, outputs, checksumOf, validate) {
@@ -171,7 +171,7 @@ async function preparationFiles(session, verifyHashes = false) {
     Object.assign(session.data.files, files);
     await session.checkpoint();
   }
-  return { hash, inspect, inspectSync, copyVerified, publish, validatedJson, validateOutputs, save, stats, receipts: files,
+  return { hash, inspect, inspectSync, copyVerified, publish, validatedManifest, validateOutputs, save, stats, receipts: files,
     writeManifest: session.writeManifest,
     publishManifest: session.publishManifest };
 

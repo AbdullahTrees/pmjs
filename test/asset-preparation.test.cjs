@@ -700,17 +700,25 @@ test('ordinary preparation reads a stable source once and still hashes each gene
   assert.equal(result.entries[0].pageHashes[0], crypto.createHash('sha256').update(PNG).digest('hex'));
 });
 
-test('published page edits are rejected even when staged verification was reused', async t => {
+test('native activation rejects a prepared page changed after atomic publication', async t => {
   const f = fixture(), rename = fs.promises.rename;
   fs.promises.rename = async function(from, to) {
     await rename.call(this, from, to);
     if (path.basename(String(from)).startsWith('.stage-'))
       fs.appendFileSync(path.join(to, 'page-0.png'), 'damaged after staging');
   };
+  f.native.assets.installPrepared = entries => {
+    const accepted = entries.filter(entry => entry.pageHashes.every((expected, index) => {
+      const page = entry.descriptor.pages[index];
+      return crypto.createHash('sha256').update(fs.readFileSync(path.join(entry.directory, page.path))).digest('hex') === expected;
+    }));
+    f.installs.push(accepted);
+    return { accepted: accepted.map(entry => entry.source), rejected: entries.filter(entry => !accepted.includes(entry)) };
+  };
   t.after(() => { fs.promises.rename = rename; });
   const result = await prepareAssets(f);
   assert.equal(result.installed, 0);
-  assert.ok(f.warnings.some(message => message.includes('published output validation failed')));
+  assert.ok(f.warnings.some(message => message.includes('prepared image index installed 0/1')));
 });
 
 test('uniform RGBA descriptors preserve all channels and reuse without PNG pages', async () => {

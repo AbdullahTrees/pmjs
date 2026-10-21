@@ -7,7 +7,8 @@ const crypto = require('node:crypto');
 const { acquireLock, createLease, retainLeases } = require('./preparation-lifetime.cjs');
 const { preparationFiles, writeJson } = require('./preparation-files.cjs');
 const installedLeases = new WeakMap();
-const checksum = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const checksumText = value => crypto.createHash('sha256').update(value).digest('hex');
+const checksum = value => checksumText(JSON.stringify(value));
 const inside = (root, name) => {
   const relative = path.relative(root, path.resolve(name));
   if (!relative || relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative))
@@ -101,6 +102,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       directories.set(path.posix.dirname(name) + '/' + record.key, name);
     }
     let lastChecksum = saved.files ? checksum(data) : null;
+    let finalizedState = false;
     const session = { root, gameRoot, sourceRoots, data, native, offline, logger, shouldCancel, pending, touched, invalidated: 0,
       phaseStates: new Map(), repairSources: new Set(), outcomes: new Map(),
       outcome(id, outcome, reason) {
@@ -115,12 +117,16 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       },
       newDirectory(parent, key) { return path.join(root, parent, key + "-" + crypto.randomBytes(6).toString("hex")); },
       async checkpoint() {
-        const current = checksum(data);
+        const serializedData = JSON.stringify(data);
+        const current = checksumText(serializedData);
         if (current === lastChecksum) return true;
         const temporary = filename + '.stage-' + crypto.randomBytes(6).toString('hex');
         try {
           const handle = await fsp.open(temporary, 'wx');
-          try { await handle.writeFile(JSON.stringify({ version: 1, checksum: current, data }) + '\n'); await handle.sync(); }
+          try {
+            await handle.writeFile(`{\"version\":1,\"checksum\":${JSON.stringify(current)},\"data\":${serializedData}}\n`);
+            await handle.sync();
+          }
           finally { await handle.close(); }
           await fsp.rename(temporary, filename);
           lastChecksum = current;
@@ -150,9 +156,16 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       publishManifest(from, to) {
         const relative = inside(root, to), value = pending.get(inside(root, from));
         if (!value) throw new Error('missing staged preparation result');
-        for (const [file, receipt] of Object.entries(session.files.receipts)) {
-          if (!file.startsWith(path.resolve(from) + path.sep)) continue;
-          const destination = path.resolve(to) + file.slice(path.resolve(from).length);
+        const sourceDirectory = path.resolve(from), destinationDirectory = path.resolve(to);
+        const outputs = Array.isArray(value.outputs) ? value.outputs.map(output => output?.path) :
+          value.outputs && typeof value.outputs === 'object' ? Object.keys(value.outputs) : [];
+        for (const output of outputs) {
+          if (typeof output !== 'string' || !output || path.isAbsolute(output)) continue;
+          const file = path.resolve(sourceDirectory, output);
+          if (!file.startsWith(sourceDirectory + path.sep)) continue;
+          const receipt = session.files.receipts[file];
+          if (!receipt) continue;
+          const destination = path.resolve(destinationDirectory, file.slice(sourceDirectory.length + 1));
           session.files.receipts[destination] = receipt;
           data.files[destination] = receipt;
           delete session.files.receipts[file]; delete data.files[file];
@@ -205,9 +218,10 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
           await prune(path.join(root, 'port'), true);
           await reclaimLegacyOutputs(cacheRoot, native.assets, logger);
         } catch (error) { logger.warn('[pmjs] preparation cleanup deferred: ' + error.message); }
+        finalizedState = true;
       },
       async close() {
-        try { await session.checkpoint(); }
+        try { if (!finalizedState) await session.checkpoint(); }
         finally { releaseLock(); }
       }
     };

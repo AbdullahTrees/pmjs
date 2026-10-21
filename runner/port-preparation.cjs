@@ -312,7 +312,6 @@ async function prepareForRun({ gameRoot, bundleRoot, descriptors, adapters = [],
               dependencies, outcome, descriptor: { id }, outputs: { 'data.pma1': outputHash } });
             await fs.promises.rename(stage, directory);
             files.publishManifest(stage, directory);
-            await files.hash(output, 'output');
             session.outcome('port:' + id, outcome);
             resolved.set(id, output);
           } finally { await fs.promises.rm(stage, { recursive: true, force: true }); }
