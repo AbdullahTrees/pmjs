@@ -742,6 +742,14 @@ return "${MODULE_STATUS:-0}"
                 self.assertEqual(result.returncode, status)
                 self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
 
+    def test_firmware_blitter_override_does_not_reach_the_runtime(self):
+        # muOS exports SDL_BLITTER_DISABLED for its own SDL games; PMJS presents
+        # through EGL and draws partial frames with the firmware blitter off.
+        result = self.run_launcher(SDL_BLITTER_DISABLED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads(self.capture.read_text())['env']
+        self.assertNotIn('SDL_BLITTER_DISABLED', env)
+
     def test_platform_helper_failure_does_not_stop_the_game(self):
         # muOS's helper exits nonzero when it has nothing to update; established
         # ports keep going, and so must the bundled launcher.

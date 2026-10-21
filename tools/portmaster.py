@@ -47,8 +47,14 @@ $GPTOKEYB2 "$BINARY" -c "$GAMEDIR/@ID@.ini" &
 # the status, and stopping here would leave the user in the firmware menu.
 pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY" || true
 
-XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
-  --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
+# muOS exports SDL_BLITTER_DISABLED=1 for its own SDL games. PMJS presents
+# through its own EGL path and draws only partial frames with the firmware
+# blitter disabled, so enable it for the runtime only.
+(
+  [ "${SDL_BLITTER_DISABLED:-}" != 1 ] || unset SDL_BLITTER_DISABLED
+  XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
+    --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
+)
 status=$?
 pm_finish || { [ "$status" -ne 0 ] || status=1; }
 exit "$status"
