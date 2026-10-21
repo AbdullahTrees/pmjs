@@ -12,7 +12,7 @@
   var nodeListenerExceptions = new WeakMap();
   var guestPromiseOrigins = new WeakMap();
   var runningTask = false;
-  var rafs = new Map(), timers = new Map(), timerWake = null;
+  var rafs = new Map(), timers = new Map(), immediates = new Set(), timerWake = null;
 
   function report(error) {
     if (typeof pmjsReportEventError === 'function') pmjsReportEventError(error);
@@ -132,7 +132,7 @@
     if (scheduled !== null) host.clearImmediate(scheduled);
     if (timerWake !== null) host.clearTimeout(timerWake);
     scheduled = timerWake = null;
-    timers.clear(); rafs.clear();
+    timers.clear(); rafs.clear(); immediates.clear();
     stopListeners.forEach(function(callback) { try { callback(); } catch (error) { report(error); } });
     stopListeners.clear();
     var discarded = tasks.slice(head).concat(continuations);
@@ -279,6 +279,21 @@
     return id;
   }
   function clearTimer(id) { timers.delete(id); armTimers(); }
+  function addImmediate(callback, args) {
+    if (typeof callback !== 'function') throw new TypeError('setImmediate callback must be a function');
+    var referenced = true;
+    var handle = {
+      ref: function() { referenced = true; return handle; },
+      unref: function() { referenced = false; return handle; },
+      hasRef: function() { return referenced && immediates.has(handle); }
+    };
+    immediates.add(handle);
+    enqueue(function() {
+      if (!immediates.delete(handle)) return;
+      callback.apply(globalThis, args);
+    }, { errorMode: 'uncaught', discard: function() { immediates.delete(handle); } });
+    return handle;
+  }
   globalThis.setTimeout = function(callback, delay) {
     return addTimer(callback, delay, false, Array.prototype.slice.call(arguments, 2));
   };
@@ -286,6 +301,10 @@
     return addTimer(callback, delay, true, Array.prototype.slice.call(arguments, 2));
   };
   globalThis.clearTimeout = globalThis.clearInterval = clearTimer;
+  globalThis.setImmediate = function(callback) {
+    return addImmediate(callback, Array.prototype.slice.call(arguments, 1));
+  };
+  globalThis.clearImmediate = function(handle) { immediates.delete(handle); };
   globalThis.requestAnimationFrame = function(callback) {
     if (typeof callback !== 'function') throw new TypeError('requestAnimationFrame callback must be a function');
     var id = nextId++;

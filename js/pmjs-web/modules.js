@@ -1,5 +1,6 @@
 var moduleCache = Object.create(null);
 var registeredCommonJsModules = Object.create(null);
+var guestTimersModule;
 function registerCommonJsModule(names, exports) {
   var requestedNames = Array.isArray(names) ? names : [names];
   if (!requestedNames.length) throw new Error('module registration requires a name');
@@ -308,12 +309,20 @@ function guestBuiltin(request) {
   if (name === 'fs/promises') return fsModule.promises;
   if (name === 'nw.gui' || name === 'nw') return nativeNwGui;
   if (name === 'child_process') return NativeHost.runtime.childProcess;
+  if (name === 'timers' && globalThis.__pmjsBuiltinRequire) {
+    if (!guestTimersModule) {
+      guestTimersModule = Object.create(globalThis.__pmjsBuiltinRequire(name));
+      guestTimersModule.setImmediate = globalThis.setImmediate;
+      guestTimersModule.clearImmediate = globalThis.clearImmediate;
+    }
+    return guestTimersModule;
+  }
   if (name === 'os') {
     var os = globalThis.__pmjsBuiltinRequire('os');
     return Object.assign({}, os, { homedir: function() { return '/save'; } });
   }
   if (['crypto', 'buffer', 'zlib', 'events', 'util', 'stream', 'string_decoder', 'assert', 'dns',
-    'url', 'querystring', 'timers'].indexOf(name) >= 0 && globalThis.__pmjsBuiltinRequire) {
+    'url', 'querystring'].indexOf(name) >= 0 && globalThis.__pmjsBuiltinRequire) {
     return globalThis.__pmjsBuiltinRequire(name);
   }
 }

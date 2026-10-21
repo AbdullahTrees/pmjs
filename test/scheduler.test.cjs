@@ -7,11 +7,13 @@ const path = require('node:path');
 const vm = require('node:vm');
 const timers = require('node:timers');
 
-function fixture(t, clock = performance) {
+function fixture(t, clock = performance, nodeReporter) {
   const errors = [], fatals = [];
-  const context = vm.createContext({ PMJS: {}, performance: clock, console,
+  const globals = { PMJS: {}, performance: clock, console,
     NativeHost: { runtime: { scheduling: { ...timers, onFatal: error => fatals.push(error) } } },
-    pmjsReportEventError: error => errors.push(error) });
+    pmjsReportEventError: error => errors.push(error) };
+  if (nodeReporter) globals.pmjsReportNodeException = nodeReporter;
+  const context = vm.createContext(globals);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
   t.after(() => context.PMJS.tasks.stop());
   return { context, errors, fatals };
@@ -106,6 +108,32 @@ test('timers run without frames, checkpoint, accept arguments and cancel', async
   }, 0, 'A');
   await new Promise(resolve => context.setTimeout(() => { trace.push('B'); resolve(); }, 5));
   assert.deepEqual(trace, ['A', 'micro', 'B']);
+});
+
+test('global setImmediate uses guest Node exception delivery and supports cancellation', async t => {
+  const nodeErrors = [], { context, fatals } = fixture(t, performance, error => nodeErrors.push(error)), trace = [];
+  const error = new Error('setImmediate callback failure');
+  const failed = context.setImmediate(function(value) {
+    assert.ok(this);
+    trace.push(value);
+    throw error;
+  }, 'first');
+  const cancelled = context.setImmediate(() => trace.push('cancelled'));
+  context.clearImmediate(cancelled);
+  const next = context.setImmediate(value => trace.push(value), 'next');
+
+  assert.equal(failed.hasRef(), true);
+  assert.equal(failed.unref(), failed);
+  assert.equal(failed.hasRef(), false);
+  assert.equal(failed.ref(), failed);
+  assert.equal(failed.hasRef(), true);
+  assert.equal(next.hasRef(), true);
+  await context.PMJS.tasks.idle();
+
+  assert.equal(failed.hasRef(), false);
+  assert.deepEqual(trace, ['first', 'next']);
+  assert.deepEqual(nodeErrors, [error]);
+  assert.deepEqual(fatals, []);
 });
 
 test('intervals skip elapsed periods and stop after cancellation inside the callback', async t => {

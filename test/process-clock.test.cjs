@@ -28,6 +28,30 @@ test('guest process retains monotonic tuple, difference and bigint clocks', () =
   assert.equal(process.cwd(), hostCwd);
 });
 
+test('guest timers.setImmediate shares the scheduler boundary and preserves exception continuation', async t => {
+  const context = vm.createContext({ process, performance, console,
+    PMJS: { config: {} }, __pmjsBuiltinRequire: require, location: {},
+    NativeHost: { fs: { readText() { return null; } },
+      runtime: { isFullscreen: () => false, scheduling: require('node:timers') } },
+    nativePlatform: { platform: process.platform, arch: process.arch } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/modules.js'), 'utf8'), context);
+  t.after(() => context.PMJS.tasks.stop());
+
+  const nodeTimers = context.require('timers');
+  const error = new Error('timers.setImmediate callback failure');
+  const delivered = [], trace = [];
+  context.process.once('uncaughtException', received => delivered.push(received));
+  nodeTimers.setImmediate(() => { throw error; });
+  nodeTimers.setImmediate(() => trace.push('continued'));
+  assert.equal(nodeTimers.setImmediate, context.setImmediate);
+  assert.equal(nodeTimers.clearImmediate, context.clearImmediate);
+  await context.PMJS.tasks.idle();
+
+  assert.deepEqual(delivered, [error]);
+  assert.deepEqual(trace, ['continued']);
+});
+
 test('guest uncaught Node exceptions reach process listeners and preserve later work', async t => {
   const logs = [], warnings = [];
   const guestConsole = Object.assign({}, console, { error(...args) { logs.push(args); }, warn(...args) { warnings.push(args); } });
