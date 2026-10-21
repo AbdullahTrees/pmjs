@@ -103,12 +103,15 @@ struct PreparedTileSource {
   std::string identity;
   int width = 0, height = 0;
   std::vector<PreparedTileRegion> regions;
+  // Also names the snapshot's content: snapshots are verified copies of the source.
+  std::string sourceHash;
 };
 struct PreparedTileSet {
   int version = 1, halo = 1;
   std::string identity;
   std::filesystem::path directory;
   std::vector<PreparedImagePage> pages;
+  std::vector<std::string> pageHashes;
   std::vector<PreparedTileSource> sources;
 };
 
@@ -494,7 +497,10 @@ class ImageStore {
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
   std::unordered_map<std::string, std::shared_ptr<TileCatalog>> tileSets_;
   mutable std::unordered_map<std::string, std::weak_ptr<ImageFileSource>> tileFiles_;
+  mutable std::unordered_set<std::string> verifiedTileFiles_;
   std::shared_ptr<ImageFileSource> captureTileFile(const std::filesystem::path& path) const;
+  bool tileIdentityMatches(const std::string& expected, const ImageFileSource& file,
+                           const std::string& hash) const;
   std::uint64_t tileHits_ = 0, tileRegions_ = 0, tileMaterializations_ = 0;
   std::uint64_t sceneryWindowHits_ = 0;
   std::uint64_t sceneryWindowUploads_ = 0, sceneryFullFallbacks_ = 0;

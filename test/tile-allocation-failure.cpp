@@ -60,7 +60,7 @@ int main() try {
     descriptor.identity = "active"; descriptor.directory = root; descriptor.pages = {{"page.png", 8, 8}};
     descriptor.sources.push_back({root/"source.png", root/"snapshot.png",
       pmjs::ImageStore::openFile(root/"source.png")->key(), 6, 6,
-      {{{1, 1, 3, 3}, {1, 1, 3, 3}, 0}}});
+      {{{1, 1, 3, 3}, {1, 1, 3, 3}, 0}}, {}});
     require(images.installTileSet(descriptor), "catalog installation failed");
     const auto active = images.loadPng(root/"source.png", false, "active");
     require(active && images.hasTileBacking(active->handle), "initial prepared load failed");

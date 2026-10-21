@@ -445,6 +445,8 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         for (const input of inputs) input.snapshot = await captureSnapshot(input);
         if (verifyRegions) result.verifiedRegions += await native.assets.processTiles(inputs, directory, manifest.descriptor);
         const descriptor = structuredClone(manifest.descriptor);
+        // Validated output hashes let native loads accept unchanged pages whose inode was renumbered.
+        for (const page of descriptor.pages) page.hash = manifest.outputs.find(output => output.path === page.path).hash;
         descriptor.sources.forEach((source, i) => Object.assign(source, {
           source: inputs[i].source, snapshot: inputs[i].snapshot, sourceHash: inputs[i].sourceHash, sourceIdentity: inputs[i].sourceIdentity }));
         entries.push({ identity: key, directory, descriptor, outputs: manifest.outputs });

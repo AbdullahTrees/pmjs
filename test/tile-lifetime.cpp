@@ -3,15 +3,33 @@
 #include "tile_assets.hpp"
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <unistd.h>
+extern "C" {
+#include <libavutil/mem.h>
+#include <libavutil/sha.h>
+}
 
 namespace {
 void require(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
+}
+std::string sha256(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+  auto* context = av_sha_alloc();
+  require(context && av_sha_init(context, 256) == 0, "sha256 unavailable");
+  av_sha_update(context, reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+  std::array<std::uint8_t, 32> digest{};
+  av_sha_final(context, digest.data());
+  av_free(context);
+  std::string hex;
+  for (const auto byte : digest) { hex += "0123456789abcdef"[byte >> 4]; hex += "0123456789abcdef"[byte & 15]; }
+  return hex;
 }
 std::size_t fileCount() {
   return std::distance(std::filesystem::directory_iterator("/proc/self/fd"),
@@ -37,7 +55,7 @@ int main() try {
     descriptor.identity = "set-0"; descriptor.directory = root;
     descriptor.sources.push_back({root/"source.png", root/"snapshot.png",
       pmjs::ImageStore::openFile(root/"source.png")->key(), 6, 6,
-      {{{0, 0, 3, 3}, {1, 1, 3, 3}, 0}}});
+      {{{0, 0, 3, 3}, {1, 1, 3, 3}, 0}}, {}});
     for (int i = 0; i < 150; ++i) {
       descriptor.identity = "set-"+std::to_string(i);
       const auto filename = "page-"+std::to_string(i)+".png";
@@ -114,6 +132,42 @@ int main() try {
     require(fileCount() == baseline, "catalog kept expired fallback file owners");
     images.clearTileSetIndex();
     require(images.tileMetadataBytes() == 0, "final catalog release retained metadata");
+  }
+  {
+    // FUSE exFAT renumbers inodes of unchanged files. A catalog identity that differs only by
+    // inode is accepted after hash verification; a wrong hash still invalidates the catalog.
+    pmjs::ImageStore images;
+    images.setWarmBudgetBytes(0);
+    pmjs::writePreparedPng(root/"renumbered.png", 6, 6, pixels.rgba);
+    pmjs::writePreparedPng(root/"renumbered-snapshot.png", 6, 6, pixels.rgba);
+    pmjs::writePreparedPng(root/"renumbered-page.png", 8, 8, page.rgba);
+    const auto renumber = [](const std::string& key) {
+      std::size_t end = key.size();
+      for (int field = 0; field < 5; ++field) end = key.rfind(':', end-1);
+      const auto start = key.rfind(':', end-1)+1;
+      return key.substr(0, start)+std::to_string(std::stoull(key.substr(start, end-start))+1)+key.substr(end);
+    };
+    const auto key = [&](const char* name) { return pmjs::ImageStore::openFile(root/name)->key(); };
+    pmjs::PreparedTileSet renumbered;
+    renumbered.identity = "renumbered"; renumbered.directory = root;
+    renumbered.pages = {{"renumbered-page.png", 8, 8}};
+    renumbered.pageHashes = {sha256(root/"renumbered-page.png")};
+    renumbered.sources.push_back({root/"renumbered.png", root/"renumbered-snapshot.png",
+      renumber(key("renumbered.png")), 6, 6, {{{0, 0, 3, 3}, {1, 1, 3, 3}, 0}}, sha256(root/"renumbered.png")});
+    const std::vector<std::string> pages{renumber(key("renumbered-page.png"))};
+    const std::vector<std::string> snapshots{renumber(key("renumbered-snapshot.png"))};
+    require(images.installTileSet(renumbered, &pages, &snapshots), "renumbered catalog failed");
+    auto image = images.loadPng(root/"renumbered.png", false, "renumbered");
+    require(image && images.hasTileBacking(image->handle) && images.consumePreparationInvalidations() == 0,
+      "inode-only renumbering discarded a verified prepared tile set");
+    images.release(image->handle); images.update();
+    renumbered.identity = "changed";
+    renumbered.sources[0].sourceHash = std::string(64, 'a');
+    require(images.installTileSet(renumbered, &pages, &snapshots), "changed catalog failed");
+    image = images.loadPng(root/"renumbered.png", false, "changed");
+    require(image && !images.hasTileBacking(image->handle) && (images.consumePreparationInvalidations() & 2),
+      "unverified renumbered source kept its prepared tile set");
+    images.release(image->handle); images.update();
   }
   std::filesystem::remove_all(root);
   std::cout << "catalog descriptors, worker snapshots, readback reuse and eviction passed\n";
