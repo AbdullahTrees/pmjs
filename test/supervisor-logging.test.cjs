@@ -111,24 +111,67 @@ test('supervisor memory sampler bounds values and tolerates unavailable procfs f
   const sampled = readWorkerMemory(321, reader);
   assert.equal(sampled.rssBytes, 10500 * 1024);
   assert.equal(sampled.headroomBytes, 99000 * 1024);
+  assert.equal('cgroupHeadroomBytes' in sampled, false,
+    'unresolved worker cgroup values do not fall back to the supervisor cgroup');
   assert.ok(!('samples' in sampled));
   assert.deepEqual(readWorkerMemory(999, { readFileSync: () => { throw Error('missing'); } }), {});
 });
 
-test('memory snapshot requests cover RSS growth, pressure, and critical events', () => {
+test('memory snapshot requests require sustained pressure unless pressure is critical or OOM', () => {
   const MiB = 1024 * 1024;
-  assert.equal(memorySnapshotCause({ rssGrowthBytes: 32 * MiB }), null);
-  assert.deepEqual(memorySnapshotCause({ rssGrowthBytes: 64 * MiB }),
-    { reason: 'rss-growth', critical: false });
-  assert.deepEqual(memorySnapshotCause({ rssGrowthBytes: 128 * MiB }),
-    { reason: 'rss-growth', critical: false });
-  assert.deepEqual(memorySnapshotCause({ headroomBytes: 170 * MiB, pressureTriggered: true }),
+  assert.equal(memorySnapshotCause({ rssGrowthBytes: 128 * MiB }), null);
+  assert.equal(memorySnapshotCause({ headroomBytes: 170 * MiB, pressureTriggered: true,
+    sustainedPressureSamples: 1 }), null);
+  assert.deepEqual(memorySnapshotCause({ headroomBytes: 170 * MiB, pressureTriggered: true,
+    sustainedPressureSamples: 2 }),
     { reason: 'memory-pressure', critical: false });
   assert.deepEqual(memorySnapshotCause({ headroomBytes: 80 * MiB, pressureTriggered: true }),
     { reason: 'critical-memory-pressure', critical: true });
   assert.deepEqual(memorySnapshotCause({ oomKillDelta: 1 }),
     { reason: 'oom-event', critical: true });
   assert.equal(memorySnapshotCause({ rssGrowthBytes: 63 * MiB }), null);
+});
+
+test('sustained pressure snapshot requests honor the cooldown', async () => {
+  const dir = temporaryDirectory('pmjs-memory-cooldown-');
+  const worker = path.join(dir, 'cooldown-worker.cjs');
+  const requests = path.join(dir, 'requests');
+  fs.writeFileSync(worker, [
+    "const fs = require('node:fs');",
+    "process.send({ type: 'pmjs-worker-monitor-online', protocol: 1 });",
+    "process.send({ type: 'pmjs-worker-diagnostics-ready', protocol: 1 });",
+    "process.on('message', message => {",
+    "  if (message && message.type === 'pmjs-memory-snapshot-request') {",
+    "    fs.appendFileSync(process.env.PMJS_REQUEST_LOG, 'request\\n');",
+    "    process.send({ type: 'pmjs-memory-snapshot', requestId: message.requestId,",
+    "      supervisorMemory: message.supervisorMemory, snapshot: { reason: message.reason,",
+    "        capturedAt: new Date().toISOString(), memory: { heapUsedBytes: 4096 }, native: {} } });",
+    "  }",
+    "});",
+    "process.once('message', options => { if (options.saveRoot) setTimeout(() => process.exit(0), 100); });"
+  ].join('\n'));
+  const old = process.env.PMJS_REQUEST_LOG;
+  process.env.PMJS_REQUEST_LOG = requests;
+  try {
+    const result = await runSupervised({ saveRoot: path.join(dir, 'saves') }, { worker,
+      monitorIntervalMs: 10, snapshotCooldownMs: 1000,
+      memoryReader: () => ({ rssBytes: 300 * 1024 * 1024, headroomBytes: 170 * 1024 * 1024 }),
+      mappingReader: () => { throw Error('permission denied'); },
+      oomCounter: () => 0, cpuReader: () => 1,
+      processListReader: () => [] });
+    assert.equal(result.code, 0);
+    assert.equal(fs.readFileSync(requests, 'utf8').trim().split('\n').length, 1);
+    const logPath = path.join(dir, 'logs', fs.readdirSync(path.join(dir, 'logs'))[0]);
+    const content = fs.readFileSync(logPath, 'utf8');
+    assert.match(content, /"processMappingsAvailable":false/);
+    assert.match(content, /"processMappings":null/);
+    assert.match(content, /"heapUsedBytes":4096/);
+    assert.match(content, /"processMappingsCapturedAt":"/);
+    assert.doesNotMatch(content, /memoryAccounting|may overlap|nextDiagnostic/);
+  } finally {
+    if (old === undefined) delete process.env.PMJS_REQUEST_LOG;
+    else process.env.PMJS_REQUEST_LOG = old;
+  }
 });
 
 test('watchdog separates startup timeout from hangs after a confirmed heartbeat', () => {
@@ -146,7 +189,7 @@ test('watchdog separates startup timeout from hangs after a confirmed heartbeat'
     lastHeartbeatAtMs: 10_000, hasHeartbeat: true }), null);
 });
 
-test('supervisor requests, logs, and retains a worker memory snapshot on abnormal exit', async () => {
+test('supervisor snapshots mappings externally for OOM and retains late worker attribution', async () => {
   const dir = temporaryDirectory('pmjs-memory-ipc-');
     const worker = path.join(dir, 'snapshot-worker.cjs');
     fs.writeFileSync(worker, [
@@ -164,14 +207,16 @@ test('supervisor requests, logs, and retains a worker memory snapshot on abnorma
       "});"
     ].join('\n'));
     let reads = 0;
+    let oomReads = 0;
     const MiB = 1024 * 1024;
     const result = await runSupervised({ saveRoot: path.join(dir, 'saves') }, { worker,
       monitorIntervalMs: 10,
       snapshotTimeoutMs: 5,
       memoryReader: () => ({
         rssBytes: (100 + reads++ * 70) * MiB,
-        anonymousRssBytes: 90 * MiB, fileRssBytes: 10 * MiB, headroomBytes: 500 * MiB }),
-      oomCounter: () => 0,
+        anonymousRssBytes: 90 * MiB, fileRssBytes: 10 * MiB, headroomBytes: 80 * MiB }),
+      mappingReader: pid => ({ pid, mappingCount: 2, anonymousBytes: 8192 }),
+      oomCounter: () => oomReads++ === 0 ? 0 : 1,
       cpuReader: () => 1,
       processListReader: () => []
     });
@@ -180,13 +225,18 @@ test('supervisor requests, logs, and retains a worker memory snapshot on abnorma
     const content = fs.readFileSync(logPath, 'utf8');
     assert.match(content, /worker-monitor-online protocol=1/);
     assert.match(content, /worker-diagnostics-ready protocol=1/);
-    assert.match(content, /memory-breakdown .*"reason":"rss-growth"/);
+    assert.match(content, /memory-breakdown .*"reason":"oom-event"/);
     assert.match(content, /memory-breakdown-timeout .*timeout_ms=5/);
     assert.match(content, /memory-breakdown .*"late":true/);
     assert.match(content, /"responseDelayMs":\d+/);
     assert.match(content, /"cpuBytes":1234/);
+    assert.match(content, /"processMappingsAvailable":true/);
+    assert.match(content, /"mappingCount":2/);
+    assert.match(content, /"processMappingsCapturedAt":"/);
+    assert.match(content, /"capturedAt":"/);
     assert.match(content, /last-game-memory-snapshot .*"stale":false/);
     assert.match(content, /"rssBytes":\d+/);
+    assert.doesNotMatch(content, /memoryAccounting|may overlap|nextDiagnostic/);
 });
 
 test('older workers keep OS monitoring but do not receive unsupported memory requests', async () => {
@@ -222,10 +272,11 @@ test('older workers keep OS monitoring but do not receive unsupported memory req
   }
 });
 
-test('worker memory and OOM counters use the worker cgroup when it is nested', () => {
+test('worker memory and OOM counters use the mounted worker cgroup', () => {
   const { oomKillCount, workerCgroupDirectory } = require('../runner/supervisor.cjs');
   const files = {
     '/proc/321/cgroup': '0::/user.slice/game.scope\n',
+    '/proc/321/mountinfo': '1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
     '/sys/fs/cgroup/user.slice/game.scope/memory.current': String(900 * 1024 * 1024),
     '/sys/fs/cgroup/user.slice/game.scope/memory.max': String(1024 * 1024 * 1024),
     '/sys/fs/cgroup/user.slice/game.scope/memory.events.local': 'oom_kill 4\n',
@@ -240,6 +291,40 @@ test('worker memory and OOM counters use the worker cgroup when it is nested', (
   assert.equal(directory, '/sys/fs/cgroup/user.slice/game.scope');
   assert.equal(readWorkerMemory(321, reader, directory).cgroupHeadroomBytes, 124 * 1024 * 1024);
   assert.equal(oomKillCount(reader, directory), 4);
+});
+
+test('cgroup v1 memory membership resolves through the mounted controller root', () => {
+  const { workerCgroupDirectory } = require('../runner/supervisor.cjs');
+  const files = {
+    '/proc/322/cgroup': '2:cpu:/user.slice/game.scope\n5:memory:/user.slice/game.scope\n',
+    '/proc/322/mountinfo': '7 1 0:5 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n',
+    '/sys/fs/cgroup/memory/user.slice/game.scope/memory.usage_in_bytes': '1000'
+  };
+  const reader = { readFileSync(file) {
+    if (Object.hasOwn(files, file)) return files[file];
+    throw Error('ENOENT');
+  }};
+  assert.equal(workerCgroupDirectory(322, reader), '/sys/fs/cgroup/memory/user.slice/game.scope');
+});
+
+test('unresolved worker cgroup is not replaced with the supervisor cgroup', () => {
+  const { readWorkerMemory, workerCgroupDirectory } = require('../runner/supervisor.cjs');
+  const files = {
+    '/proc/323/cgroup': '0::/worker.scope\n',
+    '/proc/323/mountinfo': '7 1 0:5 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
+    '/sys/fs/cgroup/memory.max': '1000000',
+    '/sys/fs/cgroup/memory.current': '900000',
+    '/proc/323/status': 'VmRSS:\t100 kB\n',
+    '/proc/meminfo': 'MemAvailable: 500000 kB\n'
+  };
+  const reader = { readFileSync(file) {
+    if (Object.hasOwn(files, file)) return files[file];
+    throw Error('ENOENT');
+  }};
+  assert.equal(workerCgroupDirectory(323, reader), null);
+  const sample = readWorkerMemory(323, reader, null);
+  assert.equal('cgroupLimitBytes' in sample, false);
+  assert.equal(sample.headroomBytes, 500000 * 1024);
 });
 
 test('rate-limited final stderr is preserved on abnormal exit without retaining unbounded buffers', () => {
@@ -269,15 +354,14 @@ test('a normal exit does not repeat rate-limited stderr in the session log', () 
   assert.equal(output.some(s => s.includes('final-rate-limited-stderr-tail')), false);
 });
 
-test('local cgroup OOM counters take precedence over hierarchical child events', () => {
+test('OOM counter reads only its explicitly supplied cgroup directory', () => {
   const { oomKillCount } = require('../runner/supervisor.cjs');
   const reader = { readFileSync: filename => {
-    if (filename === '/proc/self/cgroup') return '0::/\n';
-    if (filename === '/sys/fs/cgroup/memory.events.local') return 'oom 2\noom_kill 3\n';
-    if (filename === '/sys/fs/cgroup/memory.events') return 'oom 20\noom_kill 30\n';
+    if (filename === '/sys/fs/cgroup/supervisor/memory.events.local') return 'oom 2\noom_kill 3\n';
     throw new Error('ENOENT');
   }};
-  assert.equal(oomKillCount(reader), 3);
+  assert.equal(oomKillCount(reader, null), null);
+  assert.equal(oomKillCount(reader, '/sys/fs/cgroup/supervisor'), 3);
 });
 
 test('after a disk logging failure output is no longer rate-limited at the terminal', () => {

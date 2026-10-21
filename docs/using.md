@@ -117,6 +117,9 @@ exclusive use of the display.
 
 For additional logging:
 
+Memory values in diagnostic logs can overlap; do not add RSS, V8, native, and GPU
+totals together.
+
 - `PMJS_GRAPHICS_DIAGNOSTICS=1`: graphics diagnostics.
 - `PMJS_EVENT_DIAGNOSTICS=1`: enable MV event-stall timing and reports
 - `PMJS_REQUIRE_HARDWARE_GL=1`: reject software rendering.

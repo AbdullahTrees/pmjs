@@ -216,7 +216,6 @@ function memoryState({ reader = fs, processObject = HOST_PROCESS, osObject = os,
     externalBytes: usage.external, arrayBufferBytes: usage.arrayBuffers,
     v8Heap: detailed ? v8HeapDetails() : undefined,
     process: processMemoryDetails(processObject.pid, reader),
-    processMappings: detailed ? processMappingDetails(processObject.pid, reader) : undefined,
     host: detailed ? hostMemoryDetails(reader) : undefined,
     totalBytes: limitBytes, availableBytes, hostAvailableBytes: hostAvailable,
     cgroupLimitBytes: bounded ? cgroupLimit : null,
@@ -283,9 +282,7 @@ function createDiagnostics({ logger = console, getNative = () => null,
   readMemory = options => memoryState(options), readCpu = cpuState, timers = require('node:timers'),
   intervalMs = 10000, slowFrameMs = 180,
   heartbeatMs = 10000, slowRepeatMs = 60000, onHeartbeat = () => {} } = {}) {
-  let stage = 'starting', handle = null, pressureLevel = 0;
-  let lastReportedHeadroom = Infinity;
-  let priorEvents = null, priorPressure = null;
+  let stage = 'starting', handle = null;
   let count = 0, sum = 0, maxSlowFrame = 0, slowCount = 0, windowStart = now();
   let lastMemory = null, lastMemoryAt = -Infinity, lastContext = {}, lastLocation = null;
   let lastCompletedFrameAt = -Infinity;
@@ -349,21 +346,6 @@ function createDiagnostics({ logger = console, getNative = () => null,
           nodeArrayBufferBytes: memory.arrayBufferBytes,
           processAnonymousRssBytes: memory.process && memory.process.anonymousRssBytes
         };
-        if (level === 'warn') message.memoryAccounting =
-          'RSS, V8 heap, external memory, native CPU resources, and estimated GPU resources are ' +
-          'separate measurements and may overlap. externalBytes includes arrayBufferBytes; some ' +
-          'native, video, and streamed allocations may not be classified. processMappings partitions ' +
-          'Linux anonymous resident pages by mapping label; V8 and native counters describe owners ' +
-          'that can overlap those pages. GPU byte counts are estimates.';
-      }
-      // An error while allocating a diagnostic object must not mask OOM.
-      if (level === 'warn' && (reason === 'memory-pressure' || reason === 'memory-critical' ||
-          reason === 'memory-stalls' || reason === 'cgroup-memory-events' ||
-          reason === 'cgroup-oom-kill')) {
-        const native = optionalNative({ includeLargestImages: reason === 'memory-critical' });
-        if (native) {
-          message.native = native;
-        }
       }
       const line = '[pmjs] diagnostic ' + JSON.stringify(message);
       if (logger === HOST_CONSOLE) {
@@ -406,6 +388,17 @@ function createDiagnostics({ logger = console, getNative = () => null,
     }
     lastLocation = next;
   }
+  function sendHeartbeat() {
+    try {
+      const timestamp = now();
+      if (heartbeatMs <= 0 || timestamp - lastHeartbeatAt < heartbeatMs) return;
+      lastHeartbeatAt = timestamp;
+      onHeartbeat({ at: Date.now(), mapId: lastContext.mapId,
+        scene: lastContext.scene, frameCount: lastContext.frameCount,
+        lastCompletedFrameAgeMs: Number.isFinite(lastCompletedFrameAt) ?
+          Math.max(0, timestamp - lastCompletedFrameAt) : null });
+    } catch (_) {}
+  }
   function sample() {
     try {
       let memory = readMemory();
@@ -437,47 +430,11 @@ function createDiagnostics({ logger = console, getNative = () => null,
           if (backgroundBusyMs >= 20000 && timestamp - lastCpuWarningAt >= 60000) {
             lastCpuWarningAt = timestamp;
             emit('background-cpu-pressure', { ...details, sustainedMs: Math.round(backgroundBusyMs),
-              attribution: 'unknown', nextDiagnostic: 'bounded V8 optimization trace or thread stacks' }, null);
+              attribution: 'unknown' }, null);
           }
         } else backgroundBusyMs = 0;
       }
       previousCpu = { ...cpu, at: timestamp };
-      const events = memory.cgroupEvents;
-      const oomDelta = events && priorEvents ?
-        Math.max(0, (events.oom_kill || 0) - (priorEvents.oom_kill || 0)) : 0;
-      const highDelta = events && priorEvents ?
-        Math.max(0, (events.high || 0) - (priorEvents.high || 0)) : 0;
-      const maxDelta = events && priorEvents ?
-        Math.max(0, (events.max || 0) - (priorEvents.max || 0)) : 0;
-      priorEvents = events;
-      const threshold = Math.max(64 * MiB, Math.min(180 * MiB, memory.totalBytes * 0.15));
-      const psi = memory.pressure;
-      const stalled = psi && (psi.fullAvg10 >= 1 || psi.someAvg10 >= 10);
-      const psiWorsened = Boolean(psi && priorPressure &&
-        ((psi.fullAvg10 || 0) >= (priorPressure.fullAvg10 || 0) + 1 ||
-         (psi.someAvg10 || 0) >= (priorPressure.someAvg10 || 0) + 10));
-      priorPressure = psi;
-      const pressured = memory.availableBytes <= threshold || stalled;
-      const level = !pressured ? 0 : memory.availableBytes < 96 * MiB ? 2 : 1;
-      const worsened = level > pressureLevel || psiWorsened || (level > 0 &&
-        memory.availableBytes <= lastReportedHeadroom - 32 * MiB);
-      const meaningfulEvent = oomDelta > 0 || psiWorsened;
-      if (worsened || meaningfulEvent) {
-        memory = readMemory({ detailed: true }) || memory;
-        lastMemory = memory;
-      }
-      if (oomDelta || meaningfulEvent || worsened) {
-        if (pressured) lastReportedHeadroom = memory.availableBytes;
-        emit(oomDelta ? 'cgroup-oom-kill' : highDelta || maxDelta ? 'cgroup-memory-events' :
-          stalled && memory.availableBytes > threshold ? 'memory-stalls' :
-          level === 2 ? 'memory-critical' : 'memory-pressure',
-        { thresholdBytes: threshold, severity: level === 2 ? 'critical' : 'warning',
-          oomKillDelta: oomDelta, highDelta, maxDelta }, memory, 'warn');
-      } else if (pressureLevel > 0 && !pressured) {
-        emit('memory-recovered', { thresholdBytes: threshold, availableBytes: memory.availableBytes }, null, 'info');
-        lastReportedHeadroom = Infinity;
-      }
-      pressureLevel = level;
       if (timestamp - windowStart >= slowRepeatMs) {
         if (slowCount > 0) {
           emit('slow-frame-summary', { sampledFrames: count, slowFrames: slowCount,
@@ -486,33 +443,34 @@ function createDiagnostics({ logger = console, getNative = () => null,
         }
         count = 0; sum = 0; slowCount = 0; maxSlowFrame = 0; windowStart = timestamp;
       }
-      if (heartbeatMs > 0 && timestamp - lastHeartbeatAt >= heartbeatMs) {
-        lastHeartbeatAt = timestamp;
-        try { onHeartbeat({ at: Date.now(), mapId: lastContext.mapId,
-          scene: lastContext.scene, frameCount: lastContext.frameCount,
-          lastCompletedFrameAgeMs: Number.isFinite(lastCompletedFrameAt) ?
-            Math.max(0, timestamp - lastCompletedFrameAt) : null }); } catch (_) {}
-      }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      sendHeartbeat();
+    }
   }
   function supervisorMemorySnapshot(request = {}) {
     const timestamp = now();
-    const memory = readMemory({ detailed: true });
-    lastMemory = memory;
+    const sampledMemory = readMemory({ detailed: true });
+    lastMemory = sampledMemory;
     lastMemoryAt = timestamp;
     lastContext = gameContext(getGlobals());
-    memoryHistory.push({ at: timestamp, availableBytes: memory.availableBytes,
-      rssBytes: memory.rssBytes, heapUsedBytes: memory.heapUsedBytes,
-      externalBytes: memory.externalBytes, cgroupEvents: memory.cgroupEvents });
+    memoryHistory.push({ at: timestamp, availableBytes: sampledMemory.availableBytes,
+      rssBytes: sampledMemory.rssBytes, heapUsedBytes: sampledMemory.heapUsedBytes,
+      externalBytes: sampledMemory.externalBytes, cgroupEvents: sampledMemory.cgroupEvents });
     if (memoryHistory.length > 8) memoryHistory.shift();
-    pressureLevel = Math.max(pressureLevel, request.critical ? 2 : 1);
+    const memory = {
+      heapUsedBytes: sampledMemory.heapUsedBytes,
+      heapTotalBytes: sampledMemory.heapTotalBytes,
+      externalBytes: sampledMemory.externalBytes,
+      arrayBufferBytes: sampledMemory.arrayBufferBytes,
+      v8Heap: sampledMemory.v8Heap
+    };
     return {
       capturedAt: new Date().toISOString(),
       reason: request.reason || 'supervisor-request',
       context: lastContext,
       memory,
-      native: optionalNative({ includeLargestImages: request.critical === true }),
-      accounting: 'RSS, V8 heap, external memory, native CPU resources, and estimated GPU resources are separate measurements and may overlap. externalBytes includes arrayBufferBytes; some native, video, and streamed allocations may not be classified. GPU byte counts are estimates.'
+      native: optionalNative({ includeLargestImages: request.critical === true })
     };
   }
   // Call from a sampled completion only; the caller has already taken a clock

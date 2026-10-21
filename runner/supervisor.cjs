@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
-const { readCgroupFile } = require('./diagnostics.cjs');
+const { processMappingDetails } = require('./diagnostics.cjs');
 
 // All persistent output belongs to this process, not the game event loop.
 // Retain the first 128 KiB and the newest output within each 2 MiB file.
@@ -23,13 +23,13 @@ const WORKER_MONITOR_PROTOCOL = 1;
 const WORKER_MONITOR_HANDSHAKE_TIMEOUT_MS = 10_000;
 const MiB = 1024 * 1024;
 
-function memorySnapshotCause({ rssGrowthBytes = 0, headroomBytes, pressureTriggered = false,
-  oomKillDelta = 0 } = {}) {
+function memorySnapshotCause({ headroomBytes, pressureTriggered = false,
+  sustainedPressureSamples = 0, oomKillDelta = 0 } = {}) {
   if (oomKillDelta > 0) return { reason: 'oom-event', critical: true };
   if (headroomBytes !== undefined && headroomBytes < 96 * MiB && pressureTriggered)
     return { reason: 'critical-memory-pressure', critical: true };
-  if (pressureTriggered) return { reason: 'memory-pressure', critical: false };
-  if (rssGrowthBytes >= 64 * MiB) return { reason: 'rss-growth', critical: false };
+  if (pressureTriggered && sustainedPressureSamples >= 2)
+    return { reason: 'memory-pressure', critical: false };
   return null;
 }
 
@@ -41,27 +41,47 @@ function heartbeatTimeout({ nowMs, startedAtMs, lastHeartbeatAtMs, hasHeartbeat,
   return null;
 }
 
+function procPath(value) {
+  return value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)));
+}
+
 function workerCgroupDirectory(pid, reader = fs) {
   if (!Number.isInteger(pid)) return null;
   try {
     const text = reader.readFileSync('/proc/' + pid + '/cgroup', 'utf8');
     const unified = /^0::(.*)$/m.exec(text);
-    const memory = /^\d+:memory:(.*)$/m.exec(text);
-    const relative = unified ? unified[1] : memory && memory[1];
-    if (relative === undefined) return null;
-    const normalized = path.posix.normalize('/' + relative.replace(/^\/+/, ''));
-    const directory = path.posix.join('/sys/fs/cgroup', normalized);
-    try { reader.readFileSync(path.posix.join(directory, unified ? 'memory.current' : 'memory.usage_in_bytes'), 'utf8'); }
-    catch (_) { return null; }
-    return directory;
+    const memory = text.split('\n').map(line => /^\d+:([^:]*):(.*)$/.exec(line))
+      .find(match => match && match[1].split(',').includes('memory'));
+    if (!unified && !memory) return null;
+    const membership = path.posix.normalize(unified ? unified[1] : memory[2]);
+    const mountInfo = reader.readFileSync('/proc/' + pid + '/mountinfo', 'utf8');
+    for (const line of mountInfo.split('\n')) {
+      const separator = line.indexOf(' - ');
+      if (separator < 0) continue;
+      const mount = line.slice(0, separator).split(' ');
+      const filesystem = line.slice(separator + 3).split(' ');
+      const fsType = filesystem[0];
+      const superOptions = (filesystem[2] || '').split(',');
+      const isMemoryMount = unified ? fsType === 'cgroup2' :
+        fsType === 'cgroup' && superOptions.includes('memory');
+      if (!isMemoryMount) continue;
+      const root = path.posix.normalize(procPath(mount[3]));
+      const mountPoint = path.posix.normalize(procPath(mount[4]));
+      const relative = path.posix.relative(root, membership);
+      if (relative === '..' || relative.startsWith('../') || path.posix.isAbsolute(relative)) continue;
+      const directory = path.posix.join(mountPoint, relative);
+      const probe = unified ? 'memory.current' : 'memory.usage_in_bytes';
+      try { reader.readFileSync(path.posix.join(directory, probe), 'utf8'); return directory; }
+      catch (_) {}
+    }
+    return null;
   } catch (_) { return null; }
 }
 
 function cgroupRead(name, reader = fs, directory = null) {
-  if (directory) {
-    try { return reader.readFileSync(path.posix.join(directory, name), 'utf8'); } catch (_) {}
-  }
-  return readCgroupFile(name, reader);
+  if (!directory) return null;
+  try { return reader.readFileSync(path.posix.join(directory, name), 'utf8'); }
+  catch (_) { return null; }
 }
 
 function oomKillCount(reader = fs, directory = null) {
@@ -269,8 +289,10 @@ function createOutputLimiter(log, now = () => performance.now()) {
 
 async function runSupervised(prepare, { worker = path.join(__dirname, 'session.cjs'),
   monitorIntervalMs = MONITOR_INTERVAL_MS, memoryReader = readWorkerMemory,
+  mappingReader = processMappingDetails,
   cpuReader = readCpuTicks, processListReader = readLargestProcesses,
   oomCounter = oomKillCount, snapshotTimeoutMs = MEMORY_SNAPSHOT_TIMEOUT_MS,
+  snapshotCooldownMs = MEMORY_SNAPSHOT_COOLDOWN_MS,
   workerHandshakeTimeoutMs = WORKER_MONITOR_HANDSHAKE_TIMEOUT_MS } = {}) {
   let active = null, signal = null, sequence = 0;
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
@@ -293,6 +315,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         const history = [];
         let lastReportedHeadroom = Infinity;
         let pressureActive = false;
+        let criticalSnapshotRequested = false;
         let lastHeartbeatAt = performance.now();
         const workerStartedAt = lastHeartbeatAt;
         let lastHeartbeat = null;
@@ -301,7 +324,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         let heartbeatMissingReported = false;
         let lastCpuTicks = null;
         let hangReported = false;
-        let previousRssBytes = null;
+        let pressureSampleCount = 0;
         let lastSnapshotRequestAt = -Infinity;
         let snapshotRequestId = 0;
         let pendingSnapshotId = null;
@@ -309,6 +332,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         let pendingSnapshotSentAt = null;
         let timedOutSnapshotId = null;
         let timedOutSnapshotSentAt = null;
+        const supervisorMemoryByRequest = new Map();
         let lastMemorySnapshot = null;
         let workerProtocol = null;
         let workerMonitorOnline = false;
@@ -332,7 +356,8 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
           if (queuedSnapshotRequest) {
             const queued = queuedSnapshotRequest;
             queuedSnapshotRequest = null;
-            requestMemorySnapshot(queued.reason, queued.sample, queued.critical);
+            requestMemorySnapshot(queued.reason, queued.sample, queued.critical,
+              queued.supervisorMemory);
           }
         }
         function sendMonitorProbe() {
@@ -345,16 +370,35 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
             });
           } catch (_) { diagnosticsProbeSent = false; }
         }
-        function requestMemorySnapshot(reason, sample, critical = false) {
+        function captureSupervisorMemory(sample) {
+          const supervisorMemory = { ...(sample || {}) };
+          supervisorMemory.processMappingsCapturedAt = new Date().toISOString();
+          try {
+            supervisorMemory.processMappings = mappingReader(child.pid, fs) || null;
+            supervisorMemory.processMappingsAvailable = supervisorMemory.processMappings !== null;
+          } catch (_) {
+            supervisorMemory.processMappings = null;
+            supervisorMemory.processMappingsAvailable = false;
+          }
+          lastMemorySnapshot = { receivedAt: new Date().toISOString(),
+            receivedAtMonotonic: performance.now(), snapshot: null, supervisorMemory };
+          return supervisorMemory;
+        }
+        function requestMemorySnapshot(reason, sample, critical = false, capturedSupervisorMemory = null) {
           const now = performance.now();
           if (!diagnosticsReady) {
-            if (!queuedSnapshotRequest || critical || !queuedSnapshotRequest.critical)
-              queuedSnapshotRequest = { reason, sample, critical };
+            const replaceQueued = !queuedSnapshotRequest ||
+              (critical && !queuedSnapshotRequest.critical) ||
+              (reason === 'oom-event' && queuedSnapshotRequest.reason !== 'oom-event');
+            if (replaceQueued) {
+              const supervisorMemory = capturedSupervisorMemory || captureSupervisorMemory(sample);
+              queuedSnapshotRequest = { reason, sample, critical, supervisorMemory };
+            }
             if (workerMonitorOnline) sendMonitorProbe();
             return;
           }
           if (!child || !child.connected || (pendingSnapshotId !== null && !critical)) return;
-          if (!critical && now - lastSnapshotRequestAt < MEMORY_SNAPSHOT_COOLDOWN_MS) return;
+          if (!critical && now - lastSnapshotRequestAt < snapshotCooldownMs) return;
           if (pendingSnapshotTimer) { clearTimeout(pendingSnapshotTimer); pendingSnapshotTimer = null; }
           timedOutSnapshotId = null;
           timedOutSnapshotSentAt = null;
@@ -362,6 +406,10 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
           pendingSnapshotId = requestId;
           pendingSnapshotSentAt = now;
           lastSnapshotRequestAt = now;
+          const supervisorMemory = capturedSupervisorMemory || captureSupervisorMemory(sample);
+          supervisorMemoryByRequest.set(requestId, supervisorMemory);
+          while (supervisorMemoryByRequest.size > 2)
+            supervisorMemoryByRequest.delete(supervisorMemoryByRequest.keys().next().value);
           try {
             child.send({ type: 'pmjs-memory-snapshot-request', requestId, reason,
               critical, supervisorMemory: sample }, error => {
@@ -383,9 +431,10 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
             pendingSnapshotSentAt = null;
             pendingSnapshotTimer = null;
             diagnosticsReady = false;
+            const externalMemory = supervisorMemoryByRequest.get(requestId) || null;
             if (log) log.write('[pmjs] memory-breakdown-timeout requestId=' + requestId +
               ' reason=' + reason + ' timeout_ms=' + snapshotTimeoutMs +
-              ' channel_suspended=true\n');
+              ' channel_suspended=true supervisorMemory=' + JSON.stringify(externalMemory) + '\n');
             sendMonitorProbe();
           }, snapshotTimeoutMs);
           if (typeof pendingSnapshotTimer.unref === 'function') pendingSnapshotTimer.unref();
@@ -394,7 +443,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
           if (!child || !Number.isInteger(child.pid)) return;
           try {
             const sample = memoryReader(child.pid, fs, workerCgroup);
-            if (!Object.keys(sample).length) return;
+            if (!Object.keys(sample).length) { pressureSampleCount = 0; return; }
             const t = performance.now();
             sample.at = new Date().toISOString();
             const cpuTicks = cpuReader(child.pid);
@@ -422,35 +471,42 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
             lastCpuTicks = cpuTicks;
             history.push(sample);
             if (history.length > 12) history.shift();
-            const rssGrowth = previousRssBytes !== null && sample.rssBytes !== undefined ?
-              sample.rssBytes - previousRssBytes : 0;
-            previousRssBytes = sample.rssBytes ?? previousRssBytes;
             const currentOomCount = oomCounter(fs, workerCgroup);
             const oomDelta = currentOomCount !== null && lastOomCount !== null ?
               Math.max(0, currentOomCount - lastOomCount) : 0;
             if (currentOomCount !== null) lastOomCount = currentOomCount;
             const pressured = sample.headroomBytes !== undefined && sample.headroomBytes < 180 * MiB;
+            pressureSampleCount = pressured ? pressureSampleCount + 1 : 0;
             const worsening = pressured && (!pressureActive ||
               sample.headroomBytes <= lastReportedHeadroom - worseningBytes);
-            const snapshotCause = memorySnapshotCause({ rssGrowthBytes: rssGrowth,
-              headroomBytes: sample.headroomBytes, pressureTriggered: worsening, oomKillDelta: oomDelta });
+            const snapshotCause = memorySnapshotCause({ headroomBytes: sample.headroomBytes,
+              pressureTriggered: pressured, sustainedPressureSamples: pressureSampleCount,
+              oomKillDelta: oomDelta });
+            const shouldCapture = snapshotCause &&
+              (!snapshotCause.critical || !criticalSnapshotRequested || oomDelta > 0);
             if (worsening) {
               sample.largestProcesses = processListReader();
               pressureActive = true;
               lastReportedHeadroom = sample.headroomBytes;
               if (log) log.write('[pmjs] supervisor-memory-pressure ' + JSON.stringify(sample) + '\n');
-              if (snapshotCause) requestMemorySnapshot(snapshotCause.reason, sample, snapshotCause.critical);
             } else if (!pressured && pressureActive) {
               pressureActive = false;
+              criticalSnapshotRequested = false;
               lastReportedHeadroom = Infinity;
               if (log) log.write('[pmjs] supervisor-memory-recovered ' + JSON.stringify({
                 at: sample.at, headroomBytes: sample.headroomBytes
               }) + '\n');
             }
-            if (snapshotCause && !worsening)
+            if (shouldCapture) {
+              if (snapshotCause.critical) criticalSnapshotRequested = true;
               requestMemorySnapshot(snapshotCause.reason,
-                { ...sample, rssGrowthBytes: rssGrowth, oomKillDelta: oomDelta }, snapshotCause.critical);
-          } catch (_) { /* Diagnostics must never abort a session. */ }
+                { ...sample, oomKillDelta: oomDelta, sustainedPressureSamples: pressureSampleCount },
+                snapshotCause.critical);
+            }
+          } catch (_) {
+            pressureSampleCount = 0;
+            /* Diagnostics must never abort a session. */
+          }
         }
         function cleanup() {
           if (monitor) { clearInterval(monitor); monitor = null; }
@@ -468,6 +524,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         child = active = fork(worker, [], { stdio: ['inherit', 'pipe', 'pipe', 'ipc'], env: environment });
         workerCgroup = workerCgroupDirectory(child.pid);
         oomBefore = oomCounter(fs, workerCgroup);
+        lastOomCount = oomBefore;
         } catch (error) {
           abnormal = true;
           cleanup();
@@ -528,6 +585,8 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
             pendingSnapshotId === null && message.requestId === timedOutSnapshotId;
           if (pendingSnapshotReply || lateSnapshotReply) {
             const late = lateSnapshotReply;
+            const supervisorMemory = supervisorMemoryByRequest.get(message.requestId) || null;
+            supervisorMemoryByRequest.delete(message.requestId);
             const sentAt = late ? timedOutSnapshotSentAt : pendingSnapshotSentAt;
             const responseDelayMs = Number.isFinite(sentAt) ?
               Math.max(0, Math.round(performance.now() - sentAt)) : null;
@@ -543,7 +602,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
               const snapshotAgeMs = Math.max(0, Date.now() - Date.parse(message.snapshot.capturedAt));
               lastMemorySnapshot = { receivedAt: new Date().toISOString(),
                 receivedAtMonotonic: performance.now(), snapshot: message.snapshot,
-                supervisorMemory: message.supervisorMemory || null };
+                supervisorMemory: supervisorMemory || message.supervisorMemory || null };
               if (log) log.write('[pmjs] memory-breakdown ' + JSON.stringify({
                 reason: message.snapshot.reason,
                 late,
@@ -586,7 +645,8 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
               if (lastMemorySnapshot) {
                 const ageMs = Math.max(0, performance.now() - lastMemorySnapshot.receivedAtMonotonic);
                 log.write('[pmjs] last-game-memory-snapshot ' + JSON.stringify({
-                  capturedAt: lastMemorySnapshot.snapshot.capturedAt,
+                  capturedAt: lastMemorySnapshot.snapshot?.capturedAt ||
+                    lastMemorySnapshot.supervisorMemory?.processMappingsCapturedAt,
                   supervisorReceivedAt: lastMemorySnapshot.receivedAt,
                   ageMs: Math.round(ageMs), stale: ageMs > 60_000,
                   supervisorMemory: lastMemorySnapshot.supervisorMemory,

@@ -30,6 +30,7 @@ test('CPU logs expose sustained background load without asserting a JIT cause', 
   const warnings = records.filter(row => row.reason === 'background-cpu-pressure');
   assert.equal(warnings.length, 1, 'sustained warnings have a cooldown');
   assert.equal(warnings[0].attribution, 'unknown');
+  assert.equal('nextDiagnostic' in warnings[0], false);
   sample(10000000, 9000000);
   sample(28800000, 8900000);
   sample(28800000, null);
@@ -109,6 +110,22 @@ test('detailed Linux memory snapshot partitions anonymous RSS by mapping and lis
   assert.equal(processMappingDetails(77, { readFileSync() { throw Error('unavailable'); } }), null);
 });
 
+test('worker memoryState never reads smaps, even for a detailed V8 snapshot', () => {
+  const reads = [];
+  const reader = { readFileSync(file) {
+    reads.push(file);
+    if (file === '/proc/meminfo') return 'MemTotal: 1048576 kB\nMemAvailable: 500000 kB\n';
+    if (file === '/proc/77/status') return 'VmRSS: 1000 kB\nRssAnon: 800 kB\n';
+    throw Error('ENOENT');
+  } };
+  const memory = memoryState({ detailed: true, reader,
+    processObject: { pid: 77, memoryUsage: () => ({ rss: 1024, heapUsed: 256,
+      heapTotal: 512, external: 128, arrayBuffers: 64 }) },
+    osObject: { totalmem: () => 1024 * MiB, freemem: () => 0 } });
+  assert.equal(memory.processMappings, undefined);
+  assert.equal(reads.includes('/proc/77/smaps'), false);
+});
+
 test('map snapshot avoids guest getters and falls back to map metadata name', () => {
   let accessed = 0;
   const map = { _mapId: 21, _interpreter: { _eventId: 9, _index: 5, _waitMode: 'message' } };
@@ -122,7 +139,7 @@ test('map snapshot avoids guest getters and falls back to map metadata name', ()
   assert.equal(accessed, 0);
 });
 
-test('low-memory transitions and sampled slow-frame summaries are bounded', () => {
+test('worker samples avoid duplicate pressure warnings and bound slow-frame summaries', () => {
   let clock = 0, callback, cleared = false;
   const warnings = [], information = [], errors = [];
   let available = 75 * MiB;
@@ -135,21 +152,20 @@ test('low-memory transitions and sampled slow-frame summaries are bounded', () =
     timers: { setInterval(fn) { callback = fn; return { unref() {} }; }, clearInterval() { cleared = true; } }
   });
   monitor.start();
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /memory-critical/);
+  assert.equal(warnings.length, 0);
   clock = 1000; callback(); callback();
-  assert.equal(warnings.length, 1);
+  assert.equal(warnings.length, 0);
   monitor.observeFrame(200, 1000);
   clock = 61000; monitor.observeFrame(200, clock);
-  assert.equal(warnings.length, 1, 'frame completion only records counters');
+  assert.equal(warnings.length, 0, 'frame completion only records counters');
   callback();
-  assert.equal(warnings.length, 2);
-  assert.match(warnings[1], /slow-frame-summary/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /slow-frame-summary/);
   clock = 65000; callback();
-  assert.equal(warnings.length, 2, 'stable pressure is reported once');
+  assert.equal(warnings.length, 1, 'worker does not duplicate supervisor pressure reports');
   available = 600 * MiB;
   clock = 310000; callback();
-  assert.ok(information.some(line => line.includes('memory-recovered')));
+  assert.equal(information.some(line => line.includes('memory-recovered')), false);
   monitor.stage('bootstrap');
   clock = 312000;
   monitor.report('fatal-error', new Error('script failed'));
@@ -159,6 +175,18 @@ test('low-memory transitions and sampled slow-frame summaries are bounded', () =
   assert.match(errors[0], /script failed/);
   monitor.stop();
   assert.equal(cleared, true);
+});
+
+test('heartbeat is sent even when optional diagnostic sampling throws', () => {
+  let clock = 0;
+  const heartbeats = [];
+  const monitor = createDiagnostics({ now: () => clock,
+    readMemory: () => { throw Error('procfs unavailable'); },
+    onHeartbeat: heartbeat => heartbeats.push(heartbeat), heartbeatMs: 10000 });
+  monitor.sample();
+  clock = 10000;
+  monitor.sample();
+  assert.equal(heartbeats.length, 1);
 });
 
 test('healthy play avoids detailed native queries and reports location only once', () => {
@@ -215,10 +243,10 @@ test('supervisor memory snapshot captures separate V8 and native allocation cate
       render: { stats: () => ({ rendererTargetBytes: 6 * MiB, tileGeometryGpuBytes: 1 * MiB }) }
     })
   });
-  const snapshot = monitor.supervisorMemorySnapshot({ reason: 'rss-growth' });
+  const snapshot = monitor.supervisorMemorySnapshot({ reason: 'supervisor-request' });
   assert.equal(detailed, true);
   assert.deepEqual(imageLimits, [0]);
-  assert.equal(snapshot.reason, 'rss-growth');
+  assert.equal(snapshot.reason, 'supervisor-request');
   assert.equal(snapshot.context.mapId, 5);
   assert.equal(snapshot.memory.v8Heap.spaces[0].usedBytes, 40 * MiB);
   assert.equal(snapshot.native.images.cpuBytes, 25 * MiB);
@@ -230,7 +258,8 @@ test('supervisor memory snapshot captures separate V8 and native allocation cate
   assert.equal(snapshot.native.canvas.cpuBytes, 9 * MiB);
   assert.equal(snapshot.native.audio.livePcmBytes, 3 * MiB);
   assert.equal(snapshot.native.renderer.rendererTargetBytes, 6 * MiB);
-  assert.match(snapshot.accounting, /may overlap/);
+  assert.equal('accounting' in snapshot, false);
+  assert.equal('processMappings' in snapshot.memory, false);
   assert.equal('externalMinusListedCategoriesBytes' in snapshot, false);
 });
 
