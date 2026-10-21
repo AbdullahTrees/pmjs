@@ -99,6 +99,28 @@ test('runner logs a throwing Node filesystem callback like NW.js and keeps deliv
   assert.deepEqual([...trace].sort(), ['next', 'raf']);
 });
 
+test('readFile rejects a missing callback synchronously before scheduling or reading', () => {
+  const trace = runGuest(`
+    let scheduled=0,reads=0;
+    const enqueue=PMJS.tasks.enqueue,readBytesAsync=NativeHost.fs.readBytesAsync;
+    PMJS.tasks.enqueue=function(){scheduled++;return enqueue.apply(this,arguments);};
+    NativeHost.fs.readBytesAsync=function(){reads++;return readBytesAsync.apply(this,arguments);};
+    const errors=[];
+    for(const args of [['file'],['file',{encoding:'utf8'}]]){
+      try{fsModule.readFile(...args);errors.push('no throw');}
+      catch(error){errors.push(error.name+': '+error.message);}
+    }
+    trace.push(...errors,scheduled,reads);
+    function complete(){return trace.length===4;}
+  `);
+  assert.deepEqual(trace, [
+    'TypeError: readFile requires a callback',
+    'TypeError: readFile requires a callback',
+    0,
+    0
+  ]);
+});
+
 for (const renderHz of [30, 60]) test('runner service Promise readiness precedes the host ticker, rate=' + renderHz, () => {
   const trace = runGuest(`
     let ready=false;

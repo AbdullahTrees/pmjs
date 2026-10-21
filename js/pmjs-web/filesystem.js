@@ -223,6 +223,7 @@ var fsModule = {
   },
   readFile: function(path, options, callback) {
     if (typeof options === 'function') { callback = options; options = undefined; }
+    if (typeof callback !== 'function') throw new TypeError('readFile requires a callback');
     PMJS.tasks.enqueue(function() {
       Promise.resolve().then(function() { return fsReadContentsAsync(path, options); }).then(
         function(result) { deliverNodeCallback(function() { callback(null, result); }); },

@@ -15,9 +15,6 @@
     if (typeof pmjsReportEventError === 'function') pmjsReportEventError(error);
     else console.error('[pmjs] async error:', error);
   }
-  // NW.js reports exceptions escaping Node API callbacks as Node uncaught exceptions: logged,
-  // not sent to window.onerror, and the game keeps running. Some games rely on this, e.g. a
-  // plugin that throws from its fs.readFile callback while an optional save file is missing.
   function reportUncaught(error) {
     console.error('[pmjs] uncaught exception in Node callback:', error);
   }
