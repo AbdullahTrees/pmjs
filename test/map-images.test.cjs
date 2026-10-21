@@ -14,7 +14,7 @@ function fixture() {
   PMJS.images={};
   PMJS.methods.wrap=definition=>definitions.push(definition);
   const ImageManager={loadTileset(url,hue){loads.push({url,hue,context:PMJS.images.preparedTileSet});return {};},
-    loadParserTileset(url,hue){return this.loadTileset(url,hue);},_generateCacheKey(url,hue){return url+':'+hue;}};
+    loadParserTileset(url,hue){loads.push({url,hue,context:PMJS.images.preparedTileSet});return {};},_generateCacheKey(url,hue){return url+':'+hue;}};
   Bitmap.prototype._requestImage=function(){loads.push({context:PMJS.images.preparedTileSet,retry:true});};
   const data={tilesets:[{firstgid:1}],layers:[{data:[1,2]}]};
   const index={1:{renderer:'tiled',identity:'set-a',contractHash:crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex')}};
@@ -72,4 +72,24 @@ test('observed content and renderer mismatches request catalog refresh, unknown 
   f.PMJS.maps.tiledContract = () => false;
   assert.equal(f.PMJS.maps.selected(), '');
   assert.equal(invalidations, 2, 'runtime plugin overrides cannot be repaired by regeneration');
+});
+
+test('tileset images outside the prepared set load unscoped without discarding the catalog', () => {
+  const f = fixture(); let invalidations = 0;
+  f.context.NativeHost.assets.invalidateMapCatalog = () => { invalidations++; };
+  f.index[1].sources = ['img/tilesets/Used.png'];
+  f.ImageManager.loadParserTileset('../img/tilesets/Unused.png', 0);
+  assert.equal(f.loads.at(-1).context, '');
+  f.ImageManager.loadTileset('Unused', 0);
+  assert.equal(f.loads.at(-1).context, '');
+  assert.equal(f.PMJS.maps.stats.unscoped, 2);
+  f.ImageManager.loadParserTileset('../img/tilesets/Used.png', 0);
+  assert.equal(f.loads.at(-1).context, 'set-a');
+  f.ImageManager.loadTileset('Used', 0);
+  assert.equal(f.loads.at(-1).context, 'set-a');
+  assert.equal(f.PMJS.maps.stats.selected, 2);
+  assert.equal(invalidations, 0);
+  delete f.index[1].sources;
+  f.ImageManager.loadParserTileset('../img/tilesets/Unused.png', 0);
+  assert.equal(f.loads.at(-1).context, 'set-a', 'indexes without a source list keep the previous scoping');
 });
