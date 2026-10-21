@@ -1033,12 +1033,17 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makePalette(const ImageP
 }
 
 std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const SparsePalettePage& page, bool sparseAllowed) {
+  if (page.packed && (!page.blocks.empty() || !page.residual.empty())) return {};
   auto result = std::make_shared<PaletteBacking>();
-  result->owner = this; result->indexChannels = 2;
+  result->owner = this; result->indexChannels = page.packed ? 1 : 2;
   result->height = (page.colors.size() / 4 + 255) / 256;
   result->colors = page.colors; result->colors.resize(std::size_t(result->height) * 1024);
   const auto record = [&](std::size_t bytes) { result->bytes += bytes; gpuBytes_ += bytes; };
-  if (sparseAllowed) {
+  if (page.packed) {
+    result->indices = uploadTexture(page.width, page.height, page.base.data(), ImageChannelStorage{1}, 0, true);
+    if (!result->indices) return {};
+    record(page.base.size());
+  } else if (sparseAllowed) {
     result->indices = uploadTexture(page.width, page.height, page.base.data(), ImageChannelStorage{1}, 0, true);
     if (!result->indices) return {};
     record(page.base.size());
@@ -1068,7 +1073,8 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const 
   result->table = uploadTexture(256, result->height, result->colors.data(), {});
   if (!result->table) return {};
   record(result->colors.size());
-  textureCreates_ += sparseAllowed ? 4 : 2; ++textureEpoch_; textureUploadBytes_ += result->bytes;
+  textureCreates_ += sparseAllowed && !page.packed ? 4 : 2;
+  ++textureEpoch_; textureUploadBytes_ += result->bytes;
   peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
   return result;
 }
@@ -2446,7 +2452,7 @@ bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index)
   page.sparseChecked = true;
   std::array<std::uint8_t, 8> header{};
   if (!page.source || pread(page.source->descriptor_, header.data(), header.size(), 0) != ssize_t(header.size()) ||
-      std::memcmp(header.data(), "PML4\2\0\0\0", 8)) return false;
+      std::memcmp(header.data(), "PML4", 4) || (header[4] != 2 && header[4] != 3)) return false;
   const auto bytes = readCapturedBytes(*page.source);
   if (!bytes || (page.verifyHash && !contentHashMatches(*bytes, page.expectedHash))) return false;
   const auto& d = backing.descriptor.pages[index];
@@ -2462,7 +2468,8 @@ bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index)
   std::lock_guard lock(page.shared->mutex);
   page.sparse = page.shared->sparse.lock();
   if (!page.sparse) {
-    auto parsed = readSparsePalettePage(*bytes, preparedPageCacheBudget);
+    auto parsed = header[4] == 3 ? readIndexedPalettePage(*bytes, preparedPageCacheBudget) :
+      readSparsePalettePage(*bytes, preparedPageCacheBudget);
     if (!parsed || parsed->width != d.width || parsed->height != d.height) return false;
     page.sparse = std::make_shared<SparsePalettePage>(std::move(*parsed));
     page.shared->sparse = page.sparse;
@@ -2577,9 +2584,11 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
   auto& page = backing.pages[index];
   if (view) {
     const bool sparse = page.sparseFormat || preparedSparsePage(backing, index);
+    const bool indexed = sparse && page.sparse && page.sparse->packed;
     const auto& decision = backing.descriptor.pages[index].storage;
-    if (sparse && !sparseAllowed) page.sparseDisabled = true;
-    bool useSparse = sparse && sparseAllowed && !page.sparseDisabled && (!decision || decision->paletteBits == 16);
+    if (sparse && !indexed && !sparseAllowed) page.sparseDisabled = true;
+    bool useSparse = sparse && !indexed && sparseAllowed && !page.sparseDisabled &&
+      (!decision || decision->paletteBits == 16);
     if (!page.paletteChecked || (page.palette && bool(page.palette->blocks) != useSparse)) {
       if (sparse && !page.sparse && !preparedSparsePage(backing, index)) return std::nullopt;
       const auto* pixels = sparse ? nullptr : preparedPixels(backing, index);

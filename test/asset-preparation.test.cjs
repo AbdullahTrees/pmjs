@@ -275,6 +275,29 @@ test('default LZ4 replaces PNG preparation, reuses warm pages and permits explic
   await assert.rejects(prepareAssets({ ...f, pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
 });
 
+test('PML4 v3 indexed pages validate and reuse from cache', async () => {
+  const f = fixture();
+  f.native.assets.preparationWorkspaceVersion = 1;
+  f.native.assets.preparationLz4Version = 'lz4-test-v3';
+  f.native.assets.processImage = async (name, output) => {
+    fs.writeFileSync(path.join(output, 'page-0.pml4'), Buffer.concat([
+      Buffer.from([0x50, 0x4d, 0x4c, 0x34]), (() => {
+        const header = Buffer.alloc(28);
+        header.writeUInt32LE(3, 0); header.writeUInt32LE(64, 4); header.writeUInt32LE(64, 8);
+        header.writeUInt32LE(4 + 4 + 64 * 64, 12); header.writeUInt32LE(1, 16);
+        return header;
+      })(), Buffer.from([0])
+    ]));
+    return { version: 1, width: 1, height: 1, pages: [{ path: 'page-0.pml4', width: 64, height: 64 }],
+      cells: [{ rect: [0, 0, 1, 1], crop: [0, 0, 1, 1], fill: [0, 0, 0, 0], page: 0, atlas: [0, 0, 1, 1] }] };
+  };
+  const cold = await prepareAssets({ ...f, pageCodec: 'lz4' });
+  assert.equal(cold.generated, 1);
+  const warm = await prepareAssets({ ...f, pageCodec: 'lz4' });
+  assert.equal(warm.generated, 0);
+  assert.equal(warm.hits, 1);
+});
+
 test('unchanged sources and pages reuse checksums; explicit verification reads them again', async () => {
   const f = fixture();
   await prepareAssets(f);

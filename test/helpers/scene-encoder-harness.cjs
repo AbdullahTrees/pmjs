@@ -56,6 +56,8 @@ function makeHarness(options = {}) {
     addChild(child) {
       child.parent = this; this.children.push(child); return child;
     }
+    get filters() { return this._filters && this._filters.slice(); }
+    set filters(value) { this._filters = value && value.slice(); }
   }
   class Sprite extends Container {
     constructor(texture) {

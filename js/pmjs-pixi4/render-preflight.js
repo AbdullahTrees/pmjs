@@ -26,7 +26,7 @@
     Container: PIXI.Container,
     DisplayObject: PIXI.DisplayObject
   };
-  var renderMethods = ['renderWebGL', '_renderWebGL',
+  var renderMethods = ['renderWebGL', 'renderAdvancedWebGL', '_renderWebGL',
     'renderCanvas', '_renderCanvas'];
   var classNames = Object.keys(knownClasses);
 
@@ -62,16 +62,25 @@
   var baselineWebGLMethods = new WeakMap();
   var cachedWebGL = PIXI.DisplayObject &&
     PIXI.DisplayObject.prototype._renderCachedWebGL;
-  var emptyMethods = {};
+  var emptyMethods = { filterAccess: 'backing' };
   classNames.forEach(function(name) {
     var proto = knownClasses[name] && knownClasses[name].prototype;
     if (!proto) return;
-    baselineWebGLMethods.set(proto, {
+    var direct = name === 'ParticleContainer' || name === 'RectTileLayer' ||
+      name === 'CompositeRectTileLayer' || name === 'DisplayObject';
+    var delegate = name === 'Text' && PIXI.Sprite ? PIXI.Sprite.prototype :
+      name === 'ShaderTilemap' && PIXI.Container ? PIXI.Container.prototype : null;
+    if (!baselineWebGLMethods.has(proto)) baselineWebGLMethods.set(proto, {
       renderWebGL: proto.renderWebGL,
+      renderAdvancedWebGL: proto.renderAdvancedWebGL,
       _renderWebGL: proto._renderWebGL,
+      filterAccess: name === 'WindowLayer' ? 'public' : direct ? 'none' : 'backing',
+      prepareBeforeFilters: name === 'Text' || name === 'BitmapText' ||
+        name === 'WindowLayer' || name === 'ShaderTilemap',
+      delegate: delegate,
+      delegateWebGL: delegate && delegate.renderWebGL,
       // These stock entry points draw directly without dispatching the leaf hook.
-      callsLeaf: name !== 'WindowLayer' && name !== 'ParticleContainer' &&
-        name !== 'RectTileLayer' && name !== 'CompositeRectTileLayer'
+      callsLeaf: name !== 'WindowLayer' && !direct
     });
     baselineMethods[name] = {};
     var transformMethod = proto.updateTransform;
@@ -93,13 +102,17 @@
     });
   });
 
-  function unsupportedMethod(node) {
+  function producer(node) {
     var proto = Object.getPrototypeOf(node);
     var baseline;
     while (proto && !(baseline = baselineWebGLMethods.get(proto))) {
       proto = Object.getPrototypeOf(proto);
     }
-    baseline = baseline || emptyMethods;
+    return baseline || emptyMethods;
+  }
+
+  function unsupportedMethod(node, baseline, entryOnly) {
+    baseline = baseline || producer(node);
     var renderWebGL = node.renderWebGL;
     if (cachedWebGL && node._cacheAsBitmap && renderWebGL === cachedWebGL) {
       // A realized cache draws its snapshot, not the original node's hooks.
@@ -108,17 +121,42 @@
       renderWebGL = node._cacheData && node._cacheData.originalRenderWebGL;
     }
     if (renderWebGL !== baseline.renderWebGL) return 'renderWebGL';
+    if (entryOnly) return null;
+    if (baseline.filterAccess === 'backing' && (node._mask || node._filters) &&
+        node.renderAdvancedWebGL !== baseline.renderAdvancedWebGL) return 'renderAdvancedWebGL';
     if (baseline.callsLeaf !== false &&
         node._renderWebGL !== baseline._renderWebGL) return '_renderWebGL';
     return null;
   }
 
-  function check(node) {
-    var method = unsupportedMethod(node);
-    if (method) {
-      var detail = (node.constructor && node.constructor.name || 'node') + '.' + method;
-      PMJS.compat.hit('render.render-method', detail);
-      throw new Error('unsupported native capability: render.render-method: ' + detail);
+  function reject(node, method) {
+    var detail = (node.constructor && node.constructor.name || 'node') + '.' + method;
+    PMJS.compat.hit('render.render-method', detail);
+    throw new Error('unsupported native capability: render.render-method: ' + detail);
+  }
+
+  function check(node, entryOnly) {
+    var baseline = producer(node);
+    var method = unsupportedMethod(node, baseline, entryOnly);
+    if (method) reject(node, method);
+    return baseline;
+  }
+
+  function filters(node, baseline) {
+    if (baseline.delegate && baseline.delegate.renderWebGL !== baseline.delegateWebGL) {
+      reject(node, 'renderWebGL');
+    }
+    if (baseline.filterAccess === 'none') return null;
+    if (baseline.filterAccess === 'public') return node.filters;
+    // Container dispatches the advanced helper even for an empty filter array.
+    if ((node._mask || node._filters) &&
+        node.renderAdvancedWebGL !== baseline.renderAdvancedWebGL) reject(node, 'renderAdvancedWebGL');
+    return node._filters;
+  }
+
+  function checkLeaf(node, baseline) {
+    if (baseline.callsLeaf !== false && node._renderWebGL !== baseline._renderWebGL) {
+      reject(node, '_renderWebGL');
     }
   }
 
@@ -207,7 +245,8 @@
   }
 
   globalThis.pmjsPixiRenderPreflight = { scan: scan, report: report,
-    unsupportedMethod: unsupportedMethod, check: check,
+    unsupportedMethod: unsupportedMethod, producer: producer, check: check,
+    filters: filters, checkLeaf: checkLeaf,
     transformPlan: transformPlan, registerTransformEquivalent: registerTransformEquivalent,
     registerTransformPreparation: registerTransformPreparation };
 })();

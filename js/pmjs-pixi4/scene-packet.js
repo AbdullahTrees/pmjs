@@ -230,14 +230,15 @@ function nativePlainSpriteBinding(node) {
       node._cacheAsBitmap || PMJS.pixi4.bitmapPresentation && PMJS.pixi4.bitmapPresentation.has(node) ||
       node.shader || node.mask ||
       nativeNodeRenderType(node) !== 'sprite' || nativeScenePictureBlend(node) >= 0 ||
-      PMJS.pixi4.scenePreparation.forNode(node) || pmjsPixiRenderPreflight.unsupportedMethod(node) ||
-      !nativeSceneDirectFilters(node)) {
+      PMJS.pixi4.scenePreparation.forNode(node)) {
     return null;
   }
+  var producer = pmjsPixiRenderPreflight.producer(node);
+  if (producer.filterAccess !== 'backing' ||
+      pmjsPixiRenderPreflight.unsupportedMethod(node, producer)) return null;
   var filters = node._filters;
-  if (Array.isArray(filters) && filters.some(function(filter) {
-    return filter && filter.enabled !== false;
-  })) return null;
+  // Leave every advanced dispatch to its render turn, including empty arrays.
+  if (filters) return null;
   var blendMode = nativeSceneBlendMode(node);
   if (blendMode < 0) return null;
   var texture = node.texture;
@@ -363,8 +364,9 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
       !particleContext && forcedAlpha === undefined) {
     forcedAlpha = node.worldAlpha;
   }
-  if (!particleContext) {
-    pmjsPixiRenderPreflight.check(node);
+  var producer = !particleContext && pmjsPixiRenderPreflight.check(node, true);
+  if (producer && producer.filterAccess === 'public' && !node.children.length) return;
+  if (producer && producer.prepareBeforeFilters) {
     PMJS.pixi4.scenePreparation.prepare(node, nativeSceneFilterResolution, nativeSceneTransformsPrepared);
   }
   if (!particleContext && node.shader) {
@@ -381,7 +383,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
   }
   var nodeFilters = null;
   if (!particleContext) {
-    nodeFilters = nativeSceneFilters(node);
+    nodeFilters = pmjsPixiRenderPreflight.filters(node, producer);
   }
   var activeFilters = Array.isArray(nodeFilters) ? nodeFilters : nativeSceneNoFilters;
   var enabledFilterCount = 0;
@@ -390,6 +392,12 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
         filterScanIndex < nodeFilters.length; filterScanIndex++) {
       if (nodeFilters[filterScanIndex] &&
           nodeFilters[filterScanIndex].enabled !== false) enabledFilterCount++;
+    }
+  }
+  if (producer) {
+    pmjsPixiRenderPreflight.checkLeaf(node, producer);
+    if (!producer.prepareBeforeFilters) {
+      PMJS.pixi4.scenePreparation.prepare(node, nativeSceneFilterResolution, nativeSceneTransformsPrepared);
     }
   }
   var pictureBlend = particleContext ? -1 : nativeScenePictureBlend(node);

@@ -1,4 +1,5 @@
 #include "platform.hpp"
+#include "prepared_page.hpp"
 #include "resources.hpp"
 
 #include <algorithm>
@@ -205,6 +206,49 @@ int main() {
       require(glIsTexture(surviving),"one owner release deleted the shared sprite page");
       require(images.release(second->handle),"last sprite-page owner release failed"); images.update();
       require(images.gpuBytes() == 0 && images.cpuBytes() == 0,"sprite-page resources survived their last owner");
+    }
+    {
+      constexpr int width = 64, height = 64, pageWidth = 70, pageHeight = 70;
+      Fixture indexed;
+      indexed.source = root / "indexed.png";
+      indexed.directory = root / "indexed";
+      std::filesystem::create_directory(indexed.directory);
+      auto& d = indexed.descriptor;
+      d.width = width; d.height = height; d.halo = 3;
+      d.pages = {{"page-0.pml4", pageWidth, pageHeight}};
+      d.cells = {{{0, 0, width, height}, {0, 0, width, height}, {3, 3, width, height}, {0, 0, 0, 0}, 0}};
+      indexed.pixels.resize(width * height * 4);
+      std::vector<std::uint8_t> page(pageWidth * pageHeight * 4);
+      const auto color = [](int x, int y) {
+        const auto index = (x * 7 + y * 11) % 256;
+        return std::array<std::uint8_t, 4>{std::uint8_t(index), std::uint8_t(index),
+          std::uint8_t(index), 255};
+      };
+      for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        const auto rgba = color(x, y);
+        std::copy(rgba.begin(), rgba.end(), indexed.pixels.begin() + (y * width + x) * 4);
+      }
+      for (int y = 0; y < pageHeight; ++y) for (int x = 0; x < pageWidth; ++x) {
+        const auto rgba = color(std::clamp(x - 3, 0, width - 1), std::clamp(y - 3, 0, height - 1));
+        std::copy(rgba.begin(), rgba.end(), page.begin() + (y * pageWidth + x) * 4);
+      }
+      write(indexed.source, width, height, indexed.pixels);
+      pmjs::writeLz4Page(indexed.directory / "page-0.pml4", pageWidth, pageHeight, page, true);
+      pmjs::ImageStore images;
+      images.setWarmBudgetBytes(0); images.setPreparedFrameCacheBudget(0);
+      install(images, indexed);
+      const auto loaded = images.loadPng(indexed.source);
+      require(loaded.has_value(), "indexed prepared page failed to load");
+      const auto region = images.resolveSpriteRegion(loaded->handle, 0, 0, width, height, false, true, true);
+      require(region && region->paletteTable != 0, "indexed palette region unavailable");
+      require(images.gpuBytes() == std::size_t(pageWidth) * pageHeight + 1024,
+        "indexed palette GPU accounting is incorrect");
+      const auto restored = images.readPixelsRegion(loaded->handle, 0, 0, width, height);
+      require(restored && restored->rgba == indexed.pixels, "indexed palette pixels changed");
+      require(images.release(loaded->handle), "indexed palette release failed");
+      images.update();
+      require(images.gpuBytes() == 0 && images.cpuBytes() == 0,
+        "indexed palette resources survived their last owner");
     }
     {
       const auto blockFixture = [&](const char* name) {

@@ -2416,7 +2416,9 @@ for (const filters of [undefined, null, []]) {
     const root = new harness.sandbox.PIXI.Container();
     root._filters = filters;
     const selected = [];
-    harness.sandbox.nativeSceneFilters = node => { selected.push(node); return null; };
+    const preflight = harness.sandbox.pmjsPixiRenderPreflight;
+    const select = preflight.filters;
+    preflight.filters = (node, producer) => { selected.push(node); return select(node, producer); };
     submitOnly(harness, root);
     assert.equal(selected.includes(root), true);
   });

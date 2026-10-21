@@ -106,18 +106,18 @@ test('zero scale does not conceal a reached unsupported render hook', () => {
   assert.equal(h.submitted.length, 0);
 });
 
-test('late instance and prototype filter accessors replace formerly direct filter access', () => {
+test('ordinary rendering ignores late instance and prototype public filter accessors', () => {
   const h = makeHarness(), c = h.sandbox, node = h.sprite();
   c.submitNativeScene(node);
   let reads = 0;
   Object.defineProperty(node, 'filters', { configurable: true, get() { reads++; return []; } });
   c.submitNativeScene(node);
-  assert.ok(reads > 0);
+  assert.equal(reads, 0);
   delete node.filters;
   const before = reads;
   Object.defineProperty(c.PIXI.Sprite.prototype, 'filters', { get() { reads++; return []; } });
   c.submitNativeScene(node);
-  assert.ok(reads > before);
+  assert.equal(reads, before);
 });
 
 test('custom filter frames use the active target size and preserve transformed-target fitting semantics', () => {
@@ -132,7 +132,7 @@ test('custom filter frames use the active target size and preserve transformed-t
   assert.deepEqual(Array.from(h.plans[1].frame), [-5, -7, 100, 80]);
 });
 
-test('segment eligibility does not call authored filter accessors before their render turn', () => {
+test('segmented ordinary rendering ignores public filter accessors', () => {
   const h = makeHarness(), c = h.sandbox, root = new c.PIXI.Container();
   const reads = [];
   for (let i = 0; i < 8; i++) {
@@ -140,7 +140,7 @@ test('segment eligibility does not call authored filter accessors before their r
     Object.defineProperty(child, 'filters', { get() { reads.push(i); return []; } });
   }
   c.submitNativeScene(root);
-  assert.deepEqual(reads, [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(reads, []);
 });
 
 test('resource cleanup visits cycles and shared descendants once without changing release order', () => {

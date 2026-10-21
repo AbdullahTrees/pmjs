@@ -15,6 +15,8 @@ struct SparsePalettePage {
   std::vector<std::uint8_t> base, colors, residual;
   // Low/high occupancy words and a block-major residual offset for each 8×8 block.
   std::vector<std::array<std::uint32_t, 3>> blocks;
+  // A packed page stores one byte per pixel and has no exceptional blocks.
+  bool packed = false;
   std::size_t gpuBytes() const;
   std::size_t cpuBytes() const { return base.capacity() + colors.capacity() + residual.capacity() + blocks.capacity() * 12; }
   std::vector<std::uint8_t> denseIndices() const;
@@ -30,7 +32,11 @@ std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> enco
                                            std::size_t maxDecodedBytes);
 std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
     std::span<const std::uint8_t> rgba);
+std::optional<SparsePalettePage> makeIndexedPalettePage(int width, int height,
+    std::span<const std::uint8_t> rgba);
 std::optional<SparsePalettePage> readSparsePalettePage(std::span<const std::uint8_t> encoded,
+    std::size_t maxDecodedBytes);
+std::optional<SparsePalettePage> readIndexedPalettePage(std::span<const std::uint8_t> encoded,
     std::size_t maxDecodedBytes);
 std::vector<std::uint8_t> compressLz4Artifact(std::span<const std::uint8_t> bytes);
 std::optional<std::vector<std::uint8_t>> decompressLz4Artifact(

@@ -103,11 +103,14 @@ function pageHeaderMatches(header, page, size) {
       size === 16 + Math.ceil(page.width / 4) * Math.ceil(page.height / 4) * 16;
   }
   if (page.path.endsWith('.pml4')) {
-    return header.length >= 32 && header.toString('ascii', 0, 4) === 'PML4' && [1, 2].includes(header.readUInt32LE(4)) &&
-      header.readUInt32LE(8) === page.width && header.readUInt32LE(12) === page.height &&
-      (header.readUInt32LE(4) === 1 ? header.readUInt32LE(16) === page.width * page.height * 4 :
-        header.readUInt32LE(16) >= 8 && header.readUInt32LE(16) <= page.width * page.height * 4) &&
-      header.readUInt32LE(20) > 0 && header.readUInt32LE(20) === size - 32;
+    const version = header.readUInt32LE(4), width = header.readUInt32LE(8), height = header.readUInt32LE(12);
+    const decoded = header.readUInt32LE(16), length = header.readUInt32LE(20), count = width * height;
+    return header.length >= 32 && header.toString('ascii', 0, 4) === 'PML4' && [1, 2, 3].includes(version) &&
+      width === page.width && height === page.height &&
+      (version === 1 ? decoded === count * 4 :
+        version === 2 ? decoded >= 8 && decoded <= count * 4 :
+          decoded >= count + 8 && decoded <= count + 1028) &&
+      length > 0 && length === size - 32;
   }
   return header.length >= 24 && header.subarray(0, 8).equals(PNG) &&
     header.readUInt32BE(16) === page.width && header.readUInt32BE(20) === page.height;

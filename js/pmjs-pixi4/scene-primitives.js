@@ -513,8 +513,6 @@ var nativeSceneFilterDepth = 0;
 function nativeRenderHitCount() {
   return PMJS.compat.count('render.');
 }
-var nativeSceneStockFilters = PIXI.DisplayObject &&
-  Object.getOwnPropertyDescriptor(PIXI.DisplayObject.prototype, 'filters');
 var nativeSceneNoFilters = Object.freeze([]);
 var nativeSceneNoFilterPlan = Object.freeze({ blur: 0,
   groups: nativeSceneNoFilters, unsupported: false });
@@ -544,25 +542,6 @@ function resetNativeSceneRecords() {
   }
   nativeSceneCount = 0;
 }
-
-function nativeSceneDirectFilters(node) {
-  var cursor = node;
-  while (cursor) {
-    var descriptor = Object.getOwnPropertyDescriptor(cursor, 'filters');
-    if (descriptor) {
-      return !!nativeSceneStockFilters && descriptor.get === nativeSceneStockFilters.get &&
-        descriptor.set === nativeSceneStockFilters.set;
-    }
-    cursor = Object.getPrototypeOf(cursor);
-  }
-  return true;
-}
-
-function nativeSceneFilters(node) {
-  return nativeSceneDirectFilters(node) ? node._filters : node.filters;
-}
-
-
 
 function nativeSceneRecord(parentIndex, kind, resource, tint, blendMode,
     local, alpha, clip, blur, mask) {

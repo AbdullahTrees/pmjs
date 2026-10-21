@@ -700,6 +700,6 @@ void registerAssetMethods(napi_env env, napi_value exports) {
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);
   set(env, assets, "preparationWorkspaceVersion", number(env, 1));
-  set(env, assets, "preparationLz4Version", string(env, "lz4-1.10.0-sparse-palette-v2"));
+  set(env, assets, "preparationLz4Version", string(env, "lz4-1.10.0-indexed-palette-v3"));
 }
 }

@@ -116,6 +116,36 @@ int main() {
       std::cout << "sparse palette " << width << 'x' << height << ": dense=" << denseBytes
         << " sparse=" << sparse->gpuBytes() << " exceptions=" << sparse->residual.size() / 2 << '\n';
     }
+    for (const unsigned count : {200U, 256U}) {
+      std::vector<std::uint8_t> rgba(512 * 512 * 4);
+      for (std::size_t i = 0; i < rgba.size() / 4; ++i) {
+        const auto color = i % count;
+        rgba[i * 4] = color & 255; rgba[i * 4 + 1] = (color >> 8) & 255;
+        rgba[i * 4 + 2] = color >> 16; rgba[i * 4 + 3] = 255;
+      }
+      const auto indexed = pmjs::makeIndexedPalettePage(512, 512, rgba);
+      require(indexed && indexed->packed && indexed->colors.size() == count * 4 &&
+        indexed->blocks.empty() && indexed->residual.empty());
+      require(indexed->pixels().rgba == rgba);
+      require(indexed->gpuBytes() == rgba.size() / 4 + 1024);
+      const auto file = root / "indexed.pml4";
+      pmjs::writeLz4Page(file, 512, 512, rgba, true);
+      std::ifstream input(file, std::ios::binary);
+      const std::vector<std::uint8_t> encoded(std::istreambuf_iterator<char>(input), {});
+      require(encoded[4] == 3);
+      const auto decodedBytes = 4U + indexed->colors.size() + indexed->base.size();
+      const auto parsed = pmjs::readIndexedPalettePage(encoded, decodedBytes);
+      require(parsed && parsed->packed && parsed->pixels().rgba == rgba &&
+        parsed->gpuBytes() == indexed->gpuBytes());
+      const auto ordinary = pmjs::readLz4Page(encoded, rgba.size());
+      require(ordinary && ordinary->rgba == rgba);
+      require(!pmjs::readIndexedPalettePage(encoded, decodedBytes - 1));
+      require(!pmjs::readSparsePalettePage(encoded, rgba.size()));
+      for (const auto at : {0U, 4U, 8U, 16U, 24U, 28U, unsigned(encoded.size() - 1)}) {
+        auto broken = encoded; broken[at] ^= 128;
+        require(!pmjs::readIndexedPalettePage(broken, rgba.size()));
+      }
+    }
     for (const unsigned count : {256U, 512U, 65537U}) {
       std::vector<std::uint8_t> rgba(512 * 512 * 4);
       for (std::size_t i = 0; i < rgba.size() / 4; ++i) {
@@ -124,7 +154,9 @@ int main() {
         rgba[i * 4 + 2] = color >> 16; rgba[i * 4 + 3] = 255;
       }
       require(!pmjs::makeSparsePalettePage(512, 512, rgba));
+      require(!pmjs::makeIndexedPalettePage(512, 512, rgba) || count == 256);
     }
+    require(!pmjs::makeIndexedPalettePage(32, 32, std::vector<std::uint8_t>(32 * 32 * 4)));
     bool refused = false;
     try { pmjs::writeLz4Page(root / "invalid", 2049, 1, {}); }
     catch (const std::runtime_error&) { refused = true; }
