@@ -7,6 +7,14 @@ const vm = require('node:vm');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { createSubprocesses } = require('../runner/subprocess.cjs');
 
+function guestTasks(nodeErrors) {
+  const context = vm.createContext({ console, performance, __pmjsBuiltinRequire: require,
+    NativeHost: { runtime: { scheduling: require('node:timers') } },
+    PMJS: {}, pmjsReportNodeException(error) { nodeErrors.push(error); } });
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  return context.PMJS.tasks;
+}
+
 function subprocesses() {
   const queue = [], root = temporaryDirectory('subprocess-'), opened = [], nodeErrors = [];
   let stopped = false;
@@ -107,13 +115,7 @@ test('spawn and exit listener exceptions do not prevent later child events', asy
 });
 
 test('child output listener exceptions use the guest Node dispatcher', async t => {
-  const nodeErrors = [], context = vm.createContext({
-    console, performance, __pmjsBuiltinRequire: require,
-    NativeHost: { runtime: { scheduling: require('node:timers') } },
-    PMJS: {}, pmjsReportNodeException(error) { nodeErrors.push(error); }
-  });
-  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
-  const tasks = context.PMJS.tasks;
+  const nodeErrors = [], tasks = guestTasks(nodeErrors);
   const service = createSubprocesses({ tasks: () => tasks,
     resolveDirectory: () => temporaryDirectory('subprocess-output-'), openExternal: () => true });
   t.after(async () => { await service.stop(); tasks.stop(); });
@@ -126,6 +128,75 @@ test('child output listener exceptions use the guest Node dispatcher', async t =
     child.once('error', reject);
     child.once('close', resolve);
   });
+  await tasks.idle();
+  assert.deepEqual(nodeErrors, [listenerError]);
+});
+
+test('child stdin preserves backpressure, payload, and Node callback/event delivery', async t => {
+  const nodeErrors = [], tasks = guestTasks(nodeErrors);
+  const service = createSubprocesses({ tasks: () => tasks,
+    resolveDirectory: () => temporaryDirectory('subprocess-stdin-'), openExternal: () => true });
+  t.after(async () => { await service.stop(); tasks.stop(); });
+
+  const callbackError = new Error('stdin write callback');
+  const drainError = new Error('stdin drain listener');
+  const payload = 'pmjs-stdin-'.repeat(100_000);
+  const trace = [];
+  const child = service.api.spawn(process.execPath, ['-e',
+    'let size=0;process.stdin.on("data",chunk=>size+=chunk.length);process.stdin.on("end",()=>process.stdout.write(String(size)));']);
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => { output += chunk; });
+  const drained = new Promise(resolve => child.stdin.on('drain', () => {
+    trace.push('drain');
+    resolve();
+    throw drainError;
+  }));
+  const accepted = child.stdin.write(payload, () => { trace.push('write-callback'); throw callbackError; });
+  assert.equal(accepted, false, 'large write should report backpressure synchronously');
+  await drained;
+  await tasks.idle();
+  child.stdin.end(() => trace.push('end-callback'));
+  await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  await tasks.idle();
+
+  assert.equal(output, String(Buffer.byteLength(payload)));
+  assert.ok(trace.includes('drain'));
+  assert.ok(trace.includes('write-callback'));
+  assert.ok(trace.includes('end-callback'));
+  assert.deepEqual(nodeErrors, [drainError, callbackError]);
+});
+
+test('child stdin drops pending guest callbacks on scheduler shutdown', async () => {
+  const nodeErrors = [], tasks = guestTasks(nodeErrors);
+  const service = createSubprocesses({ tasks: () => tasks,
+    resolveDirectory: () => temporaryDirectory('subprocess-stdin-stop-'), openExternal: () => true });
+  const child = service.api.spawn(process.execPath, ['-e',
+    'process.on("SIGTERM",()=>{});process.stdin.resume();setInterval(()=>{},60000);']);
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  let callbackRan = false;
+  child.stdin.write(Buffer.alloc(1024 * 1024), () => { callbackRan = true; });
+  tasks.stop();
+  await service.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(callbackRan, false);
+  assert.deepEqual(nodeErrors, []);
+});
+
+test('child stdin errors reach guest error listeners through the Node dispatcher', async t => {
+  const nodeErrors = [], tasks = guestTasks(nodeErrors);
+  const service = createSubprocesses({ tasks: () => tasks,
+    resolveDirectory: () => temporaryDirectory('subprocess-stdin-error-'), openExternal: () => true });
+  t.after(async () => { await service.stop(); tasks.stop(); });
+
+  const listenerError = new Error('stdin error listener');
+  const child = service.api.spawn(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)']);
+  child.stdin.on('error', () => { throw listenerError; });
+  child.stdin.write(Buffer.alloc(4 * 1024 * 1024));
+  await new Promise(resolve => child.once('close', resolve));
   await tasks.idle();
   assert.deepEqual(nodeErrors, [listenerError]);
 });

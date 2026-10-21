@@ -4,7 +4,117 @@ const childProcess = require('node:child_process');
 const hostProcess = require('node:process');
 const hostTimers = require('node:timers');
 const { EventEmitter } = require('node:events');
-const { PassThrough } = require('node:stream');
+const { PassThrough, Writable } = require('node:stream');
+
+function createStdinBoundary(input, tasks) {
+  let stopping = false, inputClosed = false, inputError = null;
+  let removeStopListener = () => {};
+  const pendingWrites = new Set();
+  function enqueueCallback(callback, args) {
+    if (typeof callback !== 'function') return;
+    tasks().enqueue(() => callback.apply(undefined, args), { errorMode: 'uncaught' });
+  }
+  const stream = new Writable({
+    highWaterMark: input.writableHighWaterMark,
+    write(chunk, encoding, callback) {
+      if (stopping || inputClosed || inputError) {
+        callback(inputError || Object.assign(new Error('child process stdin is closed'), { code: 'ERR_STREAM_DESTROYED' }));
+        return;
+      }
+      let writeComplete = false, drainComplete = false, finished = false, drainListener;
+      const finish = error => {
+        if (finished) return;
+        finished = true;
+        pendingWrites.delete(finish);
+        if (drainListener) input.removeListener('drain', drainListener);
+        if (!stopping) callback(error);
+      };
+      finish.cancel = () => {
+        if (finished) return;
+        finished = true;
+        pendingWrites.delete(finish);
+        if (drainListener) input.removeListener('drain', drainListener);
+      };
+      function maybeFinish() { if (writeComplete && drainComplete) finish(); }
+      pendingWrites.add(finish);
+      let accepted;
+      try {
+        accepted = input.write(chunk, error => {
+          if (error) { finish(error); return; }
+          writeComplete = true;
+          maybeFinish();
+        });
+      } catch (error) { finish(error); return; }
+      if (accepted) drainComplete = true;
+      else {
+        drainListener = () => { drainComplete = true; maybeFinish(); };
+        input.once('drain', drainListener);
+      }
+      maybeFinish();
+    },
+    final(callback) {
+      if (stopping || inputClosed || inputError) {
+        callback(inputError || Object.assign(new Error('child process stdin is closed'), { code: 'ERR_STREAM_DESTROYED' }));
+        return;
+      }
+      try { input.end(callback); }
+      catch (error) { callback(error); }
+    },
+    destroy(error, callback) {
+      if (!stopping) {
+        const destroyedError = error || Object.assign(new Error('child process stdin was destroyed'), { code: 'ERR_STREAM_DESTROYED' });
+        Array.from(pendingWrites).forEach(finish => finish(destroyedError));
+      }
+      if (!input.destroyed) input.destroy();
+      callback(error);
+    }
+  });
+
+  function onError(error) {
+    if (stopping) return;
+    inputError = error;
+    Array.from(pendingWrites).forEach(finish => finish(error));
+    if (!stream.destroyed) stream.destroy(error);
+  }
+  function onClose() {
+    inputClosed = true;
+    if (!stopping && !stream.destroyed) stream.destroy();
+    input.removeListener('error', onError);
+    input.removeListener('close', onClose);
+    removeStopListener();
+  }
+  input.on('error', onError);
+  input.on('close', onClose);
+
+  const write = stream.write;
+  stream.write = function(chunk, encoding, callback) {
+    if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+    const delivered = typeof callback === 'function' ? function() {
+      enqueueCallback(callback, Array.prototype.slice.call(arguments));
+    } : callback;
+    return write.call(this, chunk, encoding, delivered);
+  };
+  const end = stream.end;
+  stream.end = function() {
+    const args = Array.prototype.slice.call(arguments);
+    const index = args.length - 1;
+    if (index >= 0 && typeof args[index] === 'function') {
+      const callback = args[index];
+      args[index] = function() { enqueueCallback(callback, Array.prototype.slice.call(arguments)); };
+    }
+    return end.apply(this, args);
+  };
+
+  const guestStream = typeof tasks().wrapNodeEmitter === 'function'
+    ? tasks().wrapNodeEmitter(stream, ['emit', 'write', 'end']) : stream;
+  if (typeof tasks().onStop === 'function') removeStopListener = tasks().onStop(() => {
+    stopping = true;
+    Array.from(pendingWrites).forEach(finish => finish.cancel());
+    stream.removeAllListeners();
+    if (!stream.destroyed) stream.destroy();
+  });
+  return guestStream;
+}
 
 function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
   const children = new Set();
@@ -20,7 +130,7 @@ function createSubprocesses({ tasks, resolveDirectory, openExternal }) {
     const result = typeof tasks().wrapNodeEmitter === 'function'
       ? tasks().wrapNodeEmitter(emitter, ['emit']) : emitter;
     result.pid = child.pid;
-    result.stdin = child.stdin;
+    result.stdin = child.stdin ? createStdinBoundary(child.stdin, tasks) : null;
     result.kill = child.kill.bind(child);
     result.ref = () => { child.ref(); return result; };
     result.unref = () => { child.unref(); return result; };
