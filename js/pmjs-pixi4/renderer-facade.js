@@ -402,7 +402,8 @@ function createNativePixiRenderer(width, height, options) {
           nativeComposeTransform(screenTransform, transform) : screenTransform,
         this.resolution, this.roundPixels, skipUpdateTransform,
         this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
-        Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this }), function() {
+        Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this,
+          viewportCull: { width: screenWidth, height: screenHeight } }), function() {
           renderOwner.renderTexture.bind(null);
           renderOwner._activeRenderTarget.transform = transform || null;
           NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
