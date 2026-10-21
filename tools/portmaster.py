@@ -52,8 +52,14 @@ if [ "$platform_status" -ne 0 ]; then
 fi
 
 echo '[pmjs-port] starting runtime'
-XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
-  --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
+# muOS exports SDL_BLITTER_DISABLED=1 for its own SDL games. PMJS presents
+# through its own EGL path and draws only partial frames with the firmware
+# blitter disabled, so enable it for the runtime only.
+(
+  [ "${SDL_BLITTER_DISABLED:-}" != 1 ] || unset SDL_BLITTER_DISABLED
+  XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
+    --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
+)
 status=$?
 pm_finish || { [ "$status" -ne 0 ] || status=1; }
 exit "$status"

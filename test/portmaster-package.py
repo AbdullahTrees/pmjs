@@ -685,6 +685,14 @@ return "${MODULE_STATUS:-0}"
                 self.assertIn(str(self.port / 'saves'), capture['argv'])
                 self.assertIn(str(self.port / '.cache'), capture['argv'])
 
+    def test_firmware_blitter_override_does_not_reach_the_runtime(self):
+        # muOS exports SDL_BLITTER_DISABLED for its own SDL games; PMJS presents
+        # through EGL and draws partial frames with the firmware blitter off.
+        result = self.run_launcher(SDL_BLITTER_DISABLED='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = json.loads(self.capture.read_text())['env']
+        self.assertNotIn('SDL_BLITTER_DISABLED', env)
+
     def test_xdg_discovery_and_absent_display_settings(self):
         for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'SWAYSOCK'):
             self.env.pop(name, None)
