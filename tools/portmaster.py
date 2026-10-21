@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from runtime_artifact import checked_runtime, digest, elf, inventory, static_audit, strip_binary, write_json, source_reference, payload_digest
-from portmaster_metadata import read_submission, stage_submission
+from portmaster_metadata import PORTNAME, read_submission, stage_submission
 
 
 PORTMASTER_LAUNCHER = '''#!/bin/bash
@@ -38,7 +38,7 @@ cd "$GAMEDIR" || exit 1
 GAMEDIR=$(pwd -P)
 LOGFILE="$GAMEDIR/log.txt"
 rm -f "$LOGFILE" || { echo 'Failed to remove the previous PortMaster log' >&2; exit 1; }
-exec >> "$LOGFILE" 2>&1 || exit 1
+{
 echo '[pmjs-port] launcher started'
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
 export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
@@ -57,6 +57,8 @@ XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
 status=$?
 pm_finish || { [ "$status" -ne 0 ] || status=1; }
 exit "$status"
+} 2>&1 | tee "$LOGFILE"
+exit "${PIPESTATUS[0]}"
 '''
 
 
@@ -211,18 +213,27 @@ def checked_bundle(bundle):
         if digest(index_file) != descriptor.get('assetIndexSha256'):
             raise ValueError('Bundle asset index checksum differs from pmjs.json')
         index = json.loads(index_file.read_text())
-        if index.get('schema') not in (1, 2) or index.get('kind') != 'pmjs-asset-index':
+        if index.get('schema') not in (1, 2, 3) or index.get('kind') != 'pmjs-asset-index':
             raise ValueError('Unsupported bundle asset index')
+        schema = index.get('schema')
         images = index.get('images')
         map_index = index.get('maps')
         if map_index is not None and not isinstance(map_index, dict):
             raise ValueError('Invalid bundle map index')
         maps = (map_index or {}).get('entries', [])
         if not isinstance(images, list) or not isinstance(maps, list) or not all(
-                isinstance(entry, dict) and isinstance(entry.get('outputs'), list)
-                for entry in images + maps):
+                isinstance(entry, dict) for entry in images + maps):
             raise ValueError('Invalid bundle asset index entries')
-        outputs = [page for entry in images + maps for page in entry['outputs']]
+        outputs = []
+        for entry in images:
+            calculated = entry.get('calculated') if schema == 3 else entry
+            if not isinstance(calculated, dict) or not isinstance(calculated.get('outputs'), list):
+                raise ValueError('Invalid bundle image index outputs')
+            outputs.extend(calculated['outputs'])
+        for entry in maps:
+            if not isinstance(entry.get('outputs'), list):
+                raise ValueError('Invalid bundle map index outputs')
+            outputs.extend(entry['outputs'])
         if descriptor.get('assets'):
             if descriptor['assets'] != 'assets':
                 raise ValueError('Unsupported bundle asset directory')
@@ -245,10 +256,12 @@ def checked_bundle(bundle):
 
 
 def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), sources=None, sources_url=None,
-               submission=None):
+               submission=None, release=False):
     original_info = checked_runtime(stage)
     info = original_info
     submission_details = read_submission(submission)
+    if release and submission_details is None:
+        raise ValueError('PortMaster release packaging requires --submission')
     if sources is not None or sources_url is not None:
         if sources is None or sources_url is None:
             raise ValueError('--sources and --sources-url must be provided together')
@@ -272,9 +285,9 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
             raise ValueError('Use a nonempty game name without path separators or control characters')
         name = name.strip()
         identifier = (submission_details['portname'] if submission_details else
-                      re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-'))
-        if not identifier:
-            raise ValueError('Game name must contain an ASCII letter or number')
+                      re.sub(r'[^a-z0-9._]+', '_', name.lower()).strip('._'))
+        if not PORTNAME.fullmatch(identifier):
+            raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
         if submission_details and name + '.sh' != submission_details['launcher']:
             raise ValueError('Submission launcher must match package game name')
         if submission_details and output.name != identifier + '.zip':
@@ -330,7 +343,12 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         if any(file.name.startswith('libav') for file in copied) and not info.get('dependencySources'):
             raise ValueError('Bundled FFmpeg requires a source archive reference; specify --sources and --sources-url')
         if submission_details is not None:
-            stage_submission(port, submission_details, stage, info, notices, extra_notices)
+            stage_submission(payload, port, submission_details, stage, info, notices, extra_notices)
+            root_files = {file.name.casefold() for file in payload.iterdir() if file.is_file()}
+            if identifier.casefold() in root_files:
+                raise ValueError('Port directory name collides with a submission file: ' + identifier)
+        if (name + '.sh').casefold() == identifier.casefold():
+            raise ValueError('Port directory name collides with its launcher: ' + identifier)
         package_info = {key: value for key, value in info.items()
                         if key not in ('files', 'compiledInputs', 'configuration', 'environment', 'loader')}
         package_info['source'] = {key: value for key, value in info['source'].items()
@@ -369,13 +387,15 @@ def main():
     parser.add_argument('--sources', type=Path, help='Corresponding FFmpeg source archive, distributed separately')
     parser.add_argument('--sources-url', help='Permanent HTTP(S) download URL for that archive')
     parser.add_argument('--submission', type=Path, help='Directory containing authored PortMaster metadata')
+    parser.add_argument('--release', action='store_true',
+                        help='Require authored submission metadata for a PortMaster release')
     parser.add_argument('--notice', type=Path, action='append', default=[], help='Add a port-specific license notice')
     args = parser.parse_args()
     try:
         portmaster(args.stage.resolve(), args.bundle.resolve(), args.output.resolve(), args.name,
                    args.strip, [file.resolve() for file in args.notice],
                    args.sources.resolve() if args.sources else None, args.sources_url,
-                   args.submission.resolve() if args.submission else None)
+                   args.submission.resolve() if args.submission else None, args.release)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

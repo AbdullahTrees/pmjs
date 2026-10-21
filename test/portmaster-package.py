@@ -102,37 +102,39 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIsNone(package.testzip())
             names = package.namelist()
             self.assertIn('Minimal Game.sh', names)
-            self.assertIn('minimal-game/gamedata/', names)
-            self.assertEqual(package.read('minimal-game/minimal-game.ini'), b'[controls]\n')
-            self.assertIn('minimal-game/runtime/lib/librequired.so.1', names)
-            self.assertNotIn('minimal-game/runtime.squashfs', names)
-            licenses = package.read('minimal-game/runtime/LICENSES.txt').decode()
+            self.assertIn('minimal_game/gamedata/', names)
+            self.assertTrue(any(name.startswith('minimal_game/runtime/') for name in names))
+            self.assertNotIn('minimal-game/', '\n'.join(names))
+            self.assertEqual(package.read('minimal_game/minimal_game.ini'), b'[controls]\n')
+            self.assertIn('minimal_game/runtime/lib/librequired.so.1', names)
+            self.assertNotIn('minimal_game/runtime.squashfs', names)
+            licenses = package.read('minimal_game/runtime/LICENSES.txt').decode()
             self.assertIn('Node.LICENSE', licenses)
             self.assertIn('fixture notice', licenses)
             self.assertFalse(any('libunused' in name or '/sources/' in name
                                  for name in names))
-            self.assertIn('minimal-game/pmjs.json', names)
-            self.assertIn('minimal-game/runtime/share/pmjs/tools/pmjs.mjs', names)
-            self.assertIn('minimal-game/runtime/build-info.json', names)
-            packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            self.assertIn('minimal_game/pmjs.json', names)
+            self.assertIn('minimal_game/runtime/share/pmjs/tools/pmjs.mjs', names)
+            self.assertIn('minimal_game/runtime/build-info.json', names)
+            packaged_info = json.loads(package.read('minimal_game/runtime/build-info.json'))
             self.assertEqual(packaged_info['buildId'], 'build-package-fixture')
             for key in ('compiledInputs', 'environment', 'loader'):
                 self.assertNotIn(key, packaged_info)
             self.assertNotIn('files', packaged_info['source'])
             self.assertFalse(any('/docs/' in name or '/src/' in name or name.endswith('.py') for name in names))
-            expected_runtime_files = {name.removeprefix('minimal-game/runtime/') for name in names
-                                      if name.startswith('minimal-game/runtime/') and not name.endswith('/')
-                                      and name != 'minimal-game/runtime/build-info.json'}
+            expected_runtime_files = {name.removeprefix('minimal_game/runtime/') for name in names
+                                      if name.startswith('minimal_game/runtime/') and not name.endswith('/')
+                                      and name != 'minimal_game/runtime/build-info.json'}
             self.assertNotIn('files', packaged_info)
-            runtime_files = {name: {'sha256': hashlib.sha256(package.read('minimal-game/runtime/' + name)).hexdigest(),
-                                    'bytes': len(package.read('minimal-game/runtime/' + name))}
+            runtime_files = {name: {'sha256': hashlib.sha256(package.read('minimal_game/runtime/' + name)).hexdigest(),
+                                    'bytes': len(package.read('minimal_game/runtime/' + name))}
                              for name in expected_runtime_files}
             self.assertEqual(packaged_info['payloadSha256'], artifacts.payload_digest(runtime_files))
-            self.assertEqual([name for name in names if '/gamedata/' in name], ['minimal-game/gamedata/'])
+            self.assertEqual([name for name in names if '/gamedata/' in name], ['minimal_game/gamedata/'])
             self.assertEqual(package.getinfo('Minimal Game.sh').external_attr >> 16 & 0o777, 0o755)
             binary = self.root / 'pmjs_native.node'
-            binary.write_bytes(package.read('minimal-game/runtime/lib/pmjs_native.node'))
-            (self.root / 'librequired.so.1').write_bytes(package.read('minimal-game/runtime/lib/librequired.so.1'))
+            binary.write_bytes(package.read('minimal_game/runtime/lib/pmjs_native.node'))
+            (self.root / 'librequired.so.1').write_bytes(package.read('minimal_game/runtime/lib/librequired.so.1'))
             sections = subprocess.check_output(['readelf', '-S', '--wide', binary], text=True)
             self.assertNotIn('.debug', sections)
             self.assertNotIn('.symtab', sections)
@@ -142,6 +144,8 @@ class PortMasterPackage(unittest.TestCase):
         checksum = artifacts.digest(self.output)
         portmaster.portmaster(self.stage, self.bundle, self.output)
         self.assertEqual(artifacts.digest(self.output), checksum, 'deterministic ZIP')
+        with self.assertRaisesRegex(ValueError, 'valid PortMaster portname'):
+            portmaster.portmaster(self.stage, self.bundle, self.output, name='---')
 
     def test_submission_metadata_and_licenses(self):
         import struct
@@ -167,32 +171,59 @@ class PortMasterPackage(unittest.TestCase):
                                'runtime': [], 'arch': ['x86_64'], 'store': []}}
         (submission / 'port.json').write_text(json.dumps(descriptor))
         output = self.root / 'output/minimalgame.zip'
-        portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+        subprocess.run(['node', ROOT / 'test/helpers/generate-schema3-index.cjs',
+                         self.bundle, self.game, self.root], check=True, capture_output=True, text=True)
+        index = json.loads((self.bundle / 'asset-index.json').read_text())
+        self.assertEqual(index['schema'], 3, 'integration package uses a generated schema 3 asset index')
+        self.assertIsInstance(index['images'], list)
+        self.assertEqual(len(index['images']), 1)
+        self.assertEqual(index['images'][0]['calculated']['outputs'][0]['path'],
+                         'assets/images/prepared-image/page.png')
+        portmaster.portmaster(self.stage, self.bundle, output, submission=submission, release=True)
         with zipfile.ZipFile(output) as package:
             self.assertIsNone(package.testzip())
             names = package.namelist()
-            for name in ('port.json', 'gameinfo.xml', 'screenshot.png', 'minimalgame.md', 'gamedata/'):
-                self.assertIn('minimalgame/' + name, names)
+            for name in ('port.json', 'README.md', 'gameinfo.xml', 'screenshot.png'):
+                self.assertIn(name, names)
+            self.assertIn('minimalgame/gamedata/', names)
             self.assertIn('Minimal Game.sh', names)
             self.assertNotIn('minimalgame/runtime/LICENSES.txt', names)
             self.assertIn('minimalgame/licenses/LICENSE.share_pmjs_notices_node_license.txt', names)
             self.assertIn('minimalgame/licenses/LICENSE.license.txt', names)
-            self.assertEqual(json.loads(package.read('minimalgame/port.json')), descriptor)
-            self.assertEqual(package.read('minimalgame/gameinfo.xml'), (submission / 'gameinfo.xml').read_bytes())
+            self.assertEqual(json.loads(package.read('port.json')), descriptor)
+            self.assertIn(b'<image>./screenshot.png</image>', package.read('gameinfo.xml'))
+            self.assertNotIn('minimalgame/minimalgame.md', names)
+            self.assertEqual(package.read('minimalgame/assets/images/prepared-image/page.png'),
+                             b'generated image page')
             self.assertNotIn(b'purchased bytes', b''.join(package.read(n) for n in names if n.endswith('.js')))
         checksum = artifacts.digest(output)
-        portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+        portmaster.portmaster(self.stage, self.bundle, output, submission=submission, release=True)
         self.assertEqual(artifacts.digest(output), checksum)
+        collision = self.root / 'readme.md'
+        shutil.copytree(submission, collision)
+        collision_descriptor = {**descriptor, 'name': 'readme.md.zip',
+                                'items': ['Minimal Game.sh', 'readme.md']}
+        (collision / 'port.json').write_text(json.dumps(collision_descriptor))
+        (collision / 'gameinfo.xml').write_text(
+            (collision / 'gameinfo.xml').read_text().replace('./minimalgame/', './readme.md/'))
+        with self.assertRaisesRegex(ValueError, 'collides with a submission file'):
+            portmaster.portmaster(self.stage, self.bundle, self.root / 'output/readme.md.zip',
+                                  submission=collision, release=True)
         descriptor['attr']['arch'] = ['armhf']
         (submission / 'port.json').write_text(json.dumps(descriptor))
         with self.assertRaisesRegex(ValueError, 'architecture'):
-            portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+            portmaster.portmaster(self.stage, self.bundle, output, submission=submission, release=True)
         self.assertEqual(artifacts.digest(output), checksum, 'invalid input must not replace existing package')
         descriptor['attr']['arch'] = ['x86_64']
         descriptor['items'][0] = 'Different.sh'
         (submission / 'port.json').write_text(json.dumps(descriptor))
         with self.assertRaisesRegex(ValueError, 'launcher'):
-            portmaster.portmaster(self.stage, self.bundle, output, submission=submission)
+            portmaster.portmaster(self.stage, self.bundle, output, submission=submission, release=True)
+
+    def test_release_mode_requires_authored_submission(self):
+        with self.assertRaisesRegex(ValueError, 'requires --submission'):
+            portmaster.portmaster(self.stage, self.bundle, self.output, release=True)
+        self.assertFalse(self.output.exists())
 
     def test_adapter_configuration_and_mz(self):
         adapter = self.root / 'adapter.js'
@@ -207,9 +238,9 @@ class PortMasterPackage(unittest.TestCase):
             bundle = self.create_bundle(self.root / (engine + " bundle"), config=config, adapters=[adapter])
             portmaster.portmaster(self.stage, bundle, self.output)
             with zipfile.ZipFile(self.output) as package:
-                bundle = package.read('minimal-game/bootstrap.js').decode()
+                bundle = package.read('minimal_game/bootstrap.js').decode()
                 self.assertLess(bundle.index('adapterRegistered'), bundle.index(f'// BEGIN js/pmjs-{engine}/bootstrap.js'))
-                self.assertEqual(package.read('minimal-game/config.json'), config.read_bytes())
+                self.assertEqual(package.read('minimal_game/config.json'), config.read_bytes())
 
     def test_failure_preserves_existing_zip(self):
         self.output.parent.mkdir()
@@ -240,7 +271,7 @@ class PortMasterPackage(unittest.TestCase):
             portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
             for name in selected:
-                self.assertEqual(package.read('minimal-game/runtime/' + name), (self.stage / name).read_bytes())
+                self.assertEqual(package.read('minimal_game/runtime/' + name), (self.stage / name).read_bytes())
         self.assertEqual(artifacts.inventory(self.stage), original)
 
     def test_unstripped_closure_requires_a_strip_tool(self):
@@ -278,10 +309,10 @@ class PortMasterPackage(unittest.TestCase):
         artifacts.write_json(self.stage / 'build-info.json', info)
         portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            packaged_info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            packaged_info = json.loads(package.read('minimal_game/runtime/build-info.json'))
             self.assertEqual(packaged_info['dependencySources'], info['dependencySources'])
-            self.assertIn(info['dependencySources']['url'], package.read('minimal-game/runtime/LICENSES.txt').decode())
-            self.assertIn('minimal-game/runtime/lib/libavutil.so.58', package.namelist())
+            self.assertIn(info['dependencySources']['url'], package.read('minimal_game/runtime/LICENSES.txt').decode())
+            self.assertIn('minimal_game/runtime/lib/libavutil.so.58', package.namelist())
             self.assertFalse(any('/sources/' in name for name in package.namelist()))
 
     def test_explicit_source_archive_is_verified_and_not_embedded(self):
@@ -306,7 +337,7 @@ class PortMasterPackage(unittest.TestCase):
         kwargs = {'sources': archive, 'sources_url': 'https://example.invalid/ffmpeg-sources.tar.gz'}
         portmaster.portmaster(self.stage, self.bundle, self.output, **kwargs)
         with zipfile.ZipFile(self.output) as package:
-            info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            info = json.loads(package.read('minimal_game/runtime/build-info.json'))
             self.assertEqual(info['dependencySources']['sha256'], artifacts.digest(archive))
             self.assertFalse(any('/sources/' in name or name.endswith('.tar.gz') for name in package.namelist()))
         before = self.output.read_bytes()
@@ -345,7 +376,7 @@ class PortMasterPackage(unittest.TestCase):
         descriptor_file.write_text(json.dumps(descriptor))
         portmaster.portmaster(self.stage, bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            self.assertEqual(package.read('minimal-game/' + page), target.read_bytes())
+            self.assertEqual(package.read('minimal_game/' + page), target.read_bytes())
         target.write_bytes(b'corrupt generated page')
         checksum = artifacts.digest(self.output)
         with self.assertRaisesRegex(ValueError, 'Generated asset checksum'):
@@ -433,7 +464,7 @@ class PortMasterPackage(unittest.TestCase):
         with patch('portmaster.shutil.copytree', side_effect=change_source):
             portmaster.portmaster(self.stage, bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            self.assertEqual(package.read('minimal-game/bootstrap.js'), original)
+            self.assertEqual(package.read('minimal_game/bootstrap.js'), original)
 
     def test_package_cli_delegates_bundle_validation_to_python(self):
         bundle = self.create_bundle()
@@ -511,7 +542,7 @@ class PortMasterPackage(unittest.TestCase):
         artifacts.write_json(self.stage / 'build-info.json', info)
         portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            packaged = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            packaged = json.loads(package.read('minimal_game/runtime/build-info.json'))
             self.assertTrue(packaged['payloadSha256'])
             self.assertNotIn('files', packaged)
             self.assertNotIn('compiledInputs', packaged)
@@ -525,6 +556,11 @@ class PortMasterPackage(unittest.TestCase):
             portmaster.portmaster(self.stage, self.bundle, self.output)
         self.assertEqual(self.output.read_bytes(), before)
 
+    def test_release_mode_requires_authored_submission(self):
+        with self.assertRaisesRegex(ValueError, 'requires --submission'):
+            portmaster.portmaster(self.stage, self.bundle, self.output, release=True)
+        self.assertFalse(self.output.exists())
+
     def test_legacy_runtime_keeps_its_diagnostic_inventory(self):
         info = json.loads((self.stage / 'build-info.json').read_text())
         info['schema'] = 1
@@ -533,7 +569,7 @@ class PortMasterPackage(unittest.TestCase):
         artifacts.write_json(self.stage / 'build-info.json', info)
         portmaster.portmaster(self.stage, self.bundle, self.output)
         with zipfile.ZipFile(self.output) as package:
-            info = json.loads(package.read('minimal-game/runtime/build-info.json'))
+            info = json.loads(package.read('minimal_game/runtime/build-info.json'))
             self.assertEqual(info['schema'], 1)
             self.assertNotIn('payloadSha256', info)
             self.assertTrue(info['files'])
@@ -569,16 +605,16 @@ class PortMasterLauncher(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.control = self.root / 'PortMaster'
         self.control.mkdir()
-        self.port = self.root / 'storage/ports/minimal-game'
+        self.port = self.root / 'storage/ports/minimal_game'
         (self.port / 'gamedata').mkdir(parents=True)
         (self.port / 'gamedata/index.html').touch()
-        (self.port / 'minimal-game.ini').write_text('[controls]\n')
+        (self.port / 'minimal_game.ini').write_text('[controls]\n')
         (self.port / 'saves').mkdir()
         (self.port / 'saves/existing.rpgsave').write_text('existing progress')
         (self.port / 'runtime/bin').mkdir(parents=True)
         self.launcher = self.root / 'menu/Minimal Game.sh'
         self.launcher.parent.mkdir()
-        launcher = portmaster.PORTMASTER_LAUNCHER.replace('@ID@', 'minimal-game')
+        launcher = portmaster.PORTMASTER_LAUNCHER.replace('@ID@', 'minimal_game')
         for location in ('/opt/system/Tools/PortMaster', '/opt/tools/PortMaster', '/roms/ports/PortMaster'):
             launcher = launcher.replace(location, str(self.root / location.lstrip('/')))
         self.launcher.write_text(launcher)
@@ -727,7 +763,7 @@ return "${MODULE_STATUS:-0}"
     def test_exit_helper_has_no_gameplay_bindings_and_honors_native_override(self):
         self.assertEqual(self.run_launcher().returncode, 0)
         helper = json.loads(self.gpt_capture.read_text())
-        self.assertEqual(helper['argv'], ['node', '-c', str(self.port / 'minimal-game.ini')])
+        self.assertEqual(helper['argv'], ['node', '-c', str(self.port / 'minimal_game.ini')])
         self.assertEqual(helper['wrapper'], 'active', 'multiword GPTOKEYB2 is a command line')
         self.assertEqual(helper['controls'], '[controls]\n')
         self.assertEqual(self.run_launcher(PMJS_EXIT_HOTKEY='leftstick').returncode, 0)
@@ -747,6 +783,7 @@ return "${MODULE_STATUS:-0}"
         self.assertTrue(self.capture.exists())
         self.assertIn('platform helper returned 1; continuing',
                       (self.port / 'log.txt').read_text())
+        self.assertIn('platform helper returned 1; continuing', result.stdout)
 
     def test_cleanup_failure_retains_game_failure(self):
         self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)
@@ -758,9 +795,11 @@ return "${MODULE_STATUS:-0}"
         self.assertFalse(self.capture.exists())
 
     def test_missing_exit_helper_stops_before_runtime(self):
-        self.assertEqual(self.run_launcher(expect_finish=False, GPTOKEYB2='').returncode, 1)
+        result = self.run_launcher(expect_finish=False, GPTOKEYB2='')
+        self.assertEqual(result.returncode, 1)
         self.assertFalse(self.capture.exists())
         self.assertIn('gptokeyb2 is required', (self.port / 'log.txt').read_text())
+        self.assertIn('gptokeyb2 is required', result.stdout)
 
     def test_exit_helper_stops_runtime_before_firmware_cleanup(self):
         for stopped in (False, True):

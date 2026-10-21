@@ -67,19 +67,22 @@ def read_submission(directory):
             'metadata': metadata, 'screenshot': screenshot, 'cover': cover}
 
 
-def stage_submission(port, data, stage, info, notices, extra_notices):
+def stage_submission(payload, port, data, stage, info, notices, extra_notices):
     """Stage official source metadata in the layout of PortMaster's release ZIPs."""
     architecture = {'arm64': 'aarch64', 'aarch64': 'aarch64',
                     'x64': 'x86_64', 'x86_64': 'x86_64'}.get(info['architecture'])
     if architecture is None or data['metadata']['attr']['arch'] != [architecture]:
         raise ValueError('port.json architecture does not match the packaged runtime')
     source = data['directory']
-    shutil.copyfile(source / 'port.json', port / 'port.json')
-    shutil.copyfile(source / 'README.md', port / (data['portname'] + '.md'))
-    shutil.copyfile(source / 'gameinfo.xml', port / 'gameinfo.xml')
+    shutil.copyfile(source / 'port.json', payload / 'port.json')
+    shutil.copyfile(source / 'README.md', payload / 'README.md')
     for file in (data['screenshot'], data['cover']):
         if file:
-            shutil.copyfile(file, port / file.name)
+            shutil.copyfile(file, payload / file.name)
+    gameinfo = ElementTree.parse(source / 'gameinfo.xml')
+    image = gameinfo.getroot().find('game').find('image')
+    image.text = './' + Path(image.text).name
+    gameinfo.write(payload / 'gameinfo.xml', encoding='utf-8', xml_declaration=True)
 
     licenses = port / 'licenses'
     licenses.mkdir()
