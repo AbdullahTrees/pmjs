@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const { parse } = require('../runner/cli.cjs');
-const { run, createPreparationLog, validate, parseTimingConfig, resolveSwapDefault, advanceDeadline,
+const { run, createPreparationLog, validate, resolveDefaults, parseTimingConfig, resolveSwapDefault, advanceDeadline,
   sendSupervisorHeartbeat } = require('../runner/index.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 

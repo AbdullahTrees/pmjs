@@ -2,8 +2,8 @@
 
 const path = require('node:path');
 const { openPreparation, inventory, invalidateResults } = require('./preparation-state.cjs');
-const { prepareAssets } = require('./asset-preparation.cjs');
-const { prepareMaps } = require('./map-preparation.cjs');
+const { prepareAssetsPhase } = require('./asset-preparation.cjs');
+const { prepareMapsPhase } = require('./map-preparation.cjs');
 const { prepareForRun } = require('./port-preparation.cjs');
 
 async function prepareGameAssets(options) {
@@ -55,12 +55,12 @@ async function prepareGameAssets(options) {
     }
   };
   try {
-    if (options.images !== false) result.images = await phase('images', onProgress => prepareAssets({
+    if (options.images !== false) result.images = await phase('images', onProgress => prepareAssetsPhase({
       ...options, session, onProgress }));
     if (preparationContext === 'offline')
       for (const entry of result.images?.decryptedEntries || []) native.assets.addDerived?.(entry.logicalSource, entry.file);
     if (!shouldCancel() && options.maps && (session.inventory.some(file => /^data\/Map\d+\.json$/i.test(file)) || session.data.indices.maps))
-      result.maps = await phase('maps', onProgress => prepareMaps({ ...options, session, onProgress,
+      result.maps = await phase('maps', onProgress => prepareMapsPhase({ ...options, session, onProgress,
         portableIndex: options.portableIndex?.maps }));
     if (!shouldCancel() && (options.portDescriptors?.length || options.adapters?.length || options.bundleRoot))
       result.portArtifacts = await phase('port', () => prepareForRun({ ...options, session,

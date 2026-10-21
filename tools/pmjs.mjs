@@ -236,7 +236,7 @@ async function main() {
   if (command === 'prepare') {
     const { prepareGameAssets } = require(path.join(share, 'runner/preparation.cjs'));
     const { offlineFilesystem } = require(path.join(share, 'runner/asset-index.cjs'));
-    const { resolveDefaults } = require(path.join(share, 'runner/index.cjs'));
+    const { resolveDefaults } = require(path.join(share, 'runner/config.cjs'));
     const filesystem = offlineFilesystem(game, new Map());
     const addon = require(path.join(root, 'lib/pmjs_native.node'));
     const defaults = resolveDefaults({ gameRoot: game, config, assetCacheRoot: options['--asset-cache-root'] });

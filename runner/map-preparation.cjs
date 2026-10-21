@@ -120,16 +120,10 @@ async function resolveTiled(game, map) {
   }
   return { map: clone, dependencies };
 }
-async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 624,
+async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, height = 624,
   shouldCancel = () => false, onProgress = () => {}, logger = console, verifyRegions = false, verifyHashes = false,
-  preparationContext = 'live', portableIndex = null, portableAssetRoot = null, session = null }) {
-  if (!session) {
-    const run = await require('./preparation.cjs').prepareGameAssets({ gameRoot, cacheRoot, native, width, height,
-      shouldCancel, onProgress: value => { if (value.phase !== 'start') onProgress(value); }, logger, verifyRegions, verifyHashes, preparationContext,
-      portableIndex: { maps: portableIndex }, portableAssetRoot, images: false, maps: true });
-    if (run.maps) run.maps.releaseCacheLease = run.releaseCacheLease;
-    return run.maps;
-  }
+  preparationContext = 'live', portableIndex = null, portableAssetRoot = null, session }) {
+  if (!session) throw new Error('map preparation phase requires a preparation session');
   cacheRoot = session.root;
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   const offline = preparationContext === 'offline';
@@ -514,4 +508,19 @@ async function prepareMaps({ gameRoot, cacheRoot, native, width = 816, height = 
   }
   return result;
 }
-module.exports = { prepareMaps, validTileDescriptor, validateEntry, identity };
+async function prepareMaps(options) {
+  const onProgress = options.onProgress || (() => {});
+  const result = await require('./preparation.cjs').prepareGameAssets({
+    ...options,
+    portableIndex: { maps: options.portableIndex },
+    images: false,
+    maps: true,
+    onProgress: value => {
+      if (value.phase !== 'start') onProgress(value);
+    }
+  });
+  if (result.maps) result.maps.releaseCacheLease = result.releaseCacheLease;
+  return result.maps;
+}
+
+module.exports = { prepareMapsPhase, prepareMaps, validTileDescriptor, validateEntry, identity };

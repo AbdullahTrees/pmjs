@@ -301,7 +301,7 @@ async function cachedEntry(directory, key, sourceHash, files) {
   } catch (_) { return null; }
 }
 
-async function prepareAssets({ gameRoot, cacheRoot, recipes, native, onProgress = () => {},
+async function prepareAssetsPhase({ gameRoot, cacheRoot, recipes, native, onProgress = () => {},
   shouldCancel = () => false, logger = console, verifyHashes = false,
   workspaceBytes = 256 * 1024 * 1024,
   pageCodec = 'lz4',
@@ -309,14 +309,8 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes, native, onProgress 
   astc,
   preparationContext = 'live',
   portableIndex = null, portableAssetRoot = null, policyOverrides = null,
-  processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY, session = null }) {
-  if (!session) {
-    const run = await require('./preparation.cjs').prepareGameAssets({ gameRoot, cacheRoot, recipes, native,
-      onProgress: value => { if (value.phase !== 'start') onProgress(value); }, shouldCancel, logger, verifyHashes, workspaceBytes, pageCodec, losslessPrefixes, astc,
-      preparationContext, portableIndex, portableAssetRoot, policyOverrides, processorIdentity, maps: false });
-    if (run.images) run.images.releaseCacheLease = run.releaseCacheLease;
-    return run.images;
-  }
+  processorIdentity = (native && native.assets && native.assets.preparationVersion) || PROCESSOR_IDENTITY, session }) {
+  if (!session) throw new Error('asset preparation phase requires a preparation session');
   cacheRoot = session.root;
   policyOverrides ||= { astc: astc !== undefined, losslessPrefixes: losslessPrefixes !== undefined,
     recipes: recipes !== undefined };
@@ -751,4 +745,18 @@ async function prepareAssets({ gameRoot, cacheRoot, recipes, native, onProgress 
   return result;
 }
 
-module.exports = { astcSettings, validLosslessPrefixes, prepareAssets, validRecipes, validDescriptor, validStorageDecision, automaticRecipe, PROCESSOR_IDENTITY };
+async function prepareAssets(options) {
+  const onProgress = options.onProgress || (() => {});
+  const result = await require('./preparation.cjs').prepareGameAssets({
+    ...options,
+    maps: false,
+    onProgress: value => {
+      if (value.phase !== 'start') onProgress(value);
+    }
+  });
+  if (result.images) result.images.releaseCacheLease = result.releaseCacheLease;
+  return result.images;
+}
+
+module.exports = { astcSettings, validLosslessPrefixes, prepareAssetsPhase, prepareAssets, validRecipes,
+  validDescriptor, validStorageDecision, automaticRecipe, PROCESSOR_IDENTITY };

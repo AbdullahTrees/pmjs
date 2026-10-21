@@ -147,7 +147,7 @@ export async function createBundle({ root, share, game, output, config, manifest
     if (index || includePreparedPortAssets) {
       console.log('[pmjs] Preparing asset index; this may take a few minutes for a large game.');
       const { generateAssetIndex } = require(path.join(share, 'runner/asset-index.cjs'));
-      const { resolveDefaults } = require(path.join(share, 'runner/index.cjs'));
+      const { resolveDefaults } = require(path.join(share, 'runner/config.cjs'));
       const indexConfig = configName && path.join(stage, configName);
       const options = resolveDefaults({ gameRoot: game, config: indexConfig });
       if (!index) options.assetPreparation.enabled = false;
