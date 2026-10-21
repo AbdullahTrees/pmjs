@@ -53,6 +53,23 @@ test('cache shares encoded snapshots, reuses positive entries, validates corrupt
   assert.equal((await prepareMaps(f)).generated,1);assert.equal(f.jobs,3);
 });
 
+test('enabled plugin dependencies are stream-hashed without loading plugin source into JavaScript', async t => {
+  const f = fixture(t), pluginSource = path.join(f.gameRoot, 'js/plugins/LargePlugin.js');
+  fs.mkdirSync(path.dirname(pluginSource), { recursive: true });
+  fs.writeFileSync(pluginSource, 'window.pluginValue = 1;');
+  fs.writeFileSync(path.join(f.gameRoot, 'js/plugins.js'),
+    'var $plugins = [{name:"LargePlugin",status:true,parameters:{}}];');
+  const reads = [], readBytes = f.native.fs.readBytes;
+  f.native.fs.readBytes = logical => { reads.push(logical); return readBytes(logical); };
+  const first = await prepareMaps(f);
+  assert.equal(first.generated, 1);
+  assert.ok(!reads.includes('js/plugins/LargePlugin.js'));
+  fs.writeFileSync(pluginSource, 'window.pluginValue = 2;');
+  const second = await prepareMaps(f);
+  assert.equal(second.generated, 1, 'plugin content remains part of the engine contract');
+  assert.ok(!reads.includes('js/plugins/LargePlugin.js'));
+});
+
 test('ordinary map preparation reuses shared dependency checks; full verification repeats them', async t => {
   const f = fixture(t), sourceIdentity = f.native.assets.sourceIdentity;
   fs.writeFileSync(path.join(f.gameRoot, 'data/Map002.json'), JSON.stringify({ ...f.map, data: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }));

@@ -1249,6 +1249,16 @@ test('block-grid descriptors preserve whole block crops and merged fills within 
     {rect:[128,0,128,128],crop:[0,0,0,0],fill:[255,255,255,0],page:-1,atlas:[0,0,0,0]}
   ]};
   assert.equal(validDescriptor(merged),true);
+  const overlapping={...descriptor,cells:structuredClone(descriptor.cells)};
+  overlapping.cells[1].rect=[...overlapping.cells[0].rect];
+  assert.equal(validDescriptor(overlapping),false,'fixed-grid validation rejects duplicate block coverage');
+  const partialFrameCells=[];
+  for (const frameX of [0,100]) for (const [x,y,w,h] of [[0,0,64,64],[64,0,36,64],[0,64,64,36],[64,64,36,36]])
+    partialFrameCells.push({rect:[frameX+x,y,w,h],crop:[0,0,0,0],fill:[0,0,0,0],page:-1,atlas:[0,0,0,0]});
+  const partialFrames={version:1,width:200,height:100,blockGrid:[64,100,100],pages:[],cells:partialFrameCells};
+  assert.equal(validDescriptor(partialFrames),true,'partial edge blocks remain distinct across authored frames');
+  partialFrameCells[4].rect=[...partialFrameCells[0].rect];
+  assert.equal(validDescriptor(partialFrames),false);
   for (const change of [
     d=>{d.blockGrid=[32,128,128];},
     d=>{d.blockGrid=[64,127,128];},

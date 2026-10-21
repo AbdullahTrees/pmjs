@@ -92,7 +92,17 @@ function gameInputs(native, files) {
     if (native.assets.sourceIdentity(logical) !== capturedIdentity) throw new Error('game input changed while recording '+logical);
     return { bytes, dependency: { logical, file, sourceIdentity: capturedIdentity, hash: checked.hash } };
   }
-  return { read, exists: logical => native.fs.exists(logical),
+  async function dependency(logical) {
+    const file = native.assets.sourcePath(logical);
+    const sourceIdentity = native.assets.sourceIdentity(logical);
+    if (!file || !sourceIdentity) throw new Error('missing game input ' + logical);
+    const checked = await files.inspect(file, 'map-input');
+    const capturedIdentity = native.assets.sourceIdentity(logical);
+    if (native.assets.sourcePath(logical) !== file || capturedIdentity !== sourceIdentity)
+      throw new Error('game input changed while hashing ' + logical);
+    return { logical, file, sourceIdentity: capturedIdentity, hash: checked.hash };
+  }
+  return { read, dependency, exists: logical => native.fs.exists(logical),
     directory: logical => native.fs.readDirectory(logical) || [] };
 }
 async function engineContract(game, mz) {
@@ -105,9 +115,9 @@ async function engineContract(game, mz) {
   vm.runInContext(manifestSource, context, { timeout: 1000 });
   const plugins = [];
   for (const plugin of context.$plugins) if (plugin.status) {
-    const source = game.read('js/plugins/'+plugin.name+'.js');
-    dependencies.push(source.dependency);
-    plugins.push({ name: plugin.name, parameters: plugin.parameters, hash: source.dependency.hash });
+    const dependency = await game.dependency('js/plugins/'+plugin.name+'.js');
+    dependencies.push(dependency);
+    plugins.push({ name: plugin.name, parameters: plugin.parameters, hash: dependency.hash });
   }
   return { Tilemap: engineTilemap(source, mz), dependencies, identity: { engine: engine.dependency.hash, plugins } };
 }

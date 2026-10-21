@@ -242,6 +242,16 @@ function validDescriptor(d) {
       p.storage.width !== p.width || p.storage.height !== p.height))) return false;
   if (new Set(d.pages.map(p => p.path)).size !== d.pages.length) return false;
   let area = 0;
+  let occupiedBlocks;
+  let blocksPerFrameX = 0, blocksPerFrameY = 0, blocksAcross = 0;
+  if (d.blockGrid) {
+    const [, frameWidth, frameHeight] = d.blockGrid;
+    blocksPerFrameX = Math.ceil(frameWidth / 64);
+    blocksPerFrameY = Math.ceil(frameHeight / 64);
+    blocksAcross = blocksPerFrameX * (d.width / frameWidth);
+    const totalBlocks = blocksAcross * blocksPerFrameY * (d.height / frameHeight);
+    occupiedBlocks = new Uint8Array(totalBlocks);
+  }
   for (let i = 0; i < d.cells.length; ++i) {
     const c = d.cells[i];
     if (!c || !rect(c.rect) || !rect(c.crop, false) || !rgba(c.fill) ||
@@ -264,10 +274,28 @@ function validDescriptor(d) {
           (d.halo !== undefined && (c.atlas[0] < d.halo || c.atlas[1] < d.halo ||
             c.atlas[0] + c.atlas[2] + d.halo > page.width || c.atlas[1] + c.atlas[3] + d.halo > page.height))) return false;
     }
-    for (let j = 0; j < i; ++j) {
-      const other = d.cells[j].rect;
-      if (c.rect[0] < other[0] + other[2] && other[0] < c.rect[0] + c.rect[2] &&
-          c.rect[1] < other[1] + other[3] && other[1] < c.rect[1] + c.rect[3]) return false;
+    if (occupiedBlocks) {
+      const [, frameWidth, frameHeight] = d.blockGrid;
+      const [x, y, w, h] = c.rect;
+      const frameX = Math.floor(x / frameWidth), frameY = Math.floor(y / frameHeight);
+      const localX = x % frameWidth, localY = y % frameHeight;
+      const firstBlockX = frameX * blocksPerFrameX + Math.floor(localX / 64);
+      const lastBlockX = frameX * blocksPerFrameX + Math.ceil((localX + w) / 64);
+      const firstBlockY = frameY * blocksPerFrameY + Math.floor(localY / 64);
+      const lastBlockY = frameY * blocksPerFrameY + Math.ceil((localY + h) / 64);
+      for (let blockY = firstBlockY; blockY < lastBlockY; ++blockY) {
+        for (let blockX = firstBlockX; blockX < lastBlockX; ++blockX) {
+          const index = blockY * blocksAcross + blockX;
+          if (occupiedBlocks[index]) return false;
+          occupiedBlocks[index] = 1;
+        }
+      }
+    } else {
+      for (let j = 0; j < i; ++j) {
+        const other = d.cells[j].rect;
+        if (c.rect[0] < other[0] + other[2] && other[0] < c.rect[0] + c.rect[2] &&
+            c.rect[1] < other[1] + other[3] && other[1] < c.rect[1] + c.rect[3]) return false;
+      }
     }
     area += c.rect[2] * c.rect[3];
   }
