@@ -22,9 +22,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
 import runtime_artifact as artifacts
 import portmaster
+from portmaster_metadata import portname_from_title
 
 
 class PortMasterPackage(unittest.TestCase):
+    def test_generated_portname_uses_the_shared_portmaster_rule(self):
+        self.assertEqual(portname_from_title(' A Game: Test! '), 'a_game_test')
+        with self.assertRaisesRegex(ValueError, 'valid PortMaster portname'):
+            portname_from_title('...')
+
     def setUp(self):
         temporary_root = ROOT / '.cache/tests'
         temporary_root.mkdir(parents=True, exist_ok=True)

@@ -64,7 +64,7 @@ test('worker killed before accepting IPC still gets a session file', async () =>
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-const { createOutputLimiter, readWorkerMemory } = require('../runner/supervisor.cjs');
+const { createOutputLimiter, readWorkerMemory, readLargestProcesses } = require('../runner/supervisor.cjs');
 
 test('session files never exceed 2 MiB and preserve startup plus latest crash evidence', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pmjs-log-roll-'));
@@ -100,16 +100,27 @@ test('disk retention is rate limited independently from terminal forwarding', ()
 });
 
 test('supervisor memory sampler bounds values and tolerates unavailable procfs fields', () => {
-  const bytes = { '/proc/321/status': 'Name:\tpmjs\nVmRSS:\t10500 kB\n',
+  const bytes = { '/proc/321/status': 'Name:\tpmjs\nVmRSS:\t10500 kB\nRssAnon:\t8000 kB\n' +
+      'RssFile:\t2000 kB\nRssShmem:\t500 kB\nVmData:\t12000 kB\nVmSwap:\t3 kB\n',
     '/proc/meminfo': 'MemAvailable: 99000 kB\n',
     '/sys/fs/cgroup/memory.max': '1073741824\n',
     '/sys/fs/cgroup/memory.current': '900000000\n' };
-  const reader = { readFileSync: filename => {
+  const reader = { readdirSync: () => ['321'], readFileSync: filename => {
     if (!(filename in bytes)) throw new Error('ENOENT');
     return bytes[filename];
   }};
   const sampled = readWorkerMemory(321, reader);
   assert.equal(sampled.rssBytes, 10500 * 1024);
+  assert.equal(sampled.anonymousRssBytes, 8000 * 1024);
+  assert.equal(sampled.fileRssBytes, 2000 * 1024);
+  assert.equal(sampled.sharedRssBytes, 500 * 1024);
+  assert.equal(sampled.dataVirtualBytes, 12000 * 1024);
+  assert.equal(sampled.swapBytes, 3 * 1024);
+  const largest = readLargestProcesses(reader);
+  assert.equal(largest[0].name, 'pmjs');
+  assert.equal(largest[0].anonymousRssBytes, 8000 * 1024);
+  assert.equal(largest[0].swapBytes, 3 * 1024);
+  assert.equal('dataVirtualBytes' in largest[0], false);
   assert.equal(sampled.headroomBytes, 99000 * 1024);
   assert.equal('cgroupHeadroomBytes' in sampled, false,
     'unresolved worker cgroup values do not fall back to the supervisor cgroup');

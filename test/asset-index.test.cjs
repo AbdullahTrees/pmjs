@@ -3,10 +3,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const test = require('node:test');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
-const { loadAssetIndex } = require('../runner/asset-index.cjs');
+const { loadAssetIndex, offlineFilesystem, assetIndexArtifacts } = require('../runner/asset-index.cjs');
 const { COMPILER_VERSION } = require('../runner/map-demand.cjs');
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -116,6 +117,82 @@ test('LZ4 container versions invalidate image outputs without discarding indepen
   f.index.pageCodec = f.options.assetPreparation.pageCodec = 'png';
   delete f.index.pageCodecVersion;
   assert.equal(f.load().images.length, 1, 'PNG outputs do not depend on the LZ4 container');
+});
+
+test('offline asset lookup follows native VFS case folding and rejects path collisions', () => {
+  const root = temporaryDirectory('offline-vfs-');
+  fs.mkdirSync(path.join(root, 'Img', 'Characters'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'Img', 'Characters', 'Hero.png'), 'hero');
+  fs.mkdirSync(path.join(root, 'LinkedDirectory'));
+  fs.writeFileSync(path.join(root, 'LinkedDirectory', 'hidden.png'), 'hidden');
+  fs.symlinkSync(path.join(root, 'LinkedDirectory'), path.join(root, 'DirectoryAlias'), 'dir');
+  const offline = offlineFilesystem(root, new Map());
+  assert.equal(offline.assets.sourcePath('img/characters/hero.PNG'),
+    path.join(root, 'Img', 'Characters', 'Hero.png'));
+  assert.equal(offline.assets.sourcePath('IMG//characters/./Hero.png'),
+    path.join(root, 'Img', 'Characters', 'Hero.png'));
+  assert.deepEqual(offline.fs.readDirectory('IMG/characters'), ['Hero.png']);
+  assert.equal(offline.assets.sourcePath('../Hero.png'), null);
+  assert.equal(offline.fs.exists('directoryalias'), true);
+  assert.equal(offline.fs.isDirectory('DIRECTORYALIAS'), true);
+  assert.equal(offline.assets.sourcePath('directoryalias/hidden.png'), null,
+    'directory symlinks are indexed without traversing their contents');
+  const outside = temporaryDirectory('offline-vfs-outside-');
+  fs.writeFileSync(path.join(outside, 'Outside.png'), 'outside');
+  fs.symlinkSync(path.join(outside, 'Outside.png'), path.join(root, 'Img', 'Characters', 'Outside.png'));
+  assert.equal(offlineFilesystem(root, new Map()).assets.sourcePath('img/characters/outside.png'), null);
+
+  fs.writeFileSync(path.join(root, 'Img', 'Characters', 'hero.PNG'), 'collision');
+  assert.throws(() => offlineFilesystem(root, new Map()), /case-insensitive path collision/);
+});
+
+test('offline VFS ignores special filesystem entries', { skip: process.platform !== 'linux' }, () => {
+  const root = temporaryDirectory('offline-vfs-special-');
+  execFileSync('mkfifo', [path.join(root, 'blocked.pipe')]);
+  const offline = offlineFilesystem(root, new Map());
+  assert.equal(offline.assets.sourcePath('blocked.pipe'), null);
+  assert.deepEqual(offline.fs.readDirectory('.'), []);
+});
+
+test('offline VFS normalizes derived paths and matches native file precedence and listings', () => {
+  const root = temporaryDirectory('offline-vfs-derived-');
+  const directory = path.join(root, 'Img', 'Pictures');
+  fs.mkdirSync(directory, { recursive: true });
+  const original = path.join(directory, 'Hero.png');
+  fs.writeFileSync(original, 'original');
+  const cache = temporaryDirectory('offline-vfs-derived-cache-');
+  const originalOverride = path.join(cache, 'hero-derived.png');
+  const generated = path.join(cache, 'generated.png');
+  fs.writeFileSync(originalOverride, 'derived');
+  fs.writeFileSync(generated, 'generated');
+
+  const offline = offlineFilesystem(root, new Map([
+    ['IMG/Pictures/HERO.PNG', originalOverride]
+  ]));
+  offline.assets.addDerived('IMG/Pictures/Generated.PNG', generated);
+  assert.equal(offline.assets.sourcePath('img/pictures/hero.png'), original,
+    'an original file takes precedence over a derived file');
+  assert.equal(offline.assets.sourcePath('img/pictures/generated.png'), generated,
+    'mixed-case derived keys normalize on insertion and lookup');
+  assert.deepEqual(offline.fs.readDirectory('img/pictures'), ['Generated.PNG', 'HERO.PNG']);
+});
+
+test('asset index artifact extraction understands schema 3 calculated image outputs', () => {
+  const hash = 'a'.repeat(64);
+  assert.deepEqual(assetIndexArtifacts({ schema: 3, kind: 'pmjs-asset-index', images: [
+    { source: 'img/a.png', calculated: { outputs: [{ path: 'assets/images/a/page.png', hash }] } }
+  ], maps: { entries: [{ outputs: [{ path: 'assets/maps/b/page.png', hash }] }] } }), [
+    { path: 'assets/images/a/page.png', hash }, { path: 'assets/maps/b/page.png', hash }
+  ]);
+});
+
+test('asset index artifact extraction retains schema 1 and 2 support', () => {
+  const hash = 'b'.repeat(64);
+  for (const schema of [1, 2]) {
+    assert.deepEqual(assetIndexArtifacts({ schema, kind: 'pmjs-asset-index',
+      images: [{ outputs: [{ path: `assets/schema-${schema}.png`, hash }] }],
+      maps: { entries: [] } }), [{ path: `assets/schema-${schema}.png`, hash }]);
+  }
 });
 
 

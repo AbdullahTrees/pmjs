@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { discoverAchievements } from './achievement-discovery.mjs';
+import pluginManifest from '../runner/plugin-manifest.cjs';
 
 export function preparationInputs(gameDir, config, manifest, adapters = [], hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')) {
   const candidates = ['js/rpg_core.js', 'js/rpg_managers.js', 'js/rmmz_core.js',
@@ -134,71 +135,16 @@ function detectPixiTilemapPath(gameDir) {
   return null;
 }
 
-function pluginArrayText(source) {
-  const assignment = source.match(/(?:\bvar\s+)?\$plugins\s*=/);
-  if (!assignment) throw new Error('js/plugins.js does not assign $plugins');
-  const start = source.indexOf('[', assignment.index + assignment[0].length);
-  if (start < 0) throw new Error('js/plugins.js does not contain a $plugins array');
-
-  let depth = 0;
-  let quote = null;
-  let escaped = false;
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
-    if (quote !== null) {
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-    if (character === '"') {
-      quote = character;
-    } else if (character === '[') {
-      depth += 1;
-    } else if (character === ']') {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-  throw new Error('js/plugins.js has an unterminated $plugins array');
-}
-
 export function readPluginManifest(gameDir) {
   const file = path.join(gameDir, 'js', 'plugins.js');
   if (!fs.existsSync(file)) {
     throw new Error(`plugin manifest not found: ${file}`);
   }
   const source = fs.readFileSync(file, 'utf8');
-  try {
-    // Generated JavaScript literals can have trailing commas. Normalize only
-    // those outside strings; never execute the manifest to inspect it.
-    const array = pluginArrayText(source);
-    let quoted = false;
-    let escaped = false;
-    let json = '';
-    for (let index = 0; index < array.length; index += 1) {
-      const character = array[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (character === '\\') escaped = true;
-        else if (character === '"') quoted = false;
-      } else if (character === '"') quoted = true;
-      else if (character === ',' && /^\s*[\]}]/.test(array.slice(index + 1))) {
-        const previous = json.trimEnd().slice(-1);
-        if (!['[', '{', ':', ','].includes(previous)) continue;
-      }
-      json += character;
-    }
-    const entries = JSON.parse(json);
-    if (!Array.isArray(entries)) throw new Error('$plugins is not an array');
-    const plugins = entries
-      .filter(entry => entry && typeof entry.name === 'string')
-      .map(entry => ({ name: entry.name, status: entry.status === true }));
-    const enabled = plugins.filter(entry => entry.status).map(entry => entry.name);
-    return { plugins, enabled };
-  } catch (error) {
-    throw new Error(`unsupported generated plugin manifest ${file}: ${error.message}`);
-  }
+  const parsed = pluginManifest.parsePluginManifest(source, file);
+  const plugins = parsed.plugins.filter(entry => entry && typeof entry.name === 'string')
+    .map(entry => ({ name: entry.name, status: entry.status === true }));
+  return { plugins, enabled: plugins.filter(entry => entry.status).map(entry => entry.name) };
 }
 
 export function loadAdapterRegistry(registryPath) {

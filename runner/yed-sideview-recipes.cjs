@@ -1,14 +1,13 @@
 'use strict';
 
-const vm = require('node:vm');
+const { parsePluginManifest } = require('./plugin-manifest.cjs');
 async function yedSideviewFrames(read, logger = console) {
   const frames = new Map();
   try {
     const manifest = await read('js/plugins.js');
     if (manifest === null) return frames;
-    const context = { $plugins: [] };
-    vm.runInNewContext(manifest.toString('utf8'), context, { timeout: 1000 });
-    const plugin = context.$plugins.find(p => p?.status === true && p.name === 'YED_SideviewBattler');
+    const { plugins } = parsePluginManifest(manifest.toString('utf8'));
+    const plugin = plugins.find(p => p?.status === true && p.name === 'YED_SideviewBattler');
     if (!plugin) return frames;
     const parameters = plugin.parameters || {};
     for (const file of ['data/Actors.json', 'data/Enemies.json']) {

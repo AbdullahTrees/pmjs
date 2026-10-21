@@ -5,6 +5,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const vm = require('node:vm');
+const { parsePluginManifest } = require('./plugin-manifest.cjs');
 const { performance } = require('node:perf_hooks');
 const { COMPILER_VERSION, mapContract, geometryEstimate, engineTilemap, compileRpgMap, compileTiledMap } = require('./map-demand.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -107,18 +108,18 @@ function gameInputs(native, files) {
 async function engineContract(game, mz) {
   const engine = game.read('js/'+(mz ? 'rmmz_core.js' : 'rpg_core.js'));
   const source = engine.bytes.toString('utf8'), dependencies = [engine.dependency];
-  const context = { $plugins: [] }; vm.createContext(context);
   const manifest = game.exists('js/plugins.js') ? game.read('js/plugins.js') : null;
-  const manifestSource = manifest ? manifest.bytes.toString('utf8') : 'var $plugins=[];';
   if (manifest) dependencies.push(manifest.dependency);
-  vm.runInContext(manifestSource, context, { timeout: 1000 });
-  const plugins = [];
-  for (const plugin of context.$plugins) if (plugin.status) {
+  const plugins = manifest ? parsePluginManifest(manifest.bytes.toString('utf8')).plugins : [];
+  const pluginIdentities = [];
+  for (const plugin of plugins) {
+    if (!plugin.status) continue;
     const dependency = await game.dependency('js/plugins/'+plugin.name+'.js');
     dependencies.push(dependency);
-    plugins.push({ name: plugin.name, parameters: plugin.parameters, hash: dependency.hash });
+    pluginIdentities.push({ name: plugin.name, parameters: plugin.parameters, hash: dependency.hash });
   }
-  return { Tilemap: engineTilemap(source, mz), dependencies, identity: { engine: engine.dependency.hash, plugins } };
+  return { Tilemap: engineTilemap(source, mz), dependencies,
+    identity: { engine: engine.dependency.hash, plugins: pluginIdentities } };
 }
 async function resolveTiled(game, map) {
   const clone = structuredClone(map), dependencies = [];
@@ -524,4 +525,4 @@ async function prepareMaps(options) {
   return result.maps;
 }
 
-module.exports = { prepareMapsPhase, prepareMaps, validTileDescriptor, validateEntry, identity };
+module.exports = { prepareMapsPhase, prepareMaps, validTileDescriptor, validateEntry, identity, engineContract };

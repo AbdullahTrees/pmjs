@@ -398,6 +398,9 @@ test('a standalone source copy builds without the surrounding workspace', () => 
   const root = temporaryDirectory('pmjs-standalone-');
   const clone = path.join(root, 'runtime');
   for (const directory of ['js', 'profiles']) fs.cpSync(path.join(__dirname, '..', directory), path.join(clone, directory), { recursive: true });
+  fs.mkdirSync(path.join(clone, 'runner'));
+  for (const file of ['plugin-manifest.cjs'])
+    fs.copyFileSync(path.join(__dirname, '../runner', file), path.join(clone, 'runner', file));
   fs.mkdirSync(path.join(clone, 'tools'));
   for (const file of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) fs.copyFileSync(path.join(__dirname, '../tools', file), path.join(clone, 'tools', file));
   const game = writeMvGame(root, { plugins: [{ name: 'YED_Tiled', status: true }] });
@@ -433,6 +436,8 @@ test('explicit adapter files execute in supplied order before engine bootstrap',
     fs.copyFileSync(path.resolve(__dirname, '../tools', name), path.join(root, 'tools', name));
   }
   fs.mkdirSync(path.join(root, 'profiles'));
+  fs.mkdirSync(path.join(root, 'runner'));
+  fs.copyFileSync(path.resolve(__dirname, '../runner/plugin-manifest.cjs'), path.join(root, 'runner/plugin-manifest.cjs'));
   fs.mkdirSync(path.join(root, 'js/pmjs-mv'), { recursive: true });
   fs.writeFileSync(path.join(root, 'profiles/mv.json'),
     JSON.stringify({ modules: ['js/base.js', 'js/pmjs-mv/bootstrap.js'] }));

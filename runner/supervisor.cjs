@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { fork } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
-const { processMappingDetails } = require('./diagnostics.cjs');
+const { processMappingDetails, parseProcessStatus } = require('./diagnostics.cjs');
 
 // All persistent output belongs to this process, not the game event loop.
 // Retain the first 128 KiB and the newest output within each 2 MiB file.
@@ -97,13 +97,8 @@ function readWorkerMemory(pid, reader = fs, cgroupDirectory = null) {
   const snapshot = {};
   try {
     const text = reader.readFileSync('/proc/' + pid + '/status', 'utf8');
-    const fields = { VmRSS: 'rssBytes', RssAnon: 'anonymousRssBytes',
-      RssFile: 'fileRssBytes', RssShmem: 'sharedRssBytes',
-      VmData: 'dataVirtualBytes', VmSwap: 'swapBytes' };
-    for (const match of text.matchAll(/^([^:\s]+):\s+(\d+)\s+kB$/gm)) {
-      const key = fields[match[1]];
-      if (key) snapshot[key] = Number(match[2]) * 1024;
-    }
+    Object.assign(snapshot, parseProcessStatus(text));
+    delete snapshot.name;
   } catch (_) {}
   try {
     const text = reader.readFileSync('/proc/meminfo', 'utf8');
@@ -139,14 +134,8 @@ function readLargestProcesses(reader = fs, limit = 5) {
       if (!/^\d+$/.test(entry)) continue;
       try {
         const text = reader.readFileSync('/proc/' + entry + '/status', 'utf8');
-        const name = /^Name:\s+(.+)$/m.exec(text)?.[1];
-        const item = { pid: Number(entry), name };
-        const fields = { VmRSS: 'rssBytes', RssAnon: 'anonymousRssBytes',
-          RssFile: 'fileRssBytes', RssShmem: 'sharedRssBytes', VmSwap: 'swapBytes' };
-        for (const match of text.matchAll(/^([^:\s]+):\s+(\d+)\s+kB$/gm)) {
-          const key = fields[match[1]];
-          if (key) item[key] = Number(match[2]) * 1024;
-        }
+        const item = { pid: Number(entry), ...parseProcessStatus(text) };
+        delete item.dataVirtualBytes;
         if (item.rssBytes) processes.push(item);
       } catch (_) { /* Processes can exit while /proc is sampled. */ }
     }
@@ -691,4 +680,4 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
 }
 
 module.exports = { runSupervised, openSessionLog, createOutputLimiter, readWorkerMemory,
-  oomKillCount, workerCgroupDirectory, memorySnapshotCause, heartbeatTimeout };
+  readLargestProcesses, oomKillCount, workerCgroupDirectory, memorySnapshotCause, heartbeatTimeout };

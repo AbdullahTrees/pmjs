@@ -110,6 +110,24 @@ test('generated manifests allow trailing commas without changing string values o
   }
 });
 
+test('game inspection ignores malformed records and keeps strict boolean enabled status', async () => {
+  const { readPluginManifest } = await loadInspect();
+  const dir = temporaryDirectory('pmjs-game-plugin-records-');
+  writeGame(dir, { pluginsJs: `var $plugins = [
+    null,
+    7,
+    {"status":true},
+    {"name":"Truthy","status":1},
+    {"name":"Enabled","status":true},
+    {"name":"Commented","status":false} // ignored by the inspector
+  ];` });
+  assert.deepEqual(readPluginManifest(dir), {
+    plugins: [{ name: 'Truthy', status: false }, { name: 'Enabled', status: true },
+      { name: 'Commented', status: false }],
+    enabled: ['Enabled']
+  });
+});
+
 test('Pixi inspection closes a failed read before trying the next candidate', async () => {
   const { detectPixiVersion } = await loadInspect();
   const dir = temporaryDirectory('pmjs-game-pixi-read-');

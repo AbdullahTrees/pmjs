@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { png } = require('./helpers/png.cjs');
 const { spritePacket, drawPacket } = require('./helpers/sparse-palette.cjs');
@@ -159,6 +160,20 @@ const handles = [];
     const pages = lz4Index.images.find(r => r.source === sheet.source).descriptor.pages;
     assert.ok(pages.length && pages.every(p => p.path.endsWith('.pml4') && p.storage.channels === 2));
     assert.equal(lz4Index.pageCodecVersion, native.assets.preparationLz4Version);
+    const bootstrap = path.join(lz4Output, 'bootstrap.js');
+    fs.writeFileSync(bootstrap, '// fixture bootstrap\n');
+    fs.mkdirSync(path.join(lz4Output, 'gamedata'));
+    const sha256 = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    fs.writeFileSync(path.join(lz4Output, 'pmjs.json'), JSON.stringify({
+      schema: 1, kind: 'pmjs-game-bundle', game: 'gamedata', patches: [],
+      bootstrap: 'bootstrap.js', bootstrapSha256: sha256(bootstrap),
+      assetIndex: 'asset-index.json', assetIndexSha256: sha256(path.join(lz4Output, 'asset-index.json')),
+      assets: 'assets', portPreparation: []
+    }));
+    const verifyBundle = 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[2]); ' +
+      'import portmaster; portmaster.checked_bundle(Path(sys.argv[1]))';
+    execFileSync('python3', ['-c', verifyBundle, lz4Output, path.resolve(__dirname, '../tools')],
+      { stdio: 'pipe' });
     const residual = lz4Index.images.find(r => r.source.endsWith('/paletteResidual.png'));
     assert.ok(residual.descriptor.pages.some(page => {
       const outputPage = residual.outputs.find(o => o.path.endsWith('/' + page.path));

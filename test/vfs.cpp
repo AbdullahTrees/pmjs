@@ -154,7 +154,7 @@ int main() try {
   write(mediaRoot / "data/System.json", "key-one");
   write(cache, "plaintext");
   pmjs::Vfs media(mediaRoot);
-  auto entry = pmjs::Vfs::DerivedFile{"img/a.png", "img/a.png_", "data/System.json", cache,
+  auto entry = pmjs::Vfs::DerivedFile{"IMG/A.PNG", "img/a.png_", "data/System.json", cache,
     pmjs::Vfs::fileIdentity(mediaRoot / "img/a.png_"),
     pmjs::Vfs::fileIdentity(mediaRoot / "data/System.json"), {}};
   const auto changedField = [](std::string identity, std::size_t fromEnd) {
@@ -189,8 +189,8 @@ int main() try {
   require(media.readText("IMG/A.PNG") == "plaintext" && media.exists("img/a.png"),
           "validated derived file did not resolve");
   require(media.readText("img/a.png_") == "ciphertext", "derived file replaced original bytes");
-  require(media.readDirectory("img") == std::vector<std::string>{"a.png", "a.png_"},
-          "derived logical path missing from listing");
+  require(media.readDirectory("img") == std::vector<std::string>{"A.PNG", "a.png_"},
+          "case-normalized derived logical path missing from listing");
   entry.fileIdentity = media.derivedIdentity(entry.logical);
   media.installDerivedFiles({entry}, true);
   require(media.readText("img/a.png") == "plaintext", "catalog did not reuse valid derived bytes");

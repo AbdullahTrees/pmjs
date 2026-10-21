@@ -9,6 +9,16 @@ from xml.etree import ElementTree
 PORTNAME = re.compile(r'[a-z0-9][a-z0-9._]*\Z')
 
 
+def portname_from_title(title):
+    """Convert a display title to the PortMaster portname character set."""
+    if not isinstance(title, str):
+        raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
+    portname = re.sub(r'[^a-z0-9._]+', '_', title.lower()).strip('._')
+    if not PORTNAME.fullmatch(portname):
+        raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
+    return portname
+
+
 def _regular(file):
     if file.is_symlink() or not file.is_file():
         raise ValueError(f'Missing or non-regular submission file: {file}')

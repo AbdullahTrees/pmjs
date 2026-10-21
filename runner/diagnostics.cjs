@@ -76,19 +76,25 @@ function hostMemoryDetails(reader = fs) {
     return Object.keys(result).length ? result : null;
   } catch (_) { return null; }
 }
+const PROCESS_STATUS_FIELDS = Object.freeze({
+  RssAnon: 'anonymousRssBytes', RssFile: 'fileRssBytes',
+  VmRSS: 'rssBytes', RssShmem: 'sharedRssBytes', VmData: 'dataVirtualBytes', VmSwap: 'swapBytes'
+});
+function parseProcessStatus(text) {
+  const result = {};
+  const name = /^Name:\s+(.+)$/m.exec(text);
+  if (name) result.name = name[1];
+  for (const match of text.matchAll(/^([^:\s]+):\s+(\d+)\s+kB$/gm)) {
+    const key = PROCESS_STATUS_FIELDS[match[1]];
+    if (key) result[key] = Number(match[2]) * 1024;
+  }
+  return result;
+}
 function processMemoryDetails(pid, reader = fs) {
   if (!Number.isInteger(pid)) return null;
-  const fields = {
-    RssAnon: 'anonymousRssBytes', RssFile: 'fileRssBytes',
-    VmRSS: 'rssBytes', RssShmem: 'sharedRssBytes', VmData: 'dataVirtualBytes', VmSwap: 'swapBytes'
-  };
   try {
     const text = reader.readFileSync('/proc/' + pid + '/status', 'utf8');
-    const result = {};
-    for (const match of text.matchAll(/^([^:\s]+):\s+(\d+)\s+kB$/gm)) {
-      const key = fields[match[1]];
-      if (key) result[key] = Number(match[2]) * 1024;
-    }
+    const { name, ...result } = parseProcessStatus(text);
     return Object.keys(result).length ? result : null;
   } catch (_) { return null; }
 }
@@ -510,4 +516,4 @@ function createDiagnostics({ logger = console, getNative = () => null,
 }
 
 module.exports = { readCgroupFile, numericFile, memAvailable, memoryEvents, memoryPressure,
-  processMappingDetails, memoryState, gameContext, createDiagnostics };
+  parseProcessStatus, processMappingDetails, memoryState, gameContext, createDiagnostics };

@@ -14,33 +14,111 @@ const matchesPrefix = (source, prefix) => source.toLowerCase().startsWith(prefix
 
 function offlineFilesystem(gameRoot, derived) {
   const root = fs.realpathSync(gameRoot);
-  const file = logical => {
-    if (typeof logical !== 'string' || !logical ||
-        !logical.split('/').every(part => part && part !== '.' && part !== '..') ||
-        logical.includes('\\') || logical.includes('\0')) return null;
-    if (derived.has(logical)) return derived.get(logical);
-    const candidate = path.join(root, logical);
-    if (!fs.existsSync(candidate)) return null;
-    const resolved = fs.realpathSync(candidate);
-    return resolved.startsWith(root + path.sep) ? resolved : null;
+  const files = new Map(), directories = new Map();
+  const derivedFiles = new Map();
+  const normalize = logical => {
+    if (typeof logical !== 'string' || logical.includes('\0') || path.posix.isAbsolute(logical)) return null;
+    const normalized = path.posix.normalize(logical);
+    if (normalized === '..' || normalized.startsWith('../')) return null;
+    const parts = normalized.split('/').filter(part => part && part !== '.');
+    if (!parts.length) return null;
+    return parts.map(part => part.replace(/[A-Z]/g, character =>
+      String.fromCharCode(character.charCodeAt(0) + 32))).join('/');
   };
-  const exists = logical => file(logical) !== null;
+  const contained = resolved => {
+    const relative = path.relative(root, resolved);
+    return !relative || relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+  };
+  const index = (target, directory, link = false) => {
+    let resolved = target;
+    if (link) {
+      try { resolved = fs.realpathSync(target); } catch { return; }
+      if (!contained(resolved)) return;
+      try {
+        const status = fs.statSync(resolved);
+        if (!status.isFile() && !status.isDirectory()) return;
+        directory = status.isDirectory();
+      } catch { return; }
+    }
+    const logical = path.relative(root, target).split(path.sep).join('/');
+    const key = normalize(logical);
+    if (!key) return;
+    const inventory = directory ? directories : files;
+    const previous = inventory.get(key);
+    if (previous && previous !== target) {
+      throw new Error('case-insensitive path collision: ' + previous + ' and ' + target);
+    }
+    inventory.set(key, target);
+  };
+  const scan = directory => {
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+    catch (error) { if (directory === root) throw error; return; }
+    for (const entry of entries) {
+      const target = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) index(target, false, true);
+      else if (entry.isFile()) index(target, false);
+      else if (entry.isDirectory()) { index(target, true); scan(target); }
+    }
+  };
+  scan(root);
+  for (const [logical, file] of derived) {
+    const key = normalize(logical);
+    if (!key) continue;
+    if (derivedFiles.has(key)) throw new Error('case-insensitive derived path collision: ' + logical);
+    derivedFiles.set(key, { logical, file });
+  }
+  const resolve = logical => {
+    const key = normalize(logical);
+    if (!key) return null;
+    if (files.has(key)) return files.get(key);
+    if (directories.has(key)) return null;
+    return derivedFiles.get(key)?.file || null;
+  };
+  const directory = logical => {
+    if (!logical || logical === '.') return root;
+    const key = normalize(logical);
+    return key ? directories.get(key) || null : null;
+  };
+  const exists = logical => resolve(logical) !== null || directory(logical) !== null;
   const assets = {
-    sourcePath: logical => exists(logical) ? file(logical) : null,
-    addDerived: (logical, file) => derived.set(logical, file),
+    sourcePath: resolve,
+    addDerived: (logical, file) => {
+      const key = normalize(logical);
+      if (!key) throw new Error('invalid derived logical path');
+      if (derivedFiles.has(key)) throw new Error('case-insensitive derived path collision: ' + logical);
+      derivedFiles.set(key, { logical, file });
+    },
     sourceIdentity: logical => {
-      if (!exists(logical)) return null;
-      const stat = fs.statSync(file(logical));
+      const source = resolve(logical);
+      if (!source) return null;
+      const stat = fs.statSync(source);
       return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
     }
   };
   const game = {
     exists,
-    isDirectory: logical => { try { return fs.statSync(path.join(root, logical)).isDirectory(); } catch { return false; } },
-    readBytes: logical => exists(logical) ? fs.readFileSync(file(logical)) : null,
+    isDirectory: logical => directory(logical) !== null,
+    readBytes: logical => { const source = resolve(logical); return source ? fs.readFileSync(source) : null; },
     readDirectory: logical => {
-      const directory = logical === '.' || !logical ? root : file(logical);
-      return directory && fs.statSync(directory).isDirectory() ? fs.readdirSync(directory) : null;
+      const source = directory(logical);
+      if (!source) return null;
+      const parent = logical && logical !== '.' ? normalize(logical) : '';
+      const entries = new Map();
+      for (const name of fs.readdirSync(source)) {
+        const child = parent ? parent + '/' + name : name;
+        if (resolve(child) !== null || directory(child) !== null) {
+          const key = normalize(child);
+          if (key) entries.set(key, name);
+        }
+      }
+      for (const [key, entry] of derivedFiles) {
+        const slash = key.lastIndexOf('/');
+        const entryParent = slash < 0 ? '' : key.slice(0, slash);
+        if (entryParent === parent && resolve(entry.logical) !== null)
+          entries.set(key, path.posix.basename(entry.logical));
+      }
+      return [...entries.values()].sort();
     }
   };
   return { assets, fs: game };
@@ -248,4 +326,26 @@ function loadAssetIndex(file, native, options) {
   } catch { return null; }
 }
 
-module.exports = { generateAssetIndex, loadAssetIndex, offlineFilesystem };
+function assetIndexArtifacts(index) {
+  if (!index || ![1, 2, 3].includes(index.schema) || index.kind !== 'pmjs-asset-index')
+    throw new Error('Unsupported bundle asset index');
+  if (!Array.isArray(index.images)) throw new Error('Invalid bundle asset index images');
+  const imageOutputs = index.schema === 3
+    ? index.images.map(record => record?.calculated?.outputs)
+    : index.images.map(record => record?.outputs);
+  if (imageOutputs.some(outputs => !Array.isArray(outputs)))
+    throw new Error('Invalid bundle asset index images');
+  const mapIndex = index.maps;
+  if (mapIndex !== null && mapIndex !== undefined &&
+      (!mapIndex || typeof mapIndex !== 'object' || Array.isArray(mapIndex)))
+    throw new Error('Invalid bundle map index');
+  const maps = mapIndex?.entries ?? [];
+  if (!Array.isArray(maps) || maps.some(entry => !entry || !Array.isArray(entry.outputs)))
+    throw new Error('Invalid bundle map entries');
+  const outputs = [...imageOutputs.flat(), ...maps.flatMap(entry => entry.outputs)];
+  if (outputs.some(page => !page || typeof page.path !== 'string' || typeof page.hash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(page.hash))) throw new Error('Invalid generated asset reference');
+  return outputs.map(({ path: file, hash }) => ({ path: file, hash }));
+}
+
+module.exports = { generateAssetIndex, loadAssetIndex, offlineFilesystem, assetIndexArtifacts };

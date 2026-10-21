@@ -1,9 +1,18 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { memoryState, memoryPressure, processMappingDetails, gameContext, createDiagnostics } = require('../runner/diagnostics.cjs');
+const { memoryState, memoryPressure, parseProcessStatus, processMappingDetails, gameContext, createDiagnostics } = require('../runner/diagnostics.cjs');
 
 const MiB = 1024 * 1024;
+
+test('process status memory fields use one byte mapping', () => {
+  assert.deepEqual(parseProcessStatus('Name:\tworker\nVmRSS:\t10 kB\nRssAnon:\t7 kB\n' +
+    'RssFile:\t2 kB\nRssShmem:\t1 kB\nVmData:\t20 kB\nVmSwap:\t3 kB\n'), {
+    name: 'worker', rssBytes: 10 * 1024, anonymousRssBytes: 7 * 1024,
+    fileRssBytes: 2 * 1024, sharedRssBytes: 1 * 1024,
+    dataVirtualBytes: 20 * 1024, swapBytes: 3 * 1024
+  });
+});
 
 test('CPU logs expose sustained background load without asserting a JIT cause', () => {
   let clock = 0, totalUs = 0, mainUs = 0;

@@ -34,7 +34,8 @@ class BuildProvenance(unittest.TestCase):
             (self.root / name).write_text('fixture')
         (self.root / 'bin/pmjs').write_text('#!/bin/sh\nexit 0\n')
         for name in ('build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs', 'game-bundle.mjs', 'pmjs.mjs',
-                     'package-self-test.cjs', 'portmaster.py', 'portmaster_metadata.py', 'linux-arm64/audit-abi.py'):
+                     'package-self-test.cjs', 'portmaster.py', 'portmaster_metadata.py', 'verify-asset-index.cjs',
+                     'linux-arm64/audit-abi.py'):
             (self.root / 'tools' / name).parent.mkdir(parents=True, exist_ok=True)
             (self.root / 'tools' / name).write_text('// fixture\n')
         (self.root / '.gitignore').write_text('build/\ndist/\ndependencies/\n')

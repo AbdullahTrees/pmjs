@@ -18,6 +18,7 @@ install(DIRECTORY js runner profiles DESTINATION share/pmjs
 install(FILES tools/build-js-runtime.mjs tools/game-inspect.mjs tools/achievement-discovery.mjs tools/game-bundle.mjs tools/pmjs.mjs
   tools/package-self-test.cjs DESTINATION share/pmjs/tools)
 install(FILES tools/portmaster.py tools/portmaster_metadata.py tools/runtime_artifact.py
+  tools/verify-asset-index.cjs
   DESTINATION share/pmjs/tools COMPONENT host-tools)
 install(FILES tools/linux-arm64/audit-abi.py DESTINATION share/pmjs/tools/linux-arm64 COMPONENT host-tools)
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION .)

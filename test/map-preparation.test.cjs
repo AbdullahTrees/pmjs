@@ -8,7 +8,7 @@ const { temporaryDirectory } = require('./helpers/temp.cjs');
 const { preparationLocks } = require('./helpers/preparation-lock.cjs');
 const { png } = require('./helpers/png.cjs');
 const { compileRpgMap, compileTiledMap, engineTilemap } = require('../runner/map-demand.cjs');
-const { prepareMaps, validTileDescriptor } = require('../runner/map-preparation.cjs');
+const { prepareMaps, validTileDescriptor, engineContract } = require('../runner/map-preparation.cjs');
 const { prepareGameAssets } = require('../runner/preparation.cjs');
 const { parse } = require('../runner/cli.cjs');
 const { validate } = require('../runner/index.cjs');
@@ -21,6 +21,27 @@ function writeIndex(f, value) {
   state.checksum = crypto.createHash('sha256').update(JSON.stringify(state.data)).digest('hex');
   fs.writeFileSync(file, JSON.stringify(state));
 }
+test('map preparation retains truthy plugin status semantics without executing the manifest', async () => {
+  const manifest = Buffer.from(`var $plugins = [
+    {"name":"Truthy","status":1,"parameters":{"mode":"kept"}},
+    {"name":"Placeholder","status":0,"parameters":{}},
+    {"name":"Boolean","status":true,"parameters":{}}
+  ]; throw new Error("must not execute");`);
+  const dependency = logical => ({ logical, hash: logical });
+  const game = {
+    exists: logical => logical === 'js/plugins.js',
+    read(logical) {
+      if (logical === 'js/rpg_core.js') return { bytes: Buffer.from(core), dependency: dependency(logical) };
+      if (logical === 'js/plugins.js') return { bytes: manifest, dependency: dependency(logical) };
+      throw new Error('unexpected read: ' + logical);
+    },
+    async dependency(logical) { return dependency(logical); }
+  };
+  const result = await engineContract(game, false);
+  assert.deepEqual(result.identity.plugins.map(plugin => plugin.name), ['Truthy', 'Boolean']);
+  assert.deepEqual(result.identity.plugins[0].parameters, { mode: 'kept' });
+});
+
 test('full visual planes, every tile-event page, table halves and all animation phases are demanded',()=>{
   const Tilemap=engineTilemap(core,false),names=['A1','A2','','','','B'];
   const map={width:1,height:1,tilesetId:1,data:[1,2048,0,0,0,0],events:[null,{pages:[{image:{tileId:2816}},{image:{tileId:2}}]}]};
@@ -58,7 +79,7 @@ test('enabled plugin dependencies are stream-hashed without loading plugin sourc
   fs.mkdirSync(path.dirname(pluginSource), { recursive: true });
   fs.writeFileSync(pluginSource, 'window.pluginValue = 1;');
   fs.writeFileSync(path.join(f.gameRoot, 'js/plugins.js'),
-    'var $plugins = [{name:"LargePlugin",status:true,parameters:{}}];');
+    'var $plugins = [{"name":"LargePlugin","status":true,"parameters":{}}];');
   const reads = [], readBytes = f.native.fs.readBytes;
   f.native.fs.readBytes = logical => { reads.push(logical); return readBytes(logical); };
   const first = await prepareMaps(f);

@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 from runtime_artifact import checked_runtime, digest, elf, inventory, static_audit, strip_binary, write_json, source_reference, payload_digest
-from portmaster_metadata import PORTNAME, read_submission, stage_submission
+from portmaster_metadata import portname_from_title, read_submission, stage_submission
 
 
 PORTMASTER_LAUNCHER = '''#!/bin/bash
@@ -212,28 +212,18 @@ def checked_bundle(bundle):
         index_file = bundle / descriptor['assetIndex']
         if digest(index_file) != descriptor.get('assetIndexSha256'):
             raise ValueError('Bundle asset index checksum differs from pmjs.json')
-        index = json.loads(index_file.read_text())
-        if index.get('schema') not in (1, 2, 3) or index.get('kind') != 'pmjs-asset-index':
-            raise ValueError('Unsupported bundle asset index')
-        schema = index.get('schema')
-        images = index.get('images')
-        map_index = index.get('maps')
-        if map_index is not None and not isinstance(map_index, dict):
-            raise ValueError('Invalid bundle map index')
-        maps = (map_index or {}).get('entries', [])
-        if not isinstance(images, list) or not isinstance(maps, list) or not all(
-                isinstance(entry, dict) for entry in images + maps):
-            raise ValueError('Invalid bundle asset index entries')
-        outputs = []
-        for entry in images:
-            calculated = entry.get('calculated') if schema == 3 else entry
-            if not isinstance(calculated, dict) or not isinstance(calculated.get('outputs'), list):
-                raise ValueError('Invalid bundle image index outputs')
-            outputs.extend(calculated['outputs'])
-        for entry in maps:
-            if not isinstance(entry.get('outputs'), list):
-                raise ValueError('Invalid bundle map index outputs')
-            outputs.extend(entry['outputs'])
+        verifier = Path(__file__).with_name('verify-asset-index.cjs')
+        try:
+            result = subprocess.run(['node', verifier, index_file], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as error:
+            message = error.stderr.strip() or 'asset-index validation failed'
+            raise ValueError(message) from error
+        try:
+            outputs = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise ValueError('Invalid asset-index verifier output') from error
+        if not isinstance(outputs, list) or any(not isinstance(page, dict) for page in outputs):
+            raise ValueError('Invalid asset-index verifier output')
         if descriptor.get('assets'):
             if descriptor['assets'] != 'assets':
                 raise ValueError('Unsupported bundle asset directory')
@@ -284,10 +274,7 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         if not isinstance(name, str) or not name.strip() or re.search(r'[/\\\x00-\x1f]', name) or name.strip() in ('.', '..'):
             raise ValueError('Use a nonempty game name without path separators or control characters')
         name = name.strip()
-        identifier = (submission_details['portname'] if submission_details else
-                      re.sub(r'[^a-z0-9._]+', '_', name.lower()).strip('._'))
-        if not PORTNAME.fullmatch(identifier):
-            raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
+        identifier = (submission_details['portname'] if submission_details else portname_from_title(name))
         if submission_details and name + '.sh' != submission_details['launcher']:
             raise ValueError('Submission launcher must match package game name')
         if submission_details and output.name != identifier + '.zip':
