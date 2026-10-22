@@ -110,8 +110,8 @@ int main() {
       auto pendingA = images.capturePrepared(*sourceA), pendingB = images.capturePrepared(*sourceB);
       require(pendingA && pendingB,"worker snapshots unavailable");
       bool validA = false, validB = false;
-      std::thread left([&] { validA = pmjs::ImageStore::validatePrepared(*pendingA); });
-      std::thread right([&] { validB = pmjs::ImageStore::validatePrepared(*pendingB); });
+      std::thread left([&] { validA = images.validatePrepared(*pendingA); });
+      std::thread right([&] { validB = images.validatePrepared(*pendingB); });
       left.join(); right.join();
       require(validA && validB,"concurrent page validation failed");
       auto first = images.installPreparedLoad(*sourceA,std::move(pendingA),false);
@@ -261,6 +261,18 @@ int main() {
       require(region && region->paletteTable != 0, "indexed palette region unavailable");
       require(images.gpuBytes() == std::size_t(pageWidth) * pageHeight + 1024,
         "indexed palette GPU accounting is incorrect");
+      const auto decodes = images.preparedPageDecodes();
+      const auto uploads = images.textureUploadBytes();
+      for (int frame = 0; frame < 8; ++frame) {
+        const auto repeated = images.resolveSpriteRegion(loaded->handle, 0, 0, width, height, false, true, true);
+        require(repeated && repeated->image.texture == region->image.texture &&
+          repeated->paletteTable == region->paletteTable,
+          "repeated indexed palette view changed its backing");
+      }
+      require(images.preparedPageDecodes() == decodes,
+        "repeated indexed palette view decoded an already resident page");
+      require(images.textureUploadBytes() == uploads,
+        "repeated indexed palette view uploaded an already resident page");
       const auto restored = images.readPixelsRegion(loaded->handle, 0, 0, width, height);
       require(restored && restored->rgba == indexed.pixels, "indexed palette pixels changed");
       require(images.release(loaded->handle), "indexed palette release failed");

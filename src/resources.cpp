@@ -542,6 +542,7 @@ struct ImageStore::PreparedBacking {
     std::shared_ptr<ImagePixels> pixels;
     std::shared_ptr<SparsePalettePage> sparse;
     bool sparseChecked = false, sparseFormat = false, sparseDisabled = false;
+    bool indexedFormat = false;
     std::shared_ptr<SharedPreparedPage> shared;
     std::shared_ptr<SharedTexture> sharedTexture, sharedPremultipliedTexture;
     std::uint32_t texture = 0, premultipliedTexture = 0, compactTexture = 0;
@@ -2510,6 +2511,7 @@ bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index)
     backing.pageDecodes->fetch_add(1, std::memory_order_relaxed);
   } else backing.pool->hits.fetch_add(1, std::memory_order_relaxed);
   page.sparseFormat = true;
+  page.indexedFormat = page.sparse->packed;
   page.verifyHash = false;
   page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1, std::memory_order_relaxed);
   return true;
@@ -2618,7 +2620,7 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
   auto& page = backing.pages[index];
   if (view) {
     const bool sparse = page.sparseFormat || preparedSparsePage(backing, index);
-    const bool indexed = sparse && page.sparse && page.sparse->packed;
+    const bool indexed = page.indexedFormat;
     const auto& decision = backing.descriptor.pages[index].storage;
     if (sparse && !indexed && !sparseAllowed) page.sparseDisabled = true;
     bool useSparse = sparse && !indexed && sparseAllowed && !page.sparseDisabled &&
