@@ -332,7 +332,7 @@ int main() {
         const auto path = root / name;
         writePng(path, tile);
         tiles.sources.push_back({path, path, pmjs::ImageStore::openFile(path)->key(), 6, 6,
-          {{{0, 0, 6, 6}, {1, 1, 6, 6}, 0}}});
+          {{{0, 0, 6, 6}, {1, 1, 6, 6}, 0}}, {}});
       }
       require(images.installTileSet(tiles), "grayscale tile set rejected");
       const auto firstTile = images.loadPng(root / "tile-a.png", false, tiles.identity);

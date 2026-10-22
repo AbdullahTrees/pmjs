@@ -1,5 +1,6 @@
 #include "resources.hpp"
 #include "checked_bounds.hpp"
+#include "file_identity.hpp"
 #include "canvas_pixels.hpp"
 
 #include <algorithm>
@@ -114,10 +115,22 @@ std::size_t descriptorBytes(const PreparedTileSet& descriptor) {
   return bytes;
 }
 }
+// FUSE filesystems (exFAT on handhelds) can renumber the inode of an unchanged file during a
+// session. As for prepared images, accept a changed inode only when the content hash matches.
+bool ImageStore::tileIdentityMatches(const std::string& expected, const ImageFileSource& file,
+                                     const std::string& hash) const {
+  if (file.key() == expected) return true;
+  if (!validContentHash(hash) || !inodeOnlyChange(expected, file.key())) return false;
+  const auto verified = file.key() + '\n' + hash;
+  if (verifiedTileFiles_.contains(verified)) return true;
+  if (!fileContentMatches(file.path(), file.key(), hash)) return false;
+  verifiedTileFiles_.insert(verified);
+  return true;
+}
 std::string ImageStore::effectiveTileSet(const ImageFileSource& source, const std::string& identity) const {
   const auto set = tileSets_.find(identity);
   if (set != tileSets_.end()) for (const auto& entry : set->second->descriptor.sources)
-    if (entry.identity == source.key()) return identity;
+    if (tileIdentityMatches(entry.identity, source, entry.sourceHash)) return identity;
   if (set != tileSets_.end()) {
     const auto& catalog = *set->second;
     const auto expected = std::find_if(catalog.descriptor.sources.begin(), catalog.descriptor.sources.end(),
@@ -183,7 +196,7 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
   if (found == tileSets_.end()) return nullptr;
   const auto& descriptor = found->second->descriptor;
   for (std::size_t i = 0; i < descriptor.sources.size(); ++i) {
-    if (descriptor.sources[i].identity != source.key()) {
+    if (!tileIdentityMatches(descriptor.sources[i].identity, source, descriptor.sources[i].sourceHash)) {
       if (descriptor.sources[i].path == source.path()) {
         found->second->reportFailure("source-identity-changed", descriptor.sources[i].identity, source.key());
         preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
@@ -197,7 +210,8 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       prototype->descriptor = descriptor;
       for (std::size_t page = 0; page < descriptor.pages.size(); ++page) {
         auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
-        if (!file || file->key() != found->second->pageIdentities[page]) {
+        const auto& pageHash = page < descriptor.pageHashes.size() ? descriptor.pageHashes[page] : std::string();
+        if (!file || !tileIdentityMatches(found->second->pageIdentities[page], *file, pageHash)) {
           found->second->reportFailure("page-identity-changed", found->second->pageIdentities[page], file ? file->key() : "missing");
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           preparationFailures_->record(identity);
@@ -207,7 +221,8 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
       }
       for (std::size_t entry = 0; entry < descriptor.sources.size(); ++entry) {
         auto file = captureTileFile(descriptor.sources[entry].snapshot);
-        if (!file || file->key() != found->second->snapshotIdentities[entry]) {
+        if (!file || !tileIdentityMatches(found->second->snapshotIdentities[entry], *file,
+                                          descriptor.sources[entry].sourceHash)) {
           found->second->reportFailure("snapshot-identity-changed", found->second->snapshotIdentities[entry], file ? file->key() : "missing");
           preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
           preparationFailures_->record(identity);
