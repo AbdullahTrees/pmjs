@@ -6,14 +6,14 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 
-PORTNAME = re.compile(r'[a-z0-9][a-z0-9._]*\Z')
+PORTNAME = re.compile(r'[a-z0-9]+\Z')
 
 
 def portname_from_title(title):
     """Convert a display title to the PortMaster portname character set."""
     if not isinstance(title, str):
         raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
-    portname = re.sub(r'[^a-z0-9._]+', '_', title.lower()).strip('._')
+    portname = re.sub(r'[^a-z0-9]+', '', title.lower())
     if not PORTNAME.fullmatch(portname):
         raise ValueError('Game name must produce a valid PortMaster portname; specify --name')
     return portname
