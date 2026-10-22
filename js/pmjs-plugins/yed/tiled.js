@@ -11,6 +11,82 @@
     id: animationId, owner: 'plugins/yed/tiled',
     fallback: 'guest animation updates with full tile repaint'
   });
+  var sortId = 'tilemap.yed-keyed-child-sort';
+  PMJS.plugins.registerOptimization('YED_Tiled', {
+    id: sortId, owner: 'plugins/yed/tiled',
+    fallback: 'guest child sort, reading every sort key in every comparison'
+  });
+
+  // MV's _sortChildren sorts the children with YED's comparator, which orders by (z || 0),
+  // (y || 0), (priority || 0) and then spriteId. Each comparison reads up to eight properties,
+  // including PIXI's y accessor, on hundreds of children every frame. Reading the keys once per child
+  // gives every comparison the same result, so Array.prototype.sort produces the same order.
+  // Keys must be data properties, except y, which must be PIXI's DisplayObject accessor.
+  var sortKeys = ['z', 'y', 'priority', 'spriteId'];
+  var plainKeyPrototypes = new WeakMap();
+  var plainKeyChildren = new WeakSet();
+  function displayObjectY() {
+    var descriptor = PIXI.DisplayObject && Object.getOwnPropertyDescriptor(PIXI.DisplayObject.prototype, 'y');
+    return descriptor && descriptor.get;
+  }
+  function findDescriptor(object, key) {
+    for (var target = object; target; target = Object.getPrototypeOf(target)) {
+      var descriptor = Object.getOwnPropertyDescriptor(target, key);
+      if (descriptor) return descriptor;
+    }
+    return null;
+  }
+  function plainKeys(child) {
+    if (plainKeyChildren.has(child)) return true;
+    if (!child || typeof child !== 'object') return false;
+    var proto = Object.getPrototypeOf(child), plain = proto && plainKeyPrototypes.get(proto);
+    if (plain === undefined || plain === null) {
+      var yGetter = displayObjectY();
+      plain = !!proto && sortKeys.every(function(key) {
+        var descriptor = findDescriptor(proto, key);
+        if (key === 'y') return !!descriptor && !!yGetter && descriptor.get === yGetter;
+        return !descriptor || !descriptor.get && !descriptor.set;
+      });
+      if (proto) plainKeyPrototypes.set(proto, plain);
+    }
+    if (!plain) return false;
+    var own = sortKeys.every(function(key) {
+      var descriptor = Object.getOwnPropertyDescriptor(child, key);
+      return !descriptor || !descriptor.get && !descriptor.set;
+    });
+    if (own) plainKeyChildren.add(child);
+    return own;
+  }
+  var keyZ = [], keyY = [], keyPriority = [], keySprite = [], keyOrder = [], keyNodes = [];
+  function compareKeys(a, b) {
+    if (keyZ[a] !== keyZ[b]) {
+      return keyZ[a] - keyZ[b];
+    } else if (keyY[a] !== keyY[b]) {
+      return keyY[a] - keyY[b];
+    } else if (keyPriority[a] !== keyPriority[b]) {
+      return keyPriority[a] - keyPriority[b];
+    } else {
+      return keySprite[a] - keySprite[b];
+    }
+  }
+  function keyedSort(children) {
+    var count = children.length;
+    keyZ.length = keyY.length = keyPriority.length = keySprite.length = keyOrder.length = keyNodes.length = count;
+    for (var index = 0; index < count; index++) {
+      var child = children[index];
+      if (!plainKeys(child)) return false;
+      keyZ[index] = child.z || 0;
+      keyY[index] = child.y || 0;
+      keyPriority[index] = child.priority || 0;
+      keySprite[index] = child.spriteId;
+      keyOrder[index] = index;
+      keyNodes[index] = child;
+    }
+    keyOrder.sort(compareKeys);
+    for (index = 0; index < count; index++) children[index] = keyNodes[keyOrder[index]];
+    keyNodes.length = 0;
+    return true;
+  }
 
   var reviewedMethods = {
     _paintAllTiles: 'e9b49d6deb06b751a5c2d605b252a951bbf3155c5db0ab4a1a2d2fc090ea2aec',
@@ -62,7 +138,7 @@
   }
 
   function rejectActivation(reason, beforeBoot) {
-    [paintingId, animationId].forEach(function(id) {
+    [paintingId, animationId, sortId].forEach(function(id) {
       if (beforeBoot) PMJS.optimizations.refuse(id, reason);
       else PMJS.optimizations.reportFallback(id, reason);
     });
@@ -181,6 +257,16 @@
       }
       prototype._pmjsIndexedPaintLoops = true;
       prototype._pmjsIndexedAnimation = animation;
+    }
+    if (PMJS.optimizations.isEnabled(sortId)) {
+      var guestSort = original._sortChildren, guestCompare = original._compareChildOrder;
+      prototype._sortChildren = effective._sortChildren = function() {
+        if (this._compareChildOrder !== guestCompare || !Array.isArray(this.children) ||
+            !keyedSort(this.children)) {
+          keyNodes.length = 0;
+          return guestSort.apply(this, arguments);
+        }
+      };
     }
     var contract = function(data) {
       if (!names.every(function(name) { return prototype[name] === effective[name]; })) return 'tiled-producer-changed';

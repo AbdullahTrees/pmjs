@@ -33,11 +33,18 @@ test('native preparation accepts retained work once and preserves guest fallback
   assert.equal(context.nativeTileRebuilds, 1);
 });
 
+// PIXI.DisplayObject's y accessor, as the keyed child sort expects it.
+function DisplayObject(y) { this.position = { y }; }
+Object.defineProperty(DisplayObject.prototype, 'y', {
+  get() { return this.position.y; }, set(value) { this.position.y = value; }, configurable: true
+});
+
 function fixture(options = {}) {
   function Guest() { this.calls = []; this.origin = { x: 2, y: 3 }; this._tileWidth = this._tileHeight = 16; }
   Guest.prototype = Object.fromEntries(methodNames.map(name => [name,
     new Function('this.calls.push(' + JSON.stringify(name) + ');')]));
   Guest.prototype.constructor = Guest;
+  Object.assign(Guest.prototype, options.methods || {});
   const original = { ...Guest.prototype };
   Object.setPrototypeOf(Guest.prototype, { updateTransform: original.updateTransform });
   delete Guest.prototype.updateTransform;
@@ -52,7 +59,7 @@ function fixture(options = {}) {
   const warnings = [];
   const context = { console: { ...console, warn(message) { warnings.push(message); } },
     __pmjsBuiltinRequire: require, TiledTilemap: Guest,
-    Spriteset_Map: function() {}, PIXI: { Container: { prototype: {
+    Spriteset_Map: function() {}, PIXI: { DisplayObject, Container: { prototype: {
       updateTransform() { this.calls.push('container'); }
     } } }, PMJS: { maps: {}, yedRetainedTiles: {
       supported(map) { return map.supported !== false; },
@@ -82,6 +89,79 @@ function fixture(options = {}) {
 
 const painting = 'tilemap.yed-indexed-paint-loops';
 const animation = 'tilemap.yed-indexed-animation';
+const sorting = 'tilemap.yed-keyed-child-sort';
+
+// MV 1.6.1 Tilemap.prototype._sortChildren and YED_Tiled's TiledTilemap comparator, verbatim.
+let guestComparisons = 0;
+const sortMethods = {
+  _sortChildren: function() {
+    this.children.sort(this._compareChildOrder.bind(this));
+  },
+  _compareChildOrder: function _compareChildOrder(a, b) {
+    guestComparisons++;
+    if ((a.z || 0) !== (b.z || 0)) {
+      return (a.z || 0) - (b.z || 0);
+    } else if ((a.y || 0) !== (b.y || 0)) {
+      return (a.y || 0) - (b.y || 0);
+    } else if ((a.priority || 0) !== (b.priority || 0)) {
+      return (a.priority || 0) - (b.priority || 0);
+    } else {
+      return a.spriteId - b.spriteId;
+    }
+  }
+};
+
+function sortChild(random, index) {
+  const child = new DisplayObject([0, 5, 5, 12, -3, undefined][Math.floor(random() * 6)]);
+  const z = [0, 1, 1, 3, undefined, '1'][Math.floor(random() * 6)];
+  if (z !== undefined) child.z = z;
+  if (random() < 0.5) child.priority = Math.floor(random() * 3);
+  if (random() < 0.8) child.spriteId = Math.floor(random() * 4);
+  child.label = index;
+  return child;
+}
+
+test('keyed child sort orders children exactly as the guest comparator', () => {
+  const { Guest } = fixture({ methods: sortMethods });
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (let trial = 0; trial < 300; trial++) {
+    const count = 1 + Math.floor(random() * 120);
+    const children = Array.from({ length: count }, (_, index) => sortChild(random, index));
+    const expected = children.slice().sort(sortMethods._compareChildOrder);
+    const map = new Guest();
+    map.children = children;
+    guestComparisons = 0;
+    map._sortChildren();
+    assert.equal(guestComparisons, 0);
+    assert.deepEqual(map.children.map(child => child.label), expected.map(child => child.label));
+  }
+});
+
+test('keyed child sort falls back to the guest sort for accessor keys and replaced comparators', () => {
+  const { Guest } = fixture({ methods: sortMethods });
+  const map = new Guest();
+  const accessor = new DisplayObject(1);
+  Object.defineProperty(accessor, 'z', { get() { return 2; } });
+  map.children = [accessor, new DisplayObject(0)];
+  guestComparisons = 0;
+  map._sortChildren();
+  assert.ok(guestComparisons > 0);
+  assert.deepEqual(map.children.map(child => child.y), [0, 1]);
+  const replaced = new Guest();
+  let custom = 0;
+  replaced._compareChildOrder = function(a, b) { custom++; return b.y - a.y; };
+  replaced.children = [new DisplayObject(0), new DisplayObject(1)];
+  replaced._sortChildren();
+  assert.ok(custom > 0);
+  assert.deepEqual(replaced.children.map(child => child.y), [1, 0]);
+});
+
+test('disabled keyed sort leaves the guest sort untouched', () => {
+  const { Guest, original } = fixture({ methods: sortMethods, disabled: [sorting] });
+  assert.equal(Guest.prototype._sortChildren, original._sortChildren);
+  assert.notEqual(Guest.prototype._paintAllTiles, original._paintAllTiles);
+});
 
 test('reviewed guest producers remain unchanged while retained entry points activate', () => {
   const { Guest, original, operations } = fixture();
@@ -97,7 +177,7 @@ test('reviewed guest producers remain unchanged while retained entry points acti
 });
 
 test('disabled painting leaves guest rendering methods untouched and refuses dependent animation', () => {
-  const { context, Guest, original } = fixture({ disabled: [painting] });
+  const { context, Guest, original } = fixture({ disabled: [painting, sorting] });
   for (const name of methodNames) assert.equal(Guest.prototype[name], original[name]);
   assert.equal(context.PMJS.optimizations.reason(animation), 'refused: requires '+painting);
 });
