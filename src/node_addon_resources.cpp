@@ -752,6 +752,12 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
             known.width = asInt32(env, property(env, storage, "width"));
             known.height = asInt32(env, property(env, storage, "height"));
             known.channels.channels = asInt32(env, property(env, storage, "channels"));
+            if (hasProperty(env, storage, "paletteBits")) {
+              const auto bits = asNumber(env, property(env, storage, "paletteBits"));
+              if (bits != 0 && bits != 8 && bits != 16)
+                throw std::runtime_error("invalid prepared palette width");
+              known.paletteBits = static_cast<int>(bits);
+            }
             const auto source = preparedArray<4>(env, storage, "source");
             const auto swizzle = preparedArray<4>(env, storage, "swizzle");
             bool valid = known.width == descriptor.pages.back().width && known.height == descriptor.pages.back().height &&

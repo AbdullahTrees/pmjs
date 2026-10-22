@@ -51,6 +51,34 @@ test('full visual planes, every tile-event page, table halves and all animation 
   assert.deepEqual(result.sources.find(s=>s.source.endsWith('B.png')).rectangles,[[0,0,48,48]]);
   assert.equal(map.events[1].pages.length,2);
 });
+test('rectangle reuse preserves duplicate sheets, producer phases and sheet-name changes', () => {
+  const tileset = { tilesetNames: ['A', 'A'], flags: [] }, phases = [];
+  const Tilemap = function() {};
+  Tilemap.isAutotile = Tilemap.isTileA2 = () => false;
+  Tilemap.prototype._drawNormalTile = function(target) {
+    phases.push(this.animationFrame);
+    target.bltImage(this.bitmaps[0], 0, 0, 48, 48);
+    target.bltImage(this.bitmaps[1], 0, 0, 48, 48);
+    tileset.tilesetNames[1] = this.animationFrame % 2 ? 'A' : 'B';
+    target.bltImage(this.bitmaps[1], 48, 0, 48, 48);
+  };
+  const map = { width: 1, height: 1, tilesetId: 1, data: [1, 0, 0, 0, 0, 0], events: [] };
+  const result = compileRpgMap({ map, tileset, Tilemap, mz: false });
+  assert.deepEqual(phases, Array.from({ length: 12 }, (_, index) => index));
+  assert.deepEqual(result.sources, [
+    { source: 'img/tilesets/A.png', rectangles: [[0, 0, 48, 48], [48, 0, 48, 48]] },
+    { source: 'img/tilesets/B.png', rectangles: [[48, 0, 48, 48], [0, 0, 48, 48]] }
+  ]);
+  assert.deepEqual(result.geometryDensity, [3]);
+  Tilemap.prototype._drawNormalTile = function(target) {
+    tileset.tilesetNames[0] = '';
+    target.bltImage(this.bitmaps[0], 0, 0, 48, 48);
+  };
+  assert.throws(() => compileRpgMap({ map, tileset, Tilemap, mz: false }), /missing configured sheet/);
+  tileset.tilesetNames[0] = 'A';
+  Tilemap.prototype._drawNormalTile = target => target.bltImage({ index: 0 }, 0.5, 0, 48, 48);
+  assert.throws(() => compileRpgMap({ map, tileset, Tilemap, mz: false }), /noninteger tile rectangle/);
+});
 test('Tiled recursively covers chunks, flipped GIDs, objects, spacing and arbitrary animation durations without editing them',()=>{
   const map={tilewidth:32,tileheight:32,tilesets:[{firstgid:1,image:'B.png',columns:4,tilewidth:32,tileheight:32,spacing:2,margin:1,
     tiles:[{id:0,animation:[{tileid:2,duration:137},{tileid:3,duration:29}]}]}],layers:[{layers:[{chunks:[{data:[0x80000001]}]}]},{objects:[{gid:2,width:32,height:32}]}]};

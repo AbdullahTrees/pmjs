@@ -37,13 +37,20 @@ function compileRpgMap({ map, tileset, Tilemap, mz, tileWidth = 48, tileHeight =
     if (page.image && page.image.tileId > 0) ids.add(page.image.tileId);
   const demands = new Map(), counts = new Map();
   let rectanglesThisPhase = 0;
+  let currentSource, currentRectangles;
   function record(index, x, y, width, height) {
     rectanglesThisPhase++;
     if (!tileset.tilesetNames[index]) throw new Error('missing configured sheet for tile demand '+index);
-    if (![x, y, width, height].every(Number.isSafeInteger)) throw new Error('noninteger tile rectangle');
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) ||
+        !Number.isSafeInteger(width) || !Number.isSafeInteger(height)) throw new Error('noninteger tile rectangle');
     const source = 'img/tilesets/'+tileset.tilesetNames[index]+'.png';
-    if (!demands.has(source)) demands.set(source, new Map());
-    const rect = [x, y, width, height]; demands.get(source).set(rect.join(','), rect);
+    if (source !== currentSource) {
+      currentSource = source;
+      currentRectangles = demands.get(source);
+      if (!currentRectangles) demands.set(source, currentRectangles = new Map());
+    }
+    const key = x+','+y+','+width+','+height;
+    if (!currentRectangles.has(key)) currentRectangles.set(key, [x, y, width, height]);
   }
   const tilemap = Object.create(Tilemap.prototype);
   tilemap._tileWidth = tileWidth; tilemap._tileHeight = tileHeight;
