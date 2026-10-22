@@ -2627,6 +2627,14 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
       (!decision || decision->paletteBits == 16);
     if (!page.paletteChecked || (page.palette && bool(page.palette->blocks) != useSparse)) {
       if (sparse && !page.sparse && !preparedSparsePage(backing, index)) return std::nullopt;
+      if (!decision && sparse && page.sparse->packed) {
+        const auto& colors = page.sparse->colors;
+        const ImagePixels paletteColors{static_cast<int>(colors.size() / 4), 1, colors};
+        if (imageStorage(paletteColors).channels == 1) {
+          page.paletteChecked = true;
+          return std::nullopt;
+        }
+      }
       const auto* pixels = sparse ? nullptr : preparedPixels(backing, index);
       if (!sparse && !pixels) return std::nullopt;
       if (!decision || decision->paletteBits) {

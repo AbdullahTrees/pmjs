@@ -225,11 +225,11 @@ int main() {
       require(images.release(second->handle),"last sprite-page owner release failed"); images.update();
       require(images.gpuBytes() == 0 && images.cpuBytes() == 0,"sprite-page resources survived their last owner");
     }
-    {
+    for (const bool grayscale : {false, true}) {
       constexpr int width = 64, height = 64, pageWidth = 70, pageHeight = 70;
       Fixture indexed;
-      indexed.source = root / "indexed.png";
-      indexed.directory = root / "indexed";
+      indexed.source = root / (grayscale ? "indexed-gray.png" : "indexed.png");
+      indexed.directory = root / (grayscale ? "indexed-gray" : "indexed");
       std::filesystem::create_directory(indexed.directory);
       auto& d = indexed.descriptor;
       d.width = width; d.height = height; d.halo = 3;
@@ -237,9 +237,9 @@ int main() {
       d.cells = {{{0, 0, width, height}, {0, 0, width, height}, {3, 3, width, height}, {0, 0, 0, 0}, 0}};
       indexed.pixels.resize(width * height * 4);
       std::vector<std::uint8_t> page(pageWidth * pageHeight * 4);
-      const auto color = [](int x, int y) {
+      const auto color = [grayscale](int x, int y) {
         const auto index = (x * 7 + y * 11) % 256;
-        return std::array<std::uint8_t, 4>{std::uint8_t(index), std::uint8_t(index),
+        return std::array<std::uint8_t, 4>{std::uint8_t(index), std::uint8_t(grayscale ? index : 255-index),
           std::uint8_t(index), 255};
       };
       for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
@@ -258,14 +258,21 @@ int main() {
       const auto loaded = images.loadPng(indexed.source);
       require(loaded.has_value(), "indexed prepared page failed to load");
       const auto region = images.resolveSpriteRegion(loaded->handle, 0, 0, width, height, false, true, true);
-      require(region && region->paletteTable != 0, "indexed palette region unavailable");
-      require(images.gpuBytes() == std::size_t(pageWidth) * pageHeight + 1024,
-        "indexed palette GPU accounting is incorrect");
+      if (grayscale) {
+        require(!region, "opaque grayscale page selected palette sampling");
+        const auto ordinary = images.lookup(loaded->handle);
+        require(ordinary && images.gpuBytes() == std::size_t(width) * height,
+          "opaque grayscale fallback did not retain single-channel storage");
+      } else {
+        require(region && region->paletteTable != 0, "indexed palette region unavailable");
+        require(images.gpuBytes() == std::size_t(pageWidth) * pageHeight + 1024,
+          "indexed palette GPU accounting is incorrect");
+      }
       const auto decodes = images.preparedPageDecodes();
       const auto uploads = images.textureUploadBytes();
       for (int frame = 0; frame < 8; ++frame) {
         const auto repeated = images.resolveSpriteRegion(loaded->handle, 0, 0, width, height, false, true, true);
-        require(repeated && repeated->image.texture == region->image.texture &&
+        require(grayscale ? !repeated : repeated && repeated->image.texture == region->image.texture &&
           repeated->paletteTable == region->paletteTable,
           "repeated indexed palette view changed its backing");
       }
