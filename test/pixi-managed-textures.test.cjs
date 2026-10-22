@@ -2,11 +2,9 @@
 
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const fs = require('node:fs');
-const path = require('node:path');
 const test = require('node:test');
-const vm = require('node:vm');
 const { makeHarness } = require('./helpers/scene-encoder-harness.cjs');
+const { runModule } = require('./helpers/runtime-context.cjs');
 
 function createRenderers(count = 1, configure) {
   const { sandbox: context } = makeHarness();
@@ -23,8 +21,7 @@ function createRenderers(count = 1, configure) {
   context.NativeHost.render.setScreenRenderSize = () => {};
   context.NativeHost.render.setRenderTargetSize = () => {};
   for (const name of ['renderer-managers', 'renderer-facade']) {
-    const filename = path.resolve(__dirname, '../js/pmjs-pixi4', name + '.js');
-    vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
+    runModule(context, 'js/pmjs-pixi4/' + name + '.js');
   }
   if (configure) configure(context);
   return Array.from({ length: count }, () => context.createNativePixiRenderer({

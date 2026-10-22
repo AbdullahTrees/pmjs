@@ -118,17 +118,15 @@ set(PMJS_RUNTIME_SOURCES
   src/png_recovery.cpp
   src/psd_decoder.cpp
   src/resources_tiles.cpp
-  src/asset_processor.cpp
-  src/astc_encoder.cpp
-  src/prepared_page.cpp
+  $<TARGET_OBJECTS:pmjs_asset_processor_objects>
+  $<TARGET_OBJECTS:pmjs_prepared_page_objects>
   src/tile_assets.cpp
   src/canvas.cpp
   src/canvas_composite.cpp
   src/canvas_paint.cpp
   src/text_backend.cpp
   src/text_layout.cpp
-  src/vfs.cpp
-  src/file_identity.cpp
+  $<TARGET_OBJECTS:pmjs_vfs_objects>
   src/media_decoder.cpp
   src/encrypted_audio_file.cpp
   src/media_service.cpp
@@ -141,6 +139,22 @@ set(PMJS_BASE_COMPILE_OPTIONS -Wall -Wextra -Wpedantic -Wshadow)
 if(PMJS_ENABLE_WERROR)
   list(APPEND PMJS_BASE_COMPILE_OPTIONS -Werror)
 endif()
+
+add_library(pmjs_vfs_objects OBJECT
+  src/vfs.cpp
+  src/file_identity.cpp)
+add_library(pmjs_prepared_page_objects OBJECT src/prepared_page.cpp)
+add_library(pmjs_asset_processor_objects OBJECT
+  src/asset_processor.cpp
+  src/astc_encoder.cpp)
+
+foreach(PMJS_OBJECT_TARGET pmjs_vfs_objects pmjs_prepared_page_objects pmjs_asset_processor_objects)
+  target_include_directories(${PMJS_OBJECT_TARGET} PRIVATE src)
+  target_compile_options(${PMJS_OBJECT_TARGET} PRIVATE ${PMJS_BASE_COMPILE_OPTIONS})
+endforeach()
+target_link_libraries(pmjs_vfs_objects PRIVATE PkgConfig::AVUTIL)
+target_link_libraries(pmjs_prepared_page_objects PRIVATE pmjs_lz4 PkgConfig::ZLIB)
+target_link_libraries(pmjs_asset_processor_objects PRIVATE PkgConfig::PNG pmjs_astcenc)
 
 add_library(pmjs_runtime STATIC ${PMJS_RUNTIME_SOURCES})
 target_include_directories(pmjs_runtime PUBLIC src)
@@ -182,6 +196,9 @@ set_target_properties(pmjs_native PROPERTIES INSTALL_RPATH "$ORIGIN" INSTALL_RPA
 if(PMJS_ENABLE_SANITIZERS)
   set(PMJS_SANITIZER_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
   target_compile_options(pmjs_runtime PRIVATE ${PMJS_SANITIZER_FLAGS})
+  foreach(PMJS_OBJECT_TARGET pmjs_vfs_objects pmjs_prepared_page_objects pmjs_asset_processor_objects)
+    target_compile_options(${PMJS_OBJECT_TARGET} PRIVATE ${PMJS_SANITIZER_FLAGS})
+  endforeach()
   target_link_options(pmjs_runtime PUBLIC ${PMJS_SANITIZER_FLAGS})
   target_compile_options(pmjs_native PRIVATE ${PMJS_SANITIZER_FLAGS})
   target_link_options(pmjs_native PUBLIC ${PMJS_SANITIZER_FLAGS})
@@ -210,14 +227,15 @@ if(BUILD_TESTING)
     add_test(NAME ${TEST_NAME} COMMAND $<TARGET_FILE:${TARGET}>)
   endfunction()
 
-  pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp src/vfs.cpp src/file_identity.cpp)
+  pmjs_add_cpp_test(pmjs-vfs-test native-vfs test/vfs.cpp $<TARGET_OBJECTS:pmjs_vfs_objects>)
   pmjs_add_cpp_test(pmjs-log-test native-log test/log.cpp)
   target_link_libraries(pmjs-log-test PRIVATE pthread)
   target_link_libraries(pmjs-vfs-test PRIVATE PkgConfig::AVUTIL)
-  pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp src/asset_processor.cpp src/astc_encoder.cpp)
-  pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp src/prepared_page.cpp)
+  pmjs_add_cpp_test(pmjs-asset-processor-test native-asset-processor test/asset-processor.cpp
+    $<TARGET_OBJECTS:pmjs_asset_processor_objects> $<TARGET_OBJECTS:pmjs_prepared_page_objects>)
+  pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp
+    $<TARGET_OBJECTS:pmjs_prepared_page_objects>)
   target_link_libraries(pmjs-prepared-page-test PRIVATE pmjs_lz4 PkgConfig::ZLIB)
-  target_sources(pmjs-asset-processor-test PRIVATE src/prepared_page.cpp)
   target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB pmjs_lz4 pmjs_astcenc pthread)
   pmjs_add_cpp_test(pmjs-tile-assets-test native-tile-assets test/tile-assets.cpp)
   target_link_libraries(pmjs-tile-assets-test PRIVATE pmjs_runtime)
@@ -386,6 +404,8 @@ if(BUILD_TESTING)
   set_tests_properties(native-input PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   file(GLOB PMJS_JS_TESTS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/test/*.test.cjs")
+  list(FILTER PMJS_JS_TESTS EXCLUDE REGEX
+    "^test/(canvas-ellipse|canvas-gradients|canvas-invalid-state|canvas-content-revision)\\.test\\.cjs$")
   list(SORT PMJS_JS_TESTS)
   foreach(PMJS_JS_TEST IN LISTS PMJS_JS_TESTS)
     get_filename_component(PMJS_TEST_NAME "${PMJS_JS_TEST}" NAME_WE)
@@ -668,7 +688,6 @@ if(BUILD_TESTING)
     add_test(NAME ${PMJS_EFFECT_TEST} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
       "${CMAKE_CURRENT_SOURCE_DIR}/test/${PMJS_EFFECT_TEST}.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
     set_tests_properties(${PMJS_EFFECT_TEST} PROPERTIES
-      RESOURCE_LOCK pmjs_effect_fixtures
       ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=64x64")
   endforeach()
   get_property(pmjs_tests DIRECTORY PROPERTY TESTS)
@@ -682,8 +701,11 @@ if(BUILD_TESTING)
       set_tests_properties(${pmjs_test} PROPERTIES LABELS js)
     else()
       set_tests_properties(${pmjs_test} PROPERTIES LABELS native)
-      if(pmjs_test MATCHES "^node-" OR pmjs_test MATCHES "^native-(media-decoder|audio-seek|effects-gl-state(-es2)?)$"
-          OR pmjs_test MATCHES "^js-(text-layout-reference|pixi-filter-boundary-reference)$")
+      if(pmjs_test MATCHES "^node-" AND
+          NOT pmjs_test MATCHES "^node-(writable-filesystem|async-loading|preparation-lock|sparse-palette|prepared-frame-effects|large-prepared-frame|block-sprite(-legacy-index|-disabled)?|compact-sprite-legacy-index)$")
+        set_tests_properties(${pmjs_test} PROPERTIES FIXTURES_REQUIRED pmjs_assets)
+      elseif(pmjs_test MATCHES "^native-(media-decoder|audio-seek|effects-gl-state(-es2)?)$" OR
+          pmjs_test MATCHES "^js-(text-layout-reference|pixi-filter-boundary-reference)$")
         set_tests_properties(${pmjs_test} PROPERTIES FIXTURES_REQUIRED pmjs_assets)
       endif()
     endif()

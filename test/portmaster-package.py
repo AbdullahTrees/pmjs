@@ -55,7 +55,7 @@ class PortMasterPackage(unittest.TestCase):
         for directory in ('js', 'runner', 'profiles'):
             shutil.copytree(ROOT / directory, share / directory)
         (share / 'tools').mkdir()
-        for file in ('build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs', 'game-bundle.mjs',
+        for file in ('build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs', 'game-bundle.mjs',
                      'pmjs.mjs', 'package-self-test.cjs'):
             shutil.copy2(ROOT / 'tools' / file, share / 'tools' / file)
         (share / 'notices').mkdir()

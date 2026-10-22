@@ -106,20 +106,6 @@ test('zero scale does not conceal a reached unsupported render hook', () => {
   assert.equal(h.submitted.length, 0);
 });
 
-test('ordinary rendering ignores late instance and prototype public filter accessors', () => {
-  const h = makeHarness(), c = h.sandbox, node = h.sprite();
-  c.submitNativeScene(node);
-  let reads = 0;
-  Object.defineProperty(node, 'filters', { configurable: true, get() { reads++; return []; } });
-  c.submitNativeScene(node);
-  assert.equal(reads, 0);
-  delete node.filters;
-  const before = reads;
-  Object.defineProperty(c.PIXI.Sprite.prototype, 'filters', { get() { reads++; return []; } });
-  c.submitNativeScene(node);
-  assert.equal(reads, before);
-});
-
 test('custom filter frames use the active target size and preserve transformed-target fitting semantics', () => {
   const h = filterFixture(), c = h.sandbox;
   c.nativeSceneRenderer = { screen: { width: 32, height: 32 }, _activeRenderTarget: {
@@ -130,17 +116,6 @@ test('custom filter frames use the active target size and preserve transformed-t
   c.nativeSceneRenderer._activeRenderTarget.transform = { a: 1, d: 1 };
   c.nativeRecordCustomFilter(h.filter, node);
   assert.deepEqual(Array.from(h.plans[1].frame), [-5, -7, 100, 80]);
-});
-
-test('segmented ordinary rendering ignores public filter accessors', () => {
-  const h = makeHarness(), c = h.sandbox, root = new c.PIXI.Container();
-  const reads = [];
-  for (let i = 0; i < 8; i++) {
-    const child = root.addChild(h.sprite());
-    Object.defineProperty(child, 'filters', { get() { reads.push(i); return []; } });
-  }
-  c.submitNativeScene(root);
-  assert.deepEqual(reads, []);
 });
 
 test('resource cleanup visits cycles and shared descendants once without changing release order', () => {

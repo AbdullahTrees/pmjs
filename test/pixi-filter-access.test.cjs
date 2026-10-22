@@ -14,6 +14,8 @@ for (const segmented of [false, true]) {
     c.PMJS.optimizations.isEnabled = id => id !== 'scene.plain-sprite-segment' || segmented;
     const root = new c.PIXI.Container();
     for (let i = 0; i < 8; i++) root.addChild(h.sprite());
+    c.submitNativeScene(root);
+    assert.equal(filterBegins(h.submitted.at(-1)), 0, 'warm traversal sees the plain tree');
     const node = root.children[0];
     const filter = new c.PIXI.filters.BlurFilter(4, 2);
     let reads = 0;
@@ -30,6 +32,19 @@ for (const segmented of [false, true]) {
     c.submitNativeScene(root);
     assert.equal(filterBegins(h.submitted.at(-1)), 0);
     assert.equal(reads, 0);
+  });
+
+  test(`segmented traversal ignores public filter accessors on every child=${segmented}`, () => {
+    const h = makeHarness(), c = h.sandbox, root = new c.PIXI.Container();
+    c.PMJS.optimizations.isEnabled = id => id !== 'scene.plain-sprite-segment' || segmented;
+    const reads = [];
+    for (let i = 0; i < 8; i++) {
+      const child = root.addChild(h.sprite());
+      Object.defineProperty(child, 'filters', { get() { reads.push(i); return []; } });
+    }
+    c.submitNativeScene(root);
+    assert.deepEqual(reads, []);
+    assert.equal(h.submitted.length, 1);
   });
 }
 

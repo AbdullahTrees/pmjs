@@ -33,7 +33,7 @@ class BuildProvenance(unittest.TestCase):
                      'third_party/lz4.LICENSE', 'tools/lz4.lock.json'):
             (self.root / name).write_text('fixture')
         (self.root / 'bin/pmjs').write_text('#!/bin/sh\nexit 0\n')
-        for name in ('build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs', 'game-bundle.mjs', 'pmjs.mjs',
+        for name in ('build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs', 'game-bundle.mjs', 'pmjs.mjs',
                      'package-self-test.cjs', 'portmaster.py', 'portmaster_metadata.py', 'verify-asset-index.cjs',
                      'linux-arm64/audit-abi.py'):
             (self.root / 'tools' / name).parent.mkdir(parents=True, exist_ok=True)

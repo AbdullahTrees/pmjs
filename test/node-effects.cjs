@@ -1,20 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
 const native = require(path.resolve(process.argv[2]));
-require('./effect-fixtures.cjs').writeEffectFixtures(path.resolve(process.argv[3]));
-const effectRoot = path.join(path.resolve(process.argv[3]), 'effects');
-const truncated = Buffer.alloc(18);
-truncated[2] = 2; truncated[12] = 1; truncated[14] = 1; truncated[16] = 32;
-fs.writeFileSync(path.join(effectRoot, 'Truncat.tga'), truncated);
-const truncatedEffect = fs.readFileSync(path.join(effectRoot, 'InvalidTexture.efkefc'));
-const texturePath = Buffer.from('Invalid.png', 'utf16le');
-const textureOffset = truncatedEffect.indexOf(texturePath);
-assert.ok(textureOffset >= 0);
-Buffer.from('Truncat.tga', 'utf16le').copy(truncatedEffect, textureOffset);
-fs.writeFileSync(path.join(effectRoot, 'TruncatedTexture.efkefc'), truncatedEffect);
 native.initialize({ gameRoot: path.resolve(process.argv[3]), assetRoot: '', width: 64, height: 64,
   windowTitle: 'MZ particle contract' });
 const fx = native.effects;

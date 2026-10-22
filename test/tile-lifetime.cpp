@@ -90,7 +90,7 @@ int main() try {
       !images.hasCpuPixels(image->handle), "covered read unnecessarily decoded ordinary source");
     auto source = pmjs::ImageStore::openFile(root/"source.png");
     auto pending = images.capturePrepared(*source, "set-0");
-    require(pending && pmjs::ImageStore::validatePrepared(*pending, true), "worker snapshot validation failed");
+    require(pending && images.validatePrepared(*pending, true), "worker snapshot validation failed");
     require(images.tileMetadataBytes() == catalogBytes+prototypeBytes,
       "pending shared load duplicated backing metadata");
     descriptor.identity = "set-0";

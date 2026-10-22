@@ -1,9 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const test = require('node:test');
 const vm = require('node:vm');
+const { runModule } = require('./helpers/runtime-context.cjs');
 
 function fixture(settings = {}) {
   class CanvasElement {
@@ -18,8 +18,8 @@ function fixture(settings = {}) {
       this._managedTextures.splice(this._managedTextures.indexOf(texture), 1);
     }
   };
-  const context = { CanvasElement, PIXI: { settings, GC_MODES: { AUTO: 0, MANUAL: 1 } } };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../js/pmjs-pixi4/renderer-managers.js'), 'utf8'), context);
+  const context = vm.createContext({ CanvasElement, PIXI: { settings, GC_MODES: { AUTO: 0, MANUAL: 1 } } });
+  runModule(context, 'js/pmjs-pixi4/renderer-managers.js');
   const gc = new context.NativeTextureGarbageCollector({ textureManager: manager });
   function add(source = new CanvasElement()) {
     const texture = { source, touched: gc.count, destroy() { throw new Error('GC must not destroy game textures'); } };

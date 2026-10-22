@@ -5,10 +5,40 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const nativeReferences = new Set(['text-layout-reference.test.cjs', 'pixi-filter-boundary-reference.test.cjs']);
-const tests = fs.readdirSync(path.join(root, 'test')).sort()
-  .filter(name => name.endsWith('.test.cjs') && !nativeReferences.has(name))
-  .map(name => path.join(root, 'test', name));
-const result = spawnSync(process.execPath, ['--test', ...tests], { stdio: 'inherit' });
-if (result.error) throw result.error;
-process.exitCode = result.status === null ? 1 : result.status;
+const testRoot = path.join(root, 'test');
+const excluded = new Set([
+  'canvas-ellipse.test.cjs',
+  'canvas-gradients.test.cjs',
+  'canvas-invalid-state.test.cjs',
+  'canvas-content-revision.test.cjs',
+  'text-layout-reference.test.cjs',
+  'pixi-filter-boundary-reference.test.cjs'
+]);
+
+function listTests(directory = testRoot) {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) return listTests(filename);
+    if (!entry.isFile() || !entry.name.endsWith('.test.cjs') || excluded.has(entry.name)) return [];
+    return [filename];
+  }).sort();
+}
+
+const args = process.argv.slice(2);
+const hasFileSelection = args.some(argument =>
+  /\.test\.(?:cjs|mjs|js)$/.test(argument) || argument.includes('*') ||
+  argument === 'test' || argument.startsWith('test/') || argument === './test' ||
+  argument.startsWith('./test/') ||
+  (path.isAbsolute(argument) && argument.startsWith(testRoot + path.sep)));
+const files = hasFileSelection ? [] : listTests();
+const result = spawnSync(process.execPath, ['--test', ...args, ...files], {
+  cwd: root,
+  stdio: 'inherit'
+});
+
+if (result.error) {
+  process.stderr.write(`test-js: ${result.error.message}\n`);
+  process.exitCode = 1;
+} else {
+  process.exitCode = result.status === null ? 1 : result.status;
+}

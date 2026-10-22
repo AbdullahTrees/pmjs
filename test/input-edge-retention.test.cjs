@@ -3,8 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const vm = require('node:vm');
-const fs = require('node:fs');
-const path = require('node:path');
+const { runModule } = require('./helpers/runtime-context.cjs');
 
 function setup(observe = true) {
   let install;
@@ -59,14 +58,14 @@ function setup(observe = true) {
   };
   context.Input.clear();
   vm.createContext(context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/runtime.js'), 'utf8'), context);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/events.js'), 'utf8'), context);
+  runModule(context, 'js/pmjs-web/runtime.js');
+  runModule(context, 'js/pmjs-web/events.js');
   context.CanvasContext2D = function() {};
   vm.runInContext(require('./helpers/web-element-sources.cjs').source, context);
   context.document.addEventListener('keydown', event => context.Input._onKeyDown(event));
   context.document.addEventListener('keyup', event => context.Input._onKeyUp(event));
   context.addEventListener('blur', () => context.Input.clear());
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-rpgmaker/input.js'), 'utf8'), context);
+  runModule(context, 'js/pmjs-rpgmaker/input.js');
   install();
   function flushTasks() { while (tasks.length) tasks.shift()(); }
   context.sendInput = state => { context.__pmjsReceiveInput(state); flushTasks(); };

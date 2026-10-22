@@ -7,7 +7,6 @@ const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const { createMzContext, runModule } = require('./helpers/mz-context.cjs');
 const { effectPixelScenario } = require('./helpers/effect-pixel-scenario.cjs');
-const { writeEffectFixtures } = require('./effect-fixtures.cjs');
 const { png } = require('./helpers/png.cjs');
 const native = require(path.resolve(process.argv[2]));
 const assetRoot = path.resolve(process.argv[3]);
@@ -19,7 +18,6 @@ assert.equal(hash(path.join(referenceRoot, reference.audio.file)), reference.aud
 assert.equal(hash(path.join(__dirname, '../tools/generate-mz-effect-reference.cjs')), reference.generatorSha256);
 assert.equal(hash(path.join(__dirname, 'effect-fixtures.cjs')), reference.fixtureGeneratorSha256);
 assert.equal(hash(path.join(__dirname, 'helpers/png.cjs')), reference.pngEncoderSha256);
-writeEffectFixtures(assetRoot);
 assert.equal(hash(path.join(assetRoot, 'effects/Model/block.efkmodel')), reference.modelSha256);
 native.initialize({ gameRoot: assetRoot, width: 64, height: 64, windowTitle: 'MZ renderer families' });
 

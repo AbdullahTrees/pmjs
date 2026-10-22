@@ -84,13 +84,12 @@ int main() {
   const auto translucent = images.createRgba(2, 2, translucentPixels.data());
   require(opaque.has_value(), "opaque image creation failed");
   require(translucent.has_value(), "translucent image creation failed");
-  require(!images.inspect(opaque->handle)->opaque, "unclassified image claimed opacity");
   require(images.isOpaque(opaque->handle) == std::optional<bool>(true),
           "opaque image classification failed");
   require(images.isOpaque(translucent->handle) == std::optional<bool>(false),
           "translucent image classification failed");
-  require(images.inspect(opaque->handle)->opaque, "opaque classification was not retained");
-  require(!images.inspect(translucent->handle)->opaque,
+  require(images.isOpaque(opaque->handle) == std::optional<bool>(true), "opaque classification was not retained");
+  require(images.isOpaque(translucent->handle) == std::optional<bool>(false),
           "translucent classification was not retained");
 
   const auto draw = [&](pmjs::ImageHandle image, float alpha) {

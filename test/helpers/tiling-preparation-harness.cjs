@@ -1,9 +1,7 @@
 'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
 const { makeHarness } = require('./scene-encoder-harness.cjs');
 const { elementSources } = require('./web-element-sources.cjs');
+const { runModule } = require('./runtime-context.cjs');
 
 function makeTilingPreparationHarness(native, useNative = true) {
   const transfers = { readBytes: 0, writeBytes: 0 };
@@ -28,8 +26,7 @@ function makeTilingPreparationHarness(native, useNative = true) {
     sandbox.pmjsGameConfig = {};
     sandbox.nativeWindowState = { focused: true, visible: true };
     for (const file of ['js/pmjs-web/events.js', 'js/pmjs-web/canvas.js', ...elementSources]) {
-      vm.runInContext(fs.readFileSync(path.join(__dirname, '../..', file), 'utf8'), sandbox,
-        { filename: file });
+      runModule(sandbox, file);
     }
   } });
   return { ...harness, transfers };

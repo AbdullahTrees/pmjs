@@ -70,7 +70,7 @@ function runtimeIdentity(share, hash) {
     };
     visit(path.join(share, folder));
   }
-  for (const name of ['build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
+  for (const name of ['build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
     checksum.update(name); checksum.update(hash(path.join(share, 'tools', name)));
   }
   return checksum.digest('hex');

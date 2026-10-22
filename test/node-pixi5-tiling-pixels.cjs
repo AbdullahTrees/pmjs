@@ -11,19 +11,9 @@ assert.equal(reference.mipmap, 'OFF');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 assert.equal(hash(path.join(__dirname, 'helpers/tiling-scenario.cjs')), reference.scenarioSha256);
 assert.equal(hash(path.join(__dirname, '../tools/generate-pixi5-tiling-reference.cjs')), reference.generatorSha256);
-const sceneryDirectory = path.join(assets, 'img', 'overlays');
-const sceneryFile = path.join(sceneryDirectory, `pmjs-scenery-window-${process.pid}.png`);
+const sceneryFile = path.join(assets, 'img', 'overlays', 'pmjs-scenery-window.png');
 let sceneryImage = null;
-fs.mkdirSync(sceneryDirectory, { recursive: true });
-const sceneryPixels = Buffer.alloc(3240 * 3240 * 4);
-for (let y = 0; y < 3240; y++) for (let x = 0; x < 3240; x++) {
-  const offset = (y * 3240 + x) * 4;
-  sceneryPixels[offset] = x & 0xe0;
-  sceneryPixels[offset + 1] = y & 0xe0;
-  sceneryPixels[offset + 2] = (x + y) & 0xe0;
-  sceneryPixels[offset + 3] = 255;
-}
-fs.writeFileSync(sceneryFile, png(3240, 3240, sceneryPixels));
+assert.ok(fs.existsSync(sceneryFile), 'test fixture preparation must create the oversized scenery image');
 native.initialize({ gameRoot: assets, width: 32, height: 24, windowTitle: 'Pixi 5 tiling' });
 const handles = new Set();
 try {
@@ -231,8 +221,6 @@ try {
   assert.equal(failures, 0, 'stock Pixi tiling pixel mismatches retained under test-assets/mismatches');
 } finally {
   if (sceneryImage) native.images.release(sceneryImage.handle);
-  fs.rmSync(sceneryFile, { force: true });
-  try { fs.rmdirSync(sceneryDirectory); } catch {}
   for (const handle of handles) native.canvas.release(handle);
   native.runtime.quit();
 }

@@ -385,6 +385,10 @@ test('plain containers and sprites emit the frozen oracle packet', () => {
   assert.equal(packet.count, 6);
   assert.deepEqual(packet.metadata, EXPECTED_PLAIN_METADATA);
   assert.deepEqual(packet.values, EXPECTED_PLAIN_VALUES);
+  assert.deepEqual(harness.counts,
+    { filterPlans: 0, rectMasks: 0, alphaMasks: 0 });
+  assert.deepEqual(packet.metadata.filter((_, index) => index % 7 === 0),
+    [0, 0, 1, 1, 0, 1]);
 });
 
 test('sprite textures accept the shared native raster source capability', () => {
@@ -406,15 +410,6 @@ test('sprite textures accept the shared native raster source capability', () => 
   const packet = submitOnly(harness, root);
   assert.equal(packet.count, 2);
   assert.equal(packet.metadata[7 + 2], 777);
-});
-
-test('plain fixture performs no filter, mask, or effect work', () => {
-  const harness = makeHarness();
-  const packet = submitOnly(harness, buildPlainFixture(harness));
-  assert.deepEqual(harness.counts,
-    { filterPlans: 0, rectMasks: 0, alphaMasks: 0 });
-  assert.deepEqual(packet.metadata.filter((_, index) => index % 7 === 0),
-    [0, 0, 1, 1, 0, 1]);
 });
 
 test('fixed representation table classifies every leaf without probing', () => {

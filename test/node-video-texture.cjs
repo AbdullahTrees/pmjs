@@ -12,6 +12,17 @@ native.initialize({
   windowTitle: 'pmjs video texture test'
 });
 
+async function waitForTextureUpdate(video, previousUpdates, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    native.media.updateVideo(video.handle, 0.25);
+    const memory = native.images.memory();
+    if (memory.textureFullUpdates > previousUpdates) return memory;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error(`video decoder did not upload a frame within ${timeoutMs}ms`);
+}
+
 async function main() {
   let video, scene, drawable, upperCanvas, sameFrameUpper, sceneUnderUpperCanvas, drawableWithUpperCanvas, resizedUpperCanvas, resizedUpperShot, compositorVideo;
   try {
@@ -33,13 +44,7 @@ async function main() {
       throw new Error('video allocated CPU canvas storage');
     }
 
-    native.media.updateVideo(video.handle, 0.25);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    native.media.updateVideo(video.handle, 0.25);
-    const imagesUpdated = native.images.memory();
-    if (imagesUpdated.textureFullUpdates <= imagesLoaded.textureFullUpdates) {
-      throw new Error('decoded video frame did not update its image texture');
-    }
+    await waitForTextureUpdate(video, imagesLoaded.textureFullUpdates);
 
     native.beginFrame();
     native.render.quad(0, 0, 640, 480, 1, 0, 0, 1);

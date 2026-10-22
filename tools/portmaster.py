@@ -313,7 +313,7 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         shutil.copytree(stage / 'share/pmjs/profiles', runtime / 'share/pmjs/profiles')
         tools = runtime / 'share/pmjs/tools'
         tools.mkdir()
-        for tool_name in ('pmjs.mjs', 'build-js-runtime.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs',
+        for tool_name in ('pmjs.mjs', 'build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs',
                           'game-bundle.mjs', 'package-self-test.cjs'):
             shutil.copy2(stage / 'share/pmjs/tools' / tool_name, tools / tool_name)
         notices = [stage / 'LICENSE', stage / 'THIRD_PARTY_NOTICES.md',

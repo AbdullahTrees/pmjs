@@ -32,7 +32,7 @@ int main(int argc, char** argv) try {
     images.setWarmBudgetBytes(0);
     require(images.installPrepared(root / "fixture.png", root, descriptor), "cannot install prepared fixture");
     auto load = images.capturePrepared(*source);
-    require(load && pmjs::ImageStore::validatePrepared(*load, false), "cannot validate prepared fixture");
+    require(load && images.validatePrepared(*load, false), "cannot validate prepared fixture");
     std::optional<pmjs::ImageInfo> image;
     allocationCountdown = allocation;
     try { image = images.installPreparedLoad(*source, std::move(load), false); }

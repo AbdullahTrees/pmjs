@@ -6,15 +6,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
-
-const objectUrlSource = fs.readFileSync(
-  path.resolve(__dirname, '../js/pmjs-web/object-urls.js'), 'utf8');
-const audioSource = fs.readFileSync(
-  path.resolve(__dirname, '../js/pmjs-rpgmaker/native-audio.js'), 'utf8');
-const mvAudioSource = fs.readFileSync(
-  path.resolve(__dirname, '../js/pmjs-mv/audio.js'), 'utf8');
-const mainLoopSource = fs.readFileSync(
-  path.resolve(__dirname, '../js/pmjs-rpgmaker/main-loop.js'), 'utf8');
+const { runModule } = require('./helpers/runtime-context.cjs');
 
 function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) {
   const loadedBytes = [];
@@ -66,13 +58,13 @@ function contextFor(decrypter, XMLHttpRequest, clock = Date, streaming = false) 
   context.setGainValue = (value) => { gainValue = value; };
   context.NativeHost.media.audioContextTime = () => 0;
   vm.createContext(context);
-  vm.runInContext(objectUrlSource, context);
-  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/filesystem.js'), 'utf8'), context);
-  vm.runInContext(audioSource, context);
-  vm.runInContext(mvAudioSource, context);
+  runModule(context, 'js/pmjs-web/object-urls.js');
+  runModule(context, 'js/pmjs-web/filesystem.js');
+  runModule(context, 'js/pmjs-rpgmaker/native-audio.js');
+  runModule(context, 'js/pmjs-mv/audio.js');
   if (streaming) {
     for (const module of ['pmjs-core/methods', 'pmjs-rpgmaker/lifecycle', 'pmjs-rpgmaker/plugins']) {
-      vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js', module + '.js'), 'utf8'), context);
+      runModule(context, 'js/' + module + '.js');
     }
     context.__pmjsBuiltinRequire = require;
     context.compatHits = [];
@@ -360,8 +352,8 @@ test('a stop listener can restart audio without losing completion polling', asyn
   context.NativeHost.media.playAudio = () => { playing = true; return true; };
   context.NativeHost.media.audioIsPlaying = () => playing;
   context.__pmjsBuiltinRequire = require; context.performance = performance;
-  vm.runInContext(fs.readFileSync(path.resolve(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
-  vm.runInContext(mainLoopSource, context);
+  runModule(context, 'js/pmjs-web/scheduler.js');
+  runModule(context, 'js/pmjs-rpgmaker/main-loop.js');
   const tracked = () => context.PMJS.rpgmaker.audio.update();
   const audio = new context.WebAudio('audio/se/restart.ogg');
   let completions = 0;

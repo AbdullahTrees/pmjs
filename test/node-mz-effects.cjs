@@ -3,7 +3,6 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { createMzContext, runModule } = require('./helpers/mz-context.cjs');
-require('./effect-fixtures.cjs').writeEffectFixtures(path.resolve(process.argv[3]));
 const native = require(path.resolve(process.argv[2]));
 native.initialize({ gameRoot: path.resolve(process.argv[3]), width: 64, height: 64,
   windowTitle: 'MZ effect bridge contract' });

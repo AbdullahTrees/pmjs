@@ -98,7 +98,7 @@ For native tests, install Xvfb and xauth, then run:
 ```sh
 cmake --preset dev
 cmake --build --preset dev --parallel 4
-ctest --preset dev --output-on-failure
+ctest --preset dev -LE '^js$' --output-on-failure
 ```
 
 The JavaScript checks run separately:
@@ -107,9 +107,23 @@ The JavaScript checks run separately:
 npm ci
 npm run lint
 npm run licensing
-npm test
+npm run test:all
 python3 test/portmaster-package.py
 ```
+
+`npm test` forwards explicit file or directory selections and Node test options:
+
+```sh
+npm test -- test/scene-encoders.test.cjs
+npm test -- --test-name-pattern='plain fixture' test/scene-encoders.test.cjs
+npm test -- --test-name-pattern='filter accessor' test/pixi-filter-access.test.cjs
+```
+
+With no file selection, `npm test` runs the full JavaScript suite and forwards
+any Node options to that run. `npm run test:all` names that full-suite run
+explicitly. When running both commands from this section, CTest excludes its
+duplicate `js-*` registrations while retaining build, setup, native and
+integration checks.
 
 `./build.sh` makes a runnable installation. A public release also needs
 the verification and device checks in [Releases](releases.md).

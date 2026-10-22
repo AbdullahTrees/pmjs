@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { inspectGame, loadAdapterRegistry, resolveAdapters, prepareGameConfig } from './game-inspect.mjs';
+import { prepareGameConfig } from './game-inspect.mjs';
+import { insertExplicitAdapters, loadProfile, resolveCapabilityManifest, supportedEngines } from './build-js-composition.mjs';
 
 const args = process.argv.slice(2);
 const values = new Map();
@@ -39,13 +40,7 @@ if (profileArgument && (gameArgument || manifestArgument)) {
 }
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = outputArgument ? path.resolve(outputArgument) : null;
-const supportedEngines = {
-  mv: { profile: 'mv', pixiMajor: 4, bootstrap: 'js/pmjs-mv/bootstrap.js', pluginAdapters: true },
-  mz: { profile: 'mz', pixiMajor: 5, bootstrap: 'js/pmjs-mz/bootstrap.js', pluginAdapters: false },
-};
 
-// Structural validation only: the runtime optimization registry remains the
-// single authority for which IDs exist. Unknown IDs fail at startup instead.
 function assertDisableOptimizationsShape(value, configPath) {
   if (value === undefined) return;
   const ok = Array.isArray(value) && value.every(id => typeof id === 'string' && id) &&
@@ -60,153 +55,25 @@ let rawModules = [];
 let buildReport = null;
 let detectedRuntime = null;
 
-function loadProfile(name) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error(`invalid profile: ${name}`);
-  const profilePath = path.join(root, 'profiles', `${name}.json`);
-  const baseDir = root;
-  if (!fs.existsSync(profilePath)) {
-    console.error(`error: profile '${name}' not found at ${profilePath}`);
-    process.exit(1);
-  }
-  const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
-  if (!Array.isArray(profile.modules) || !profile.modules.length) {
-    throw new Error(`profile '${name}' requires a non-empty modules array`);
-  }
-  return { ...profile, baseDir };
-}
-
-function adapterSelection(option, registry, inspection, manifestPath) {
-  let mode = option;
-  let include = [];
-  let exclude = [];
-  if (option && typeof option === 'object' && !Array.isArray(option)) {
-    mode = option.mode;
-    include = option.include || [];
-    exclude = option.exclude || [];
-    if (mode !== 'auto' || !Array.isArray(include) || !Array.isArray(exclude)) {
-      throw new Error(`manifest ${manifestPath} adapter object requires mode "auto" and include/exclude arrays`);
-    }
-  }
-  if (Array.isArray(option)) {
-    mode = 'explicit';
-    include = option;
-  }
-  if (!['auto', 'all', 'none', 'explicit'].includes(mode)) {
-    throw new Error(`manifest ${manifestPath} adapters must be "auto", "all", "none", an array, or an auto override object`);
-  }
-  const known = new Set(registry.flatMap(entry => entry.plugins));
-  for (const name of [...include, ...exclude]) {
-    if (typeof name !== 'string' || !known.has(name)) {
-      throw new Error(`manifest ${manifestPath} adapters unknown plugin: ${name}`);
-    }
-  }
-  let names = mode === 'all' ? [...known]
-    : mode === 'auto' ? inspection.enabledPlugins
-      : mode === 'explicit' ? include : [];
-  if (mode === 'auto') names = [...new Set([...names, ...include])];
-  const excluded = new Set(exclude);
-  return resolveAdapters(registry, names.filter(name => !excluded.has(name)));
-}
-
-function resolveCapabilityManifest(manifest, manifestPath) {
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    throw new Error(`manifest ${manifestPath} must be an object`);
-  }
-  for (const key of Object.keys(manifest)) {
-    if (key !== 'adapters') throw new Error(`unsupported manifest key: ${key}`);
-  }
-  if (!gameArgument) throw new Error(`capability manifest ${manifestPath} requires --game`);
-  const adaptersOption = manifest.adapters === undefined ? 'auto' : manifest.adapters;
-
-  const registryPath = path.join(root, 'profiles', 'plugin-adapters.json');
-  const registry = loadAdapterRegistry(registryPath);
-
-  let inspection;
-  try {
-    inspection = inspectGame(path.resolve(process.cwd(), gameArgument), registryPath);
-  } catch (error) {
-    throw new Error(`cannot inspect game: ${error.message}`);
-  }
-  const engine = supportedEngines[inspection.engine];
-  if (!engine) {
-    throw new Error(`detected unsupported engine '${inspection.engine}' in ${inspection.gameDir}`);
-  }
-  if (!inspection.pixiPath) {
-    throw new Error(`detected ${inspection.engine.toUpperCase()} but could not find Pixi`);
-  }
-  if (!inspection.pixiVersion) {
-    throw new Error(`detected ${inspection.engine.toUpperCase()} but could not determine Pixi version from ${inspection.pixiPath}`);
-  }
-  const detectedPixiMajor = Number.parseInt(inspection.pixiVersion, 10);
-  if (detectedPixiMajor !== engine.pixiMajor) {
-    throw new Error(`engine ${inspection.engine} requires Pixi ${engine.pixiMajor}.x; detected ${inspection.pixiVersion}`);
-  }
-  if (inspection.engine === 'mv' && !inspection.pixiTilemapPath) {
-    throw new Error('detected MV but could not find pixi-tilemap.js');
-  }
-  detectedRuntime = {
-    engine: inspection.engine,
-    engineVersion: inspection.engineVersion,
-    pixiPath: inspection.pixiPath.replaceAll(path.sep, '/'),
-    pixiVersion: inspection.pixiVersion,
-    pixiTilemapPath: inspection.pixiTilemapPath &&
-      inspection.pixiTilemapPath.replaceAll(path.sep, '/'),
-  };
-
-  const profileName = engine.profile;
-  const profile = loadProfile(profileName);
-  const baseModules = profile.modules;
-  const baseDir = profile.baseDir;
-  const bootstrap = engine.bootstrap;
-  const bootstrapCount = baseModules.filter(module => module === bootstrap).length;
-  if (bootstrapCount !== 1 || baseModules.at(-1) !== bootstrap) {
-    throw new Error(`profile ${profileName} must contain ${bootstrap} exactly once as its final module`);
-  }
-  if (!engine.pluginAdapters && adaptersOption !== 'auto' && adaptersOption !== 'none') {
-    throw new Error(`engine ${inspection.engine} does not yet support plugin adapter selection`);
-  }
-  const selected = engine.pluginAdapters
-    ? adapterSelection(adaptersOption, registry, inspection, manifestPath)
-    : [];
-  const adapterModules = [];
-  const adapterReport = [];
-  for (const { plugin, modules } of selected) {
-    for (const module of modules) {
-      if (!adapterModules.includes(module)) adapterModules.push(module);
-    }
-    adapterReport.push(`${plugin} -> ${modules.join(', ')}`);
-  }
-
-  const split = baseModules.length - 1;
-  const ordered = [
-    ...baseModules.slice(0, split).map(mod => ({ module: mod, baseDir })),
-    ...adapterModules.map(mod => ({ module: mod, baseDir: root })),
-    ...baseModules.slice(split).map(mod => ({ module: mod, baseDir })),
-  ];
-  buildReport = {
-    engine: profileName,
-    detected: inspection ? {
-      engine: inspection.engine,
-      mvVersion: inspection.mvVersion,
-      pixiVersion: inspection.pixiVersion,
-      pluginTotal: inspection.pluginTotal,
-      enabledPlugins: inspection.enabledPlugins.length,
-      unmatchedEnabledPlugins: inspection.unmatchedEnabledPlugins,
-    } : null,
-    adapters: adapterReport,
-  };
-  return ordered;
-}
-
 if (profileArgument) {
-  const { modules, baseDir } = loadProfile(profileArgument);
-  rawModules = modules.map(mod => ({ module: mod, baseDir }));
-} else if (manifestArgument) {
-  const manifestPath = path.resolve(manifestArgument);
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  rawModules = resolveCapabilityManifest(manifest, manifestPath);
+  const { modules, baseDir } = loadProfile(root, profileArgument);
+  rawModules = modules.map(module => ({ module, baseDir }));
 } else {
-  rawModules = resolveCapabilityManifest({}, '<command line>');
+  let manifest = {};
+  let manifestPath = '<command line>';
+  if (manifestArgument) {
+    manifestPath = path.resolve(manifestArgument);
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  }
+  const composition = resolveCapabilityManifest({
+    root,
+    gameDir: gameArgument && path.resolve(process.cwd(), gameArgument),
+    manifest,
+    manifestPath,
+  });
+  rawModules = composition.modules;
+  buildReport = composition.buildReport;
+  detectedRuntime = composition.detectedRuntime;
 }
 
 function printBuildReport() {
@@ -230,14 +97,7 @@ function printBuildReport() {
   write(lines.join('\n'));
 }
 
-if (adapterFiles.length) {
-  const bootstrap = rawModules.findIndex(item =>
-    Object.values(supportedEngines).some(engine => item.module === engine.bootstrap));
-  if (bootstrap !== rawModules.length - 1 || bootstrap < 0) {
-    throw new Error('explicit adapters require a terminal MV/MZ bootstrap');
-  }
-  rawModules.splice(bootstrap, 0, ...adapterFiles.map(file => ({ module: path.basename(file), file })));
-}
+rawModules = insertExplicitAdapters(rawModules, adapterFiles);
 
 const seenModules = new Set();
 for (const item of rawModules) {

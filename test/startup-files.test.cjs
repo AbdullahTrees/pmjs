@@ -36,6 +36,7 @@ test('runtime identity notices added and removed files while warm content reads 
   const root = temporaryDirectory('runtime-identity-');
   for (const directory of ['js', 'profiles', 'tools']) fs.mkdirSync(path.join(root, directory));
   for (const file of ['js/base.js', 'profiles/base.json', 'tools/build-js-runtime.mjs',
+    'tools/build-js-composition.mjs',
     'tools/game-inspect.mjs', 'tools/achievement-discovery.mjs']) fs.writeFileSync(path.join(root, file), file);
   const receipt = path.join(root, 'receipt.json'), cold = startupFiles(receipt, 'build');
   const original = runtimeIdentity(root, cold.hash); cold.save();
