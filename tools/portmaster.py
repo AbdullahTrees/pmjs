@@ -37,15 +37,14 @@ BINARY=node
 cd "$GAMEDIR" || exit 1
 GAMEDIR=$(pwd -P)
 PMJS_ROOT="$GAMEDIR/runtime"
-LOGFILE="$GAMEDIR/log.txt"
-rm -f "$LOGFILE" || { echo 'Failed to remove the previous PortMaster log' >&2; exit 1; }
-{
+> "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1 || exit 1
 echo '[pmjs-port] launcher started'
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
 export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
+export PMJS_GRAPHICS_DIAGNOSTICS=1
 
 [ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
-$GPTOKEYB2 "$BINARY" -c "$GAMEDIR/@ID@.ini" &
+$GPTOKEYB2 "$BINARY" > /dev/null 2>&1 &
 pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY"
 platform_status=$?
 if [ "$platform_status" -ne 0 ]; then
@@ -58,10 +57,9 @@ LD_LIBRARY_PATH="$PMJS_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \\
   "$GAMEDIR/runtime/bin/$BINARY" "$PMJS_ROOT/share/pmjs/tools/pmjs.mjs" "$PMJS_ROOT" "$GAMEDIR" \\
   --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
 status=$?
+echo "[pmjs-port] runtime exited status=$status"
 pm_finish || { [ "$status" -ne 0 ] || status=1; }
 exit "$status"
-} 2>&1 | tee "$LOGFILE"
-exit "${PIPESTATUS[0]}"
 '''
 
 
@@ -355,7 +353,6 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         write_json(runtime / 'build-info.json', package_info)
         launcher = payload / (name + '.sh')
         launcher.write_text(PORTMASTER_LAUNCHER.replace('@ID@', identifier))
-        (port / (identifier + '.ini')).write_text('[controls]\n')
         launcher.chmod(0o755)
         subprocess.run(['bash', '-n', launcher], check=True)
         epoch = info['source']['sourceDateEpoch']

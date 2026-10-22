@@ -31,6 +31,12 @@ class PortMasterPackage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'valid PortMaster portname'):
             portname_from_title('...')
 
+    def test_static_audit_rejects_bundled_firmware_graphics_libraries(self):
+        library = self.stage / 'lib/libSDL2-2.0.so.0'
+        shutil.copy2('/bin/true', library)
+        with self.assertRaisesRegex(ValueError, 'graphics/window library must not be bundled'):
+            artifacts.static_audit(self.stage, {'architecture': 'x86_64'})
+
     def setUp(self):
         temporary_root = ROOT / '.cache/tests'
         temporary_root.mkdir(parents=True, exist_ok=True)
@@ -111,7 +117,7 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIn('minimalgame/gamedata/', names)
             self.assertTrue(any(name.startswith('minimalgame/runtime/') for name in names))
             self.assertNotIn('minimal-game/', '\n'.join(names))
-            self.assertEqual(package.read('minimalgame/minimalgame.ini'), b'[controls]\n')
+            self.assertNotIn('minimalgame/minimalgame.ini', names)
             self.assertIn('minimalgame/runtime/lib/librequired.so.1', names)
             self.assertNotIn('minimalgame/runtime.squashfs', names)
             licenses = package.read('minimalgame/runtime/LICENSES.txt').decode()
@@ -168,6 +174,8 @@ class PortMasterPackage(unittest.TestCase):
         (submission / 'README.md').write_text('## Notes\n\nThanks to the developer.\n\n## Controls\n\n## Compile\n')
         (submission / 'gameinfo.xml').write_text('''<?xml version="1.0"?>
 <gameList><game><path>./Minimal Game.sh</path><name>Minimal Game</name>
+<desc>A concise description.</desc><releasedate>20060606T000000</releasedate>
+<developer>Example Developer</developer><publisher>Open Source</publisher><genre>RPG</genre>
 <image>./minimalgame/screenshot.png</image></game></gameList>''')
         descriptor = {'version': 4, 'name': 'minimalgame.zip',
                       'items': ['Minimal Game.sh', 'minimalgame'], 'items_opt': [],
@@ -606,7 +614,6 @@ class PortMasterLauncher(unittest.TestCase):
         self.port = self.root / 'storage/ports/minimalgame'
         (self.port / 'gamedata').mkdir(parents=True)
         (self.port / 'gamedata/index.html').touch()
-        (self.port / 'minimalgame.ini').write_text('[controls]\n')
         (self.port / 'saves').mkdir()
         (self.port / 'saves/existing.rpgsave').write_text('existing progress')
         (self.port / 'runtime/bin').mkdir(parents=True)
@@ -620,7 +627,7 @@ class PortMasterLauncher(unittest.TestCase):
         self.capture = self.root / 'node.json'
         self.gpt_capture = self.root / 'gptokeyb2.json'
         node = self.port / 'runtime/bin/node'
-        node.write_text('#!' + sys.executable + '\n' + '''import json, os, signal, sys
+        node.write_text('#!' + sys.executable + '\n' + '''import json, os, signal, sys, time
 from pathlib import Path
 Path(os.environ['CAPTURE']).write_text(json.dumps({
     'argv': sys.argv[1:], 'env': dict(os.environ), 'pid': os.getpid(), 'uid': os.getuid()
@@ -630,6 +637,7 @@ if 'READY_FD' in os.environ:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     os.write(int(os.environ['READY_FD']), b'1')
     signal.pause()
+time.sleep(0.05)
 sys.exit(int(os.environ.get('NODE_STATUS', '0')))
 ''')
         node.chmod(0o755)
@@ -639,8 +647,7 @@ sys.exit(int(os.environ.get('NODE_STATUS', '0')))
         gptokeyb.write_text('#!' + sys.executable + '\n' + '''import json, os, signal, sys
 from pathlib import Path
 Path(os.environ['GPT_CAPTURE']).write_text(json.dumps({
-    'argv': sys.argv[1:], 'wrapper': os.environ.get('HELPER_WRAPPER'),
-    'controls': Path(sys.argv[3]).read_text()
+    'argv': sys.argv[1:], 'wrapper': os.environ.get('HELPER_WRAPPER')
 }))
 if 'KILL_TARGET_FD' in os.environ:
     target = int(os.read(int(os.environ['KILL_TARGET_FD']), 32))
@@ -667,7 +674,6 @@ get_controls() {
 }
 pm_platform_helper() { echo base-helper >> "$EVENTS"; }
 pm_finish() {
-  wait
   printf 'finish:%s\n' "$LD_LIBRARY_PATH" >> "$EVENTS"
   return "${FINISH_STATUS:-0}"
 }
@@ -761,9 +767,8 @@ return "${MODULE_STATUS:-0}"
     def test_exit_helper_has_no_gameplay_bindings_and_honors_native_override(self):
         self.assertEqual(self.run_launcher().returncode, 0)
         helper = json.loads(self.gpt_capture.read_text())
-        self.assertEqual(helper['argv'], ['node', '-c', str(self.port / 'minimalgame.ini')])
+        self.assertEqual(helper['argv'], ['node'])
         self.assertEqual(helper['wrapper'], 'active', 'multiword GPTOKEYB2 is a command line')
-        self.assertEqual(helper['controls'], '[controls]\n')
         self.assertEqual(self.run_launcher(PMJS_EXIT_HOTKEY='leftstick').returncode, 0)
         self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_EXIT_HOTKEY'], 'leftstick')
 
@@ -775,6 +780,8 @@ return "${MODULE_STATUS:-0}"
                 result = self.run_launcher(expect_finish=started, **{setting: str(status)})
                 self.assertEqual(result.returncode, status)
                 self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
+                if setting == 'NODE_STATUS':
+                    self.assertIn('runtime exited status=23', (self.port / 'log.txt').read_text())
 
         result = self.run_launcher(PLATFORM_STATUS='1')
         self.assertEqual(result.returncode, 0)

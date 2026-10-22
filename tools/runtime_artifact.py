@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parent.parent
+GRAPHICS_LIBRARY = re.compile(r'^(lib(SDL2|EGL|GLES|GL|gbm|Mali|mali|drm|wayland)|.*_dri\.so)')
 
 
 def digest(file):
@@ -82,6 +83,8 @@ def static_audit(stage, info):
         raise ValueError('Unexpected addon architecture')
     result = {'architecture': 'x86_64', 'addon': addon, 'externalDependencies': addon['needed']}
     for library in (stage / 'lib').glob('*.so*'):
+        if GRAPHICS_LIBRARY.match(library.name):
+            raise ValueError('firmware graphics/window library must not be bundled: ' + library.name)
         if elf(library)['machine'] != addon['machine']:
             raise ValueError('Wrong shared-library architecture: ' + str(library))
     if (stage / 'bin/node').exists() and elf(stage / 'bin/node')['machine'] != addon['machine']:

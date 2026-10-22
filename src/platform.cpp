@@ -337,12 +337,16 @@ Platform::Platform(int width, int height, std::string title) {
   SDL_SetHintWithPriority("SDL_VIDEO_X11_FORCE_EGL", "1", SDL_HINT_DEFAULT);
   // Older SDL versions select EGL for ES contexts through this hint instead.
   SDL_SetHintWithPriority(SDL_HINT_OPENGL_ES_DRIVER, "1", SDL_HINT_DEFAULT);
+  Log() << "[pmjs-platform] stage=sdl-init begin\n";
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) != 0) {
     const std::string error = SDL_GetError();
     printLoadedLibraries();
+    Log(LogLevel::Error) << "[pmjs-platform] stage=sdl-init failed: " << error << '\n';
     SDL_Quit();
     throw std::runtime_error("SDL_Init failed: " + error);
   }
+  Log() << "[pmjs-platform] stage=sdl-init complete video_driver="
+        << (SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "unknown") << '\n';
   // Window is the physical drawable; the game size stays with the renderer.
   SDL_Rect bounds{};
   if (SDL_GetDisplayBounds(0, &bounds) == 0 && bounds.w > 0 && bounds.h > 0) {
@@ -390,10 +394,18 @@ Platform::Platform(int width, int height, std::string title) {
     SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, rgb[1]);
     SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, rgb[2]);
     SDL_ClearError();
+    Log() << "[pmjs-platform] stage=create-window begin rgb="
+          << rgb[0] << rgb[1] << rgb[2] << " size=" << windowWidth_ << 'x'
+          << windowHeight_ << '\n';
     window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED,
                                SDL_WINDOWPOS_CENTERED, windowWidth_, windowHeight_,
-                               SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
-    if (window_) context_ = SDL_GL_CreateContext(window_);
+                               SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN |
+                                 SDL_WINDOW_FULLSCREEN_DESKTOP);
+    if (window_) {
+      Log() << "[pmjs-platform] stage=create-context begin rgb="
+            << rgb[0] << rgb[1] << rgb[2] << '\n';
+      context_ = SDL_GL_CreateContext(window_);
+    }
     if (context_) break;
     const std::string error = std::string(window_ ? "SDL_GL_CreateContext" : "SDL_CreateWindow") +
       " failed (RGB" + std::to_string(rgb[0]) + std::to_string(rgb[1]) +

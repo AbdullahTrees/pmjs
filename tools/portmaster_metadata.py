@@ -3,6 +3,7 @@ import json
 import re
 import shutil
 import struct
+from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -27,13 +28,14 @@ def _regular(file):
 
 
 def _image(directory, stem, required):
-    images = [directory / (stem + suffix) for suffix in ('.png', '.jpg')
-              if (directory / (stem + suffix)).exists()]
-    if len(images) > 1 or (required and not images):
-        raise ValueError(f'Expected {"one" if required else "at most one"} {stem}.png/.jpg')
-    if not images:
+    image = directory / (stem + '.png')
+    if required and not image.exists():
+        raise ValueError(f'Expected {"one" if required else "at most one"} {stem}.png')
+    if (directory / (stem + '.jpg')).exists():
+        raise ValueError(f'{stem}.jpg is not accepted; use a PNG file')
+    if not image.exists():
         return None
-    return _regular(images[0])
+    return _regular(image)
 
 
 def _image_dimensions(file):
@@ -88,6 +90,8 @@ def _validate_metadata(metadata):
 
     for field in ('title', 'desc', 'inst'):
         value = _required_text(attr.get(field), f'attr.{field}')
+        if '—' in value:
+            raise ValueError(f'port.json attr.{field} must not use em dashes')
         if field != 'title':
             markdown = re.search(r'(?:^|\s)[#>*+-]\s|`|(?:\*\*|__|~~)|\[[^]]+\]\([^)]+\)', value)
             if '\n' in value or '\r' in value or r'\n' in value or markdown:
@@ -99,12 +103,17 @@ def _validate_metadata(metadata):
             for name in porter):
         raise ValueError('port.json attr.porter must contain porter names, not placeholders')
     if not isinstance(attr.get('genres'), list) or not attr['genres'] or any(
-            not isinstance(genre, str) or not re.fullmatch(r'[a-z][a-z0-9-]*', genre)
+            not isinstance(genre, str) or genre not in {
+                'action', 'adventure', 'arcade', 'casino-card', 'fps', 'platformer',
+                'puzzle', 'racing', 'rhythm', 'rpg', 'simulation', 'sports',
+                'strategy', 'visual-novel', 'other'}
             for genre in attr['genres']):
-        raise ValueError('port.json attr.genres must be a nonempty array of lowercase genre slugs')
+        raise ValueError('port.json attr.genres must use current PortMaster genre slugs')
     for field in ('desc_md', 'inst_md'):
         if field not in attr or (attr[field] is not None and not isinstance(attr[field], str)):
             raise ValueError(f'port.json attr.{field} must be a string or null')
+        if isinstance(attr[field], str) and '—' in attr[field]:
+            raise ValueError(f'port.json attr.{field} must not use em dashes')
     if 'image' not in attr or (attr['image'] is not None and not isinstance(attr['image'], str)):
         raise ValueError('port.json attr.image must be a string or null')
     if not isinstance(attr.get('exp'), bool):
@@ -121,6 +130,12 @@ def _validate_metadata(metadata):
         raise ValueError('port.json attr.reqs must be an array of strings')
     if not isinstance(attr.get('min_glibc'), str):
         raise ValueError('port.json attr.min_glibc must be a string')
+    if not isinstance(attr.get('arch'), list) or any(
+            architecture not in {'aarch64', 'armhf', 'x86_64', 'x86'}
+            for architecture in attr['arch']):
+        raise ValueError('port.json attr.arch must use supported architecture names')
+    if attr.get('runtime') and attr['arch']:
+        raise ValueError('port.json attr.runtime and attr.arch are mutually exclusive')
 
 
 def read_submission(directory):
@@ -147,7 +162,13 @@ def read_submission(directory):
     if not isinstance(attr.get('arch'), list) or len(attr['arch']) != 1:
         raise ValueError('port.json must select exactly one PMJS architecture')
 
-    _regular(directory / 'README.md')
+    readme = _regular(directory / 'README.md').read_text(encoding='utf-8')
+    headings = re.findall(r'^##? .+$', readme, flags=re.MULTILINE)
+    if (not readme.startswith('## Notes\n') or headings[:3] !=
+            ['## Notes', '## Controls', '## Compile'] or readme.startswith('# ')):
+        raise ValueError('README.md must start with Notes, Controls, and Compile sections')
+    if '—' in readme:
+        raise ValueError('README.md must not use em dashes')
     xml = _regular(directory / 'gameinfo.xml')
     try:
         root = ElementTree.parse(xml).getroot()
@@ -156,10 +177,23 @@ def read_submission(directory):
     game = root.find('game') if root.tag == 'gameList' else None
     if game is None or game.findtext('path') != './' + launcher:
         raise ValueError('gameinfo.xml path must match the launcher')
+    game_fields = ('path', 'name', 'desc', 'releasedate', 'developer', 'publisher', 'genre', 'image')
+    if (len(game) != len(game_fields) or {child.tag for child in game} != set(game_fields) or
+            any(not (game.findtext(field) or '').strip() for field in game_fields)):
+        raise ValueError('gameinfo.xml must contain only the current required game fields')
+    if any('—' in (game.findtext(field) or '') for field in game_fields):
+        raise ValueError('gameinfo.xml must not use em dashes')
+    releasedate = game.findtext('releasedate', '')
+    if not re.fullmatch(r'\d{8}T000000', releasedate):
+        raise ValueError('gameinfo.xml releasedate must use YYYYMMDDT000000 format')
+    try:
+        datetime.strptime(releasedate, '%Y%m%dT%H%M%S')
+    except ValueError as error:
+        raise ValueError('gameinfo.xml releasedate must be a real calendar date') from error
     screenshot = _image(directory, 'screenshot', required=True)
     width, height = _image_dimensions(screenshot)
-    if width < 640 or height < 480:
-        raise ValueError('PortMaster screenshot must be at least 640x480')
+    if width < 640 or height < 480 or width * 3 != height * 4:
+        raise ValueError('PortMaster screenshot must be 4:3 and at least 640x480')
     cover = _image(directory, 'cover', required=False)
     expected_images = {'./' + portname + '/' + (cover or screenshot).name,
                        './' + portname + '/' + screenshot.name}
