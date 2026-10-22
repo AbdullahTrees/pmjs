@@ -38,7 +38,7 @@ THIRD_PARTY_NOTICES.md
 
 The installation can be moved outside the build tree. ARM64 packages include
 Node and nongraphics dependencies; SDL2, EGL, GLES and graphics drivers come
-from the firmware. The ABI baseline is glibc 2.28, GLIBCXX 3.4.25,
+from the firmware. The ABI baseline is glibc 2.28, GLIBCXX 3.4.21,
 CXXABI 1.3.11 and GCC 7.0.0.
 
 Release staging verifies native inputs, strips Release binaries and audits the

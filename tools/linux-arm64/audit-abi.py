@@ -66,7 +66,7 @@ def inspect(file):
     }
 
 
-def audit(node, addon, lib_dir, max_glibc="2.28", max_glibcxx="3.4.25"):
+def audit(node, addon, lib_dir, max_glibc="2.28", max_glibcxx="3.4.21"):
     if not lib_dir.is_dir():
         raise ValueError(f"library directory missing: {lib_dir}")
     libraries = {}
