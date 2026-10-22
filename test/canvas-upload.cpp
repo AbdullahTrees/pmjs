@@ -304,5 +304,42 @@ int main() {
     assert(actual->rgba==canvases.readPixels(expected->handle,0,0,3,3)->rgba);
     for (auto handle : {view->handle,reference->handle,crop->handle,expected->handle}) assert(canvases.release(handle));
   }
+  {
+    pmjs::ImageStore accountingImages;
+    pmjs::CanvasStore accounting(accountingImages);
+    const std::vector<uint8_t> red={255,0,0,255}, blue={0,0,255,255};
+    const auto source=accountingImages.createRgba(1,1,red.data(),true); assert(source);
+    const auto destination=accounting.create(1,1), retained=accounting.create(1,1);
+    assert(destination && retained);
+    assert(accounting.drawImage(destination->handle,source->handle,0,0,1,1,0,0,1,1,1,false));
+    assert(accounting.drawImage(retained->handle,destination->handle,0,0,1,1,0,0,1,1,1,false));
+    // Copy-on-write duplicates the deferred command, sharing its snapshot.
+    assert(accounting.fillRect(destination->handle,0,0,1,1,0xffffffff));
+    assert(accounting.cpuBytes()==0);
+    assert(accountingImages.updateRgba(source->handle,blue.data()));
+    assert(accounting.cpuBytes()==4);
+    assert(accountingImages.release(source->handle));
+    assert(accounting.release(retained->handle));
+    assert(accounting.cpuBytes()==4);
+    assert(accounting.realize(destination->handle));
+    assert(accounting.cpuBytes()==4);
+    assert(accounting.release(destination->handle));
+    assert(accounting.cpuBytes()==0);
+
+    const auto pixels=accounting.createPixels(1,1,red,pmjs::PixelEncoding::StraightRGBA8); assert(pixels);
+    const auto view=accounting.create(1,1); assert(view);
+    assert(accounting.cpuBytes()==4);
+    assert(accounting.drawImage(view->handle,pixels->handle,0,0,1,1,0,0,1,1,1,false));
+    assert(accounting.fillRect(pixels->handle,0,0,1,1,0xffffffff));
+    assert(accounting.cpuBytes()==8);
+    assert(accounting.replacePixels(pixels->handle,blue,pmjs::PixelEncoding::StraightRGBA8));
+    assert(accounting.cpuBytes()==8);
+    assert(accounting.release(pixels->handle));
+    assert(accounting.cpuBytes()==4);
+    assert(accounting.readPixels(view->handle,0,0,1,1)->rgba==red);
+    assert(accounting.cpuBytes()==4);
+    assert(accounting.release(view->handle));
+    assert(accounting.cpuBytes()==0);
+  }
   std::cout << "[canvas-upload] exact RGBA premultiplied transfers, region bounds and failed-upload retry agree\n";
 }

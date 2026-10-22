@@ -738,12 +738,33 @@ CanvasStore::Content::Content(CanvasStore& store) : owner(store) {
 CanvasStore::Content::~Content() {
   owner.discardCommands(*this);
   owner.contents_.erase(this);
+  owner.pixelBytes_ -= pixels.size();
+}
+
+void CanvasStore::Content::setPixels(std::vector<std::uint8_t> value) {
+  owner.pixelBytes_ -= pixels.size();
+  pixels = std::move(value);
+  owner.pixelBytes_ += pixels.size();
+}
+
+std::vector<std::uint8_t> CanvasStore::Content::takePixels() {
+  owner.pixelBytes_ -= pixels.size();
+  return std::exchange(pixels, {});
+}
+
+void CanvasStore::retainSnapshot(const CanvasCommand& command) {
+  if (const auto* draw = std::get_if<DrawImageCmd>(&command); draw && draw->snapshot)
+    ++snapshots_[draw->snapshot.get()];
 }
 
 void CanvasStore::releaseCommandDependencies(CanvasCommand& cmd) {
   std::visit([this](auto& c) {
     using T = std::decay_t<decltype(c)>;
     if constexpr (std::is_same_v<T, DrawImageCmd>) {
+      if (c.snapshot) {
+        auto found = snapshots_.find(c.snapshot.get());
+        if (--found->second == 0) snapshots_.erase(found);
+      }
       if (c.source != 0) {
         images_.release(c.source);
         c.source = 0;
@@ -869,7 +890,7 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
         const int height = std::min(canvas->height, static_cast<int>(sourceY + sourceHeight) + 1) - top;
         auto& crop = croppedSource.emplace(*this);
         crop.width = width; crop.height = height; crop.state = ContentState::Realizing;
-        crop.pixels.assign(static_cast<size_t>(width) * height * 4, 0);
+        crop.setPixels(std::vector<std::uint8_t>(static_cast<size_t>(width) * height * 4, 0));
         auto read = *view;
         read.sourceX = left; read.sourceY = top; read.sourceWidth = width; read.sourceHeight = height;
         read.destinationX = read.destinationY = 0; read.destinationWidth = width; read.destinationHeight = height;
@@ -1128,8 +1149,8 @@ bool CanvasStore::realizeContent(Content& surface) {
   prepared.state = ContentState::Realizing;
   surface.state = ContentState::Realizing;
   try {
-    prepared.pixels.assign(static_cast<std::size_t>(surface.width) *
-                             static_cast<std::size_t>(surface.height) * 4U, 0);
+    prepared.setPixels(std::vector<std::uint8_t>(static_cast<std::size_t>(surface.width) *
+                             static_cast<std::size_t>(surface.height) * 4U, 0));
     if (prepared.opaque) for (size_t i = 3; i < prepared.pixels.size(); i += 4) prepared.pixels[i] = 255;
     prepared.knownAllZero = !prepared.opaque;
     for (const auto& cmd : surface.commands) {
@@ -1160,7 +1181,7 @@ bool CanvasStore::realizeContent(Content& surface) {
     throw;
   }
 
-  surface.pixels = std::move(prepared.pixels);
+  surface.setPixels(prepared.takePixels());
   surface.mayHaveOverAlpha = prepared.mayHaveOverAlpha;
   surface.knownAllZero = prepared.knownAllZero;
   surface.state = ContentState::Realized;
@@ -1314,7 +1335,7 @@ CanvasStore::Content* CanvasStore::writableContent(CanvasHandle handle) {
     copy->height = old.height;
     copy->opaque = old.opaque;
     copy->state = old.state;
-    copy->pixels = old.pixels;
+    copy->setPixels(old.pixels);
     copy->mayHaveOverAlpha = old.mayHaveOverAlpha;
     copy->knownAllZero = old.knownAllZero;
     auto commands = old.commands;
@@ -1324,6 +1345,7 @@ CanvasStore::Content* CanvasStore::writableContent(CanvasHandle handle) {
       }
     }
     copy->commands = std::move(commands);
+    for (const auto& command : copy->commands) retainSnapshot(command);
     copy->queuedCommandBytes = old.queuedCommandBytes;
     copy->dependencyDepth = old.dependencyDepth;
     copy->dirtyX0 = old.dirtyX0;
@@ -1368,7 +1390,7 @@ std::optional<CanvasInfo> CanvasStore::createPixels(
                                static_cast<size_t>(extent->width) * 4, encoding),
                 PixelView(pixels.data(), pixels.size(), extent->width, extent->height,
                           static_cast<size_t>(extent->width) * 4, PixelEncoding::PremultipliedBGRA8));
-  surface.pixels = std::move(pixels);
+  surface.setPixels(std::move(pixels));
   for (size_t i = 0; i < surface.pixels.size(); i += 4)
     if (surface.pixels[i] > surface.pixels[i+3] || surface.pixels[i+1] > surface.pixels[i+3] ||
         surface.pixels[i+2] > surface.pixels[i+3]) { surface.mayHaveOverAlpha = true; break; }
@@ -1556,6 +1578,12 @@ bool CanvasStore::drawImage(CanvasHandle destination, std::uint32_t source,
         if (!command.snapshot) return false;
       }
       destinationSurface->commands.emplace_back(command);
+      try {
+        retainSnapshot(destinationSurface->commands.back());
+      } catch (...) {
+        destinationSurface->commands.pop_back();
+        throw;
+      }
       if (command.source) images_.retain(command.source);
       destinationSurface->queuedCommandBytes += sizeof(DrawImageCmd);
       destinationSurface->dependencyDepth = std::max(destinationSurface->dependencyDepth, depth);
@@ -1860,7 +1888,7 @@ bool CanvasStore::replacePixels(CanvasHandle handle,
                                static_cast<size_t>(extent->width) * 4, encoding),
                 PixelView(pixels.data(), pixels.size(), extent->width, extent->height,
                           static_cast<size_t>(extent->width) * 4, PixelEncoding::PremultipliedBGRA8));
-  replacement->pixels = std::move(pixels);
+  replacement->setPixels(std::move(pixels));
   for (size_t i = 0; i < replacement->pixels.size(); i += 4)
     if (replacement->pixels[i] > replacement->pixels[i+3] || replacement->pixels[i+1] > replacement->pixels[i+3] ||
         replacement->pixels[i+2] > replacement->pixels[i+3]) { replacement->mayHaveOverAlpha = true; break; }
@@ -1931,13 +1959,10 @@ void CanvasStore::uploadDirty() {
 }
 
 std::size_t CanvasStore::cpuBytes() const {
-  std::size_t result = 0;
-  std::unordered_set<const ImagePixelSnapshot*> snapshots;
-  for (const auto* content : contents_) {
-    result += content->pixels.size();
-    for (const auto& command : content->commands) if (const auto* draw = std::get_if<DrawImageCmd>(&command))
-      if (draw->snapshot && draw->snapshot->pixels && snapshots.insert(draw->snapshot.get()).second)
-        result += draw->snapshot->pixels->rgba.size();
+  std::size_t result = pixelBytes_;
+  for (const auto& [snapshot, references] : snapshots_) {
+    (void)references;
+    if (snapshot->pixels) result += snapshot->pixels->rgba.size();
   }
   return result;
 }
