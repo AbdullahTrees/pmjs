@@ -2,6 +2,7 @@
 import json
 import re
 import shutil
+import struct
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -35,6 +36,93 @@ def _image(directory, stem, required):
     return _regular(images[0])
 
 
+def _image_dimensions(file):
+    with file.open('rb') as image:
+        header = image.read(24)
+        if (len(header) == 24 and header.startswith(b'\x89PNG\r\n\x1a\n') and
+                header[12:16] == b'IHDR'):
+            return struct.unpack('>II', header[16:24])
+        if header[:2] != b'\xff\xd8':
+            raise ValueError(f'Unsupported screenshot image: {file.name}')
+        image.seek(2)
+        while marker_prefix := image.read(1):
+            if marker_prefix != b'\xff':
+                continue
+            marker = image.read(1)
+            while marker == b'\xff':
+                marker = image.read(1)
+            if not marker or marker in (b'\x00', b'\xd8', b'\xd9') or b'\xd0' <= marker <= b'\xd7':
+                continue
+            if marker == b'\xda':
+                break
+            length = image.read(2)
+            if len(length) != 2:
+                break
+            segment_length = struct.unpack('>H', length)[0]
+            if segment_length < 2:
+                break
+            if marker[0] in (0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+                             0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf):
+                frame = image.read(5)
+                if len(frame) == 5:
+                    height, width = struct.unpack('>HH', frame[1:5])
+                    return width, height
+                break
+            image.seek(segment_length - 2, 1)
+    raise ValueError(f'Could not read screenshot dimensions: {file.name}')
+
+
+def _required_text(value, field):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'port.json {field} must be a nonempty string')
+    return value
+
+
+def _validate_metadata(metadata):
+    items_opt = metadata.get('items_opt')
+    if not isinstance(items_opt, list) or items_opt:
+        raise ValueError('port.json items_opt must be an empty array for PMJS packages')
+    attr = metadata.get('attr')
+    if not isinstance(attr, dict):
+        raise ValueError('port.json attr must be an object')
+
+    for field in ('title', 'desc', 'inst'):
+        value = _required_text(attr.get(field), f'attr.{field}')
+        if field != 'title':
+            markdown = re.search(r'(?:^|\s)[#>*+-]\s|`|(?:\*\*|__|~~)|\[[^]]+\]\([^)]+\)', value)
+            if '\n' in value or '\r' in value or r'\n' in value or markdown:
+                raise ValueError(f'port.json attr.{field} must be one-line plain text')
+    porter = attr.get('porter')
+    if not isinstance(porter, list) or not porter or any(
+            not isinstance(name, str) or not name.strip() or
+            re.sub(r'[^a-z]', '', name.lower()) in {'yourhandle', 'placeholder', 'todo', 'tbd'}
+            for name in porter):
+        raise ValueError('port.json attr.porter must contain porter names, not placeholders')
+    if not isinstance(attr.get('genres'), list) or not attr['genres'] or any(
+            not isinstance(genre, str) or not re.fullmatch(r'[a-z][a-z0-9-]*', genre)
+            for genre in attr['genres']):
+        raise ValueError('port.json attr.genres must be a nonempty array of lowercase genre slugs')
+    for field in ('desc_md', 'inst_md'):
+        if field not in attr or (attr[field] is not None and not isinstance(attr[field], str)):
+            raise ValueError(f'port.json attr.{field} must be a string or null')
+    if 'image' not in attr or (attr['image'] is not None and not isinstance(attr['image'], str)):
+        raise ValueError('port.json attr.image must be a string or null')
+    if not isinstance(attr.get('exp'), bool):
+        raise ValueError('port.json attr.exp must be a boolean')
+    if not isinstance(attr.get('store'), list) or any(
+            not isinstance(store, dict) or any(
+                not isinstance(store.get(field), str) or not store[field].strip()
+                for field in ('name', 'gameurl', 'developerurl'))
+            for store in attr['store']):
+        raise ValueError('port.json attr.store must be an array of complete store links')
+    if not isinstance(attr.get('availability'), str) or not attr['availability'].strip():
+        raise ValueError('port.json attr.availability must be a nonempty string')
+    if not isinstance(attr.get('reqs'), list) or any(not isinstance(req, str) for req in attr['reqs']):
+        raise ValueError('port.json attr.reqs must be an array of strings')
+    if not isinstance(attr.get('min_glibc'), str):
+        raise ValueError('port.json attr.min_glibc must be a string')
+
+
 def read_submission(directory):
     """Read the files normally authored for a PortMaster-New port PR."""
     if directory is None:
@@ -46,6 +134,7 @@ def read_submission(directory):
     metadata = json.loads(_regular(directory / 'port.json').read_text(encoding='utf-8'))
     if not isinstance(metadata, dict) or metadata.get('version') != 4 or metadata.get('name') != portname + '.zip':
         raise ValueError('Expected PortMaster v4 port.json matching the submission directory')
+    _validate_metadata(metadata)
     items = metadata.get('items')
     if not isinstance(items, list) or len(items) != 2 or items[1] != portname:
         raise ValueError('port.json items must specify the launcher and this port directory')
@@ -68,6 +157,9 @@ def read_submission(directory):
     if game is None or game.findtext('path') != './' + launcher:
         raise ValueError('gameinfo.xml path must match the launcher')
     screenshot = _image(directory, 'screenshot', required=True)
+    width, height = _image_dimensions(screenshot)
+    if width < 640 or height < 480:
+        raise ValueError('PortMaster screenshot must be at least 640x480')
     cover = _image(directory, 'cover', required=False)
     expected_images = {'./' + portname + '/' + (cover or screenshot).name,
                        './' + portname + '/' + screenshot.name}

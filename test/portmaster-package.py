@@ -172,9 +172,11 @@ class PortMasterPackage(unittest.TestCase):
         descriptor = {'version': 4, 'name': 'minimalgame.zip',
                       'items': ['Minimal Game.sh', 'minimalgame'], 'items_opt': [],
                       'attr': {'title': 'Minimal Game', 'porter': ['Test Porter'],
-                               'desc': 'A game & test', 'inst': 'Supply the game files.',
+                               'desc': 'A game & test', 'desc_md': None,
+                               'inst': 'Supply the game files.', 'inst_md': None,
                                'genres': ['rpg'], 'image': None, 'rtr': False,
-                               'runtime': [], 'arch': ['x86_64'], 'store': []}}
+                               'exp': False, 'runtime': [], 'arch': ['x86_64'], 'store': [],
+                               'availability': 'full', 'reqs': [], 'min_glibc': ''}}
         (submission / 'port.json').write_text(json.dumps(descriptor))
         output = self.root / 'output/minimalgame.zip'
         subprocess.run(['node', ROOT / 'test/helpers/generate-schema3-index.cjs',

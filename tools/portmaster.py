@@ -36,6 +36,7 @@ GAMEDIR="/${directory#/}/ports/@ID@"
 BINARY=node
 cd "$GAMEDIR" || exit 1
 GAMEDIR=$(pwd -P)
+PMJS_ROOT="$GAMEDIR/runtime"
 LOGFILE="$GAMEDIR/log.txt"
 rm -f "$LOGFILE" || { echo 'Failed to remove the previous PortMaster log' >&2; exit 1; }
 {
@@ -52,7 +53,9 @@ if [ "$platform_status" -ne 0 ]; then
 fi
 
 echo '[pmjs-port] starting runtime'
-XDG_CACHE_HOME="$GAMEDIR/.cache" "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
+XDG_CACHE_HOME="$GAMEDIR/.cache" \\
+LD_LIBRARY_PATH="$PMJS_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \\
+  "$GAMEDIR/runtime/bin/$BINARY" "$PMJS_ROOT/share/pmjs/tools/pmjs.mjs" "$PMJS_ROOT" "$GAMEDIR" \\
   --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
 status=$?
 pm_finish || { [ "$status" -ne 0 ] || status=1; }
