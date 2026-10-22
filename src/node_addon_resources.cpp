@@ -207,12 +207,22 @@ void executeImageLoad(napi_env, void* opaque) noexcept {
   auto* load = static_cast<AsyncImageLoad*>(opaque);
   if (load->prepared) {
     try {
-      if (pmjs::ImageStore::validatePrepared(*load->prepared, load->prepareCpuPixels)) return;
+      if (state && state->images.validatePrepared(*load->prepared, load->prepareCpuPixels)) return;
     } catch (...) {
       // Invalid prepared backing still permits decoding the captured source.
     }
     load->tileValidationFailed = !load->tileSet.empty();
+    try {
+      if (state) load->pixels = state->images.decodePreparedFallback(*load->prepared);
+    } catch (...) {
+      load->pixels = std::nullopt;
+    }
+    if (!load->pixels && load->source) {
+      try { load->pixels = pmjs::ImageStore::decodeFile(*load->source); }
+      catch (...) { load->pixels = std::nullopt; }
+    }
     load->prepared.reset();
+    return;
   }
   try {
     load->pixels = pmjs::ImageStore::decodeFile(load->fallbackSource ? *load->fallbackSource : *load->source);
@@ -326,7 +336,7 @@ napi_value queueImageLoad(napi_env env, const std::filesystem::path& path,
   load->retainCpuPixels = retainCpuPixels;
   load->prepareCpuPixels = retainCpuPixels;
   load->prepared = state->images.capturePrepared(*load->source, tileSet);
-  if (load->prepared) load->fallbackSource = pmjs::ImageStore::capturePreparedFallback(*load->prepared);
+  if (load->prepared) load->fallbackSource = state->images.capturePreparedFallback(*load->prepared);
   load->deferreds.push_back(deferred);
   state->pendingImageLoads.emplace(key, load.get());
   const auto queued = queueImageWork(env, *load);

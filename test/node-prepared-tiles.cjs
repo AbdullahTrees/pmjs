@@ -204,12 +204,16 @@ async function main() {
   Object.assign(staleSet.descriptor.sources[0], { source: 'source.png', snapshot: path.join(root, 'snapshot.png'),
     sourceIdentity: native.assets.sourceIdentity('source.png') });
   assert.equal(native.assets.installTileSets([staleSet], true), 1);
-  for (const missing of [path.join(directory, descriptor.pages[0].path), path.join(root, 'snapshot.png')]) {
+  for (const [missing, invalidates] of [
+    [path.join(directory, descriptor.pages[0].path), true],
+    [path.join(root, 'snapshot.png'), false],
+  ]) {
     const bytes = fs.readFileSync(missing); fs.unlinkSync(missing);
     assert.equal(native.assets.installTileSetCatalog([staleSet]), 1, 'catalog installation must not open missing tile files');
     native.assets.consumePreparationInvalidations();
     const fallback = await native.images.loadAsync('source.png', false, staleSet.identity);
-    assert.equal(native.assets.consumePreparationInvalidations() & 2, 2, 'stale pages and snapshots request map regeneration');
+    assert.equal(native.assets.consumePreparationInvalidations() & 2, invalidates ? 2 : 0,
+      invalidates ? 'missing pages request map regeneration' : 'unused snapshots are not inspected');
     const ordinary = native.images.load('source.png');
     assert.deepEqual(frame(fallback, rectangles[0], transforms[0], true), frame(ordinary, rectangles[0], transforms[0], true));
     native.images.release(fallback.handle); native.images.release(ordinary.handle); native.beginFrame();
