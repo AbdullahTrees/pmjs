@@ -2517,3 +2517,30 @@ test('screen renders skip plain leaf sprites wholly outside the viewport', () =>
   sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.viewport-cull';
   assert.equal(positions(render({ width: 640, height: 480 })).length, 6, 'registry disable keeps every sprite');
 });
+
+test('hidden children between plain sprites encode like the visible children alone', () => {
+  for (const segmented of [true, false]) {
+    const harness = makeHarness();
+    const { sandbox, sprite } = harness;
+    sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.plain-sprite-segment' || segmented;
+    const visible = [];
+    const mixed = new sandbox.PIXI.Container();
+    for (let i = 0; i < 9; i++) {
+      const child = sprite(16 + i, 24 + i);
+      child.x = i * 7;
+      child.y = i * 3;
+      child.tint = 0xabcdef;
+      mixed.addChild(child);
+      visible.push(child);
+      const hidden = sprite(8, 8);
+      if (i % 3 === 0) hidden.visible = false;
+      else if (i % 3 === 1) hidden.renderable = false;
+      else hidden.alpha = 0;
+      mixed.addChild(hidden);
+    }
+    const withHidden = submitOnly(harness, mixed);
+    const plain = new sandbox.PIXI.Container();
+    for (const child of visible) plain.addChild(child);
+    assert.deepEqual(submitOnly(harness, plain), withHidden, segmented ? 'segmented' : 'ordinary');
+  }
+});
