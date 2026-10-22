@@ -293,6 +293,7 @@ async function prepareForRun({ gameRoot, bundleRoot, descriptors, adapters = [],
             if (value === null) {
               const record = { id, key, source: entry.source, sourceHash: inputHash, processor: identity, dependencies, outcome: 'ordinary-choice', descriptor: null, outputs: {} };
               session.data.results[path.relative(session.root, directory).split(path.sep).join('/')] = record;
+              session.markDirty();
               session.touch(directory); session.outcome('port:' + id, 'ordinary-choice');
               continue;
             }

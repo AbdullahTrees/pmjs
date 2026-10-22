@@ -123,24 +123,41 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       directories.set(path.posix.dirname(name) + '/' + record.key, name);
     }
     let lastChecksum = saved.files ? checksum(data) : null;
+    let stateDirty = false;
     let finalizedState = false;
     const session = { root, gameRoot, sourceRoots, data, native, offline, logger, shouldCancel, pending, touched, invalidated: 0,
       phaseStates: new Map(), repairSources: new Set(), outcomes: new Map(),
+      markDirty() { stateDirty = true; },
+      setIndex(name, value, verifiedUnchanged = false) {
+        const previous = data.indices[name];
+        const sameList = (left, right) => Array.isArray(left) && Array.isArray(right) &&
+          left.length === right.length && left.every((item, index) => item === right[index]);
+        if (verifiedUnchanged && name === 'maps' && previous && value && previous.compiler === value.compiler &&
+            previous.compilationsHash === value.compilationsHash && previous.mapInputsHash === value.mapInputsHash &&
+            sameList(previous.keys, value.keys) && sameList(previous.snapshots, value.snapshots) &&
+            sameList(previous.recompileMapInputs, value.recompileMapInputs)) return false;
+        if (previous === value) return false;
+        data.indices[name] = value;
+        stateDirty = true;
+        return true;
+      },
       outcome(id, outcome, reason) {
         const previous = session.outcomes.get(id)?.outcome;
         if (outcome === 'reused-local' && ['generated', 'reused-package'].includes(previous)) outcome = previous;
         session.outcomes.set(id, { id, outcome, ...(reason ? { reason } : {}) });
-        if (outcome === 'ordinary-failure') data.failures[id] = reason;
-        else delete data.failures[id];
+        if (outcome === 'ordinary-failure') {
+          if (data.failures[id] !== reason) { data.failures[id] = reason; stateDirty = true; }
+        } else if (Object.hasOwn(data.failures, id)) { delete data.failures[id]; stateDirty = true; }
       },
       directory(parent, key) {
         return path.join(root, directories.get(parent + '/' + key) || parent + '/' + key);
       },
       newDirectory(parent, key) { return path.join(root, parent, key + "-" + crypto.randomBytes(6).toString("hex")); },
       async checkpoint() {
+        if (!stateDirty) return true;
         const serializedData = JSON.stringify(data);
         const current = checksumText(serializedData);
-        if (current === lastChecksum) return true;
+        if (current === lastChecksum) { stateDirty = false; return true; }
         const temporary = filename + '.stage-' + crypto.randomBytes(6).toString('hex');
         try {
           const handle = await fsp.open(temporary, 'wx');
@@ -151,6 +168,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
           finally { await handle.close(); }
           await fsp.rename(temporary, filename);
           lastChecksum = current;
+          stateDirty = false;
           return true;
         } catch (error) {
           if (!session.persistenceWarning) logger.warn('[pmjs] preparation state could not be saved: ' + error.message);
@@ -166,7 +184,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       touch(directory) { const key = inside(root, directory); if (Object.hasOwn(data.results, key)) touched.add(key); },
       discard(directory) {
         const key = inside(root, directory);
-        if (Object.hasOwn(data.results, key)) ++session.invalidated;
+        if (Object.hasOwn(data.results, key)) { ++session.invalidated; stateDirty = true; }
         delete data.results[key]; touched.delete(key);
       },
       startPhase(name) { session.phaseStates.set(name, 'active'); },
@@ -190,8 +208,10 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
           session.files.receipts[destination] = receipt;
           data.files[destination] = receipt;
           delete session.files.receipts[file]; delete data.files[file];
+          stateDirty = true;
         }
         data.results[relative] = value;
+        stateDirty = true;
         directories.set(path.posix.dirname(relative) + '/' + value.key, relative);
         pending.delete(inside(root, from));
         touched.add(relative);
@@ -200,20 +220,26 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         for (const key of Object.keys(data.results)) {
           const phase = key.startsWith('maps/') ? 'maps' : key.startsWith('port/') ? 'port' : 'images';
           if (session.phaseStates.get(phase) === 'completed' && !touched.has(key)) {
-            delete data.results[key]; ++session.invalidated;
+            delete data.results[key]; ++session.invalidated; stateDirty = true;
           }
         }
         for (const id of Object.keys(data.failures)) {
           const phase = id.startsWith('map:') ? 'maps' : id.startsWith('port:') ? 'port' : 'images';
-          if (session.phaseStates.get(phase) === 'completed' && !session.outcomes.has(id)) delete data.failures[id];
+          if (session.phaseStates.get(phase) === 'completed' && !session.outcomes.has(id)) {
+            delete data.failures[id]; stateDirty = true;
+          }
         }
         const retained = new Set(Object.keys(data.results).map(value => value.split('/').at(-1)));
         for (const record of Object.values(data.results))
           for (const input of record?.descriptor?.sources || [])
             if (input.snapshot) retained.add(path.basename(input.snapshot, '.png'));
         for (const key of [...(data.indices.maps?.snapshots || []), ...(data.indices.maps?.keys || [])]) retained.add(key);
-        Object.assign(data.files, session.files.receipts);
-        for (const file of Object.keys(data.files)) if (!session.files.receipts[file]) delete data.files[file];
+        for (const [file, receipt] of Object.entries(session.files.receipts)) {
+          if (data.files[file] !== receipt) { data.files[file] = receipt; stateDirty = true; }
+        }
+        for (const file of Object.keys(data.files)) if (!session.files.receipts[file]) {
+          delete data.files[file]; stateDirty = true;
+        }
         const committed = await session.checkpoint();
         if (!offline) {
           const previousLease = installedLeases.get(native.assets);

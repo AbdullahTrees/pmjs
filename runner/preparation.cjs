@@ -38,7 +38,8 @@ async function prepareGameAssets(options) {
           for (const record of Object.values(session.data.results))
             if (record?.source === item.id || (encryptedSource && record?.source === encryptedSource) || record?.key === item.id) {
               if (record.source) session.repairSources.add(record.source);
-              record.failed = true; ++session.invalidated;
+              if (!record.failed) { record.failed = true; session.markDirty(); }
+              ++session.invalidated;
               if (attempt === 1) session.outcome(name === 'maps' ? 'map:' + record.filename : 'image:' + record.source, 'ordinary-failure', item.reason);
             }
           }

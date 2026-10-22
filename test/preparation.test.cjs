@@ -57,6 +57,7 @@ test('publication relocates only declared image, map and port output receipts', 
 test('oversized cached state rebuilds without loading its contents', async t => {
   const f = fixture(), first = await openPreparation({ ...f.options });
   const filename = path.join(first.root, 'preparation-state.json');
+  first.markDirty();
   await first.checkpoint();
   await first.close();
   fs.truncateSync(filename, 48 * 1024 * 1024 + 1);
@@ -84,6 +85,7 @@ test('large state checkpoints use bounded write buffers and preserve Unicode at 
   const prefix = JSON.stringify(session.data).indexOf('"large":"') + '"large":"'.length;
   const text = 'x'.repeat(64 * 1024 - prefix - 1) + '😺' + 'y'.repeat(1024 * 1024);
   session.data.failures.large = text;
+  session.markDirty();
   const open = fs.promises.open;
   let largestWrite = 0;
   t.mock.method(fs.promises, 'open', async (...args) => {
@@ -112,9 +114,20 @@ test('successful finalization checkpoints once and close does not serialize stat
     ++serializations;
     return { files: data.files, results: data.results, indices: data.indices, failures: data.failures };
   } });
+  session.markDirty();
   await session.finish();
   await session.close();
   assert.equal(serializations, 1);
+});
+
+test('unchanged warm state skips checkpoint serialization', async t => {
+  const f = fixture(), session = await openPreparation({ ...f.options });
+  t.after(() => session.close());
+  let serializations = 0;
+  Object.defineProperty(session.data, 'toJSON', { value() { ++serializations; return {}; } });
+  assert.equal(await session.checkpoint(), true);
+  await session.close();
+  assert.equal(serializations, 0);
 });
 
 test('one state reuses unchanged inputs and outputs after a fresh inventory', async () => {

@@ -21,6 +21,16 @@ async function preparationFiles(session, verifyHashes = false) {
   const files = {}, known = new Map();
   const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, jsonReads: 0, jsonReuses: 0,
     copiedFiles: 0, copiedBytes: 0, publicationReuses: 0, hashedBytesByCategory: {} };
+  function saveReceipt(file, receipt) {
+    const cached = session.data.files[file];
+    const same = cached && cached.identity === receipt.identity && cached.hash === receipt.hash &&
+      cached.header === receipt.header;
+    const stored = same ? cached : receipt;
+    if (!same) session.markDirty?.();
+    files[file] = stored;
+    session.data.files[file] = stored;
+    return stored;
+  }
   function identity(stat) {
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':');
   }
@@ -68,8 +78,7 @@ async function preparationFiles(session, verifyHashes = false) {
           inspected.gameRooted && await fsp.realpath(file) !== actual)
         throw new Error('preparation input changed while verifying');
     }
-    files[file] = { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) };
-    session.data.files[file] = files[file];
+    saveReceipt(file, { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) });
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, reused, size: Number(before.size), header };
   }
@@ -92,8 +101,7 @@ async function preparationFiles(session, verifyHashes = false) {
       stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + bytes.length;
     } else ++stats.reusedFiles;
     const header = Buffer.from(bytes.subarray(0, 32));
-    files[file] = { identity: signature, hash: checksum, header: header.toString('base64') };
-    session.data.files[file] = files[file];
+    saveReceipt(file, { identity: signature, hash: checksum, header: header.toString('base64') });
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, size: bytes.length, header };
   }
@@ -128,7 +136,7 @@ async function preparationFiles(session, verifyHashes = false) {
           identity(written) !== identity(await fsp.lstat(target, { bigint: true })))
         throw new Error('copy output changed while copying');
       const signature = identity(written);
-      files[path.resolve(target)] = { identity: signature, hash: checksum };
+      saveReceipt(path.resolve(target), { identity: signature, hash: checksum });
       known.set(signature, { hash: checksum, header });
       ++stats.copiedFiles; stats.copiedBytes += size;
       return { hash: checksum, header, size };
@@ -147,7 +155,7 @@ async function preparationFiles(session, verifyHashes = false) {
     // A directly renamed file may acquire a new ctime; retain the other identity fields.
     if (!after.isFile() || ['dev', 'ino', 'size', 'mtimeNs', 'birthtimeNs'].some(key => before[key] !== after[key])) return;
     const signature = identity(after);
-    files[to] = { ...receipt, identity: signature };
+    saveReceipt(to, { ...receipt, identity: signature });
     known.set(signature, known.get(receipt.identity) || { hash: receipt.hash });
     ++stats.publicationReuses;
   }
@@ -168,7 +176,12 @@ async function preparationFiles(session, verifyHashes = false) {
     return true;
   }
   async function save() {
-    Object.assign(session.data.files, files);
+    for (const [file, receipt] of Object.entries(files)) {
+      if (session.data.files[file] !== receipt) {
+        session.data.files[file] = receipt;
+        session.markDirty?.();
+      }
+    }
     await session.checkpoint();
   }
   return { hash, inspect, inspectSync, copyVerified, publish, validatedManifest, validateOutputs, save, stats, receipts: files,

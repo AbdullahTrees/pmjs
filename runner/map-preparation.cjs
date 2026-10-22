@@ -184,7 +184,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
     result.total = data.length;
     if (!data.length) {
       if (!offline) { native.assets.installTileSets([]); native.assets.preparedMapIndex = {}; }
-      session.data.indices.maps = null;
+      session.setIndex('maps', null);
       result.entries = [];
       result.validation = files.stats;
       return result;
@@ -242,13 +242,15 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         compilationsHash: identity(portableIndex.compilations), mapInputs: rebound,
         mapInputsHash: identity(rebound) };
     }
-    if (session.data.indices.maps?.compiler !== COMPILER_VERSION) session.data.indices.maps = null;
+    if (session.data.indices.maps?.compiler !== COMPILER_VERSION) session.setIndex('maps', null);
     const previousIndex = session.data.indices.maps || imported;
     const recompileMapInputs = new Set(previousIndex?.recompileMapInputs || []);
-    const previousCompilations = previousIndex?.compilations &&
-      previousIndex.compilationsHash === identity(previousIndex.compilations) ? previousIndex.compilations : {};
-    const previousInputs = previousIndex?.mapInputs &&
-      previousIndex.mapInputsHash === identity(previousIndex.mapInputs) ? previousIndex.mapInputs : {};
+    const previousCompilationsValid = !!previousIndex?.compilations &&
+      previousIndex.compilationsHash === identity(previousIndex.compilations);
+    const previousInputsValid = !!previousIndex?.mapInputs &&
+      previousIndex.mapInputsHash === identity(previousIndex.mapInputs);
+    const previousCompilations = previousCompilationsValid ? previousIndex.compilations : {};
+    const previousInputs = previousInputsValid ? previousIndex.mapInputs : {};
     const compilations = {}, mapInputs = {};
     async function unchangedDependencies(cached) {
       if (!Array.isArray(cached.dependencies) || !cached.dependencies.length) return null;
@@ -489,12 +491,14 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
         const match = /^entries\/([^/]+)\//.exec(path.relative(cacheRoot, snapshot).split(path.sep).join('/'));
         if (match) retainedKeys.push(match[1]);
       }
+      const reusablePreviousIndex = previousIndex === session.data.indices.maps &&
+        previousCompilationsValid && previousInputsValid;
       const nextIndex = { compiler: COMPILER_VERSION, keys: retainedKeys, snapshots: [...snapshots.keys()],
         compilations, compilationsHash: identity(compilations), mapInputs, mapInputsHash: identity(mapInputs),
         recompileMapInputs: [...recompileMapInputs] };
       result.compilations = compilations;
       result.mapInputs = mapInputs;
-      session.data.indices.maps = nextIndex;
+      session.setIndex('maps', nextIndex, reusablePreviousIndex);
       await files.save();
 
     }
