@@ -2472,3 +2472,43 @@ test('scene harnesses keep Pixi prototypes and native submissions separate', () 
   assert.equal(first.submitted.length, 1);
   assert.equal(second.submitted.length, 0);
 });
+
+test('screen renders skip plain leaf sprites wholly outside the viewport', () => {
+  const harness = preparedHarness();
+  const { sandbox, sprite } = harness;
+  sandbox.PIXI.Sprite.prototype.calculateVertices = function() {
+    const w = this.transform.worldTransform, f = this.texture.frame;
+    const corners = [[0, 0], [f.width, 0], [f.width, f.height], [0, f.height]];
+    this.vertexData = new Float32Array(corners.flatMap(([x, y]) =>
+      [w.a * x + w.c * y + w.tx, w.b * x + w.d * y + w.ty]));
+  };
+  function scene() {
+    const root = new sandbox.PIXI.Container(); root._boundsID = 0;
+    for (const [x, y] of [[10, 10], [-40, 10], [700, 200], [620, 460], [100, 600], [-31, -31]]) {
+      const child = sprite(32, 32); child.x = x; child.y = y; child._boundsID = 0; root.addChild(child);
+    }
+    return root;
+  }
+  function render(viewportCull) {
+    sandbox.renderNativeStage(scene(), undefined, 1, false, false, null,
+      viewportCull ? { viewportCull } : {});
+    return harness.submitted.at(-1);
+  }
+  const full = render(null), culled = render({ width: 640, height: 480 });
+  const positions = packet => Array.from({ length: packet.count }, (_, i) => packetNode(packet, i))
+    .filter(node => node.kind === 1).map(node => [node.x, node.y]);
+  // Values 4-5 of a sprite with prepared vertices hold its bottom-right corner. A 32x32 quad is
+  // dropped exactly when it misses the 640x480 screen by more than a pixel.
+  const visible = ([x, y]) => !(x < -1 || y < -1 || x - 32 > 641 || y - 32 > 481);
+  const all = positions(full);
+  assert.equal(all.length, 6);
+  assert.ok(all.filter(visible).length < 6 && all.filter(visible).length > 1, 'fixture mixes visible and hidden sprites');
+  assert.deepEqual(positions(culled), all.filter(visible),
+    'wholly off-screen leaves are skipped; partly visible ones stay in order');
+  const records = packet => Array.from({ length: packet.count }, (_, i) => packetNode(packet, i))
+    .filter(node => node.kind === 1 && node.x === all[0][0] && node.y === all[0][1])
+    .map(({ resource, ...record }) => record);
+  assert.deepEqual(records(culled), records(full), 'visible records are unchanged (each render makes new textures)');
+  sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.viewport-cull';
+  assert.equal(positions(render({ width: 640, height: 480 })).length, 6, 'registry disable keeps every sprite');
+});

@@ -26,6 +26,8 @@ if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
   PMJS.optimizations.register({ id: 'scene.solid-sprite-mask-clip',
     owner: 'pmjs-pixi4',
     fallback: 'encode Sprite masks through the alpha-mask filter group' });
+  PMJS.optimizations.register({ id: 'scene.viewport-cull', owner: 'pmjs-pixi4',
+    fallback: 'encode plain leaf sprites that lie wholly outside the screen' });
 }
 
 var nativeTransformParent = new PIXI.Container();
@@ -611,6 +613,8 @@ var nativeSceneTransformsPrepared = false;
 var nativeSceneFilterResolution = 1;
 var nativeSceneRoundPixels = false;
 var nativeScenePlainSpriteSegments = true;
+// Screen size in target pixels while rendering the stage to the screen; null for render targets.
+var nativeSceneCullRect = null;
 var nativeSceneRenderer = null;
 
 function nativeComposeTransform(parent, local) {
