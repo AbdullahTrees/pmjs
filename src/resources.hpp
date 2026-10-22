@@ -195,6 +195,9 @@ class ImageStore {
   static constexpr std::size_t defaultPreparedFrameCacheBytes = 4U * 1024U * 1024U;
   static constexpr std::size_t warmEntryLimit = 256;
   static constexpr std::size_t warmFileLimit = 128;
+  // Bounds retained successful inode-only content verifications.
+  static constexpr std::size_t tileVerificationCacheEntryLimit = 64;
+  static constexpr std::size_t tileVerificationCacheByteLimit = 32U * 1024U;
 
   ImageStore();
   ~ImageStore();
@@ -235,6 +238,9 @@ class ImageStore {
   std::uint64_t tilePageUploads() const { return tilePageUploads_; }
   const std::unordered_map<std::string, std::uint64_t>& tileFallbacks() const { return tileFallbacks_; }
   std::size_t tileMetadataBytes() const { return tileMetadataBytes_->load(std::memory_order_relaxed); }
+  std::size_t tileVerificationCacheEntries() const;
+  // Approximation including key storage, hash nodes and bucket pointers.
+  std::size_t tileVerificationCacheEstimatedBytes() const;
   void noteTileLoadFallback() { if (tileDiagnostics_) ++tileFallbacks_["page-validation"]; }
   std::vector<std::string> consumePreparationFailures() { return preparationFailures_->consume(); }
   unsigned consumePreparationInvalidations() { return preparationInvalidations_->exchange(0, std::memory_order_relaxed); }
@@ -511,6 +517,7 @@ class ImageStore {
   mutable std::mutex tileFileMutex_;
   mutable std::mutex tileVerificationMutex_;
   mutable std::unordered_set<std::string> verifiedTileFiles_;
+  mutable std::size_t tileVerificationCacheEstimatedBytes_ = 0;
   std::shared_ptr<ImageFileSource> captureTileFile(const std::filesystem::path& path) const;
   std::uint64_t tileHits_ = 0, tileRegions_ = 0, tileMaterializations_ = 0;
   std::uint64_t sceneryWindowHits_ = 0;
