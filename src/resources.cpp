@@ -1148,12 +1148,14 @@ std::optional<ImagePixels> ImageStore::readPalettePixels(const Slot& slot, std::
 bool ImageStore::materializePalette(Slot& slot) {
   auto pixels = readPalettePixels(slot);
   if (!pixels) return false;
-  const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), {});
+  const auto storage = imageStorage(*pixels);
+  const auto bytes = static_cast<std::size_t>(slot.width) * slot.height * storage.channels;
+  const auto texture = uploadTexture(slot.width, slot.height, pixels->rgba.data(), storage);
   if (!texture) return false;
   slot.texture = texture;
-  slot.storage = {};
-  gpuBytes_ += pixels->rgba.size();
-  textureUploadBytes_ += pixels->rgba.size();
+  slot.storage = storage;
+  gpuBytes_ += bytes;
+  textureUploadBytes_ += bytes;
   ++textureCreates_; ++textureEpoch_;
   peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
   // Earlier operations in this submission may still reference the index view.
@@ -2352,10 +2354,11 @@ void ImageStore::trimPreparedPages() const {
   // Shared CPU pages stay resident until the global byte budget needs space.
   std::vector<std::pair<std::uint64_t, PreparedBacking::Page*>> pages;
   std::size_t bytes = 0;
-  std::unordered_set<const ImagePixels*> seen;
+  std::unordered_set<const void*> seen;
   for (auto& slot : slots_) if (slot.live && slot.prepared) {
-    for (auto& page : slot.prepared->pages) if (page.pixels) {
-      if (seen.insert(page.pixels.get()).second) bytes += page.pixels->rgba.capacity();
+    for (auto& page : slot.prepared->pages) if (page.pixels || page.sparse) {
+      if (page.pixels && seen.insert(page.pixels.get()).second) bytes += page.pixels->rgba.capacity();
+      if (page.sparse && seen.insert(page.sparse.get()).second) bytes += page.sparse->cpuBytes();
       pages.emplace_back(page.shared->lastCpuUse.load(std::memory_order_relaxed), &page);
     }
   }
@@ -2365,12 +2368,22 @@ void ImageStore::trimPreparedPages() const {
   });
   for (auto& [serial, page] : pages) {
     if (bytes <= preparedPageCacheBudget) break;
-    if (!page->pixels) continue;
-    const auto* storage = page->pixels.get();
-    bytes -= page->pixels->rgba.capacity();
-    for (auto& [otherSerial, other] : pages) {
-      (void)otherSerial;
-      if (other->pixels.get() == storage) other->pixels.reset();
+    if (page->pixels) {
+      const auto* storage = page->pixels.get();
+      bytes -= page->pixels->rgba.capacity();
+      for (auto& [otherSerial, other] : pages) {
+        (void)otherSerial;
+        if (other->pixels.get() == storage) other->pixels.reset();
+      }
+    }
+    if (bytes <= preparedPageCacheBudget) break;
+    if (page->sparse) {
+      const auto* storage = page->sparse.get();
+      bytes -= page->sparse->cpuBytes();
+      for (auto& [otherSerial, other] : pages) {
+        (void)otherSerial;
+        if (other->sparse.get() == storage) other->sparse.reset();
+      }
     }
   }
 }

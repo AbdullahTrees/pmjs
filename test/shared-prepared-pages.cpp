@@ -288,6 +288,49 @@ int main() {
         "indexed palette resources survived their last owner");
     }
     {
+      constexpr int side = 2048, width = 64, height = 64;
+      std::vector<std::uint8_t> page(side * side * 4), source(width * height * 4);
+      for (int y = 0; y < side; ++y) for (int x = 0; x < side; ++x) {
+        const auto gray = static_cast<std::uint8_t>((x * 7 + y * 11) % 256);
+        const auto offset = (y * side + x) * 4;
+        page[offset] = page[offset+1] = page[offset+2] = gray; page[offset+3] = 255;
+      }
+      for (int y = 0; y < height; ++y)
+        std::copy_n(page.data() + ((y+1) * side + 1) * 4, width * 4,
+          source.data() + y * width * 4);
+      pmjs::ImageStore images;
+      images.setWarmBudgetBytes(0);
+      std::vector<pmjs::ImageHandle> handles;
+      for (int index = 0; index < 9; ++index) {
+        const auto name = "packed-budget-" + std::to_string(index);
+        const auto directory = root / name, file = root / (name + ".png");
+        std::filesystem::create_directory(directory);
+        const auto offset = (128 + index) * 4;
+        page[offset] = page[offset+1] = page[offset+2] = std::uint8_t(page[offset] + 1);
+        write(file, width, height, source);
+        pmjs::writeLz4Page(directory / "page.pml4", side, side, page, true);
+        pmjs::PreparedImageDescriptor descriptor;
+        descriptor.width = width; descriptor.height = height; descriptor.halo = 1;
+        descriptor.pages = {{"page.pml4", side, side}};
+        descriptor.cells = {{{0,0,width,height}, {0,0,width,height}, {1,1,width,height}, {}, 0}};
+        require(images.installPrepared(file, directory, descriptor), "packed cache fixture installation failed");
+        const auto image = images.loadPng(file);
+        require(image.has_value(), "packed cache fixture load failed");
+        handles.push_back(image->handle);
+      }
+      require(images.cpuBytes() <= 32U * 1024U * 1024U,
+        "packed page payloads exceeded the shared CPU page budget");
+      const auto decodes = images.preparedPageDecodes();
+      pixels(images, handles.front(), source);
+      require(images.preparedPageDecodes() > decodes,
+        "evicted packed page was not reconstructed from its retained source");
+      require(images.cpuBytes() <= 32U * 1024U * 1024U,
+        "reconstructed packed page exceeded the shared CPU page budget");
+      for (const auto handle : handles) require(images.release(handle), "packed cache owner release failed");
+      images.update();
+      require(images.cpuBytes() == 0 && images.gpuBytes() == 0, "packed cache resources survived their last owner");
+    }
+    {
       const auto blockFixture = [&](const char* name) {
         Fixture value; value.source = root/(std::string(name)+".png"); value.directory = root/name;
         std::filesystem::create_directory(value.directory);

@@ -32,6 +32,8 @@ try {
       assert.deepEqual(drawPacket(native, packet(indexed)), drawPacket(native, packet(reference)),
         'tiling pixels differ from independent ordinary RGBA backing');
       assert.equal(owner(indexed).palette, nearest, 'only nearest tiling keeps indexed backing');
+      if (!nearest) assert.equal(owner(indexed).gpuBytes, 64 * 64 * 2,
+        'linear fallback must retain compact grayscale-alpha storage');
       const uploads = native.images.memory().textureUploadBytes;
       drawPacket(native, packet(indexed));
       assert.equal(native.images.memory().textureUploadBytes, uploads, 'stable tiling must not upload again');
