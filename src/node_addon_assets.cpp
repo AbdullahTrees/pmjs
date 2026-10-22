@@ -612,6 +612,8 @@ napi_value installTileSetsImpl(napi_env env, napi_callback_info info, bool catal
         auto page = element(env, pageValues, j);
         setValue.pages.push_back({asString(env, property(env, page, "path")),
           integer(env, property(env, page, "width")), integer(env, property(env, page, "height"))});
+        // Optional: descriptors published before page hashes were recorded keep exact identity checks.
+        setValue.pageHashes.push_back(hasProperty(env, page, "hash") ? asString(env, property(env, page, "hash")) : "");
       }
       auto sources = property(env, d, "sources");
       const auto sourceCount = arrayLength(env, sources, 512);
@@ -623,6 +625,7 @@ napi_value installTileSetsImpl(napi_env env, napi_callback_info info, bool catal
         if (!path) throw std::runtime_error("cannot resolve tile source");
         output.path = *path; output.snapshot = asString(env, property(env, source, "snapshot"));
         output.identity = asString(env, property(env, source, "sourceIdentity"));
+        if (hasProperty(env, source, "sourceHash")) output.sourceHash = asString(env, property(env, source, "sourceHash"));
         output.width = integer(env, property(env, source, "width")); output.height = integer(env, property(env, source, "height"));
         auto regions = property(env, source, "regions");
         const auto regionCount = arrayLength(env, regions, 65536);

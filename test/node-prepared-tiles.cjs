@@ -19,6 +19,37 @@ const widePixels=Buffer.alloc(8192*64*4);
 for(let y=0;y<64;y++) for(let x=0;x<8192;x++) widePixels.set([x%256,y*3,(x*71+y)%256,255],(y*8192+x)*4);
 fs.writeFileSync(path.join(root,'wide.png'),png(8192,64,widePixels));
 fs.copyFileSync(path.join(root,'wide.png'),path.join(root,'wide-snapshot.png'));
+const cacheFixture = path.join(root, 'verification-cache-source.png');
+fs.writeFileSync(cacheFixture, png(4, 4, Buffer.alloc(4 * 4 * 4, 127)));
+const cacheSourceBytes = fs.readFileSync(cacheFixture);
+const cacheSourceHash = crypto.createHash('sha256').update(cacheSourceBytes).digest('hex');
+const cacheScenarioFixtures = [
+  { name: 'entry-cap', count: 70, pathLength: 0, expectedCap: 'entries' },
+  { name: 'byte-cap', count: 40, pathLength: 900, expectedCap: 'bytes' },
+].map(scenario => {
+  const fixtures = [];
+  for (let index = 0; index < scenario.count; ++index) {
+    let logicalDirectory = root;
+    if (scenario.pathLength) {
+      let remaining = scenario.pathLength;
+      let component = 0;
+      while (remaining > 0) {
+        const length = Math.min(180, remaining);
+        const name = `${component}${'p'.repeat(length - String(component).length)}`;
+        ++component;
+        logicalDirectory = path.join(logicalDirectory, name);
+        remaining -= length;
+      }
+      fs.mkdirSync(logicalDirectory, {recursive:true});
+    }
+    const logical = path.relative(root, path.join(logicalDirectory, `${scenario.name}-${index}.png`));
+    fs.copyFileSync(cacheFixture, path.join(root, logical));
+    const snapshot = path.join(root, 'verification-cache-snapshots', scenario.name, `${index}.png`);
+    fs.mkdirSync(path.dirname(snapshot), {recursive:true}); fs.copyFileSync(cacheFixture, snapshot);
+    fixtures.push({logical, snapshot});
+  }
+  return {...scenario, fixtures};
+});
 const paddedSources = [[512,0,32,32],[-32,0,32,32],[0,512,32,32],[0,-32,32,32],
   [496,0,32,32],[-16,0,32,32],[0,496,32,32],[0,-16,32,32],[496,496,32,32]];
 for (const [index,source] of paddedSources.entries()) {
@@ -200,16 +231,108 @@ async function main() {
   assert.deepEqual(frame(wideView,wideRects[2],transforms[0],true),saved);
   assert.deepEqual(frame(wideView,[2048,16,32,32],transforms[0],true),frame(wideOriginal,[2048,16,32,32],transforms[0],true));
   native.images.release(wideView.handle);native.images.release(wideOriginal.handle);native.beginFrame();
+  const hashFile = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const changedInode = identity => {
+    const fields = identity.split(':');
+    const inodeIndex = fields.length - 6;
+    fields[inodeIndex] = String(BigInt(fields[inodeIndex]) + 1n);
+    return fields.join(':');
+  };
+  const sourceHash = hashFile(path.join(root, 'source.png'));
+  const pageHash = hashFile(path.join(directory, descriptor.pages[0].path));
+  const ordinaryForIdentityChecks = native.images.load('source.png');
+  const inodeScenarios = [
+    { name: 'source-inode-match', change: candidate => {
+      candidate.descriptor.sources[0].sourceIdentity = changedInode(candidate.descriptor.sources[0].sourceIdentity);
+    }, retainCpu: false, invalidates: false },
+    { name: 'page-inode-match', change: candidate => {
+      candidate.pageIdentities[0] = changedInode(candidate.pageIdentities[0]);
+    }, retainCpu: false, invalidates: false },
+    { name: 'snapshot-inode-match', change: candidate => {
+      candidate.snapshotIdentities[0] = changedInode(candidate.snapshotIdentities[0]);
+    }, retainCpu: true, invalidates: false },
+    { name: 'source-inode-content-mismatch', change: candidate => {
+      candidate.descriptor.sources[0].sourceIdentity = changedInode(candidate.descriptor.sources[0].sourceIdentity);
+      candidate.descriptor.sources[0].sourceHash = '0'.repeat(64);
+    }, retainCpu: false, invalidates: true },
+    { name: 'page-inode-content-mismatch', change: candidate => {
+      candidate.pageIdentities[0] = changedInode(candidate.pageIdentities[0]);
+      candidate.descriptor.pages[0].hash = '0'.repeat(64);
+    }, retainCpu: false, invalidates: true },
+  ];
+  for (const scenario of inodeScenarios) {
+    const candidate = structuredClone(set);
+    candidate.identity = scenario.name;
+    candidate.descriptor.sources[0].sourceIdentity = native.assets.sourceIdentity('source.png');
+    candidate.descriptor.sources[0].sourceHash = sourceHash;
+    candidate.descriptor.pages[0].hash = pageHash;
+    scenario.change(candidate);
+    assert.equal(native.assets.installTileSetCatalog([candidate]), 1, `${scenario.name} catalog installs`);
+    native.assets.consumePreparationInvalidations();
+    const before = native.images.memory();
+    const recovered = await native.images.loadAsync('source.png', scenario.retainCpu, scenario.name);
+    assert.deepEqual(frame(recovered, rectangles[0], transforms[0], true),
+      frame(ordinaryForIdentityChecks, rectangles[0], transforms[0], true), scenario.name);
+    assert.equal(native.assets.consumePreparationInvalidations() & 2, scenario.invalidates ? 2 : 0,
+      `${scenario.name} reports the expected content verification result`);
+    if (diagnostics) assert.equal(native.images.memory().tileHits - before.tileHits, scenario.invalidates ? 0 : 1,
+      `${scenario.name} ${scenario.invalidates ? 'rejects' : 'recovers'} the prepared tile backing`);
+    native.images.release(recovered.handle);
+    native.beginFrame();
+  }
+  native.images.release(ordinaryForIdentityChecks.handle);
+  native.beginFrame();
+  const cacheTileDirectory = path.join(root, 'verification-cache-tiles'); fs.mkdirSync(cacheTileDirectory);
+  const cacheDescriptor = await native.assets.processTiles([{file:cacheFixture,rectangles:[[0,0,4,4]]}],cacheTileDirectory);
+  for (const scenario of cacheScenarioFixtures) {
+    const candidate = { identity: `verification-cache-${scenario.name}`, directory: cacheTileDirectory,
+      descriptor: structuredClone(cacheDescriptor) };
+    candidate.descriptor.sources = [];
+    for (const {logical, snapshot} of scenario.fixtures) {
+      const source = structuredClone(cacheDescriptor.sources[0]);
+      Object.assign(source, {source:logical, snapshot, sourceIdentity:native.assets.sourceIdentity(logical), sourceHash:cacheSourceHash});
+      candidate.descriptor.sources.push(source);
+    }
+    const captured = native.assets.installTileSets([candidate], true, true);
+    assert.deepEqual(captured.accepted, [candidate.identity], `${scenario.name} identities captured: ${JSON.stringify(captured)}`);
+    for (const source of candidate.descriptor.sources) source.sourceIdentity = changedInode(source.sourceIdentity);
+    assert.equal(native.assets.installTileSetCatalog([candidate]), 1, `${scenario.name} catalog installs`);
+    let maximumEntries = 0, maximumBytes = 0;
+    for (const source of candidate.descriptor.sources) {
+      const image = await native.images.loadAsync(source.source, false, candidate.identity);
+      const memory = native.images.memory();
+      maximumEntries = Math.max(maximumEntries, memory.tileVerificationCacheEntries);
+      maximumBytes = Math.max(maximumBytes, memory.tileVerificationCacheEstimatedBytes);
+      assert.ok(memory.tileVerificationCacheEntries <= memory.tileVerificationCacheEntryLimit,
+        `${scenario.name} verification cache stays within its entry limit`);
+      assert.ok(memory.tileVerificationCacheEstimatedBytes <= memory.tileVerificationCacheByteLimit,
+        `${scenario.name} verification cache stays within its byte limit`);
+      native.images.release(image.handle); native.beginFrame();
+    }
+    if (scenario.expectedCap === 'entries') {
+      assert.equal(maximumEntries, native.images.memory().tileVerificationCacheEntryLimit,
+        'entry-cap case reaches the configured entry limit');
+    } else {
+      assert.ok(maximumBytes >= native.images.memory().tileVerificationCacheByteLimit * 0.9,
+        'byte-cap case approaches the configured byte limit');
+      assert.ok(maximumEntries < native.images.memory().tileVerificationCacheEntryLimit,
+        'byte-cap case resets before reaching the entry limit');
+    }
+  }
   const staleSet = { identity: 'stale-set', directory, descriptor: structuredClone(descriptor) };
   Object.assign(staleSet.descriptor.sources[0], { source: 'source.png', snapshot: path.join(root, 'snapshot.png'),
     sourceIdentity: native.assets.sourceIdentity('source.png') });
   assert.equal(native.assets.installTileSets([staleSet], true), 1);
-  for (const missing of [path.join(directory, descriptor.pages[0].path), path.join(root, 'snapshot.png')]) {
+  for (const [missing, invalidates] of [
+    [path.join(directory, descriptor.pages[0].path), true],
+    [path.join(root, 'snapshot.png'), false],
+  ]) {
     const bytes = fs.readFileSync(missing); fs.unlinkSync(missing);
     assert.equal(native.assets.installTileSetCatalog([staleSet]), 1, 'catalog installation must not open missing tile files');
     native.assets.consumePreparationInvalidations();
     const fallback = await native.images.loadAsync('source.png', false, staleSet.identity);
-    assert.equal(native.assets.consumePreparationInvalidations() & 2, 2, 'stale pages and snapshots request map regeneration');
+    assert.equal(native.assets.consumePreparationInvalidations() & 2, invalidates ? 2 : 0,
+      invalidates ? 'missing pages request map regeneration' : 'unused snapshots are not inspected');
     const ordinary = native.images.load('source.png');
     assert.deepEqual(frame(fallback, rectangles[0], transforms[0], true), frame(ordinary, rectangles[0], transforms[0], true));
     native.images.release(fallback.handle); native.images.release(ordinary.handle); native.beginFrame();

@@ -207,12 +207,22 @@ void executeImageLoad(napi_env, void* opaque) noexcept {
   auto* load = static_cast<AsyncImageLoad*>(opaque);
   if (load->prepared) {
     try {
-      if (pmjs::ImageStore::validatePrepared(*load->prepared, load->prepareCpuPixels)) return;
+      if (state && state->images.validatePrepared(*load->prepared, load->prepareCpuPixels)) return;
     } catch (...) {
       // Invalid prepared backing still permits decoding the captured source.
     }
     load->tileValidationFailed = !load->tileSet.empty();
+    try {
+      if (state) load->pixels = state->images.decodePreparedFallback(*load->prepared);
+    } catch (...) {
+      load->pixels = std::nullopt;
+    }
+    if (!load->pixels && load->source) {
+      try { load->pixels = pmjs::ImageStore::decodeFile(*load->source); }
+      catch (...) { load->pixels = std::nullopt; }
+    }
     load->prepared.reset();
+    return;
   }
   try {
     load->pixels = pmjs::ImageStore::decodeFile(load->fallbackSource ? *load->fallbackSource : *load->source);
@@ -326,7 +336,7 @@ napi_value queueImageLoad(napi_env env, const std::filesystem::path& path,
   load->retainCpuPixels = retainCpuPixels;
   load->prepareCpuPixels = retainCpuPixels;
   load->prepared = state->images.capturePrepared(*load->source, tileSet);
-  if (load->prepared) load->fallbackSource = pmjs::ImageStore::capturePreparedFallback(*load->prepared);
+  if (load->prepared) load->fallbackSource = state->images.capturePreparedFallback(*load->prepared);
   load->deferreds.push_back(deferred);
   state->pendingImageLoads.emplace(key, load.get());
   const auto queued = queueImageWork(env, *load);
@@ -448,6 +458,14 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
     number(env, images.cpuBytes())), "cannot set image CPU bytes");
   check(env, napi_set_named_property(env, result, "tileMetadataBytes",
     number(env, images.tileMetadataBytes())), "cannot set tile metadata bytes");
+  check(env, napi_set_named_property(env, result, "tileVerificationCacheEntries",
+    number(env, images.tileVerificationCacheEntries())), "cannot set tile verification cache entries");
+  check(env, napi_set_named_property(env, result, "tileVerificationCacheEstimatedBytes",
+    number(env, images.tileVerificationCacheEstimatedBytes())), "cannot set tile verification cache bytes");
+  check(env, napi_set_named_property(env, result, "tileVerificationCacheEntryLimit",
+    number(env, pmjs::ImageStore::tileVerificationCacheEntryLimit)), "cannot set tile verification cache entry limit");
+  check(env, napi_set_named_property(env, result, "tileVerificationCacheByteLimit",
+    number(env, pmjs::ImageStore::tileVerificationCacheByteLimit)), "cannot set tile verification cache byte limit");
   check(env, napi_set_named_property(env, result, "warmBudgetBytes",
     number(env, images.warmBudgetBytes())), "cannot set image warm budget");
   check(env, napi_set_named_property(env, result, "warmBytes",

@@ -1,10 +1,12 @@
 #include "resources.hpp"
 #include "checked_bounds.hpp"
+#include "file_identity.hpp"
 #include "canvas_pixels.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fcntl.h>
 #include <unordered_set>
 #include <mutex>
 
@@ -37,8 +39,10 @@ struct ImageStore::TilePrototype {
   mutable std::mutex mutex;
   std::weak_ptr<TileDecoded> decoded;
   std::weak_ptr<TilePages> pageOwner;
+  std::weak_ptr<TileCatalog> catalog;
   PreparedTileSet descriptor;
   std::vector<std::shared_ptr<ImageFileSource>> pages, snapshots;
+  std::vector<std::string> pageIdentities, snapshotIdentities;
   std::shared_ptr<std::atomic<std::size_t>> accounting;
   std::size_t metadataBytes = 0;
   ~TilePrototype() {
@@ -52,8 +56,10 @@ struct ImageStore::TileCatalog {
   std::shared_ptr<std::atomic<std::size_t>> accounting;
   std::size_t metadataBytes = 0;
   mutable bool failureReported = false;
+  mutable std::mutex failureMutex;
   void reportFailure(const char* reason, const std::string& expected,
       const std::string& actual) const {
+    const std::lock_guard lock(failureMutex);
     if (failureReported) return;
     failureReported = true;
     std::fprintf(stderr, "[pmjs] preparation invalidation kind=tiles reason=%s identity=%s expected=\"%s\" actual=\"%s\"\n",
@@ -78,7 +84,9 @@ struct ImageStore::TileBacking {
 };
 struct ImageStore::TileLoad {
   std::shared_ptr<TilePrototype> prototype;
+  std::shared_ptr<ImageFileSource> sourceFile;
   std::size_t source = 0;
+  std::string identity;
   std::string key;
   std::shared_ptr<TileDecoded> decoded;
   std::shared_ptr<TilePages> cachedPages;
@@ -93,11 +101,21 @@ void ImageStore::collectTileFiles(const Slot& slot,
 }
 void ImageStore::clearTileSetIndex() {
   tileSets_.clear();
-  std::erase_if(tileFiles_, [](const auto& entry) { return entry.second.expired(); });
+  {
+    const std::lock_guard lock(tileFileMutex_);
+    std::erase_if(tileFiles_, [](const auto& entry) { return entry.second.expired(); });
+  }
+  {
+    const std::lock_guard lock(tileVerificationMutex_);
+    verifiedTileFiles_.clear();
+    verifiedTileFiles_.rehash(0);
+    tileVerificationCacheEstimatedBytes_ = verifiedTileFiles_.bucket_count() * sizeof(void*);
+  }
 }
 std::shared_ptr<ImageFileSource> ImageStore::captureTileFile(const std::filesystem::path& path) const {
   auto file = openFile(path);
   if (!file) return nullptr;
+  const std::lock_guard lock(tileFileMutex_);
   if (auto shared = tileFiles_[file->key()].lock()) return shared;
   std::shared_ptr<ImageFileSource> shared(std::move(file));
   tileFiles_[shared->key()] = shared;
@@ -106,22 +124,89 @@ std::shared_ptr<ImageFileSource> ImageStore::captureTileFile(const std::filesyst
 namespace {
 std::size_t descriptorBytes(const PreparedTileSet& descriptor) {
   std::size_t bytes = descriptor.identity.capacity()+descriptor.directory.native().capacity()+
-    descriptor.sources.capacity()*sizeof(PreparedTileSource)+descriptor.pages.capacity()*sizeof(PreparedImagePage);
+    descriptor.sources.capacity()*sizeof(PreparedTileSource)+descriptor.pages.capacity()*sizeof(PreparedImagePage)+
+    descriptor.pageHashes.capacity()*sizeof(std::string);
+  for (const auto& hash : descriptor.pageHashes) bytes += hash.capacity();
   for (const auto& source : descriptor.sources) bytes +=
     source.regions.capacity()*sizeof(PreparedTileRegion)+source.identity.capacity()+
-      source.path.native().capacity()+source.snapshot.native().capacity();
+      source.sourceHash.capacity()+source.path.native().capacity()+source.snapshot.native().capacity();
   for (const auto& page : descriptor.pages) bytes += page.path.native().capacity();
   return bytes;
 }
+std::size_t tileVerificationEntryBytes(const std::string& key) {
+  return key.capacity() + sizeof(std::string) + 2 * sizeof(void*);
 }
+}
+std::size_t ImageStore::tileVerificationCacheEntries() const {
+  const std::lock_guard lock(tileVerificationMutex_);
+  return verifiedTileFiles_.size();
+}
+std::size_t ImageStore::tileVerificationCacheEstimatedBytes() const {
+  const std::lock_guard lock(tileVerificationMutex_);
+  return tileVerificationCacheEstimatedBytes_;
+}
+ImageStore::TileIdentityState ImageStore::tileIdentityState(
+    const std::string& expected, const ImageFileSource& file, const std::string& hash) const {
+  if (file.key() == expected) {
+    return TileIdentityState::exact;
+  }
+  if (!validContentHash(hash) || !inodeOnlyChange(expected, file.key())) {
+    return TileIdentityState::changed;
+  }
+  const auto verified = file.key() + '\n' + hash;
+  const std::lock_guard lock(tileVerificationMutex_);
+  if (verifiedTileFiles_.contains(verified)) return TileIdentityState::verified;
+  return TileIdentityState::inodeOnly;
+}
+
+bool ImageStore::tileContentMatches(const std::string& expectedIdentity,
+    const ImageFileSource& file, const std::string& hash,
+    std::span<const std::uint8_t> bytes) const {
+  if (file.key() == expectedIdentity || !validContentHash(hash) ||
+      !inodeOnlyChange(expectedIdentity, file.key())) return false;
+  const auto verified = file.key() + '\n' + hash;
+  {
+    const std::lock_guard lock(tileVerificationMutex_);
+    if (verifiedTileFiles_.contains(verified)) return true;
+  }
+  if (!contentHashMatches(bytes, hash)) return false;
+  const auto entryBytes = tileVerificationEntryBytes(verified);
+  if (entryBytes > tileVerificationCacheByteLimit) return true;
+  {
+    const std::lock_guard lock(tileVerificationMutex_);
+    if (verifiedTileFiles_.contains(verified)) return true;
+    if (verifiedTileFiles_.size() >= tileVerificationCacheEntryLimit ||
+        tileVerificationCacheEstimatedBytes_ > tileVerificationCacheByteLimit - entryBytes) {
+      verifiedTileFiles_.clear();
+      verifiedTileFiles_.rehash(0);
+      tileVerificationCacheEstimatedBytes_ = verifiedTileFiles_.bucket_count() * sizeof(void*);
+    }
+    if (tileVerificationCacheEstimatedBytes_ > tileVerificationCacheByteLimit - entryBytes) return true;
+    const auto oldBucketCount = verifiedTileFiles_.bucket_count();
+    const auto [_, inserted] = verifiedTileFiles_.insert(verified);
+    if (inserted) {
+      tileVerificationCacheEstimatedBytes_ += entryBytes +
+        (verifiedTileFiles_.bucket_count() - oldBucketCount) * sizeof(void*);
+      if (verifiedTileFiles_.size() > tileVerificationCacheEntryLimit ||
+          tileVerificationCacheEstimatedBytes_ > tileVerificationCacheByteLimit) {
+        verifiedTileFiles_.clear();
+        verifiedTileFiles_.rehash(0);
+        tileVerificationCacheEstimatedBytes_ = verifiedTileFiles_.bucket_count() * sizeof(void*);
+      }
+    }
+  }
+  return true;
+}
+
 std::string ImageStore::effectiveTileSet(const ImageFileSource& source, const std::string& identity) const {
   const auto set = tileSets_.find(identity);
-  if (set != tileSets_.end()) for (const auto& entry : set->second->descriptor.sources)
-    if (entry.identity == source.key()) return identity;
   if (set != tileSets_.end()) {
     const auto& catalog = *set->second;
     const auto expected = std::find_if(catalog.descriptor.sources.begin(), catalog.descriptor.sources.end(),
       [&](const auto& entry) { return entry.path == source.path(); });
+    if (expected != catalog.descriptor.sources.end() &&
+        tileIdentityState(expected->identity, source, expected->sourceHash) !=
+          TileIdentityState::changed) return identity;
     catalog.reportFailure(expected == catalog.descriptor.sources.end() ? "source-not-in-map" : "source-identity-changed",
       expected == catalog.descriptor.sources.end() ? "" : expected->identity, source.key());
     preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
@@ -181,77 +266,205 @@ std::shared_ptr<ImageStore::TileLoad> ImageStore::captureTileLoad(
     const ImageFileSource& source, const std::string& identity) const {
   const auto found = tileSets_.find(identity);
   if (found == tileSets_.end()) return nullptr;
-  const auto& descriptor = found->second->descriptor;
-  for (std::size_t i = 0; i < descriptor.sources.size(); ++i) {
-    if (descriptor.sources[i].identity != source.key()) {
-      if (descriptor.sources[i].path == source.path()) {
-        found->second->reportFailure("source-identity-changed", descriptor.sources[i].identity, source.key());
-        preparationInvalidations_->fetch_or(2, std::memory_order_relaxed); preparationFailures_->record(identity);
-      }
-      continue;
-    }
-    auto load = std::make_shared<TileLoad>();
-    auto prototype = found->second->captured.lock();
-    if (!prototype) {
-      prototype = std::make_shared<TilePrototype>();
-      prototype->descriptor = descriptor;
-      for (std::size_t page = 0; page < descriptor.pages.size(); ++page) {
-        auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
-        if (!file || file->key() != found->second->pageIdentities[page]) {
-          found->second->reportFailure("page-identity-changed", found->second->pageIdentities[page], file ? file->key() : "missing");
-          preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
-          preparationFailures_->record(identity);
-          return nullptr;
-        }
-        prototype->pages.push_back(std::move(file));
-      }
-      for (std::size_t entry = 0; entry < descriptor.sources.size(); ++entry) {
-        auto file = captureTileFile(descriptor.sources[entry].snapshot);
-        if (!file || file->key() != found->second->snapshotIdentities[entry]) {
-          found->second->reportFailure("snapshot-identity-changed", found->second->snapshotIdentities[entry], file ? file->key() : "missing");
-          preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
-          preparationFailures_->record(identity);
-          return nullptr;
-        }
-        prototype->snapshots.push_back(std::move(file));
-      }
-      prototype->metadataBytes = sizeof(TilePrototype)+descriptorBytes(prototype->descriptor)+
-        (prototype->pages.capacity()+prototype->snapshots.capacity())*sizeof(std::shared_ptr<ImageFileSource>);
-      prototype->accounting = tileMetadataBytes_;
-      tileMetadataBytes_->fetch_add(prototype->metadataBytes, std::memory_order_relaxed);
-      found->second->captured = prototype;
-    }
-    load->prototype = prototype; load->source = i; load->key = tileKey(source.key(), identity);
-    load->cachedPages = prototype->pageOwner.lock();
-    { std::lock_guard lock(prototype->mutex);
-      load->decoded = prototype->decoded.lock();
-      if (!load->decoded) { load->decoded = std::make_shared<TileDecoded>(); prototype->decoded = load->decoded; }
-    }
-    return load;
+  const auto& catalog = *found->second;
+  std::vector<std::size_t> byPath;
+  for (std::size_t i = 0; i < catalog.descriptor.sources.size(); ++i)
+    if (catalog.descriptor.sources[i].path == source.path()) byPath.push_back(i);
+  if (byPath.empty()) {
+    catalog.reportFailure("source-not-in-map", "", source.key());
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(identity);
+    return nullptr;
   }
-  return nullptr;
+  std::optional<std::size_t> sourceIndex;
+  for (const auto candidate : byPath) {
+    const auto& expected = catalog.descriptor.sources[candidate];
+    if (tileIdentityState(expected.identity, source, expected.sourceHash) !=
+        TileIdentityState::changed) { sourceIndex = candidate; break; }
+  }
+  if (!sourceIndex) {
+    const auto& expected = catalog.descriptor.sources[byPath.front()];
+    catalog.reportFailure("source-identity-changed", expected.identity, source.key());
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(identity);
+    return nullptr;
+  }
+
+  auto load = std::make_shared<TileLoad>();
+  load->sourceFile = std::shared_ptr<ImageFileSource>(new ImageFileSource());
+  load->sourceFile->descriptor_ = fcntl(source.descriptor_, F_DUPFD_CLOEXEC, 0);
+  if (load->sourceFile->descriptor_ < 0) return nullptr;
+  load->sourceFile->size_ = source.size_;
+  load->sourceFile->modifiedSeconds_ = source.modifiedSeconds_;
+  load->sourceFile->modifiedNanoseconds_ = source.modifiedNanoseconds_;
+  load->sourceFile->path_ = source.path_;
+  load->sourceFile->key_ = source.key_;
+  load->sourceFile->encryptionKey_ = source.encryptionKey_;
+
+  auto prototype = found->second->captured.lock();
+  if (!prototype) {
+    const auto& descriptor = catalog.descriptor;
+    prototype = std::make_shared<TilePrototype>();
+    prototype->catalog = found->second;
+    prototype->descriptor = descriptor;
+    prototype->pageIdentities = catalog.pageIdentities;
+    prototype->snapshotIdentities = catalog.snapshotIdentities;
+    prototype->snapshots.resize(descriptor.sources.size());
+    prototype->pages.reserve(descriptor.pages.size());
+    for (std::size_t page = 0; page < descriptor.pages.size(); ++page) {
+      auto file = captureTileFile(descriptor.directory/descriptor.pages[page].path);
+      const auto& hash = page < descriptor.pageHashes.size() ? descriptor.pageHashes[page] : std::string();
+      if (!file || tileIdentityState(catalog.pageIdentities[page], *file, hash) == TileIdentityState::changed) {
+        catalog.reportFailure("page-identity-changed", catalog.pageIdentities[page], file ? file->key() : "missing");
+        preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+        preparationFailures_->record(identity);
+        return nullptr;
+      }
+      prototype->pages.push_back(std::move(file));
+    }
+    prototype->metadataBytes = sizeof(TilePrototype)+descriptorBytes(prototype->descriptor)+
+      (prototype->pages.capacity()+prototype->snapshots.capacity())*sizeof(std::shared_ptr<ImageFileSource>)+
+      (prototype->pageIdentities.capacity()+prototype->snapshotIdentities.capacity())*sizeof(std::string);
+    for (const auto& value : prototype->pageIdentities) prototype->metadataBytes += value.capacity();
+    for (const auto& value : prototype->snapshotIdentities) prototype->metadataBytes += value.capacity();
+    prototype->accounting = tileMetadataBytes_;
+    tileMetadataBytes_->fetch_add(prototype->metadataBytes, std::memory_order_relaxed);
+    found->second->captured = prototype;
+  }
+  load->prototype = std::move(prototype);
+  load->source = *sourceIndex;
+  load->identity = identity;
+  load->key = tileKey(source.key(), identity);
+  load->cachedPages = load->prototype->pageOwner.lock();
+  {
+    std::lock_guard lock(load->prototype->mutex);
+    load->decoded = load->prototype->decoded.lock();
+    if (!load->decoded) {
+      load->decoded = std::make_shared<TileDecoded>();
+      load->prototype->decoded = load->decoded;
+    }
+  }
+  return load;
 }
-std::shared_ptr<ImageFileSource> ImageStore::captureTileFallback(const TileLoad& load) {
-  return load.prototype->snapshots[load.source];
+std::optional<ImagePixels> ImageStore::decodeTileFallback(const TileLoad& load) const {
+  return decodeTileSnapshot(*load.prototype, load.source);
+}
+
+std::shared_ptr<ImageFileSource> ImageStore::captureTileSnapshot(
+    TilePrototype& prototype, std::size_t sourceIndex) const {
+  if (sourceIndex >= prototype.descriptor.sources.size()) return nullptr;
+  const std::lock_guard lock(prototype.mutex);
+  auto& file = prototype.snapshots[sourceIndex];
+  if (file) return file;
+  file = captureTileFile(prototype.descriptor.sources[sourceIndex].snapshot);
+  const auto& source = prototype.descriptor.sources[sourceIndex];
+  if (!file) {
+    if (auto catalog = prototype.catalog.lock())
+      catalog->reportFailure("snapshot-missing", prototype.snapshotIdentities[sourceIndex], "missing");
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(prototype.descriptor.identity);
+    return nullptr;
+  }
+  if (tileIdentityState(prototype.snapshotIdentities[sourceIndex], *file,
+      source.sourceHash) == TileIdentityState::changed) {
+    if (auto catalog = prototype.catalog.lock())
+      catalog->reportFailure("snapshot-identity-changed", prototype.snapshotIdentities[sourceIndex], file->key());
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(prototype.descriptor.identity);
+    file.reset();
+  }
+  return file;
+}
+
+std::optional<ImagePixels> ImageStore::decodeTileSnapshot(
+    TilePrototype& prototype, std::size_t sourceIndex) const {
+  auto file = captureTileSnapshot(prototype, sourceIndex);
+  if (!file) return std::nullopt;
+  const auto& source = prototype.descriptor.sources[sourceIndex];
+  const auto state = tileIdentityState(prototype.snapshotIdentities[sourceIndex], *file,
+      source.sourceHash);
+  if (state == TileIdentityState::changed) return std::nullopt;
+  const auto bytes = readCapturedBytes(*file);
+  if (!bytes || (state == TileIdentityState::inodeOnly && !tileContentMatches(
+        prototype.snapshotIdentities[sourceIndex], *file, source.sourceHash, *bytes))) {
+    if (auto catalog = prototype.catalog.lock())
+      catalog->reportFailure("snapshot-content-mismatch", prototype.snapshotIdentities[sourceIndex], file->key());
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(prototype.descriptor.identity);
+    return std::nullopt;
+  }
+  auto pixels = decodeMemory(bytes->data(), bytes->size());
+  if (!pixels || pixels->width != source.width || pixels->height != source.height) return std::nullopt;
+  return pixels;
 }
 
 bool ImageStore::validateTileLoad(TileLoad& load, bool retainCpu) {
   const auto& prototype = *load.prototype;
   std::lock_guard lock(load.decoded->mutex);
+  const auto invalidate = [&](const char* reason, const std::string& expected,
+                              const std::string& actual) {
+    if (auto catalog = prototype.catalog.lock()) catalog->reportFailure(reason, expected, actual);
+    preparationInvalidations_->fetch_or(2, std::memory_order_relaxed);
+    preparationFailures_->record(load.identity);
+  };
+  const auto& source = prototype.descriptor.sources[load.source];
+  const auto sourceState = tileIdentityState(source.identity, *load.sourceFile, source.sourceHash);
+  if (sourceState == TileIdentityState::changed) {
+    invalidate("source-identity-changed", source.identity, load.sourceFile->key());
+    return false;
+  }
+  if (sourceState == TileIdentityState::inodeOnly) {
+    const auto bytes = readCapturedBytes(*load.sourceFile);
+    if (!bytes || !tileContentMatches(source.identity, *load.sourceFile,
+        source.sourceHash, *bytes)) {
+      invalidate("source-content-mismatch", source.identity, load.sourceFile->key());
+      return false;
+    }
+  }
   if (!load.cachedPages && !load.decoded->validated) {
     std::vector<ImagePixels> decoded;
     for (std::size_t i = 0; i < prototype.pages.size(); ++i) {
-      auto pixels = decodeFile(*prototype.pages[i]);
       const auto& page = prototype.descriptor.pages[i];
-      if (!pixels || pixels->width != page.width || pixels->height != page.height) return false;
+      const auto& pageHash = i < prototype.descriptor.pageHashes.size() ? prototype.descriptor.pageHashes[i] : std::string();
+      const auto identityState = tileIdentityState(prototype.pageIdentities[i], *prototype.pages[i], pageHash);
+      if (identityState == TileIdentityState::changed) {
+        invalidate("page-identity-changed", prototype.pageIdentities[i], prototype.pages[i]->key());
+        return false;
+      }
+      const auto bytes = readCapturedBytes(*prototype.pages[i]);
+      if (!bytes || (identityState == TileIdentityState::inodeOnly && !tileContentMatches(
+            prototype.pageIdentities[i], *prototype.pages[i], pageHash, *bytes))) {
+        invalidate("page-content-mismatch", prototype.pageIdentities[i], prototype.pages[i]->key());
+        return false;
+      }
+      auto pixels = decodeMemory(bytes->data(), bytes->size());
+      if (!pixels || pixels->width != page.width || pixels->height != page.height) {
+        invalidate("page-decode-failed", prototype.pageIdentities[i], prototype.pages[i]->key());
+        return false;
+      }
       decoded.push_back(std::move(*pixels));
     }
     load.decoded->pixels = std::move(decoded); load.decoded->validated = true;
+  } else {
+    for (std::size_t i = 0; i < prototype.pages.size(); ++i) {
+      const auto& hash = i < prototype.descriptor.pageHashes.size() ? prototype.descriptor.pageHashes[i] : std::string();
+      const auto state = tileIdentityState(prototype.pageIdentities[i], *prototype.pages[i], hash);
+      if (state == TileIdentityState::changed) {
+        invalidate("page-identity-changed", prototype.pageIdentities[i], prototype.pages[i]->key());
+        return false;
+      }
+      if (state == TileIdentityState::inodeOnly) {
+        const auto bytes = readCapturedBytes(*prototype.pages[i]);
+        if (!bytes || !tileContentMatches(prototype.pageIdentities[i], *prototype.pages[i], hash, *bytes)) {
+          invalidate("page-content-mismatch", prototype.pageIdentities[i], prototype.pages[i]->key());
+          return false;
+        }
+      }
+    }
   }
   if (retainCpu && !load.ordinary) {
-    load.ordinary = decodeFile(*prototype.snapshots[load.source]);
-    const auto& source = prototype.descriptor.sources[load.source];
-    if (!load.ordinary || load.ordinary->width != source.width || load.ordinary->height != source.height) return false;
+    load.ordinary = decodeTileSnapshot(*load.prototype, load.source);
+    if (!load.ordinary) return false;
   }
   return true;
 }
@@ -343,7 +556,7 @@ std::optional<ImagePixels> ImageStore::readTileRegion(const Slot& slot, int x, i
         return pixels;
       }
     }
-    auto ordinary = decodeFile(*backing.prototype->snapshots[backing.source]);
+    auto ordinary = decodeTileSnapshot(*backing.prototype, backing.source);
     if (!ordinary || ordinary->width != source.width || ordinary->height != source.height) return std::nullopt;
     encodeTileSlotPixels(*ordinary, slot.premultiplied);
     if (ordinary->width != slot.width || ordinary->height != slot.height) {
