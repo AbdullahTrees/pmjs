@@ -274,7 +274,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
       try {
         const tiledFile = 'maps/Map'+mapId+'.json';
         const tiled = game.exists(tiledFile), cachedInputs = previousInputs[filename];
-        let dependencies, demand, compile, visualContract;
+        let dependencies, demand, compile, visualContract, cachedEntryKey, cachedEntrySources;
         const compilationKey = inputs => identity({ compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
           compilation: true, dependencies: [...sharedDependencies,...inputs].map(input=>input.hash), width, height });
         if (!recompileMapInputs.has(filename) && cachedInputs && cachedInputs.tiled === tiled) {
@@ -283,6 +283,10 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
             const cached = previousCompilations[compilationKey(dependencies)];
             if (cached && HASH.test(cachedInputs.contractHash)) {
               demand = { ...cached, contractHash: cachedInputs.contractHash };
+              if (HASH.test(cachedInputs.entryKey || '') && Array.isArray(cachedInputs.entrySources)) {
+                cachedEntryKey = cachedInputs.entryKey;
+                cachedEntrySources = cachedInputs.entrySources;
+              }
             }
           }
         }
@@ -365,8 +369,19 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
           } else merged.set(input.sourceIdentity || input.source,input);
         }
         inputs = [...merged.values()];
-        const key = identity({ compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
-          demand, dependencies: dependencies.map(dependency => dependency.hash), contract: contract.identity, width, height, sources: inputs.map(({ source, sourceHash }) => ({ source, sourceHash })) });
+        const entrySources = inputs.map(({ source, sourceHash }) => ({ source, hash: sourceHash }));
+        const sameSources = Array.isArray(cachedEntrySources) && cachedEntrySources.length === entrySources.length &&
+          entrySources.every((input, index) => HASH.test(input.hash || '') &&
+            cachedEntrySources[index]?.source === input.source && cachedEntrySources[index]?.hash === input.hash);
+        let key;
+        if (cachedEntryKey && sameSources) {
+          key = cachedEntryKey;
+        } else {
+          key = identity({ compiler: COMPILER_VERSION, processor: native.assets.tilePreparationVersion,
+            demand, dependencies: dependencies.map(dependency => dependency.hash), contract: contract.identity, width, height,
+            sources: inputs.map(({ source, sourceHash }) => ({ source, sourceHash })) });
+        }
+        mapInputs[filename] = { ...mapInputs[filename], entryKey: key, entrySources };
         keys.push(key);
         let directory = session.directory('maps/entries', key);
         let manifest = await validateEntry(directory, key,files);
@@ -442,7 +457,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
           await validateDependencies([...sharedDependencies, ...dependencies]);
           await fsp.rename(stage, directory); files.publishManifest(stage, directory); stage = null; ++result.generated;
         }
-        await validateDependencies([...sharedDependencies, ...dependencies, ...inputs.map(input => sourceDependencies.get(input.source)).filter(Boolean)]);
+        await validateDependencies([...dependencies, ...inputs.map(input => sourceDependencies.get(input.source)).filter(Boolean)]);
         Object.assign(row, manifest.estimates);
         if (!manifest.descriptor) { declined = true; throw new Error(manifest.reason); }
         for (const input of inputs) input.snapshot = await captureSnapshot(input);
@@ -470,6 +485,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
       report('validate', filename, index+1, data.length);
     }
     if (!result.cancelled) {
+      await validateDependencies(sharedDependencies);
       report('validate', '', data.length, data.length);
       await files.save();
       for (const entry of entries) for (const source of entry.descriptor.sources)

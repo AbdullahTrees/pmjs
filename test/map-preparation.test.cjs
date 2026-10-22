@@ -91,6 +91,22 @@ test('enabled plugin dependencies are stream-hashed without loading plugin sourc
   assert.ok(!reads.includes('js/plugins/LargePlugin.js'));
 });
 
+test('shared engine changes during warm map reuse reject installation at the final dependency check', async t => {
+  const f = fixture(t);
+  await prepareMaps(f);
+  const engine = path.join(f.gameRoot, 'js/rpg_core.js');
+  let changed = false;
+  const warm = await prepareMaps({ ...f, onProgress(progress) {
+    if (!changed && progress.phase === 'map-validate' && progress.completed > 0) {
+      fs.appendFileSync(engine, '\nchanged during map preparation');
+      changed = true;
+    }
+  } });
+  assert.equal(changed, true);
+  assert.match(warm.error, /map dependency changed during preparation/);
+  assert.equal(warm.installed, 0);
+});
+
 test('ordinary map preparation reuses shared dependency checks; full verification repeats them', async t => {
   const f = fixture(t), sourceIdentity = f.native.assets.sourceIdentity;
   fs.writeFileSync(path.join(f.gameRoot, 'data/Map002.json'), JSON.stringify({ ...f.map, data: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }));
@@ -149,6 +165,18 @@ test('warm compilation preserves descriptors and map contracts; changed and dama
   fs.writeFileSync(path.join(f.gameRoot,'data/Tilesets.json'),JSON.stringify(sheets));
   const changedFlags=await prepareMaps(f);
   assert.equal(changedFlags.compilationHits,0);assert.notDeepEqual(changedFlags.index,beforeFlags);
+});
+
+test('warm map output keys are reused only while tile source hashes match', async t => {
+  const f = fixture(t), cold = await prepareMaps(f);
+  const before = readIndex(f).mapInputs['Map001.json'].entryKey;
+  const source = path.join(f.gameRoot, 'img/tilesets/B.png');
+  fs.appendFileSync(source, 'changed');
+  const warmDemand = await prepareMaps(f);
+  assert.equal(warmDemand.compilationHits, 1);
+  assert.equal(warmDemand.generated, 1);
+  assert.notEqual(readIndex(f).mapInputs['Map001.json'].entryKey, before);
+  assert.notEqual(warmDemand.index[1].identity, cold.index[1].identity);
 });
 
 test('large Tiled maps keep bounded cached contracts across reuse, changes and legacy migration', async t => {
