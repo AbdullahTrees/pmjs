@@ -3,6 +3,12 @@
 (function() {
   var host = typeof NativeHost !== 'undefined' && NativeHost.runtime && NativeHost.runtime.scheduling ||
     globalThis.__pmjsBuiltinRequire('node:timers');
+  var hostNextTick = host.nextTick;
+  if (typeof hostNextTick !== 'function' && typeof globalThis.__pmjsBuiltinRequire === 'function') {
+    var hostProcess = globalThis.__pmjsBuiltinRequire('node:process');
+    hostNextTick = hostProcess.nextTick.bind(hostProcess);
+  }
+  if (typeof hostNextTick !== 'function') hostNextTick = host.setImmediate;
   var nextId = 1;
   var tasks = [], head = 0, continuations = [];
   var scheduled = null, stopped = false, rendering = false, frame = null;
@@ -65,6 +71,11 @@
           wrapped.listener = listener;
           var result = target[property].call(target, event, wrapped);
           return result === target ? guestEmitter : result;
+        };
+        if (property === 'rawListeners') return function(event) {
+          return target.rawListeners(event).map(function(listener) {
+            return listener && listener.pmjsGuestNodeListener ? listener.listener : listener;
+          });
         };
         if (property === 'removeListener' || property === 'off') return function(event, listener) {
           var raw = target.rawListeners(event), wrapped = null;
@@ -200,6 +211,19 @@
   }
   PMJS.tasks = {
     enqueue: enqueue,
+    nextTick: function(callback, args) {
+      if (typeof callback !== 'function') throw new TypeError('nextTick callback must be a function');
+      if (stopped) return false;
+      hostNextTick(function() {
+        if (stopped) return;
+        runningTask = true;
+        try { trackGuestPromise(callback.apply(undefined, args || []), 'node'); }
+        catch (error) {
+          reportUncaught(nodeListenerExceptions.has(error) ? nodeListenerExceptions.get(error) : error);
+        } finally { runningTask = false; }
+      });
+      return true;
+    },
     invoke: invoke,
     nodeListenerException: nodeListenerException,
     trackGuestPromise: trackGuestPromise,
@@ -290,7 +314,7 @@
     immediates.add(handle);
     enqueue(function() {
       if (!immediates.delete(handle)) return;
-      callback.apply(globalThis, args);
+      return callback.apply(globalThis, args);
     }, { errorMode: 'uncaught', discard: function() { immediates.delete(handle); } });
     return handle;
   }

@@ -121,6 +121,8 @@ test('global setImmediate uses guest Node exception delivery and supports cancel
   const cancelled = context.setImmediate(() => trace.push('cancelled'));
   context.clearImmediate(cancelled);
   const next = context.setImmediate(value => trace.push(value), 'next');
+  const returnedPromise = Promise.resolve('immediate result');
+  context.setImmediate(() => returnedPromise);
 
   assert.equal(failed.hasRef(), true);
   assert.equal(failed.unref(), failed);
@@ -134,6 +136,7 @@ test('global setImmediate uses guest Node exception delivery and supports cancel
   assert.deepEqual(trace, ['first', 'next']);
   assert.deepEqual(nodeErrors, [error]);
   assert.deepEqual(fatals, []);
+  assert.equal(context.PMJS.tasks.guestPromiseOrigin(returnedPromise), 'node');
 });
 
 test('intervals skip elapsed periods and stop after cancellation inside the callback', async t => {

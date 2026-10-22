@@ -395,7 +395,7 @@ async function runSession(input, diagnostics, setNative) {
       native.assets.decompressPortArtifact);
     const hostSetTimeout = hostTimers.setTimeout;
     const hostSetImmediate = hostTimers.setImmediate;
-    native.runtime.scheduling = { ...hostTimers };
+    native.runtime.scheduling = { ...hostTimers, nextTick: hostProcess.nextTick.bind(hostProcess) };
     const physicalDisplay = (native.runtime && typeof native.runtime.displaySize === 'function')
       ? native.runtime.displaySize()
       : {

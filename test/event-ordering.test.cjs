@@ -60,6 +60,37 @@ test('runner checkpoints between deferred tasks, timers, and animation callbacks
   assert.ok(trace.indexOf('raf:micro') < trace.indexOf('raf:B'), trace.join(','));
 });
 
+test('nextTick precedes immediates, Promises, timer callbacks and filesystem completions', () => {
+  const trace = runGuest(`
+    process.nextTick(()=>trace.push('tick:top'));
+    Promise.resolve().then(()=>trace.push('promise:top'));
+    setImmediate(()=>{
+      trace.push('immediate');
+      process.nextTick(()=>trace.push('tick:immediate'));
+      Promise.resolve().then(()=>trace.push('promise:immediate'));
+    });
+    setTimeout(()=>{
+      trace.push('timer');
+      process.nextTick(()=>trace.push('tick:timer'));
+      Promise.resolve().then(()=>trace.push('promise:timer'));
+    },0);
+    fsModule.readFile('file',()=>{
+      trace.push('filesystem');
+      process.nextTick(()=>trace.push('tick:filesystem'));
+      Promise.resolve().then(()=>trace.push('promise:filesystem'));
+    });
+    function complete(){
+      return ['tick:top','promise:top','tick:immediate','promise:immediate',
+        'tick:timer','promise:timer','tick:filesystem','promise:filesystem']
+        .every(value=>trace.includes(value));
+    }
+  `);
+  for (const source of ['top', 'immediate', 'timer', 'filesystem']) {
+    assert.ok(trace.indexOf('tick:' + source) < trace.indexOf('promise:' + source), trace.join(','));
+  }
+  assert.ok(trace.indexOf('tick:top') < trace.indexOf('immediate'), trace.join(','));
+});
+
 test('warm images become listener-ready before twenty saturated frames', () => {
   const trace = runGuest(`
     PMJS.images={shouldRetainPixels(){return false;},loadCompleted(){}};
@@ -118,26 +149,25 @@ test('async filesystem callback rejections use their own guest route and keep th
   assert.ok(trace.includes('continued'));
 });
 
-test('readFile rejects a missing callback synchronously before scheduling or reading', () => {
+test('readFile without a callback follows the Node 9 warning and fallback behavior', () => {
   const trace = runGuest(`
     let scheduled=0,reads=0;
     const enqueue=PMJS.tasks.enqueue,readBytesAsync=NativeHost.fs.readBytesAsync;
     PMJS.tasks.enqueue=function(){scheduled++;return enqueue.apply(this,arguments);};
     NativeHost.fs.readBytesAsync=function(){reads++;return readBytesAsync.apply(this,arguments);};
-    const errors=[];
+    const calls=[],warnings=[];
+    process.on('warning',warning=>warnings.push(warning.code));
     for(const args of [['file'],['file',{encoding:'utf8'}]]){
-      try{fsModule.readFile(...args);errors.push('no throw');}
-      catch(error){errors.push(error.name+': '+error.message);}
+      try{fsModule.readFile(...args);calls.push('returned');}
+      catch(error){calls.push(error.name+': '+error.message);}
     }
-    trace.push(...errors,scheduled,reads);
-    function complete(){return trace.length===4;}
+    setTimeout(()=>trace.push(...calls,scheduled,reads,warnings[0]),0);
+    function complete(){return trace.length===5;}
   `);
-  assert.deepEqual(trace, [
-    'TypeError: readFile requires a callback',
-    'TypeError: readFile requires a callback',
-    0,
-    0
-  ]);
+  assert.deepEqual(trace.slice(0, 2), ['returned', 'returned']);
+  assert.ok(trace[2] > 0);
+  assert.equal(trace[3], 2);
+  assert.equal(trace[4], 'DEP0013');
 });
 
 for (const renderHz of [30, 60]) test('runner service Promise readiness precedes the host ticker, rate=' + renderHz, () => {

@@ -311,9 +311,14 @@ function guestBuiltin(request) {
   if (name === 'child_process') return NativeHost.runtime.childProcess;
   if (name === 'timers' && globalThis.__pmjsBuiltinRequire) {
     if (!guestTimersModule) {
-      guestTimersModule = Object.create(globalThis.__pmjsBuiltinRequire(name));
-      guestTimersModule.setImmediate = globalThis.setImmediate;
-      guestTimersModule.clearImmediate = globalThis.clearImmediate;
+      guestTimersModule = {
+        setTimeout: globalThis.setTimeout,
+        clearTimeout: globalThis.clearTimeout,
+        setInterval: globalThis.setInterval,
+        clearInterval: globalThis.clearInterval,
+        setImmediate: globalThis.setImmediate,
+        clearImmediate: globalThis.clearImmediate
+      };
     }
     return guestTimersModule;
   }
@@ -346,7 +351,7 @@ var hostProcessPid = typeof process !== 'undefined' ? process.pid : undefined;
 var guestArguments = NativeHost.runtime.arguments || [];
 var nwCompatVersion = PMJS.config.nwVersion || (globalThis.PMJS_RUNTIME_ENGINE === 'mz' ? '0.48.4' : '0.29.0');
 var guestProcess = new NwEventEmitter();
-var guestNodeMajor = globalThis.PMJS_RUNTIME_ENGINE === 'mz' ? 14 : 9;
+var guestNodeMajor = 9;
 Object.assign(guestProcess, {
   pid: hostProcessPid,
   platform: nativePlatform.platform,
@@ -357,7 +362,7 @@ Object.assign(guestProcess, {
   cwd: function() { return '/game'; },
   nextTick: function(callback) {
     var args = Array.prototype.slice.call(arguments, 1);
-    PMJS.tasks.enqueue(function() { return callback.apply(undefined, args); }, { errorMode: 'uncaught' });
+    PMJS.tasks.nextTick(callback, args);
   },
   hrtime: hostProcessHrtime,
   execPath: '/game/pmjs',
@@ -372,7 +377,7 @@ globalThis.pmjsReportNodeException = function(error) {
     console.error('[pmjs] uncaught exception in Node callback:', error);
   }
 };
-var guestUnhandledPromiseIds = new Map();
+var guestUnhandledPromiseIds = new WeakMap();
 var guestUnhandledPromiseId = 0;
 var guestUnhandledDeprecationWarned = false;
 function emitGuestPromiseWarning(name, message, code, stack) {

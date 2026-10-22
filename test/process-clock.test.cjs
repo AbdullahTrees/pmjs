@@ -41,6 +41,9 @@ test('guest timers.setImmediate shares the scheduler boundary and preserves exce
   const nodeTimers = context.require('timers');
   const error = new Error('timers.setImmediate callback failure');
   const delivered = [], trace = [];
+  for (const method of ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate']) {
+    assert.equal(nodeTimers[method], context[method]);
+  }
   context.process.once('uncaughtException', received => delivered.push(received));
   nodeTimers.setImmediate(() => { throw error; });
   nodeTimers.setImmediate(() => trace.push('continued'));
@@ -50,6 +53,22 @@ test('guest timers.setImmediate shares the scheduler boundary and preserves exce
 
   assert.deepEqual(delivered, [error]);
   assert.deepEqual(trace, ['continued']);
+});
+
+test('guest timers facade cancels scheduled callbacks on scheduler shutdown', async () => {
+  const context = vm.createContext({ process, performance, console,
+    PMJS: { config: {} }, __pmjsBuiltinRequire: require, location: {},
+    NativeHost: { fs: { readText() { return null; } },
+      runtime: { isFullscreen: () => false, scheduling: require('node:timers') } },
+    nativePlatform: { platform: process.platform, arch: process.arch } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/scheduler.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../js/pmjs-web/modules.js'), 'utf8'), context);
+
+  let callbackRan = false;
+  context.require('timers').setTimeout(() => { callbackRan = true; }, 0);
+  context.PMJS.tasks.stop();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(callbackRan, false);
 });
 
 test('guest uncaught Node exceptions reach process listeners and preserve later work', async t => {
@@ -104,6 +123,13 @@ test('guest uncaught Node exceptions reach process listeners and preserve later 
 
   const emitter = new (require('node:events').EventEmitter)();
   const guestEmitter = context.PMJS.tasks.wrapNodeEmitter(emitter, ['emit']);
+  const listenerError = new Error('synchronous listener failure'), listenerTrace = [];
+  const firstListener = () => { listenerTrace.push('first'); throw listenerError; };
+  guestEmitter.on('sync', firstListener);
+  guestEmitter.on('sync', () => listenerTrace.push('second'));
+  assert.equal(guestEmitter.rawListeners('sync')[0], firstListener);
+  assert.throws(() => guestEmitter.emit('sync'), received => received === listenerError);
+  assert.deepEqual(listenerTrace, ['first']);
   const listenerPromise = Promise.resolve('event listener result');
   guestEmitter.on('event', () => listenerPromise);
   guestEmitter.emit('event');
