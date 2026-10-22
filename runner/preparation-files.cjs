@@ -95,7 +95,10 @@ async function preparationFiles(session, verifyHashes = false) {
         throw new Error('preparation input changed while verifying');
       verifiedRenumbering(renumbered, checksum, cached);
     }
-    files[file] = { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) };
+    // An unchanged file whose inode was renumbered keeps its record, so the saved state (and the
+    // state file on disk) stays the same from launch to launch.
+    files[file] = renumbered && checksum === cached.hash ? cached :
+      { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) };
     session.data.files[file] = files[file];
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, reused, size: Number(before.size), header };
@@ -122,7 +125,8 @@ async function preparationFiles(session, verifyHashes = false) {
       verifiedRenumbering(renumbered, checksum, cached);
     } else ++stats.reusedFiles;
     const header = Buffer.from(bytes.subarray(0, 32));
-    files[file] = { identity: signature, hash: checksum, header: header.toString('base64') };
+    files[file] = renumbered && checksum === cached.hash ? cached :
+      { identity: signature, hash: checksum, header: header.toString('base64') };
     session.data.files[file] = files[file];
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, size: bytes.length, header };

@@ -171,3 +171,15 @@ test('records with other identity changes, or under hash verification, are hashe
   assert.equal(files.stats.hashedFiles, 12);
   assert.equal(files.stats.renumberedFiles, 0);
 });
+
+test('unchanged renumbered files keep their records so the saved state does not change', async () => {
+  // File 3 changed (its recorded hash is stale); the others only had their inodes renumbered.
+  const { names, session } = renumberedSession('renumbered-state-', 12, { wrongHash: new Set([3]) });
+  const unchanged = names.filter((_, index) => index !== 3);
+  const records = () => JSON.stringify(unchanged.map(file => session.data.files[file]));
+  const before = records();
+  const files = await preparationFiles(session);
+  for (const file of names) await files.inspect(file);
+  assert.equal(records(), before, 'verified inode-only changes leave records untouched');
+  assert.equal(session.data.files[names[3]].hash, hash('content 3'), 'a changed file gets a new record');
+});
