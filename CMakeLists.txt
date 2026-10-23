@@ -446,6 +446,11 @@ if(BUILD_TESTING)
     ${NODE_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/test/node-video-eof.cjs"
     $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-video-eof PROPERTIES TIMEOUT 10)
+  add_test(NAME node-video-clock COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-video-clock.cjs"
+    $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
+  set_tests_properties(node-video-clock PROPERTIES TIMEOUT 10
+    ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-preparation-lock COMMAND ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-preparation-lock.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-preparation-lock PROPERTIES TIMEOUT 15)

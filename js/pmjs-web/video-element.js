@@ -50,8 +50,16 @@ Object.defineProperty(VideoElement.prototype, 'src', {
 });
 Object.defineProperty(VideoElement.prototype, 'currentTime', {
   get: function() {
-    if (!this.paused && this._audio && NativeHost.media.audioIsPlaying(this._audio.handle))
-      return NativeHost.media.audioPosition(this._audio.handle);
+    if (!this.paused && this._audio && NativeHost.media.audioIsPlaying(this._audio.handle)) {
+      var time = NativeHost.media.audioPosition(this._audio.handle);
+      // Hold an explicit seek while shorter audio clamps or rounds it.
+      // Otherwise continue from audio when its stream ends before the movie.
+      if (time >= this._startOffset) {
+        this._startOffset = time;
+        this._startedAt = performance.now();
+      }
+      return this._startOffset;
+    }
     if (!this.paused) return this._startOffset +
       (performance.now() - this._startedAt) / 1000 * this._playbackRate;
     return this._currentTime;
@@ -60,7 +68,7 @@ Object.defineProperty(VideoElement.prototype, 'currentTime', {
     this._currentTime = Math.max(0, Number(value) || 0);
     this._startOffset = this._currentTime; this._startedAt = performance.now();
     if (!this.paused && this._audio) NativeHost.media.playAudio(
-      this._audio.handle, this.loop, this._currentTime);
+      this._audio.handle, false, this._currentTime);
   }
 });
 Object.defineProperty(VideoElement.prototype, 'playbackRate', {
@@ -268,10 +276,11 @@ VideoElement.prototype._startPlayback = function() {
   if (this.ended) this._currentTime = 0;
   this.paused = false; this.ended = false; this._startOffset = this._currentTime;
   this._startedAt = performance.now();
+  // The video timeline owns looping; shorter audio must not wrap independently.
   if (this._audio) {
     NativeHost.media.setAudioParameters(this._audio.handle,
       this._muted ? 0 : this._volume, this._playbackRate, 0);
-    NativeHost.media.playAudio(this._audio.handle, this.loop, this._currentTime);
+    NativeHost.media.playAudio(this._audio.handle, false, this._currentTime);
   }
   if (nativeVideos.indexOf(this) < 0) nativeVideos.push(this);
   this.dispatchEvent({ type: 'play', target: this });
