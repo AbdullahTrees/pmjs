@@ -246,6 +246,7 @@ class PreparationSource {
     if (size <= SIZE_MAX) cache_ = workspace.retain(static_cast<std::size_t>(size));
   }
   Rows rows() { return Rows(*this); }
+  void releaseCache() { cache_.reset(); ready_ = false; }
   Workspace& workspace;
   int width = 0, height = 0;
  private:
@@ -603,6 +604,9 @@ void emitLayout(PreparationSource& source, const std::filesystem::path& staging,
   for (std::size_t index = 0; index < asset.pages.size(); ++index) {
     auto& page = asset.pages[index];
     auto bytes = renderPage(source, asset, static_cast<int>(index), index == 0, &recipe);
+    // No more source rows are needed for this emission. Keep encoding scratch
+    // from overlapping the cached decode; a failed replay can reopen the source.
+    if (index + 1 == asset.pages.size()) source.releaseCache();
     if (classifyCompact && asset.compactEligible.value_or(false)) {
       for (const auto& cell : asset.cells) {
         if (cell.page != static_cast<int>(index) || !cell.crop[2]) continue;

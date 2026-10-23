@@ -639,6 +639,55 @@ int main() {
     try { pmjs::prepareAssetImage(source, root / "16bit"); }
     catch (const pmjs::AssetPreparationUnsupported&) { refused = true; }
     require(refused);
+    {
+      pmjs::AssetPreparationOptions options;
+      options.workspaceBytes = 64U * 1024U * 1024U;
+      options.lz4Pages = true;
+      write(source, 2048, 128, [](int x, int y) {
+        return AssetColor{static_cast<std::uint8_t>(x), static_cast<std::uint8_t>(y), 31, 255};
+      });
+      const auto layout = pmjs::prepareAssetImage(source, root / "cache-reference", {}, nullptr, options);
+      require(layout.pages.size() > 1);
+      for (const bool lz4 : {false, true}) {
+        pmjs::AssetPreparationStats stats;
+        options.lz4Pages = lz4;
+        options.statistics = &stats;
+        const auto output = root / (lz4 ? "cache-lz4" : "cache-png");
+        const auto replay = pmjs::prepareAssetImage(source, output, {}, &layout, options);
+        verify(source, output, replay);
+        require(replay.pages.size() == layout.pages.size());
+        require(stats.sourceDecodes == 1 && stats.sourceCacheHits >= layout.pages.size() - 1);
+        require(stats.liveWorkspaceBytes == 0 && stats.peakWorkspaceBytes <= options.workspaceBytes);
+        options.statistics = nullptr;
+      }
+      write(source, 64, 64, [](int x, int y) {
+        return x >= 24 && x < 40 && y >= 24 && y < 40 ? AssetColor{31,41,51,61} : AssetColor{};
+      });
+      const auto single = pmjs::prepareAssetImage(source, root / "cache-single", {}, nullptr, options);
+      require(single.pages.size() == 1);
+      for (const bool lz4 : {false, true}) {
+        pmjs::AssetPreparationStats stats;
+        options.lz4Pages = lz4;
+        options.statistics = &stats;
+        auto page = single.pages.back().path;
+        page.replace_extension(lz4 ? ".pml4" : ".png");
+        const auto output = root / (lz4 ? "cache-retry-lz4" : "cache-retry-png");
+        std::filesystem::create_directories(output / page);
+        const auto recovered = pmjs::prepareAssetImage(source, output, {}, &single, options);
+        verify(source, output, recovered);
+        require(stats.sourceDecodes >= 2 && stats.liveWorkspaceBytes == 0);
+        require(stats.peakWorkspaceBytes <= options.workspaceBytes);
+        const auto blocked = root / (lz4 ? "cache-blocked-lz4" : "cache-blocked-png");
+        std::filesystem::create_directories(blocked / page);
+        std::ofstream(blocked / page / "retained") << "retained";
+        bool failed = false;
+        try { pmjs::prepareAssetImage(source, blocked, {}, &single, options); }
+        catch (const std::exception&) { failed = true; }
+        require(failed && stats.liveWorkspaceBytes == 0);
+        require(std::filesystem::exists(blocked / page / "retained"));
+        options.statistics = nullptr;
+      }
+    }
     write(source, 8192, 4096, [](int x,int y) { return x == 4000 && y == 3000 ? AssetColor{31,41,51,61} : AssetColor{}; });
     result = pmjs::prepareAssetImage(source, root / "large");
     require(result.width == 8192 && result.height == 4096 && result.halo == 10);
