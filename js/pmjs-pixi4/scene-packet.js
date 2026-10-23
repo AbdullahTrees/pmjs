@@ -90,6 +90,24 @@ function nativeParticleFrameContext(container) {
     revisions = [];
     container.__pmjsParticleBufferRevisions = revisions;
   }
+  // Drop only removed tail snapshots whose static batches were invalidated.
+  // Direct children-array edits without Pixi invalidation keep their old cache
+  // semantics; ordinary removeChild/removeChildren invalidate the tail.
+  var values = container.__pmjsParticleValues;
+  if (values && values.length > container.children.length) {
+    var tailBatch = Math.floor(container.children.length / batchSize);
+    var tailDirty = !container._bufferUpdateIDs &&
+      tailBatch >= container._bufferToUpdate;
+    if (container._bufferUpdateIDs) {
+      for (var tailIndex = 0; tailIndex <= tailBatch; tailIndex++) {
+        if ((revisions[tailIndex] || 0) < (container._bufferUpdateIDs[tailIndex] || 0)) {
+          tailDirty = true;
+          break;
+        }
+      }
+    }
+    if (tailDirty) values.length = container.children.length;
+  }
   var dirty = [];
   var dirtyFollowing = false;
   var batchCount = Math.ceil(Math.min(container.children.length,

@@ -51,6 +51,19 @@ if (PIXI.mesh && PIXI.mesh.Mesh) {
     };
   })();
 }
+if (PIXI.particles && PIXI.particles.ParticleContainer) {
+  (function() {
+    var proto = PIXI.particles.ParticleContainer.prototype;
+    var destroy = proto.destroy;
+    proto.destroy = function() {
+      var result = destroy && destroy.apply(this, arguments);
+      this.__pmjsParticleValues = null;
+      this.__pmjsParticleBufferRevisions = null;
+      this.__pmjsParticleProperties = null;
+      return result;
+    };
+  })();
+}
 if (PIXI.Graphics) {
   (function() {
     var destroy = PIXI.Graphics.prototype.destroy;
