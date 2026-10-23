@@ -107,12 +107,17 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
   try {
     await applyPendingInvalidations({ root, native, logger });
     const filename = path.join(root, 'preparation-state.json');
-    let saved = {};
+    let saved = {}, verifiedChecksum = null;
     try {
       const record = await readState(filename);
       if (record.version === 1 && record.checksum === checksum(record.data) &&
           record.data && ['files', 'results', 'indices'].every(key => record.data[key] &&
-            typeof record.data[key] === 'object' && !Array.isArray(record.data[key]))) saved = record.data;
+            typeof record.data[key] === 'object' && !Array.isArray(record.data[key]))) {
+        saved = record.data;
+        // Reuse only when normalization below preserves the exact JSON key order and values.
+        if (saved.failures && Object.keys(saved).join(',') === 'files,results,indices,failures')
+          verifiedChecksum = record.checksum;
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') logger.warn('[pmjs] preparation state unavailable; rebuilding: ' + error.message);
     }
@@ -122,7 +127,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
       if (!record?.key) continue;
       directories.set(path.posix.dirname(name) + '/' + record.key, name);
     }
-    let lastChecksum = saved.files ? checksum(data) : null;
+    let lastChecksum = saved.files ? verifiedChecksum || checksum(data) : null;
     let stateDirty = false;
     let finalizedState = false;
     const session = { root, gameRoot, sourceRoots, data, native, offline, logger, shouldCancel, pending, touched, invalidated: 0,
