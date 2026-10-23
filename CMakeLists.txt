@@ -603,6 +603,12 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-image-load.cjs" $<TARGET_FILE:pmjs_native>)
   set_tests_properties(node-prepared-image-load PROPERTIES ENVIRONMENT
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;UV_THREADPOOL_SIZE=1")
+  add_test(NAME node-failed-tile-ownership COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-failed-tile-ownership.cjs" $<TARGET_FILE:pmjs_native>)
+  add_test(NAME node-failed-tile-ownership-quit COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-failed-tile-ownership.cjs" $<TARGET_FILE:pmjs_native> --quit-pending)
+  set_tests_properties(node-failed-tile-ownership node-failed-tile-ownership-quit PROPERTIES
+    TIMEOUT 90 ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;UV_THREADPOOL_SIZE=1")
   add_test(NAME node-custom-filters COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE} --expose-gc
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-custom-filters.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
   set_tests_properties(node-custom-filters PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
