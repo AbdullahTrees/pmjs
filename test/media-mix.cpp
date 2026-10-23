@@ -443,7 +443,7 @@ void testContextAutomation() {
         "underrun retains the source playhead and pending frame");
   CHECK(near(silence.front(), 0) && near(silence.back(), 0), "underrun emits silence");
   CHECK(near(starved.gain, 0.28, 0.00002), "context automation advances during starvation");
-  starved.samples.insert(starved.samples.end(), {0.5F, 0.5F});
+  starved.samples.append({0.5F, 0.5F});
   float recovery[2]{};
   pmjs::mixVoiceInto(starved, recovery, 1, 1, 4800);
   CHECK(near(recovery[0], 0.28) && starved.positionFrame == 1,

@@ -165,6 +165,8 @@ struct MediaService::Impl {
     std::size_t wanted;
     {
       std::lock_guard lock(voice->mutex);
+      // Reclaim inactive stream storage on the worker, including fade-completed voices.
+      if (!voice->mix.playing) voice->mix.samples.clear();
       if (!voice->mix.playing || voice->mix.eof || voice->decoding ||
           voice->mix.samples.size() / 2 >= bufferFrames) return;
       voice->decoding = true; generation = voice->generation;
@@ -195,7 +197,7 @@ struct MediaService::Impl {
           count = std::min<std::size_t>(count, voice->mix.loopEnd - voice->producerFrame);
           decoded.resize(count * 2);
         }
-        voice->mix.samples.insert(voice->mix.samples.end(), decoded.begin(), decoded.end());
+        voice->mix.samples.append(decoded.begin(), decoded.end());
         voice->producerFrame += count;
         const bool boundary = voice->mix.loop && voice->mix.loopEnd > voice->mix.loopStart &&
                               voice->producerFrame >= voice->mix.loopEnd;

@@ -324,6 +324,17 @@ if(BUILD_TESTING)
   add_test(NAME native-renderer-clear COMMAND ${XVFB_RUN} -a $<TARGET_FILE:pmjs-renderer-clear-test>)
   set_tests_properties(native-renderer-clear PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   pmjs_add_cpp_test(pmjs-media-mix-test native-audio-mix-unit test/media-mix.cpp)
+  pmjs_add_cpp_test(pmjs-stream-pcm-buffer-test native-stream-pcm-buffer test/stream-pcm-buffer.cpp)
+  target_link_options(pmjs-stream-pcm-buffer-test PRIVATE "-Wl,--wrap=_Znwm")
+  add_executable(pmjs-audio-streaming-test test/audio-streaming.cpp)
+  target_include_directories(pmjs-audio-streaming-test PRIVATE src)
+  target_link_libraries(pmjs-audio-streaming-test PRIVATE pmjs_runtime)
+  target_compile_options(pmjs-audio-streaming-test PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_options(pmjs-audio-streaming-test PRIVATE
+    "-Wl,--wrap=SDL_OpenAudioDevice" "-Wl,--wrap=SDL_PauseAudioDevice" "-Wl,--wrap=SDL_CloseAudioDevice"
+    "-Wl,--wrap=av_read_frame" "-Wl,--wrap=_Znwm" "-Wl,--wrap=_ZdlPv" "-Wl,--wrap=_ZdlPvm")
+  add_test(NAME native-audio-streaming COMMAND pmjs-audio-streaming-test)
+  set_tests_properties(native-audio-streaming PROPERTIES TIMEOUT 30)
   target_compile_definitions(pmjs-media-mix-test PRIVATE
     PMJS_EFFECT_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/mz-effects/audio.tsv"
     PMJS_MZ_AUDIO_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/test/assets/reference/mz-pan.tsv"

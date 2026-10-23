@@ -8,7 +8,7 @@
 #include <numbers>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include "stream_pcm_buffer.hpp"
 #include <memory>
 #include "media_decoder.hpp"
 #include "audio_automation.hpp"
@@ -23,7 +23,7 @@ struct PreparedAudioAsset : DecodedAudio {
 struct VoiceMixState {
   GainAutomation* automation = nullptr;
   std::shared_ptr<const PreparedAudioAsset> asset;
-  std::deque<float> samples;  // interleaved stereo frames
+  StreamPcmBuffer samples;  // interleaved stereo frames
   double phase = 0;
   std::uint64_t positionFrame = 0;
   float volume = 1.0F, pitch = 1.0F, pan = 0.0F;
