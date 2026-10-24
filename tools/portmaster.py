@@ -117,7 +117,7 @@ def checked_bundle(bundle):
                 raise ValueError('Invalid PMJS processor sidecar name')
             relative_processor = processor_file.relative_to(bundle).as_posix()
             packaged_files = []
-            for helper in sorted(processor_file.parent.glob('*.cjs')):
+            for helper in sorted(processor_file.parent.rglob('*.cjs')):
                 if helper == processor_file:
                     continue
                 packaged_files.append({'path': helper.relative_to(bundle).as_posix(),

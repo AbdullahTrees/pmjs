@@ -251,45 +251,16 @@ MvNativeWebAudio._onVisibilityChange = function() {};
 MvNativeWebAudio._fadeIn = function() {};
 MvNativeWebAudio._fadeOut = function() {};
 
-if (NativeHost.media) {
-  globalThis.WebAudio = MvNativeWebAudio;
-  AudioManager.createBuffer = function(folder, name) {
-    var url = this._path + folder + '/' + encodeURIComponent(name) + this.audioFileExt();
-    return new MvNativeWebAudio(url, pmjsAudio.intentForFolder(folder));
-  };
-  AudioManager.shouldUseHtml5Audio = function() { return false; };
-  AudioManager.checkWebAudioError = function(buffer) {
-    if (buffer && buffer.isError()) {
-      throw new Error('Failed to load: ' + (buffer.url || buffer._url));
-    }
-  };
-  SceneManager.initAudio = function() {};
-  AudioManager.isReady = function() { return true; };
-} else if (!globalThis.AudioContext) {
-  globalThis.WebAudio = MvNativeWebAudio;
-  SceneManager.initAudio = function() {};
-  MvNativeWebAudio.initialize = function() { return true; };
-  AudioManager.isReady = function() { return true; };
-} else {
-  WebAudio._onTouchStart = function() {
-    if (this._context && this._context.resume) this._context.resume();
-    this._unlocked = true;
-  };
-  WebAudio.prototype._createNodes = function() {
-    var context = WebAudio._context;
-    this._sourceNode = context.createBufferSource();
-    this._sourceNode.buffer = this._buffer;
-    this._sourceNode.loopStart = this._loopStart;
-    this._sourceNode.loopEnd = this._loopStart + this._loopLength;
-    this._sourceNode.playbackRate.setValueAtTime(this._pitch, context.currentTime);
-    this._gainNode = context.createGain();
-    this._gainNode.gain.setValueAtTime(this._volume, context.currentTime);
-    this._pannerNode = context.createStereoPanner();
-    this._updatePanner();
-  };
-  WebAudio.prototype._updatePanner = function() {
-    if (this._pannerNode) {
-      this._pannerNode.pan.setValueAtTime(this._pan, WebAudio._context.currentTime);
-    }
-  };
-}
+globalThis.WebAudio = MvNativeWebAudio;
+AudioManager.createBuffer = function(folder, name) {
+  var url = this._path + folder + '/' + encodeURIComponent(name) + this.audioFileExt();
+  return new MvNativeWebAudio(url, pmjsAudio.intentForFolder(folder));
+};
+AudioManager.shouldUseHtml5Audio = function() { return false; };
+AudioManager.checkWebAudioError = function(buffer) {
+  if (buffer && buffer.isError()) {
+    throw new Error('Failed to load: ' + (buffer.url || buffer._url));
+  }
+};
+SceneManager.initAudio = function() {};
+AudioManager.isReady = function() { return true; };

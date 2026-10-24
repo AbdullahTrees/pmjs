@@ -3,7 +3,7 @@
 
 
 Linux ARM64 is the first release target; local x64 builds are for development
-and testing. Public releases require the explicit release presets below.
+and testing. The qualification procedure below uses explicit release presets.
 
 ## Stage the runtime
 
@@ -86,7 +86,7 @@ python3 tools/release.py archive --stage dist/pmjs-arm64 \
 python3 tools/release.py verify-archive --archive dist/pmjs-linux-arm64.tar.gz
 ```
 
-Public archives require a clean source tree, compiled provenance and a matching
+Qualified archives require a clean source tree, compiled provenance and a matching
 graphics test. ARM64 requires a hardware renderer and Skia65. x64 may use software
 rendering under Xvfb. Addon loading alone is insufficient.
 
@@ -101,7 +101,9 @@ python3 tools/release.py archive --stage dist/pmjs-arm64 \
 
 Before distributing, test saves, repeated launching, game compatibility, audio,
 controls, frame pacing and return to the menu on the intended device and firmware.
-Hosted CI publishes regular releases with runtime and source archives.
+Hosted CI publishes regular releases containing development runtime archives and
+matching source archives. Its ARM64 verification is static; these archives have
+not completed the hardware graphics qualification above.
 
 ## PortMaster ZIP
 

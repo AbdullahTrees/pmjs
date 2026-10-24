@@ -973,7 +973,8 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
   const auto region = rasterCanvasRegion(destinationSurface.pixels, destinationSurface.width,
     destinationSurface.height, dst, [&](uint8_t* pixels, int width, int height, size_t stride, int left, int top) {
       const auto draw = sourcePixels.encoding == PixelEncoding::PremultipliedBGRA8 ?
-        pmjs_skia65_image_bgra_strided : pmjs_skia65_image_rgba_strided;
+        pmjs_skia65_image_bgra_strided : sourcePixels.encoding == PixelEncoding::PremultipliedRGBA8 ?
+        pmjs_skia65_image_premul_rgba_strided : pmjs_skia65_image_rgba_strided;
       return draw(pixels, width, height, stride, left, top, sourcePixels.rgba,
         sourcePixels.width, sourcePixels.height, static_cast<size_t>(sourcePixels.width) * 4,
         src.data(), dst.data(), alpha, smoothing);

@@ -73,6 +73,8 @@ function runtimeIdentity(share, hash) {
   for (const name of ['build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
     checksum.update(name); checksum.update(hash(path.join(share, 'tools', name)));
   }
+  checksum.update('runner/plugin-manifest.cjs');
+  checksum.update(hash(path.join(share, 'runner/plugin-manifest.cjs')));
   return checksum.digest('hex');
 }
 

@@ -90,8 +90,6 @@ def _validate_metadata(metadata):
 
     for field in ('title', 'desc', 'inst'):
         value = _required_text(attr.get(field), f'attr.{field}')
-        if '—' in value:
-            raise ValueError(f'port.json attr.{field} must not use em dashes')
         if field != 'title':
             markdown = re.search(r'(?:^|\s)[#>*+-]\s|`|(?:\*\*|__|~~)|\[[^]]+\]\([^)]+\)', value)
             if '\n' in value or '\r' in value or r'\n' in value or markdown:
@@ -112,8 +110,6 @@ def _validate_metadata(metadata):
     for field in ('desc_md', 'inst_md'):
         if field not in attr or (attr[field] is not None and not isinstance(attr[field], str)):
             raise ValueError(f'port.json attr.{field} must be a string or null')
-        if isinstance(attr[field], str) and '—' in attr[field]:
-            raise ValueError(f'port.json attr.{field} must not use em dashes')
     if 'image' not in attr or (attr['image'] is not None and not isinstance(attr['image'], str)):
         raise ValueError('port.json attr.image must be a string or null')
     if not isinstance(attr.get('exp'), bool):
@@ -167,8 +163,6 @@ def read_submission(directory):
     if (not readme.startswith('## Notes\n') or headings[:3] !=
             ['## Notes', '## Controls', '## Compile'] or readme.startswith('# ')):
         raise ValueError('README.md must start with Notes, Controls, and Compile sections')
-    if '—' in readme:
-        raise ValueError('README.md must not use em dashes')
     xml = _regular(directory / 'gameinfo.xml')
     try:
         root = ElementTree.parse(xml).getroot()
@@ -181,8 +175,6 @@ def read_submission(directory):
     if (len(game) != len(game_fields) or {child.tag for child in game} != set(game_fields) or
             any(not (game.findtext(field) or '').strip() for field in game_fields)):
         raise ValueError('gameinfo.xml must contain only the current required game fields')
-    if any('—' in (game.findtext(field) or '') for field in game_fields):
-        raise ValueError('gameinfo.xml must not use em dashes')
     releasedate = game.findtext('releasedate', '')
     if not re.fullmatch(r'\d{8}T000000', releasedate):
         raise ValueError('gameinfo.xml releasedate must use YYYYMMDDT000000 format')

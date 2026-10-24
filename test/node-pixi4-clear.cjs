@@ -96,6 +96,11 @@ try {
   c.PMJS.pixi4.getStageRenderOptions = function() { return {}; };
   c.renderNativeStage = function(...args) {
     args[7]();
+    if (args[5] !== null) {
+      const color = args[5];
+      native.render.quad(0, 0, 16, 12, (color >> 16 & 255) / 255,
+        (color >> 8 & 255) / 255, (color & 255) / 255, 1);
+    }
     native.render.quad(0, 0, 8, 6, 1, 0, 0, 1);
   };
   native.beginFrame();
@@ -112,6 +117,7 @@ try {
   assert.deepEqual(texturePixel(texture), [0, 255, 255, 255]);
 
   // Immediate clear leaves the color for future automatic clears unchanged.
+  native.render.setClearColor(0, 0, 1, 1);
   native.beginFrame();
   native.render.quad(0, 0, 1, 1, 1, 1, 1, 1);
   native.renderScene();
@@ -121,6 +127,41 @@ try {
   renderer.clear([1, 0, 0, 1]);
   native.renderFrame();
   assert.deepEqual(screenPixel(), [255, 0, 0, 255], 'clear orders after queued drawing');
+  renderer.backgroundColor = 0xffff00;
+  for (const [defaultClear, override, expected] of [
+    [true, false, [0, 255, 0, 255]],
+    [true, null, [0, 255, 0, 255]],
+    [false, undefined, [0, 255, 0, 255]],
+    [false, true, [255, 255, 0, 255]],
+    [true, undefined, [255, 255, 0, 255]]
+  ]) {
+    native.beginFrame();
+    native.render.quad(0, 0, 16, 12, 0, 1, 0, 1);
+    native.renderScene();
+    native.beginFrame();
+    renderer.clearBeforeRender = defaultClear;
+    renderer.render({}, null, override);
+    native.renderScene();
+    assert.deepEqual(screenPixel(12, 9), expected,
+      `render clearing default=${defaultClear} override=${override}`);
+    assert.deepEqual(screenPixel(2, 2), [255, 0, 0, 255], 'new commands still draw');
+  }
+  const retainedTexture = { width: 16, height: 12, baseTexture: { width: 16, height: 12, resolution: 1 } };
+  renderer.clearRenderTexture(retainedTexture, [0, 1, 0, 1]);
+  renderer.clearBeforeRender = false;
+  native.beginFrame();
+  renderer.render({}, retainedTexture);
+  assert.deepEqual(texturePixel(retainedTexture, 12, 9), [0, 255, 0, 255], 'offscreen render honors the default retain policy');
+  renderer.render({}, retainedTexture, true);
+  assert.deepEqual(texturePixel(retainedTexture, 12, 9), [0, 0, 0, 0], 'explicit offscreen clear overrides the default');
+  retainedTexture.baseTexture.__pmjsRenderCanvas._releaseNativeCanvas();
+  const transparentRenderer = c.createNativePixiRenderer(16, 12, { transparent: true });
+  native.beginFrame();
+  transparentRenderer.render({}, null, true);
+  native.renderScene();
+  assert.deepEqual(screenPixel(12, 9), [0, 0, 0, 0], 'transparent render clears alpha');
+  assert.deepEqual(screenPixel(2, 2), [255, 0, 0, 255]);
+  transparentRenderer.destroy();
   texture.baseTexture.__pmjsRenderCanvas._releaseNativeCanvas();
   sibling.baseTexture.__pmjsRenderCanvas._releaseNativeCanvas();
   renderer.destroy();

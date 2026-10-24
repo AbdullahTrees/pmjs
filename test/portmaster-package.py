@@ -171,16 +171,16 @@ class PortMasterPackage(unittest.TestCase):
         (submission / 'screenshot.png').write_bytes(
             b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 640, 480, 8, 6, 0, 0, 0)) +
             chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
-        (submission / 'README.md').write_text('## Notes\n\nThanks to the developer.\n\n## Controls\n\n## Compile\n')
+        (submission / 'README.md').write_text('## Notes\n\nThanks to the developer — and contributors.\n\n## Controls\n\n## Compile\n')
         (submission / 'gameinfo.xml').write_text('''<?xml version="1.0"?>
 <gameList><game><path>./Minimal Game.sh</path><name>Minimal Game</name>
-<desc>A concise description.</desc><releasedate>20060606T000000</releasedate>
+<desc>A game — with punctuation.</desc><releasedate>20060606T000000</releasedate>
 <developer>Example Developer</developer><publisher>Open Source</publisher><genre>RPG</genre>
 <image>./minimalgame/screenshot.png</image></game></gameList>''')
         descriptor = {'version': 4, 'name': 'minimalgame.zip',
                       'items': ['Minimal Game.sh', 'minimalgame'], 'items_opt': [],
-                      'attr': {'title': 'Minimal Game', 'porter': ['Test Porter'],
-                               'desc': 'A game & test', 'desc_md': None,
+                      'attr': {'title': 'Minimal Game — Subtitle', 'porter': ['Test Porter'],
+                               'desc': 'A game — and test', 'desc_md': 'A game — and test',
                                'inst': 'Supply the game files.', 'inst_md': None,
                                'genres': ['rpg'], 'image': None, 'rtr': False,
                                'exp': False, 'runtime': [], 'arch': ['x86_64'], 'store': [],
@@ -400,6 +400,29 @@ class PortMasterPackage(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     portmaster.portmaster(self.stage, bundle, self.output)
                 self.assertFalse(self.output.exists())
+
+    def test_bundle_preserves_nested_helpers_from_the_preparation_producer(self):
+        processor = self.root / 'nested.pmjs-processor.cjs'
+        processor.write_text("module.exports = { id: 'nested', version: 1, files: ['lib/helper.cjs'], outputs: [{ id: 'fixture', source: 'data/System.json', generate(bytes) { return require('./lib/helper.cjs')(bytes); } }] };")
+        helper = self.root / 'lib/helper.cjs'
+        helper.parent.mkdir()
+        helper.write_text("module.exports = bytes => bytes;")
+        subprocess.run(['node', '-e', """
+const fs = require('node:fs');
+const path = require('node:path');
+const { buildPortPreparation, verifyPortDescriptor } = require('./runner/port-preparation.cjs');
+const [bundleRoot, processor] = process.argv.slice(1);
+const file = path.join(bundleRoot, 'pmjs.json');
+const descriptor = JSON.parse(fs.readFileSync(file));
+descriptor.portPreparation = buildPortPreparation({ bundleRoot, processors: [processor] });
+verifyPortDescriptor(bundleRoot, descriptor.portPreparation);
+fs.writeFileSync(file, JSON.stringify(descriptor));
+""", self.bundle, processor], cwd=ROOT, check=True, capture_output=True, text=True)
+        before = json.loads((self.bundle / 'pmjs.json').read_text())
+        self.assertEqual(portmaster.checked_bundle(self.bundle)['portPreparation'], before['portPreparation'])
+        portmaster.portmaster(self.stage, self.bundle, self.output)
+        with zipfile.ZipFile(self.output) as package:
+            self.assertEqual(package.read('minimalgame/preparation/nested/lib/helper.cjs'), helper.read_bytes())
 
     def test_bundle_refreshes_stale_preparation_manifest_from_sidecars(self):
         bundle = self.root / 'stale-preparation-bundle'

@@ -353,6 +353,7 @@ function createNativePixiRenderer(width, height, options) {
         this._nextTextureLocation = 0;
         if (typeof this.emit === 'function') this.emit('prerender');
         var renderOwner = this;
+        var shouldClear = !!(clear === undefined ? this.clearBeforeRender : clear);
         if (renderTexture) {
           var base = renderTexture.baseTexture;
           if (!base || base.width <= 0 || base.height <= 0) {
@@ -382,7 +383,7 @@ function createNativePixiRenderer(width, height, options) {
               renderOwner.renderTexture.bind(renderTexture);
               renderOwner._activeRenderTarget.transform = transform || null;
               NativeHost.render.setRenderTargetSize(targetWidth, targetHeight);
-              if (clear === false) {
+              if (!shouldClear) {
                 NativeHost.render.image(target._ensureNativeCanvas().handle,
                   1, 0, 0, 1, 0, 0, 0, 0, targetWidth, targetHeight,
                   1, 0xffffff, 0);
@@ -394,6 +395,7 @@ function createNativePixiRenderer(width, height, options) {
           if (typeof this.emit === 'function') this.emit('postrender');
           return;
         }
+        if (shouldClear) NativeHost.render.setClearColor(0, 0, 0, this.transparent ? 0 : 1);
         var screenWidth = this.width;
         var screenHeight = this.height;
         var screenTransform = { a: this.resolution, b: 0, c: 0,
@@ -401,12 +403,13 @@ function createNativePixiRenderer(width, height, options) {
         renderNativeStage(stage, transform ?
           nativeComposeTransform(screenTransform, transform) : screenTransform,
         this.resolution, this.roundPixels, skipUpdateTransform,
-        this.clearBeforeRender && !this.transparent ? this._backgroundColor : null,
+        shouldClear && !this.transparent ? this._backgroundColor : null,
         Object.assign({}, PMJS.pixi4.getStageRenderOptions(stage), { renderer: this }), function() {
           renderOwner.renderTexture.bind(null);
           renderOwner._activeRenderTarget.transform = transform || null;
           NativeHost.render.setScreenRenderSize(screenWidth, screenHeight);
         });
+        NativeHost.render.setClearBeforeRender(shouldClear);
         this.textureGC.update();
         if (typeof this.emit === 'function') this.emit('postrender');
       } finally {

@@ -199,3 +199,39 @@ for (const stopAfter of [70, 600]) test('stopping a partially drained large queu
   assert.deepEqual(discarded, Array.from({ length: 1023 - stopAfter }, (_, i) => i + stopAfter + 1));
   assert.deepEqual(fatals, []);
 });
+
+test('timer and animation callback promises use browser rejection delivery without blocking', async t => {
+  const { EventEmitter } = require('node:events');
+  const { installPromiseRejectionBridge } = require('../runner/promise-rejections.cjs');
+  const { context, fatals } = fixture(t), host = new EventEmitter(), delivered = [];
+  const remove = installPromiseRejectionBridge(host, {
+    getTasks: () => context.PMJS.tasks,
+    reportUnhandled: (reason, promise, origin) => delivered.push([reason, promise, origin]),
+    reportHandled() {}
+  });
+  t.after(remove);
+  const promises = [];
+  const pending = () => { const promise = new Promise(() => {}); promises.push(promise); return promise; };
+  await new Promise(resolve => {
+    context.setTimeout(pending, 0);
+    context.setTimeout('globalThis.stringPromise = new Promise(function() {})', 0);
+    const interval = context.setInterval(() => { context.clearInterval(interval); return pending(); }, 1);
+    context.setTimeout(resolve, 5);
+  });
+  promises.push(context.stringPromise);
+  context.requestAnimationFrame(pending);
+  let nextRan = false;
+  context.requestAnimationFrame(() => { nextRan = true; });
+  await context.PMJS.tasks.runFrame(() => context.pmjsDrainScheduler(10));
+  assert.equal(nextRan, true, 'unsettled callback promises must not hold the frame');
+  assert.equal(promises.length, 4);
+  for (const promise of promises) {
+    host.emit('unhandledRejection', new Error('browser callback'), promise);
+  }
+  await context.PMJS.tasks.idle();
+  assert.deepEqual(delivered.map(entry => entry[2]), ['browser', 'browser', 'browser', 'browser']);
+  assert.deepEqual(delivered.map(entry => entry[1]), promises);
+  const infrastructure = new Error('infrastructure');
+  assert.throws(() => host.emit('unhandledRejection', infrastructure, Promise.resolve()), error => error === infrastructure);
+  assert.deepEqual(fatals, []);
+});
