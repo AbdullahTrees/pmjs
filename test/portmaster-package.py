@@ -757,6 +757,7 @@ return "${MODULE_STATUS:-0}"
             self.assertNotIn(name, env)
         self.assertEqual(env['SDL_GAMECONTROLLERCONFIG'], 'firmware-map')
         self.assertEqual(env['PMJS_EXIT_HOTKEY'], 'none')
+        self.assertNotIn('PMJS_GRAPHICS_DIAGNOSTICS', env)
 
     def test_standard_control_directory_priority(self):
         locations = [self.root / 'opt/system/Tools/PortMaster',
@@ -786,6 +787,12 @@ return "${MODULE_STATUS:-0}"
         arguments = json.loads(self.capture.read_text())['argv']
         self.assertIn(str(self.port), arguments)
         self.assertEqual(arguments[arguments.index('--save-root') + 1], str(self.port / 'saves'))
+
+    def test_graphics_diagnostics_honor_explicit_environment(self):
+        for value in ('0', '1'):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_launcher(PMJS_GRAPHICS_DIAGNOSTICS=value).returncode, 0)
+                self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_GRAPHICS_DIAGNOSTICS'], value)
 
     def test_exit_helper_has_no_gameplay_bindings_and_honors_native_override(self):
         self.assertEqual(self.run_launcher().returncode, 0)

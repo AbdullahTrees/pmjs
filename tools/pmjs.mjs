@@ -34,7 +34,7 @@ Usage:
   pmjs GAME [--config FILE] [--manifest FILE] [--patch FILE ...] [-- GAME_ARGUMENT ...]
   pmjs bundle GAME --output DIR [--include-assets | --no-index]
       [--config FILE] [--manifest FILE] [--patch FILE ...]
-      [--include-port-assets]
+      [--include-port-assets] [--asset-cache-root DIR]
   pmjs BUNDLE [--game DIR]
   pmjs package BUNDLE --runtime DIR --output ZIP [--sources FILE --sources-url URL]
       [--submission DIR]
@@ -148,14 +148,15 @@ async function main() {
         args.filter(value => value === '--include-port-assets').length > 1 ||
         args.filter(value => value === '--no-index').length > 1) throw new Error('duplicate bundle option');
     const options = parse(args.filter(value => !['--include-assets', '--include-port-assets', '--no-index'].includes(value)),
-      ['--output', '--config', '--manifest', '--patch', '--adapter', '--port-preparer'], false);
+      ['--output', '--config', '--manifest', '--patch', '--adapter', '--port-preparer', '--asset-cache-root'], false);
     if (!options['--output']) throw new Error('--output is required');
     const game = gameDirectory(gameArgument);
     if (includeAssets) console.warn('[pmjs] Generated pages can contain game artwork. Share this bundle only when allowed.');
     if (includePortAssets) console.warn('[pmjs] Port-generated data may reproduce game content. Confirm redistribution rights.');
     await createBundle({ root, share, game, output: options['--output'], config: options['--config'],
       manifest: options['--manifest'], adapters: options.adapters, runtimeIdentity: runtimeIdentity('bundle-build'),
-      index, includeAssets, portProcessors: options.portPreparers, includePortAssets });
+      index, includeAssets, portProcessors: options.portPreparers, includePortAssets,
+      cacheRoot: options['--asset-cache-root'] });
     console.log(`Bundle created: ${options['--output']}`);
     return;
   }

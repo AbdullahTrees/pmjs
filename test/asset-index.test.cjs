@@ -11,6 +11,45 @@ const { loadAssetIndex, offlineFilesystem, assetIndexArtifacts } = require('../r
 const { COMPILER_VERSION } = require('../runner/map-demand.cjs');
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+test('generated map indexes omit local source metadata without changing cached descriptors', async t => {
+  const root = temporaryDirectory('portable-map-index-');
+  const output = path.join(root, 'output'), gameRoot = path.join(root, 'game');
+  for (const directory of [output, gameRoot, path.join(root, 'lib')]) fs.mkdirSync(directory);
+  const addon = path.join(root, 'lib/pmjs_native.node');
+  fs.writeFileSync(addon, '');
+  const { preparationLocks } = require('./helpers/preparation-lock.cjs');
+  require.cache[addon] = { exports: { assets: { ...preparationLocks(), imageStorageVersion: 1,
+    classifyImageStorage() { throw new Error('no images expected'); } } } };
+  t.after(() => { delete require.cache[addon]; });
+  const page = path.join(root, 'tiles-0.png');
+  fs.writeFileSync(page, 'prepared page');
+  const checksum = crypto.createHash('sha256').update(fs.readFileSync(page)).digest('hex');
+  const source = Object.freeze({ source: 'img/tilesets/B.png', sourceHash: 'a'.repeat(64),
+    snapshot: path.join(root, 'cache/sources/B.png'), sourceIdentity: 'local-identity',
+    width: 48, height: 48, regions: [{ rect: [0, 0, 48, 48], atlas: [1, 1, 48, 48], page: 0 }] });
+  const descriptor = Object.freeze({ version: 1, halo: 1,
+    pages: [{ path: 'tiles-0.png', width: 50, height: 50 }], sources: Object.freeze([source]) });
+  const preparation = require('../runner/preparation.cjs');
+  t.mock.method(preparation, 'prepareGameAssets', async () => ({ maps: {
+    selected: 1, index: { 1: { identity: 'map-1' } }, entries: [{ identity: 'map-1', directory: root,
+      descriptor, outputs: [{ path: 'tiles-0.png', hash: checksum }] }] } }));
+  const modulePath = require.resolve('../runner/asset-index.cjs');
+  const originalModule = require.cache[modulePath];
+  delete require.cache[modulePath];
+  t.after(() => { require.cache[modulePath] = originalModule; });
+  const { generateAssetIndex } = require(modulePath);
+  await generateAssetIndex({ root, gameRoot, output, includeAssets: true,
+    options: { width: 816, height: 624, assetPreparation: { enabled: true, maps: true, recipes: [], pageCodec: 'png' } } });
+  const index = JSON.parse(fs.readFileSync(path.join(output, 'asset-index.json')));
+  const { snapshot, sourceIdentity, ...portableSource } = source;
+  assert.deepEqual(index.maps.entries[0].descriptor, { ...descriptor, sources: [portableSource] });
+  assert.equal(descriptor.sources[0].snapshot, snapshot);
+  assert.equal(descriptor.sources[0].sourceIdentity, sourceIdentity);
+  assert.deepEqual(index.maps.entries[0].outputs,
+    [{ path: 'assets/maps/map-1/tiles-0.png', hash: checksum }]);
+  assert.equal(fs.readFileSync(path.join(output, index.maps.entries[0].outputs[0].path), 'utf8'), 'prepared page');
+});
+
 function fixture() {
   const root = temporaryDirectory('asset-index-'), file = path.join(root, 'index.json');
   const native = { assets: { preparationVersion: { processor: 1 }, tilePreparationVersion: 'tiles-1', preparationLz4Version: 'sparse-palette-v2' } };

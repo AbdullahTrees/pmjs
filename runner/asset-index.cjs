@@ -7,6 +7,8 @@ const { astcSettings, validDescriptor, validStorageDecision } = require('./asset
 const { validTileDescriptor } = require('./map-preparation.cjs');
 const { prepareGameAssets } = require('./preparation.cjs');
 const { COMPILER_VERSION } = require('./map-demand.cjs');
+const { acquireLock } = require('./preparation-lifetime.cjs');
+const { storageClassifier, mapStorageInputs } = require('./asset-storage-index.cjs');
 
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -143,20 +145,26 @@ function portableMaps(result, includeAssets, output) {
       }
       return { ...page, path: relative };
     });
+    const descriptor = { ...manifest.descriptor,
+      sources: manifest.descriptor.sources.map(({ snapshot, sourceIdentity, ...source }) => source) };
     entries.push({ mapId: Number(mapId), identity: selected.identity,
-      descriptor: manifest.descriptor, outputs: pages, estimates: manifest.estimates });
+      descriptor, outputs: pages, estimates: manifest.estimates });
   }
   return { compiler: COMPILER_VERSION, compilations: result.compilations || {}, mapInputs, entries };
 }
 
-async function generateAssetIndex({ root, gameRoot, options, output, includeAssets, portDescriptors = [], includePortAssets = false, writeIndex = true, shouldCancel = () => false }) {
+async function generateAssetIndex({ root, gameRoot, options, output, includeAssets, portDescriptors = [], includePortAssets = false, writeIndex = true, shouldCancel = () => false, cacheRoot: reusableCache }) {
   const nativeAddon = require(path.join(root, 'lib/pmjs_native.node'));
-  const cacheRoot = path.join(output, '.preparation');
+  const cacheRoot = reusableCache ? path.resolve(reusableCache) : path.join(output, '.preparation');
+  const lockRoot = path.join(cacheRoot, 'index-lock');
+  fs.mkdirSync(lockRoot, { recursive: true });
   const derived = new Map();
   const filesystem = offlineFilesystem(gameRoot, derived);
   const native = { assets: Object.assign(Object.create(nativeAddon.assets), filesystem.assets), fs: filesystem.fs };
   const warnings = [];
   const logger = { warn: message => warnings.push(message) };
+  const release = await acquireLock(lockRoot, shouldCancel, () => {}, nativeAddon.assets, 3600000);
+  if (!release) throw new Error('asset indexing cancelled');
   try {
     const prepared = await prepareGameAssets({ gameRoot, cacheRoot, native,
       ...options.assetPreparation, images: options.assetPreparation.enabled,
@@ -190,8 +198,9 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
     if (nativeAddon.assets.imageStorageVersion !== 1 || typeof nativeAddon.assets.classifyImageStorage !== 'function')
       throw new Error('image storage indexing requires a current host runtime');
     const decryptedInputs = new Map(images.decryptedEntries.map(entry => [entry.source, entry.file]));
-    const imageRecords = [];
-    for (const decision of images.decisions) {
+    const classifier = storageClassifier(nativeAddon.assets, cacheRoot);
+    const imageWarnings = new Map();
+    const imageRecords = await mapStorageInputs(images.decisions, async decision => {
       if (shouldCancel()) throw new Error('image storage indexing cancelled');
       if (decision.descriptor && !validDescriptor(decision.descriptor)) throw new Error('invalid generated image descriptor');
       const original = imageEntries.get(decision.source);
@@ -215,14 +224,14 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
       const imageSource = decision.source.replace(/\.(png_|rpgmvp)$/i, '.png');
       if (imageSource.toLowerCase().endsWith('.png') && !transformsPixels) {
         try {
-          storage = await nativeAddon.assets.classifyImageStorage(
+          storage = await classifier.classify(
             decryptedInputs.get(decision.source) || filesystem.assets.sourcePath(decision.source));
           if (!validStorageDecision(storage)) throw new Error('invalid storage decision');
           if (hash(filesystem.assets.sourcePath(decision.source)) !== decision.sourceHash)
             throw new Error('image source changed during storage classification');
         } catch (error) {
           storage = undefined;
-          warnings.push('[pmjs] image storage index unavailable ' + decision.source + ': ' + error.message);
+          imageWarnings.set(decision, '[pmjs] image storage index unavailable ' + decision.source + ': ' + error.message);
         }
       }
       let descriptor = decision.descriptor;
@@ -230,7 +239,7 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
         const pages = [];
         for (const page of descriptor.pages) {
           if (shouldCancel()) throw new Error('page storage indexing cancelled');
-          const pageStorage = await nativeAddon.assets.classifyImageStorage(path.join(entry.directory, page.path));
+          const pageStorage = await classifier.classify(path.join(entry.directory, page.path));
           if (!validStorageDecision(pageStorage) || pageStorage.width !== page.width || pageStorage.height !== page.height)
             throw new Error('invalid prepared page storage decision');
           const expected = decision.outputs[page.path];
@@ -239,8 +248,10 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
         }
         descriptor = { ...descriptor, pages };
       }
-      imageRecords.push({ ...decision, descriptor, ...(storage ? { storage } : {}), outputs });
-    }
+      return { ...decision, descriptor, ...(storage ? { storage } : {}), outputs };
+    });
+    classifier.save();
+    for (const decision of images.decisions) if (imageWarnings.has(decision)) warnings.push(imageWarnings.get(decision));
     const index = { schema: 3, kind: 'pmjs-asset-index',
       sections: { imageStorage: 1, images: 1, mapCompilation: 1, tileOutputs: 1 },
       pageCodec: options.assetPreparation.pageCodec,
@@ -268,7 +279,8 @@ async function generateAssetIndex({ root, gameRoot, options, output, includeAsse
     return { images: images.total, preparedImages: images.prepared,
       maps: maps?.selected || 0, warnings: warnings.slice(0, 3), warningCount: warnings.length };
   } finally {
-    fs.rmSync(cacheRoot, { recursive: true, force: true });
+    release();
+    if (!reusableCache) fs.rmSync(cacheRoot, { recursive: true, force: true });
   }
 }
 

@@ -41,7 +41,6 @@ PMJS_ROOT="$GAMEDIR/runtime"
 echo '[pmjs-port] launcher started'
 export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
 export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
-export PMJS_GRAPHICS_DIAGNOSTICS=1
 
 [ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
 $GPTOKEYB2 "$BINARY" > /dev/null 2>&1 &

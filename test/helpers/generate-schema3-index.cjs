@@ -26,6 +26,7 @@ require.cache[preparationPath].exports.prepareGameAssets = async () => ({
 });
 
 const addon = { assets: {
+  ...require('./preparation-lock.cjs').preparationLocks(),
   imageStorageVersion: 1,
   preparationVersion: { processor: 'fixture' },
   tilePreparationVersion: 'fixture-tiles',
