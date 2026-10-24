@@ -17,6 +17,7 @@ export PMJS_NODE_ROOT="$PWD/.cache/linux-arm64/node"
 export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/arm64"
 export PMJS_EFFEKSEER_ARCHIVE="$PWD/.cache/effekseer/source.tar.gz"
 export PMJS_LZ4_ARCHIVE="$PWD/.cache/lz4/source.tar.gz"
+export PMJS_ASTCENC_ARCHIVE="$PWD/.cache/astcenc/source.tar.gz"
 cmake --preset release-linux-arm64
 python3 tools/release.py sources --sdk "$PMJS_SDK_ROOT" --output dist/pmjs-ffmpeg-sources.tar.gz
 python3 tools/release.py stage --build build/release-linux-arm64 --output dist/pmjs-arm64 \
@@ -89,8 +90,7 @@ Public archives require a clean source tree, compiled provenance and a matching
 graphics test. ARM64 requires a hardware renderer and Skia65. x64 may use software
 rendering under Xvfb. Addon loading alone is insufficient.
 
-The archive contains only the runtime. Publish its `ARCHIVE.release.json` and
-`ARCHIVE.verification.json` companions and matching source archive together.
+The archive contains only the runtime. Publish it with the matching source archive.
 Use a fresh archive filename; publication is atomic per file, not per group.
 Creating an archive does not publish it. For a local candidate without device testing:
 
@@ -101,7 +101,7 @@ python3 tools/release.py archive --stage dist/pmjs-arm64 \
 
 Before distributing, test saves, repeated launching, game compatibility, audio,
 controls, frame pacing and return to the menu on the intended device and firmware.
-Hosted CI publishes development prereleases without device qualification.
+Hosted CI publishes regular releases with runtime and source archives.
 
 ## PortMaster ZIP
 

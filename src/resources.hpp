@@ -61,7 +61,6 @@ struct ImageStorageDecision {
   int width = 0, height = 0, paletteBits = 0;
   ImageChannelStorage channels;
   bool hasPixelFacts = false, opaque = false, allZero = false;
-  std::optional<std::vector<std::array<int, 4>>> sparseRegions = std::nullopt;
 };
 
 // A deferred reader keeps its crop alive at the revision it observed. Pixel
@@ -330,8 +329,6 @@ class ImageStore {
                                              bool premultiplied = false);
   bool isRenderTarget(ImageHandle handle) const;
   std::optional<std::uint64_t> contentRevision(ImageHandle handle) const;
-  // Source-space coverage with a periodic one-texel filtering halo. No readback.
-  const std::vector<std::array<int, 4>>* sparseRegions(ImageHandle handle) const;
   std::uint64_t textureEpoch() const { return textureEpoch_; }
   bool ensureMipmaps(ImageHandle handle, bool premultiplied);
   const ImagePixels* readPixels(ImageHandle handle) const;
@@ -482,8 +479,6 @@ class ImageStore {
     std::filesystem::path sourcePath;
     std::string lastPreparedFallbackReason;
     mutable std::optional<ImagePixels> cachedPixels;
-    std::optional<std::vector<std::array<int, 4>>> sparseRegions;
-    std::uint64_t sparseRevision = 0;
     bool live = false;
   };
 
@@ -508,7 +503,6 @@ class ImageStore {
   std::optional<ImageInfo> insertTileView(std::shared_ptr<TileBacking> backing,
       int width, int height, const std::string& cacheKey);
   bool tileDiagnostics_ = false;
-  bool sparseTiling_ = false;
   std::shared_ptr<std::atomic<std::size_t>> tileMetadataBytes_ =
       std::make_shared<std::atomic<std::size_t>>(0);
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);

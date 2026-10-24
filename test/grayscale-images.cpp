@@ -355,8 +355,7 @@ int main() {
       const auto path = root / "indexed-pixel-facts.png";
       writePng(path, pixels);
       const auto decision = pmjs::ImageStore::classifyStorage(pixels);
-      require(decision.hasPixelFacts && decision.allZero && !decision.opaque &&
-        decision.sparseRegions && decision.sparseRegions->empty(), "zero facts differ");
+      require(decision.hasPixelFacts && decision.allZero && !decision.opaque, "zero facts differ");
       require(images.installStorageDecision(path, pmjs::ImageStore::openFile(path)->key(), decision),
         "pixel facts rejected");
       const auto image = images.loadPng(path);

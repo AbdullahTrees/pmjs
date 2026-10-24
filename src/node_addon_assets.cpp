@@ -203,13 +203,6 @@ napi_value storageDescriptor(napi_env env, const ImageStorageDecision& decision)
     set(env, value, "pixelFactsVersion", number(env, 1));
     set(env, value, "opaque", boolean(env, decision.opaque));
     set(env, value, "allZero", boolean(env, decision.allZero));
-    napi_value regions = null(env);
-    if (decision.sparseRegions) {
-      check(env, napi_create_array_with_length(env, decision.sparseRegions->size(), &regions), "cannot create sparse regions");
-      for (std::size_t i = 0; i < decision.sparseRegions->size(); ++i)
-        check(env, napi_set_element(env, regions, i, arrayValue(env, (*decision.sparseRegions)[i])), "cannot write sparse region");
-    }
-    set(env, value, "sparseRegions", regions);
   }
   return value;
 }
@@ -425,18 +418,6 @@ napi_value installImageStorage(napi_env env, napi_callback_info info) try {
         decision.hasPixelFacts = true;
         check(env, napi_get_value_bool(env, property(env, storage, "opaque"), &decision.opaque), "invalid opacity fact");
         check(env, napi_get_value_bool(env, property(env, storage, "allZero"), &decision.allZero), "invalid zero fact");
-        auto regions = property(env, storage, "sparseRegions");
-        bool isArray = false;
-        check(env, napi_is_array(env, regions, &isArray), "invalid sparse regions");
-        if (isArray) {
-          decision.sparseRegions.emplace();
-          for (std::uint32_t r = 0, regionCount = arrayLength(env, regions, 64); r < regionCount; ++r)
-            decision.sparseRegions->push_back(integers<4>(env, element(env, regions, r)));
-        } else {
-          napi_valuetype type;
-          check(env, napi_typeof(env, regions, &type), "invalid sparse regions");
-          if (type != napi_null) throw std::runtime_error("invalid sparse regions");
-        }
       }
       bool valid = true;
       for (int c = 0; c < 4; ++c) {

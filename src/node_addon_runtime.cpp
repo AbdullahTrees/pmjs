@@ -539,14 +539,6 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
   check(env, napi_set_named_property(env, result, "tilingSpriteDrawCalls",
     number(env, static_cast<double>(stats.tilingSpriteDrawCalls))),
     "cannot set renderer tiling sprite draws");
-  check(env, napi_set_named_property(env, result, "sparseTilingCommands",
-    number(env, static_cast<double>(stats.sparseTilingCommands))), "cannot set sparse tiling commands");
-  check(env, napi_set_named_property(env, result, "sparseTilingDrawCalls",
-    number(env, static_cast<double>(stats.sparseTilingDrawCalls))), "cannot set sparse tiling draws");
-  check(env, napi_set_named_property(env, result, "sparseTilingFullPixels",
-    number(env, static_cast<double>(stats.sparseTilingFullPixels))), "cannot set sparse tiling full pixels");
-  check(env, napi_set_named_property(env, result, "sparseTilingPixels",
-    number(env, static_cast<double>(stats.sparseTilingPixels))), "cannot set sparse tiling pixels");
   check(env, napi_set_named_property(env, result, "screenFillDrawCalls",
     number(env, static_cast<double>(stats.screenFillDrawCalls))),
     "cannot set renderer screen fill draws");

@@ -18,80 +18,6 @@ std::array<int, 4> effectFrame(const RenderCommand* filter, int width, int heigh
           std::clamp(filter->clip[3], 0, height)};
 }
 
-// Keep the original quad's interpolation; disjoint scissors omit only empty raster areas.
-std::optional<std::vector<std::array<int, 4>>> sparseTilingClips(
-    const RenderCommand& command, const ImageInfo& image,
-    const std::vector<std::array<int, 4>>& regions,
-    const std::array<float, 2>& p0, const std::array<float, 2>& p1,
-    const std::array<float, 2>& p3, const std::array<int, 4>& clip) {
-  const double sx = command.source[0], sy = command.source[1];
-  const double sw = command.source[2], sh = command.source[3];
-  if (!(sw > 0 && sh > 0 && p1[0] > p0[0] && p3[1] > p0[1]) ||
-      p1[1] != p0[1] || p3[0] != p0[0] ||
-      !std::isfinite(sx) || !std::isfinite(sy) ||
-      std::abs(sx) > 10000000 || std::abs(sy) > 10000000 ||
-      !std::isfinite(sw) || !std::isfinite(sh)) return std::nullopt;
-  std::vector<std::array<int, 4>> rectangles;
-  for (const auto& region : regions) {
-    const double x0 = std::ceil((sx - region[0] - region[2]) / image.width);
-    const double x1 = std::floor((sx + sw - region[0]) / image.width);
-    const double y0 = std::ceil((sy - region[1] - region[3]) / image.height);
-    const double y1 = std::floor((sy + sh - region[1]) / image.height);
-    const double columns = x1 - x0 + 1, rows = y1 - y0 + 1;
-    if (columns <= 0 || rows <= 0) continue;
-    if (columns > 256 || rows > 256 || columns * rows > 256) return std::nullopt;
-    for (double y = y0; y <= y1; ++y) for (double x = x0; x <= x1; ++x) {
-      const double left = p0[0] + (region[0] + x * image.width - sx) / sw * (double(p1[0]) - p0[0]);
-      const double top = p0[1] + (region[1] + y * image.height - sy) / sh * (double(p3[1]) - p0[1]);
-      const double right = left + region[2] / sw * (double(p1[0]) - p0[0]);
-      const double bottom = top + region[3] / sh * (double(p3[1]) - p0[1]);
-      std::array<int, 4> bounds{
-        static_cast<int>(std::floor(std::clamp(left, double(clip[0]), double(clip[2])))),
-        static_cast<int>(std::floor(std::clamp(top, double(clip[1]), double(clip[3])))),
-        static_cast<int>(std::ceil(std::clamp(right, double(clip[0]), double(clip[2])))),
-        static_cast<int>(std::ceil(std::clamp(bottom, double(clip[1]), double(clip[3]))))};
-      if (bounds[2] > bounds[0] && bounds[3] > bounds[1]) rectangles.push_back(bounds);
-      if (rectangles.size() > 256) return std::nullopt;
-    }
-  }
-  // Outward rounding can overlap neighboring regions at small scales. Union them
-  // before blending so each pixel is drawn at most once.
-  std::vector<int> rows;
-  for (const auto& rectangle : rectangles) {
-    rows.push_back(rectangle[1]); rows.push_back(rectangle[3]);
-  }
-  std::sort(rows.begin(), rows.end());
-  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-  std::vector<std::array<int, 4>> result;
-  for (std::size_t row = 1; row < rows.size(); ++row) {
-    std::vector<std::array<int, 2>> spans;
-    for (const auto& rectangle : rectangles)
-      if (rectangle[1] <= rows[row - 1] && rectangle[3] >= rows[row])
-        spans.push_back({rectangle[0], rectangle[2]});
-    std::sort(spans.begin(), spans.end());
-    std::vector<std::array<int, 2>> merged;
-    for (const auto& span : spans) {
-      if (!merged.empty() && span[0] <= merged.back()[1])
-        merged.back()[1] = std::max(merged.back()[1], span[1]);
-      else merged.push_back(span);
-    }
-    for (const auto& span : merged) {
-      const auto previous = std::find_if(result.begin(), result.end(), [&](const auto& rectangle) {
-        return rectangle[0] == span[0] && rectangle[2] == span[1] && rectangle[3] == rows[row - 1];
-      });
-      if (previous != result.end()) (*previous)[3] = rows[row];
-      else result.push_back({span[0], rows[row - 1], span[1], rows[row]});
-      if (result.size() > 64) return std::nullopt;
-    }
-  }
-  std::uint64_t area = 0;
-  for (const auto& rectangle : result)
-    area += std::uint64_t(rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1]);
-  const auto fullArea = std::uint64_t(clip[2] - clip[0]) * (clip[3] - clip[1]);
-  if (area * 100 > fullArea * 65) return std::nullopt;
-  return result;
-}
-
 }  // namespace
 
 void Renderer::applyBlendMode(BlendMode mode) {
@@ -652,9 +578,6 @@ void Renderer::renderScene() {
     std::optional<CompactImageRegion> compact{};
     std::optional<BlockImageRegion> block{};
     std::array<float, 4> compactBounds{};
-    bool sparse = false;
-    std::vector<std::array<int, 4>> sparseClips{};
-    std::uint64_t sparseFullPixels = 0;
     std::uint32_t paletteTable = 0, paletteBlocks = 0, paletteResidual = 0;
   };
   std::vector<DrawOperation> operations;
@@ -963,42 +886,11 @@ void Renderer::renderScene() {
     const std::array<int, 4>& operationClip =
         inlineMatrix ? inlineFilterClip[commandIndex] :
                                            command.clip;
-    std::optional<std::vector<std::array<int, 4>>> sparseClips;
-    std::uint64_t sparseFullPixels = 0;
-    if (sparseTiling_ && command.primitive == RenderCommand::Primitive::tilingSprite &&
-        std::isfinite(p0[0]) && std::isfinite(p0[1]) &&
-        std::isfinite(p1[0]) && std::isfinite(p1[1]) &&
-        std::isfinite(p3[0]) && std::isfinite(p3[1]) &&
-        preparingFilterDepth == 0 && !inlineMatrix &&
-        sceneProjection_ == std::array<float, 6>{1, 0, 0, 1, 0, 0} &&
-        viewportMapping == std::array<float, 4>{1, 1, 0, 0} &&
-        !command.atlasTilingSampling && !command.mipmap && !command.roundPixels &&
-        command.repeat && command.textureRotation == 0 && !command.spriteWorldVertices &&
-        command.blendMode == BlendMode::normal && command.blur <= 0 &&
-        !command.maskImage && !command.appliesSpriteColor && !command.appliesColorMatrix &&
-        !command.standaloneBitmapRegion && !command.appliesMeshPostTintOverlay) {
-      if (const auto* regions = images_.sparseRegions(command.image)) {
-        std::array<int, 4> bounds{0, 0, width_, height_};
-        if (operationClipped) bounds = {std::max(0, operationClip[0]), std::max(0, operationClip[1]),
-          std::min(width_, operationClip[2]), std::min(height_, operationClip[3])};
-        if (p1[0] > p0[0] && p3[1] > p0[1] && p1[1] == p0[1] && p3[0] == p0[0]) {
-          bounds[0] = std::max(bounds[0], int(std::floor(std::clamp(p0[0], 0.0F, float(width_)))));
-          bounds[1] = std::max(bounds[1], int(std::floor(std::clamp(p0[1], 0.0F, float(height_)))));
-          bounds[2] = std::min(bounds[2], int(std::ceil(std::clamp(p1[0], 0.0F, float(width_)))));
-          bounds[3] = std::min(bounds[3], int(std::ceil(std::clamp(p3[1], 0.0F, float(height_)))));
-        }
-        if (bounds[2] >= bounds[0] && bounds[3] >= bounds[1]) {
-          sparseFullPixels = std::uint64_t(bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
-          sparseClips = sparseTilingClips(command, *info, *regions, p0, p1, p3, bounds);
-        }
-      }
-    }
     const bool operationStateMatches = !operations.empty() &&
         operations.back().paletteTable == paletteTable &&
         operations.back().paletteBlocks == paletteBlocks && operations.back().paletteResidual == paletteResidual &&
         !block && !operations.back().block && !compact && !operations.back().compact &&
-        operations.back().tileLayer == 0 && !operations.back().sparse &&
-        !sparseClips.has_value() &&
+        operations.back().tileLayer == 0 &&
         operations.back().derivedImage == derived.has_value() &&
         operations.back().derivedUvTransform == derivedUvTransform &&
         operations.back().derivedSampleBounds == derivedSampleBounds &&
@@ -1088,11 +980,7 @@ void Renderer::renderScene() {
           p0[0] + (bounds[2] + 2 - command.source[0]) * sx,
           p0[1] + (bounds[3] + 2 - command.source[1]) * sy};
       }
-      if (sparseClips) {
-        operations.back().sparse = true;
-        operations.back().sparseClips = std::move(*sparseClips);
-        operations.back().sparseFullPixels = sparseFullPixels;
-      }
+
     } else {
       operations.back().count += 6;
     }
@@ -2320,35 +2208,16 @@ void Renderer::renderScene() {
     }
     if (operation.mipmap) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
       operation.nearest ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
-    std::size_t drawCount = 1;
-    if (operation.sparse) {
-      drawCount = operation.sparseClips.size();
-      if (!scissorActive) { glEnable(GL_SCISSOR_TEST); scissorActive = true; }
-      if (diagnostics_) {
-        ++stats_.sparseTilingCommands;
-        stats_.sparseTilingFullPixels += operation.sparseFullPixels;
-      }
-      for (const auto& bounds : operation.sparseClips) {
-        rasterScissor(bounds[0], height_ - bounds[3], bounds[2] - bounds[0], bounds[3] - bounds[1]);
-        glDrawArrays(GL_TRIANGLES, operation.first, operation.count);
-        if (diagnostics_) stats_.sparseTilingPixels +=
-          std::uint64_t(bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
-      }
-      if (diagnostics_) stats_.sparseTilingDrawCalls += drawCount;
-      if (operation.clipped) {
-        rasterScissor(operation.clip[0], height_ - operation.clip[3],
-          std::max(0, operation.clip[2] - operation.clip[0]), std::max(0, operation.clip[3] - operation.clip[1]));
-      } else { glDisable(GL_SCISSOR_TEST); scissorActive = false; }
-    } else glDrawArrays(GL_TRIANGLES, operation.first, operation.count);
+    glDrawArrays(GL_TRIANGLES, operation.first, operation.count);
     if (operation.mipmap) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
       operation.nearest ? GL_NEAREST : GL_LINEAR);
     if (diagnostics_) {
-      stats_.drawCalls += drawCount;
-      if (operation.primitive == RenderCommand::Primitive::tilingSprite) stats_.tilingSpriteDrawCalls += drawCount;
-      else if (operation.primitive == RenderCommand::Primitive::screenFill) stats_.screenFillDrawCalls += drawCount;
-      else stats_.spriteDrawCalls += drawCount;
-      if (simpleSprite || directSprite) stats_.baseSpriteDrawCalls += drawCount;
-      else stats_.effectSpriteDrawCalls += drawCount;
+      ++stats_.drawCalls;
+      if (operation.primitive == RenderCommand::Primitive::tilingSprite) ++stats_.tilingSpriteDrawCalls;
+      else if (operation.primitive == RenderCommand::Primitive::screenFill) ++stats_.screenFillDrawCalls;
+      else ++stats_.spriteDrawCalls;
+      if (simpleSprite || directSprite) ++stats_.baseSpriteDrawCalls;
+      else ++stats_.effectSpriteDrawCalls;
     }
   }
   if (scissorActive) glDisable(GL_SCISSOR_TEST);

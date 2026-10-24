@@ -83,11 +83,12 @@ test('storage decisions require their own supported version and valid layout', (
   f.index.imageStorageVersion = f.native.assets.imageStorageVersion = 1;
   f.index.images[0].storage = storage;
   assert.deepEqual(f.load().images[0].storage, storage);
-  const facts = { ...storage, pixelFactsVersion: 1, opaque: true, allZero: false, sparseRegions: null };
+  const facts = { ...storage, pixelFactsVersion: 1, opaque: true, allZero: false };
   f.index.images[0].storage = facts;
   assert.deepEqual(f.load().images[0].storage, facts);
-  for (const invalid of [{ ...facts, allZero: true }, { ...facts, sparseRegions: [[2040, 0, 32, 32]] },
-    { ...facts, sparseRegions: 'unknown' }, { ...facts, pixelFactsVersion: 2 }]) {
+  f.index.images[0].storage = { ...facts, sparseRegions: [[0, 0, 32, 32]] };
+  assert.deepEqual(f.load().images[0].storage, f.index.images[0].storage);
+  for (const invalid of [{ ...facts, allZero: true }, { ...facts, pixelFactsVersion: 2 }]) {
     f.index.images[0].storage = invalid;
     assert.equal(f.load().images[0].storage, undefined);
   }

@@ -37,12 +37,13 @@ def main():
         parser.error("PMJS builds require Linux")
     require(["cmake", "ninja", "pkg-config", "git", "python3"])
     output = (args.output or ROOT / "dist" /
-              ("pmjs-arm64" if args.target == "arm64" else "pmjs")).resolve()
+              ("pmjs-arm64" if args.target == "arm64" else "pmjs"))
+    if output.is_symlink():
+        raise ValueError(f"Output cannot be a symbolic link: {output}")
+    output = output.resolve()
     if output in (ROOT, ROOT / "build", ROOT / "dist"):
         parser.error("output must be an installation directory")
     if output.exists():
-        if output.is_symlink():
-            raise ValueError(f"Output cannot be a symbolic link: {output}")
         if not output.is_dir():
             raise ValueError(f"Output is not a directory: {output}")
         if any(output.iterdir()):

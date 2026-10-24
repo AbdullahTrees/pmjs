@@ -9,10 +9,56 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'tools'))
 import release
+import build as build_command
+
+
+class BuildCommand(unittest.TestCase):
+    def setUp(self):
+        temporary_root = ROOT / '.cache/tests'
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(prefix='pmjs build command ', dir=temporary_root)
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def test_output_symlinks_are_rejected_before_building(self):
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                target = self.root / ('existing' if existing else 'missing')
+                if existing:
+                    target.mkdir()
+                    (target / 'keep').write_text('preserved')
+                output = self.root / ('existing-link' if existing else 'missing-link')
+                output.symlink_to(target, target_is_directory=True)
+                with mock.patch.object(sys, 'argv', ['build.py', '--output', str(output)]), \
+                        mock.patch.object(build_command, 'require'), \
+                        mock.patch.object(build_command.subprocess, 'run') as run:
+                    with self.assertRaisesRegex(ValueError, 'Output cannot be a symbolic link'):
+                        build_command.main()
+                    run.assert_not_called()
+                self.assertTrue(output.is_symlink())
+                if existing:
+                    self.assertEqual((target / 'keep').read_text(), 'preserved')
+                else:
+                    self.assertFalse(target.exists())
+
+    def test_example_uses_the_public_launcher_and_preserves_arguments(self):
+        example = self.root / 'example'
+        example.mkdir()
+        shutil.copy2(ROOT / 'example/run-game.sh', example / 'run-game.sh')
+        launcher = self.root / 'dist/pmjs/bin/pmjs'
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        launcher.chmod(0o755)
+        game, saves = self.root / 'game files', self.root / 'save files'
+        result = subprocess.run(['bash', str(example / 'run-game.sh'), str(game), str(saves)],
+                                text=True, capture_output=True, check=True, cwd=self.root)
+        self.assertEqual(result.stdout.splitlines(),
+                         [str(game), '--save-root', str(saves), '--config', str(example / 'config.json')])
 
 
 class BuildProvenance(unittest.TestCase):

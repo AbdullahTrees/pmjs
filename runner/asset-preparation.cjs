@@ -211,9 +211,7 @@ function validStorageDecision(value) {
     (!value.paletteBits || value.channels === 4) &&
     (value.pixelFactsVersion === undefined || value.pixelFactsVersion === 1 &&
       typeof value.opaque === 'boolean' && typeof value.allZero === 'boolean' &&
-      !(value.opaque && value.allZero) &&
-      (value.sparseRegions === null || Array.isArray(value.sparseRegions) && value.sparseRegions.length <= 64 &&
-        value.sparseRegions.every(r => rect(r) && r[0] + r[2] <= value.width && r[1] + r[3] <= value.height)));
+      !(value.opaque && value.allZero));
 }
 
 function validDescriptor(d) {
