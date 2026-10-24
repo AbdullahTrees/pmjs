@@ -13,7 +13,7 @@ from pathlib import Path
 PLATFORM_LIBRARIES = {"libSDL2-2.0.so.0", "libEGL.so.1", "libGLESv2.so.2"}
 SYSTEM_LIBRARIES = {
     "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1",
-    "libgcc_s.so.1", "libstdc++.so.6", "ld-linux-aarch64.so.1",
+    "libgcc_s.so.1", "libstdc++.so.6", "libatomic.so.1", "ld-linux-aarch64.so.1",
 }
 GRAPHICS_NAME = re.compile(r"^(lib(SDL2|EGL|GLES|GL|gbm|Mali|mali|drm|wayland)|.*_dri\.so)")
 
@@ -46,7 +46,7 @@ def inspect(file):
     if "GLIBC_PRIVATE" in required_versions:
         raise ValueError(f"{file}: depends on private glibc symbols")
     requirements = {}
-    for namespace in ("GLIBC", "GLIBCXX", "CXXABI", "GCC"):
+    for namespace in ("GLIBC", "GLIBCXX", "CXXABI", "GCC", "LIBATOMIC"):
         values = set()
         for name in required_versions:
             if not name.startswith(namespace + "_"):
@@ -82,7 +82,7 @@ def audit(node, addon, lib_dir, max_glibc="2.28", max_glibcxx="3.4.21"):
     external = set()
     for artifact in artifacts:
         for namespace, ceiling in (("GLIBC", max_glibc), ("GLIBCXX", max_glibcxx),
-                                   ("CXXABI", "1.3.11"), ("GCC", "7.0.0")):
+                                   ("CXXABI", "1.3.11"), ("GCC", "7.0.0"), ("LIBATOMIC", "1.0")):
             for required in artifact["requirements"][namespace]:
                 if version(required) > version(ceiling):
                     raise ValueError(f"{artifact['path']}: requires {namespace}_{required}; maximum is {ceiling}")

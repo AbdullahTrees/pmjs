@@ -47,7 +47,14 @@ test('fractional opacity keeps deferred canvas consumers optimizable', () => {
         if (width(bitmaps[0]) !== 1 || bitmaps[0].context.globalAlpha !== 0.5) {
           throw new Error('canvas dimensions or opacity changed');
         }
-        console.log('optimized=' + !!(%GetOptimizationStatus(width) & 16));
+        // Compare with a forced optimized reference; V8 status bit positions vary.
+        function reference(bitmap) { return 1; }
+        %PrepareFunctionForOptimization(reference);
+        reference(bitmaps[0]); reference(bitmaps[1]);
+        %OptimizeFunctionOnNextCall(reference);
+        reference(bitmaps[0]);
+        console.log('optimized=' +
+          (%GetOptimizationStatus(width) === %GetOptimizationStatus(reference)));
       `)}, realm);
   `;
   const child = spawnSync(process.execPath,

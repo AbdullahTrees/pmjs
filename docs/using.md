@@ -99,8 +99,9 @@ asset and use ordinary loading.
 ## System requirements
 
 ARM64 installations include Node and nongraphics libraries. The system must
-provide SDL2, EGL, and GLES 3.0 or newer, with glibc 2.28 or newer. Bundled
-Node 22 targets Linux 4.18 or newer; older kernels need separate testing.
+provide SDL2, EGL, and GLES 3.0 or newer, with glibc 2.28 or newer and
+`libatomic.so.1` (LIBATOMIC 1.0). Bundled Node targets Linux 4.18 or newer;
+older kernels need separate testing.
 Local x64 installations use system Node and the native libraries used to
 build them.
 

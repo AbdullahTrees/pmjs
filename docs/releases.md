@@ -39,7 +39,8 @@ THIRD_PARTY_NOTICES.md
 The installation can be moved outside the build tree. ARM64 packages include
 Node and nongraphics dependencies; SDL2, EGL, GLES and graphics drivers come
 from the firmware. The ABI baseline is glibc 2.28, GLIBCXX 3.4.21,
-CXXABI 1.3.11 and GCC 7.0.0.
+CXXABI 1.3.11 and GCC 7.0.0. The system also supplies `libatomic.so.1`
+with LIBATOMIC 1.0 for Node.
 
 Release staging verifies native inputs, strips Release binaries and audits the
 ABI. Detailed provenance and file inventories go in `RUNTIME.release.json`

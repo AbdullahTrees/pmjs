@@ -10,6 +10,17 @@ const { run, createPreparationLog, validate, resolveDefaults, parseTimingConfig,
   sendSupervisorHeartbeat } = require('../runner/index.cjs');
 const { temporaryDirectory } = require('./helpers/temp.cjs');
 
+test('importing the runner preserves the embedding process code-cache compatibility', () => {
+  const runner = JSON.stringify(path.resolve(__dirname, '../runner/index.cjs'));
+  childProcess.execFileSync(require('node:process').execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const v8 = require('node:v8');
+    const before = v8.cachedDataVersionTag();
+    require(${runner});
+    assert.equal(v8.cachedDataVersionTag(), before);
+  `]);
+});
+
 function fixture(source) {
   const root = temporaryDirectory('pmjs-runner-');
   const bootstrap = path.join(root, 'bootstrap.js');

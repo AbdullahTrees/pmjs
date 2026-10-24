@@ -542,6 +542,10 @@ async function runSession(input, diagnostics, setNative) {
 
 // A separate wrapper covers failures before native initialization's inner try/finally.
 async function run(input, hooks = {}) {
+  // Shared scene walks encounter many display-object subclass shapes.
+  const v8 = require('node:v8');
+  v8.setFlagsFromString('--max-valid-polymorphic-map-count=128');
+  console.log('[pmjs] v8 polymorphic_maps=128 cached_data_tag=' + v8.cachedDataVersionTag());
   let runtimeNative = null;
   const diagnostics = createDiagnostics({ getNative: () => runtimeNative,
     onHeartbeat: heartbeat => {
