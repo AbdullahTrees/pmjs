@@ -67,10 +67,15 @@ int main() try {
     const auto initialBytes = images.gpuBytes();
     for (int upload : {1, 2}) {
       descriptor.identity = "failed-"+std::to_string(upload);
+      const auto pageName = "failed-page-"+std::to_string(upload)+".png";
+      pmjs::writePreparedPng(root/pageName, 8, 8, page.rgba);
+      descriptor.pages = {{pageName, 8, 8}};
       require(images.installTileSet(descriptor), "failure catalog installation failed");
       textureCountdown = upload;
       const auto fallback = images.loadPng(root/"source.png", false, descriptor.identity);
-      require(textureCountdown == 0 && fallback && !images.hasTileBacking(fallback->handle), "failed upload did not select ordinary backing");
+      if (textureCountdown != 0 || !fallback || images.hasTileBacking(fallback->handle))
+        throw std::runtime_error("failed upload did not select ordinary backing: upload="+std::to_string(upload)+
+          " remaining="+std::to_string(textureCountdown)+" image="+std::to_string(bool(fallback)));
       require(images.readPixels(fallback->handle)->rgba == pixels.rgba, "upload fallback changed source pixels");
       require(images.hasTileBacking(active->handle), "upload failure invalidated existing owner");
       images.release(fallback->handle); images.update();
@@ -81,6 +86,15 @@ int main() try {
     require(ordinary.has_value(), "ordinary control load failed");
     {
       pmjs::Renderer renderer(32, 32, images);
+      const std::vector<float> positions{0,0,6,0,0,6};
+      const std::vector<double> uvs{0,0,1,0,0,1};
+      const std::vector<std::uint32_t> indices{0,1,2};
+      bufferFailures = 1;
+      require(renderer.createMesh(ordinary->handle,positions,uvs,indices,false) == 0 && bufferFailures == 0,
+        "failed mesh upload registered geometry");
+      const auto mesh = renderer.createMesh(ordinary->handle,positions,uvs,indices,false);
+      require(mesh != 0, "mesh creation did not recover after allocation failure");
+      require(renderer.releaseTileLayer(mesh), "mesh release failed");
       auto draw = [&](pmjs::ImageHandle image) {
         const auto layer = renderer.createTileLayer({{image, {1, 1, 3, 3}, {0, 0}, {0, 0}}});
         require(layer != 0, "tile layer creation failed");

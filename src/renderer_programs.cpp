@@ -81,8 +81,7 @@ constexpr std::uint16_t primitiveSurfaceGenerationMask = 0x3fffU;
 }  // namespace
 
 Renderer::Renderer(int width, int height, ImageStore& images)
-    : width_(width), height_(height), presentationWidth_(width),
-      presentationHeight_(height), queueWidth_(width), queueHeight_(height),
+    : width_(width), height_(height), queueWidth_(width), queueHeight_(height),
       images_(images) {
   struct GraphicsBindings {
     GLint program = 0, vertexArray = 0, arrayBuffer = 0, texture = 0;
@@ -700,6 +699,8 @@ std::uint32_t Renderer::createFilterProgram(const std::string& fragmentSource, c
 }
 
 std::uint32_t Renderer::registerFilterPlan(const std::shared_ptr<CustomFilterPlan>& plan) {
+  if (!plan || plan->passes.empty())
+    throw std::invalid_argument("custom filter plan requires at least one pass");
   ++filterPlanRegistrations_;
   if ((filterPlanRegistrations_ & 63U) == 0 || filterPlans_.size() >= 4096) {
     std::erase_if(filterPlans_, [](const auto& entry) { return entry.second.expired(); });

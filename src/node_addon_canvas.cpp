@@ -675,9 +675,9 @@ napi_value measureTextMetrics(napi_env env, napi_callback_info info) try {
   auto metrics = value.canvases.measureTextMetrics(paths,
     asString(env, a.at(1)), asNumber(env, a.at(2)), textStyle(env, a, 3));
   if (!metrics) throw std::runtime_error("text measurement failed");
-  napi_value result; napi_create_object(env, &result);
+  napi_value result; check(env, napi_create_object(env, &result), "create text metrics");
   const auto set = [&](const char* name, double metric) {
-    napi_set_named_property(env, result, name, number(env, metric));
+    check(env, napi_set_named_property(env, result, name, number(env, metric)), "set text metric");
   };
   set("width", metrics->width); set("actualBoundingBoxLeft", metrics->actualLeft);
   set("actualBoundingBoxRight", metrics->actualRight);

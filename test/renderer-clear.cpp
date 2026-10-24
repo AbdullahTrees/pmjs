@@ -65,6 +65,22 @@ int main() {
     glDeleteFramebuffers(2, framebuffers.data());
   }
   SDL_GL_DeleteContext(context);
+  const auto resizeContext = SDL_GL_CreateContext(window);
+  assert(resizeContext);
+  {
+    pmjs::ImageStore images;
+    pmjs::Renderer renderer(8,6,images);
+    renderer.setDrawableSize(16,12);
+    assert(renderer.setScreenRenderSize(16,12));
+    renderer.clearScene(0,1,0,1);
+    renderer.presentToDrawable();
+    glBindFramebuffer(GL_FRAMEBUFFER,0);
+    std::array<std::uint8_t,4> corner{};
+    glReadPixels(15,11,1,1,GL_RGBA,GL_UNSIGNED_BYTE,corner.data());
+    assert((corner==std::array<std::uint8_t,4>{0,255,0,255}));
+    assert(glGetError()==GL_NO_ERROR);
+  }
+  SDL_GL_DeleteContext(resizeContext);
   const auto captureContext = SDL_GL_CreateContext(window);
   assert(captureContext);
   {

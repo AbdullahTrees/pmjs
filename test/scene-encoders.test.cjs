@@ -1535,6 +1535,19 @@ test('particle children upload sprite fields without dispatch', () => {  const h
     { filterPlans: 0, rectMasks: 0, alphaMasks: 0 });
 });
 
+test('particle batches use container blending independently of child blend modes', () => {
+  for (const mode of [0, 1, 2, 3]) {
+    const harness = makeHarness(), {sandbox, sprite} = harness;
+    const root = new sandbox.PIXI.Container();
+    const container = new sandbox.PIXI.particles.ParticleContainer();
+    container.blendMode = mode;
+    const child = sprite(); child.blendMode = (mode + 1) % 4;
+    container.addChild(child); root.addChild(container);
+    const packet = submitOnly(harness, root);
+    assert.equal(packet.metadata[2 * 7 + 4], mode);
+  }
+});
+
 test('particle children carry tone and blend colors regardless of attachment timing', () => {
   const harness = makeHarness();
   const { sandbox, sprite } = harness;

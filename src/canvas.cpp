@@ -933,7 +933,8 @@ bool CanvasStore::drawImageNow(Content& destinationSurface, const DrawImageCmd& 
       std::all_of(geometry.begin(), geometry.end(), [](float value) { return value == std::floor(value); })) {
     bool transparent = true;
     for (int y = 0; !destinationKnownAllZero && y < destinationHeight && transparent; ++y) for (int x = 0; x < destinationWidth; ++x) {
-      const size_t index = (static_cast<size_t>(destinationY + y) * destinationSurface.width + destinationX + x) * 4;
+      const size_t index = ((static_cast<size_t>(destinationY) + static_cast<size_t>(y)) * destinationSurface.width +
+                            static_cast<size_t>(destinationX) + static_cast<size_t>(x)) * 4;
       uint32_t pixel;
       std::memcpy(&pixel, destinationSurface.pixels.data() + index, sizeof(pixel));
       if (pixel) { transparent = false; break; }

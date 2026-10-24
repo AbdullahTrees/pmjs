@@ -393,7 +393,7 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
       (node.shader.constructor && node.shader.constructor.name || 'shader') +
       ':base=' + nativeNodeRenderType(node));
   }
-  var blendMode = nativeSceneBlendMode(particleContext || node);
+  var blendMode = nativeSceneBlendMode(particleContext ? particleContext.container : node);
   if (blendMode < 0) {
     PMJS.compat.hit('render.blend-mode',
       (node.constructor && node.constructor.name || 'node') + ':blend=' + node.blendMode);

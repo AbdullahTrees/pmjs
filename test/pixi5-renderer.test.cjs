@@ -422,6 +422,17 @@ test('Pixi 5 renderer renders and extracts MZ RenderTexture canvases', () => {
   assert.equal(fixture.submissions[0].values[0], 2);
 });
 
+test('screen extraction registers the capture with canvas resource ownership', () => {
+  const fixture = createContext(), c = fixture.context, tracked = [];
+  c.trackNativeResource = (resource, kind) => { tracked.push({resource,kind});return resource; };
+  runModule(c, 'js/pmjs-pixi5/scene.js');
+  runModule(c, 'js/pmjs-pixi5/renderer.js');
+  const app = new c.PIXI.Application({width:100,height:50});
+  const canvas = app.renderer.extract.canvas();
+  assert.equal(canvas.width,100);assert.equal(canvas.height,50);
+  assert.deepEqual(tracked,[{resource:canvas._nativeCanvas,kind:'canvas'}]);
+});
+
 test('MZ ColorFilter encloses its subtree and skips neutral or disabled filters', () => {
   const { context, submissions } = createContext();
   context.ColorFilter = function ColorFilter() {

@@ -471,8 +471,6 @@ class Renderer {
 
   int width_;
   int height_;
-  int presentationWidth_;
-  int presentationHeight_;
   PresentationGeometry presentation_;
   std::array<int, 2> authoredPresentationSize_{0, 0};
   int authoredPresentationFilter_ = 0;

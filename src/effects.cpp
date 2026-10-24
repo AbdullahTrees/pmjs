@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -189,13 +190,17 @@ class WavePlayer final : public Effekseer::SoundPlayer {
     }
     std::string error;
     const auto id = media_.loadAudio(wave->path, &error, {AudioIntent::effect, wave->path, wave->path});
-    if (!id) throw std::runtime_error("cannot play effect sound: " + error);
+    if (!id) {
+      std::fprintf(stderr, "[pmjs] cannot play effect sound %s: %s\n", wave->path.c_str(), error.c_str());
+      return nullptr;
+    }
     if (p.Mode3D) {
       // Authored Distance sets Web Audio maxDistance; inverse attenuation ignores it.
       const auto gains = spatialEffectGains(wave->channels, p.Position.X, p.Position.Y, p.Position.Z);
       if (!media_.setStereoGains(id, gains[0], gains[1])) {
         media_.release(id);
-        throw std::runtime_error("invalid effect sound position");
+        std::fprintf(stderr, "[pmjs] invalid effect sound position: %s\n", wave->path.c_str());
+        return nullptr;
       }
     }
     media_.setParameters(id, p.Volume, std::pow(2.0F, p.Pitch), p.Mode3D ? 0 : p.Pan);

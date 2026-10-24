@@ -137,7 +137,7 @@
         }
         capture.width = renderer.width;
         capture.height = renderer.height;
-        capture._nativeCanvas = NativeHost.canvas.captureScene();
+        capture._nativeCanvas = trackNativeResource(NativeHost.canvas.captureScene(), 'canvas');
         if (typeof capture._pmjsContentChanged === 'function') {
           capture._pmjsContentChanged();
         }

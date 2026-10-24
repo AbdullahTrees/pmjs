@@ -57,6 +57,9 @@ int main() try {
   const auto linkedRoot = fixture.path() / "linked-game";
   std::filesystem::create_directory_symlink(root, linkedRoot);
   pmjs::Vfs vfs(linkedRoot);
+  require(vfs.isDirectory("data/"), "trailing slash directory lookup failed");
+  require(vfs.readDirectory("data/") == vfs.readDirectory("data"),
+          "trailing slash directory enumeration differs");
   require(vfs.readText("DATA/system.JSON") == "system-data",
           "case-insensitive ordinary file lookup failed");
   require(vfs.readText("data/System.alias") == "system-data",

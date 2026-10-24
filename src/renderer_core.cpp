@@ -918,6 +918,7 @@ std::uint32_t Renderer::createMesh(
     }
   }
 #endif
+  while (glGetError() != GL_NO_ERROR) {}
   glGenVertexArrays(1, &mesh.vertexArray);
   glGenBuffers(1, &mesh.vertexBuffer);
   glBindVertexArray(mesh.vertexArray);
@@ -935,6 +936,13 @@ std::uint32_t Renderer::createMesh(
   glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
                         reinterpret_cast<void*>(4 * sizeof(float)));
   glBindVertexArray(vertexArray_);
+  const auto meshError = glGetError();
+  if (!mesh.vertexArray || !mesh.vertexBuffer || meshError != GL_NO_ERROR) {
+    if (mesh.vertexBuffer) glDeleteBuffers(1, &mesh.vertexBuffer);
+    if (mesh.vertexArray) glDeleteVertexArrays(1, &mesh.vertexArray);
+    for (const auto retained : mesh.images) images_.release(retained);
+    return 0;
+  }
   mesh.batches.push_back({info->texture, info->width, info->height, 0,
                           static_cast<std::int32_t>(triangles.size()), info->premultiplied, image});
   if (diagnostics_) ++stats_.bufferUploads;

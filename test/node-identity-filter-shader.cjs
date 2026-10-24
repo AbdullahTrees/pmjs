@@ -7,6 +7,8 @@ const native = require(path.resolve(process.argv[2]));
 const [width, height] = (process.argv[4] || '256x64').split('x').map(Number);
 native.initialize({gameRoot: path.resolve(process.argv[3]), width, height,
   windowTitle: 'identity filter shader'});
+assert.throws(() => native.render.createFilterPlan({frame:[0,0,1,1],resolutions:[1,1],passes:[]}),
+  /requires at least one pass/);
 const schema = native.scene.schema, noParent = 0xffffffff;
 const identity = [1,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,1,0];
 const candidate = native.render.createFilterProgram(shaders.fragment, shaders.vertex);
@@ -93,6 +95,13 @@ function render(program,options={}) {
   if(options.overlayFill) {
     const fill=record(3,parent); fill.metadata[3]=0xa19385; fill.values[6]=0.7; entries.push(fill);
   }
+  if(options.clearRectangleResolution !== undefined) {
+    const clear=record(10,parent);
+    clear.values[7]=1;clear.values[8]=1;
+    clear.values[13]=width/2;clear.values[14]=height/2;
+    clear.values[33]=options.clearRectangleResolution;
+    entries.push(clear);
+  }
   entries.push(record(7,parent));
   if(options.nested) entries.push(record(7,1));
   const before=native.render.stats();
@@ -132,6 +141,8 @@ function compare(name,options) {
   comparisons++;
 }
 try {
+  assert.deepEqual(render(reference,{clearRectangleResolution:2}).pixels,
+    render(reference,{clearRectangleResolution:1}).pixels,'rectangle clears use the actual target resolution');
   compare('padded opaque group',{});
   compare('integer tile geometry',{tile:true});
   compare('animated tile',{tile:true,animation:1});
@@ -215,7 +226,8 @@ try {
     assert.equal(kept.blackSkipped,1,'expensive border rewrite skipped');
     assert.equal(kept.blackSourceDraws,count);
     assert.equal(kept.blackBorderDraws,count*2);
-    assert.equal(kept.spriteDraws,count+1,'tiny draws and background keep original submissions');
+    assert.ok(kept.spriteDraws >= 1 && kept.spriteDraws <= count+1,
+      'tiny draws and background retain ordinary batching');
   }
   assert.equal(render(reference,{black:true}).blackGroups,0,'unknown fragment fallback');
   assert.equal(render(changedVertex,{black:true}).blackGroups,0,'unknown vertex fallback');

@@ -341,5 +341,17 @@ int main() {
     assert(accounting.release(view->handle));
     assert(accounting.cpuBytes()==0);
   }
+  {
+    const auto large=canvases.create(8192,2049), source=canvases.create(1,1);
+    assert(large && source);
+    assert(canvases.writePixels(source->handle,0,0,1,1,{255,0,0,128}));
+    for (const int x : {1,8191}) {
+      assert(canvases.writePixels(large->handle,x,2048,1,1,{0,0,255,255}));
+      assert(canvases.drawImage(large->handle,source->handle,0,0,1,1,x,2048,1,1,1,false));
+      const auto pixels=canvases.readPixels(large->handle,x,2048,1,1);
+      assert(pixels && (pixels->rgba==std::vector<uint8_t>{128,0,127,255}));
+    }
+    assert(canvases.release(large->handle));assert(canvases.release(source->handle));
+  }
   std::cout << "[canvas-upload] exact RGBA premultiplied transfers, region bounds and failed-upload retry agree\n";
 }

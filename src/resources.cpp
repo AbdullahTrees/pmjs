@@ -2269,7 +2269,8 @@ std::optional<ImageInfo> ImageStore::acquirePrepared(const ImageFileSource& sour
 std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& source,
     std::shared_ptr<PreparedLoad> load, bool retainCpu) {
   if (!load || !load->validated) return std::nullopt;
-  if (load->tiles) return installTileLoad(std::move(load->tiles), retainCpu);
+  // Keep the captured snapshot available if page allocation needs fallback.
+  if (load->tiles) return installTileLoad(load->tiles, retainCpu);
   auto pixels = std::move(load->pixels);
   if (auto cached = acquireCached(source)) {
     auto& slot = slots_[(cached->handle & indexMask) - 1U];

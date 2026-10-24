@@ -1198,7 +1198,7 @@ void Renderer::renderScene() {
       const float bottom = std::min(target.height / rasterResolution,
         rectangle[1] + rectangle[3] - rasterFrame[1]);
       glEnable(GL_SCISSOR_TEST);
-      const float clearResolution = operation.command->clearResolution;
+      const float clearResolution = rasterResolution;
       glScissor(static_cast<int>(left * clearResolution), static_cast<int>(top * clearResolution),
         static_cast<int>(std::max(0.0F, right - left) * clearResolution),
         static_cast<int>(std::max(0.0F, bottom - top) * clearResolution));
@@ -2392,7 +2392,7 @@ void Renderer::presentToDrawable() {
                       composePresentation ? filterTarget_.framebuffer : sceneTarget_.framebuffer);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     glBlitFramebuffer(0, 0, width_, height_, 0, 0,
-                      presentationWidth_, presentationHeight_,
+                      presentation_.drawableWidth, presentation_.drawableHeight,
                       GL_COLOR_BUFFER_BIT,
                       presentation_.filter == PresentFilter::linear ?
                         GL_LINEAR : GL_NEAREST);
