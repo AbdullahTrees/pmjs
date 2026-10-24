@@ -237,7 +237,7 @@ test('renderer confines producer selection to configured screen renders and repo
   sandbox.PIXI.Texture.EMPTY = { baseTexture: {} };
   sandbox.PIXI.Matrix = class { identity() { return this; } };
   sandbox.PIXI.WebGLRenderer = class {};
-  Object.assign(sandbox.NativeHost.render, { setScreenRenderSize() {}, setClearColor() {}, setRenderTargetSize() {}, renderToCanvas() {} });
+  Object.assign(sandbox.NativeHost.render, { setScreenRenderSize() {}, setClearColor() {}, setClearBeforeRender() {}, setRenderTargetSize() {}, renderToCanvas() {} });
   sandbox.CanvasElement.prototype._pmjsContentChanged = function() {};
   for (const name of ['renderer-managers', 'renderer-facade']) {
     runModule(sandbox, 'js/pmjs-pixi4/' + name + '.js');
