@@ -177,6 +177,42 @@ test('local mode retains window and per-node preparation', () => {
   assert.equal(harness.submitted.at(-1).values[2 * 41 + 4], 17);
 });
 
+test('local encoding observes later window callbacks and children exposed during preparation', () => {
+  const harness = preparedHarness(), { sandbox, sprite } = harness;
+  const root = new sandbox.PIXI.Container();
+  const earlier = root.addChild(sprite());
+  const window = root.addChild(new sandbox.Window());
+  const exposed = window.addChild(new sandbox.Window());
+  exposed.visible = false;
+  const inserted = sprite(), calls = [];
+  for (const target of [window, exposed]) {
+    for (const method of ['_updateCursor', '_updateArrows', '_updatePauseSign', '_updateContents']) {
+      target[method] = () => calls.push([target, method]);
+    }
+  }
+  window._updateContents = () => {
+    calls.push([window, '_updateContents']);
+    earlier.x = 17.5;
+    exposed.visible = true;
+    exposed.addChild(inserted);
+  };
+  exposed._updateContents = () => {
+    calls.push([exposed, '_updateContents']);
+    inserted.x = -2.25;
+  };
+  const prepare = sandbox.PMJS.pixi4.scenePreparation.prepare;
+  sandbox.PMJS.pixi4.scenePreparation.prepare = function(...args) {
+    assert.equal(calls.length, 8, 'all window callbacks precede encoding');
+    return prepare(...args);
+  };
+  sandbox.renderNativeStage(root, undefined, 1, false, false, null, { worldState: 'local' });
+  const packet = harness.submitted.at(-1);
+  assert.equal(packet.values[41 + 4], 17.5);
+  assert.equal(packet.values[4 * 41 + 4], -2.25);
+  assert.deepEqual(calls.map(([target]) => target), [window, window, window, window,
+    exposed, exposed, exposed, exposed]);
+});
+
 test('skipUpdateTransform overrides local mode while default world-hook behavior is unchanged', () => {
   const harness = preparedHarness(), { sandbox } = harness;
   const root = new sandbox.PIXI.Container();
