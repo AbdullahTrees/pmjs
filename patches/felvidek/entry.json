@@ -1,0 +1,7 @@
+{
+  "modules": [
+    "database.js",
+    "collision-map.js",
+    "neutral-tone.js"
+  ]
+}

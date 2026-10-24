@@ -16,7 +16,7 @@ export default [
     rules: safetyRules,
   },
   {
-    files: ['runner/**/*.{js,cjs}', 'tools/**/*.{mjs,cjs}', 'test/**/*.cjs'],
+    files: ['patches/**/*.cjs', 'runner/**/*.{js,cjs}', 'tools/**/*.{mjs,cjs}', 'test/**/*.cjs'],
     languageOptions: { ecmaVersion: 2022, globals: globals.node },
     rules: { ...safetyRules, 'no-undef': 'error' },
   },
