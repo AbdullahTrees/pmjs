@@ -55,13 +55,14 @@ async function main() {
   const pageCodec = process.argv[4] || 'png';
   // Materialized aliases remain supported for addons without audio-view capability.
   const options = { gameRoot, cacheRoot: path.join(root, 'cache'),
-    native: { assets: native.assets, fs: native.fs }, pageCodec };
+    native: { assets: native.assets, fs: native.fs }, pageCodec,
+    workspaceBytes: engine === 'MV' ? 0 : 64 * 1024 * 1024 };
   assert.match(native.assets.preparationLz4Version, /^lz4-1\.10\.0-indexed-palette-v3$/);
   assert.equal(native.assets.preparationWorkspaceVersion, 1);
   for (const workspaceBytes of [-1, 0.5, 268435457])
     assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-workspace'), null,
       path.join(gameRoot, imageSource), null, { workspaceBytes }), /workspaceBytes must be an integer/);
-  const cold = await prepareAssets({ ...options, workspaceBytes: engine === 'MV' ? 0 : 64 * 1024 * 1024 });
+  const cold = await prepareAssets(options);
   assert.ok(cold.entries[0].descriptor.pages.every(page => page.path.endsWith(pageCodec === 'lz4' ? '.pml4' : '.png')));
   assert.throws(() => native.assets.processImage(imageSource, path.join(root, 'invalid-codec'), null,
     path.join(gameRoot, imageSource), null, { pageCodec: 'lz4hc3' }), /pageCodec must be png or lz4/);
@@ -97,7 +98,7 @@ async function main() {
   assert.ok(music.duration > 0);
   assert.equal(native.media.playAudio(music.handle, true, 0), true);
   assert.equal(native.media.playAudio(effect.handle, false, 0), true);
-  const warm = await prepareAssets({ ...options, workspaceBytes: 128 * 1024 * 1024 });
+  const warm = await prepareAssets(options);
   assert.equal(warm.validation.hashedFiles, 0);
   assert.equal(warm.generated, 0);
   assert.equal(warm.hits, 4);
