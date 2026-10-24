@@ -214,6 +214,8 @@ std::optional<ImagePixels> decodePngFromMemory(const void* data, std::size_t siz
   png_image image{};
   image.version = PNG_IMAGE_VERSION;
   if (!png_image_begin_read_from_memory(&image, data, size)) return std::nullopt;
+  // Browser image decoding treats untagged 16-bit samples as encoded sRGB.
+  image.flags |= PNG_IMAGE_FLAG_16BIT_sRGB;
   image.format = PNG_FORMAT_RGBA;
   const auto extent = checkedImageExtent(static_cast<int>(image.width), static_cast<int>(image.height), 8192, maxDecodedBytes);
   if (!extent) {
