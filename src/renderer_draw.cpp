@@ -2168,6 +2168,7 @@ void Renderer::renderScene() {
       if (operation.derivedImage) {
         glUniform4fv(spriteEffect.derivedUvTransform, 1, operation.derivedUvTransform.data());
         glUniform2fv(spriteEffect.derivedAtlasOffset, 1, operation.derivedAtlasOffset.data());
+        glUniform4fv(spriteEffect.derivedSampleBounds, 1, operation.derivedSampleBounds.data());
       }
       glUniform1f(spriteEffect.blur, operation.blur);
       glUniform1i(spriteEffect.matrixEnabled,

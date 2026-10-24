@@ -17,6 +17,10 @@ for (let frame = 0; frame < 3; ++frame) {
       (x + y) % 3 === 0 ? 255 : 128], (y * 96 + frame * 32 + x) * 4);
   }
 }
+for (let y = 32; y < 40; ++y) for (let x = 32; x < 64; ++x) {
+  if (x < 38 || x >= 58) continue;
+  pixels.set([220, 50, 90, 255], (y * 96 + x) * 4);
+}
 const sourceBytes = png(96, 48, pixels);
 fs.writeFileSync(path.join(root, 'sheet.png'), sourceBytes);
 const oversizedPixels = Buffer.alloc(2400 * 1000 * 4);
@@ -61,7 +65,7 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
     const directory = path.join(root, 'prepared');
     fs.mkdirSync(directory);
     const descriptor = await native.assets.processImage('sheet.png', directory,
-      { grid: [6, 4], backdrop: [0, 0, 0, 0] });
+      { grid: [3, 2], backdrop: [0, 0, 0, 0] });
     assert.ok(descriptor, 'fixture must use prepared storage');
     native.assets.installPrepared([{ source: 'sheet.png', directory, descriptor,
       sourceIdentity: native.assets.sourceIdentity('sheet.png') }]);
@@ -87,6 +91,12 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
       const options = { frame: 1, scaled: true, packedUv, tone };
       compare(draw(prepared, options), draw(original, options), `halo: packed=${packedUv}, tone=${tone}`);
     }
+    for (const packedUv of [false,true]) for (const nearest of [false,true])
+      for (const tone of [[0,0,0,0],[0.1,0,0,0.3]]) {
+        const options = { source: [32, 24, 32, 24], packedUv, nearest, tone };
+        compare(draw(prepared, options), draw(original, options),
+          `lower sheet row: packed=${packedUv}, nearest=${nearest}, tone=${tone}`);
+      }
     const cached = native.images.memory(100);
     assert.equal(cached.preparedMaterializations, before.preparedMaterializations,
       'sprite color effects materialized the logical sheet');

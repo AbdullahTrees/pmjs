@@ -196,6 +196,7 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.derivedImage = glGetUniformLocation(effect.program, "derivedImage");
     effect.derivedUvTransform = glGetUniformLocation(effect.program, "derivedUvTransform");
     effect.derivedAtlasOffset = glGetUniformLocation(effect.program, "derivedAtlasOffset");
+    effect.derivedSampleBounds = glGetUniformLocation(effect.program, "derivedSampleBounds");
     effect.block.enabled = glGetUniformLocation(effect.program, "blockImage");
     effect.block.nearest = glGetUniformLocation(effect.program, "blockNearest");
     effect.block.grid = glGetUniformLocation(effect.program, "blockGrid");

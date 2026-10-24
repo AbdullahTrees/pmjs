@@ -560,6 +560,7 @@ class Renderer {
     int derivedImage = -1;
     int derivedUvTransform = -1;
     int derivedAtlasOffset = -1;
+    int derivedSampleBounds = -1;
     BlockSpriteUniforms block;
     int blur = -1;
     int maskEnabled = -1;

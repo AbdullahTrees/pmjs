@@ -1426,6 +1426,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   uniform bool derivedImage;
   uniform highp vec4 derivedUvTransform;
   uniform highp vec2 derivedAtlasOffset;
+  uniform highp vec4 derivedSampleBounds;
   uniform float blurRadius;
   uniform sampler2D maskImage;
   uniform bool maskEnabled;
@@ -1447,6 +1448,10 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   highp vec4 spriteTexel(highp vec2 pixel) {
     highp vec2 address = clamp(pixel, spriteFrame.xy, spriteFrame.zw);
     if (derivedImage) {
+      // Trimmed transparent margins must not read neighboring atlas cells.
+      highp vec2 coord = (address + vec2(0.5)) / imageDimensions;
+      if (any(lessThan(coord, derivedSampleBounds.xy)) ||
+          any(greaterThan(coord, derivedSampleBounds.zw))) return vec4(0.0);
       address += derivedAtlasOffset;
       if (any(lessThan(address, vec2(0.0))) ||
           any(greaterThanEqual(address, vec2(textureSize(image, 0))))) return vec4(0.0);
@@ -1514,7 +1519,10 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
             tilingAtlasBounds.xy, tilingAtlasBounds.zw);
         } else coord = clamp(coord, margin, vec2(1.0) - margin);
       }
-      if (derivedImage && nearestSampling && paletteImage != 0) {
+      if (derivedImage && (any(lessThan(coord, derivedSampleBounds.xy)) ||
+          any(greaterThan(coord, derivedSampleBounds.zw)))) {
+        sampleColor = vec4(0.0);
+      } else if (derivedImage && nearestSampling && paletteImage != 0) {
         highp vec2 pixel = clamp(floor(coord * imageDimensions), vec2(0.0), imageDimensions - vec2(1.0));
         highp vec2 address = pixel + derivedAtlasOffset;
         highp vec2 size = vec2(textureSize(image, 0));
