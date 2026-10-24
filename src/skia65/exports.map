@@ -22,5 +22,9 @@ PMJS_SKIA65_2 {
     pmjs_skia65_bounds;
     pmjs_skia65_set_telemetry;
     pmjs_skia65_font_cache_stats;
+    pmjs_skia65_color_icc;
+    pmjs_skia65_color_rgb;
+    pmjs_skia65_color_apply;
+    pmjs_skia65_color_close;
   local: *;
 };

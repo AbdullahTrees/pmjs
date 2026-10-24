@@ -635,10 +635,8 @@ int main() {
     }, {4,4,std::nullopt,{}});
     require(result.pages.empty() && result.cells.size() == 16);
     write(source, 8, 8, [](int,int) { return AssetColor{13,27,31,0}; }, 0, 16);
-    refused = false;
-    try { pmjs::prepareAssetImage(source, root / "16bit"); }
-    catch (const pmjs::AssetPreparationUnsupported&) { refused = true; }
-    require(refused);
+    const auto wideTransparent = pmjs::prepareAssetImage(source, root / "16bit");
+    require(wideTransparent.uniform == AssetColor({13,27,31,0}));
     {
       pmjs::AssetPreparationOptions options;
       options.workspaceBytes = 64U * 1024U * 1024U;

@@ -784,3 +784,24 @@ void pmjs_skia65_cache_limits(size_t bytes, int entries) {
   SkGraphics::SetFontCacheCountLimit(entries);
 }
 }
+
+#include "SkColorSpace.h"
+#include "SkColorSpaceXform.h"
+#include "SkMatrix44.h"
+void* pmjs_skia65_color_icc(const void* data, size_t size) {
+  auto source = SkColorSpace::MakeICC(data, size);
+  return source ? SkColorSpaceXform::New(source.get(), SkColorSpace::MakeSRGB().get()).release() : nullptr;
+}
+void* pmjs_skia65_color_rgb(const float p[8], float gamma) {
+  SkColorSpacePrimaries primaries{p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]};
+  SkMatrix44 matrix(SkMatrix44::kUninitialized_Constructor);
+  if (!primaries.toXYZD50(&matrix)) return nullptr;
+  SkColorSpaceTransferFn fn{gamma,1,0,0,0,0,0};
+  auto source = SkColorSpace::MakeRGB(fn, matrix);
+  return source ? SkColorSpaceXform::New(source.get(), SkColorSpace::MakeSRGB().get()).release() : nullptr;
+}
+void pmjs_skia65_color_apply(void* transform, uint8_t* rgba, int count) {
+  static_cast<SkColorSpaceXform*>(transform)->apply(SkColorSpaceXform::kRGBA_8888_ColorFormat,
+    rgba, SkColorSpaceXform::kRGBA_8888_ColorFormat, rgba, count, kUnpremul_SkAlphaType);
+}
+void pmjs_skia65_color_close(void* transform) { delete static_cast<SkColorSpaceXform*>(transform); }

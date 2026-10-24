@@ -9,7 +9,7 @@ const { pipeline } = require('node:stream/promises');
 const { yedSideviewFrames } = require('./yed-sideview-recipes.cjs');
 
 const CACHE_VERSION = 1;
-const PROCESSOR_IDENTITY = { processor: 'images-v15-sparse-palette-astcenc4.7', decoder: 'png-rgba-v1', pageSize: 2048 };
+const PROCESSOR_IDENTITY = { processor: 'images-v16-color-managed-astcenc4.7', decoder: 'png-rgba-color-v2', colorManagement: 'none', pageSize: 2048 };
 const HASH = /^[a-f0-9]{64}$/;
 const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const ENCRYPTED_HEADER = Buffer.from('5250474d560000000003010000000000', 'hex');

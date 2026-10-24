@@ -94,6 +94,11 @@ PMJS_SKIA65_API int pmjs_skia65_bounds(pmjs_skia65_font* font, const char* utf8,
 PMJS_SKIA65_API void pmjs_skia65_font_cache_stats(pmjs_skia65_font* font, size_t* bytes, size_t* entries, size_t* metric_bytes);
 PMJS_SKIA65_API void pmjs_skia65_set_telemetry(int enabled);
 
+PMJS_SKIA65_API void* pmjs_skia65_color_icc(const void* data, size_t size);
+PMJS_SKIA65_API void* pmjs_skia65_color_rgb(const float primaries[8], float gamma);
+PMJS_SKIA65_API void pmjs_skia65_color_apply(void* transform, uint8_t* rgba, int count);
+PMJS_SKIA65_API void pmjs_skia65_color_close(void* transform);
+
 #ifdef __cplusplus
 }
 #endif

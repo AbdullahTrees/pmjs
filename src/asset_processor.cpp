@@ -1,4 +1,5 @@
 #include "asset_processor.hpp"
+#include "png_color.hpp"
 #include "astc_encoder.hpp"
 #include "checked_bounds.hpp"
 #include "prepared_page.hpp"
@@ -66,18 +67,7 @@ class PngRows {
       close(); throw AssetPreparationUnsupported("preparation requires a bounded noninterlaced PNG");
     }
     width = static_cast<int>(w); height = static_cast<int>(h);
-    const int color = png_get_color_type(png_, info_);
-    const int depth = png_get_bit_depth(png_, info_);
-    if (depth == 16) {
-      close(); throw AssetPreparationUnsupported("16-bit PNG preparation requires the ordinary decoder");
-    }
-    if (color == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png_);
-    if (color == PNG_COLOR_TYPE_GRAY && depth < 8) png_set_expand_gray_1_2_4_to_8(png_);
-    const bool transparency = png_get_valid(png_, info_, PNG_INFO_tRNS);
-    if (transparency) png_set_tRNS_to_alpha(png_);
-    if (color == PNG_COLOR_TYPE_GRAY || color == PNG_COLOR_TYPE_GRAY_ALPHA) png_set_gray_to_rgb(png_);
-    if (!(color & PNG_COLOR_MASK_ALPHA) && !transparency) png_set_add_alpha(png_, 255, PNG_FILLER_AFTER);
-    png_set_alpha_mode(png_, PNG_ALPHA_PNG, PNG_DEFAULT_sRGB);
+    configurePng(png_, info_, transform_);
     png_read_update_info(png_, info_);
     if (png_get_rowbytes(png_, info_) != static_cast<std::size_t>(width) * 4) {
       close(); throw std::runtime_error("unexpected preparation PNG format");
@@ -90,6 +80,7 @@ class PngRows {
   void read() {
     if (setjmp(png_jmpbuf(png_))) throw std::runtime_error("cannot decode preparation PNG row");
     png_read_row(png_, row.data(), nullptr);
+    transform_.apply(row.data(), width);
   }
   void finish() {
     if (setjmp(png_jmpbuf(png_))) throw std::runtime_error("cannot finish preparation PNG");
@@ -103,6 +94,7 @@ class PngRows {
     if (file_) std::fclose(file_);
     png_ = nullptr; info_ = nullptr; file_ = nullptr;
   }
+  ImageColorTransform transform_;
   FILE* file_ = nullptr;
   png_structp png_ = nullptr;
   png_infop info_ = nullptr;
