@@ -49,7 +49,7 @@
     }
     var approved = new Set([container, sprite, windowTransform, faceTransform, tiling]);
     var renderers = new WeakSet(), active = null, localRenders = 0, fallbacks = 0, lastReason = null;
-    function inspect(node, parent, faces, windowChild, parentDraws) {
+    function inspect(node, parent, faces, matrices, depth, windowChild, parentDraws) {
       // Native preparation skips hidden branches; a Window can expose its own children.
       if (node && node.visible === false && !windowChild) return null;
       if (!node || !approved.has(node.updateTransform)) return 'unknown-transform';
@@ -61,8 +61,8 @@
       var draws = parentDraws !== false && alpha > 0;
       if (node.updateTransform === tiling && node.updateTransformTS !== container) return 'tiling-predecessor';
       if (node.mask || node._cacheAsBitmap || node.shader) return 'advanced-rendering';
-      var filters = node._filters || [];
-      for (var i = 0; i < filters.length; i++) {
+      var filters = node._filters;
+      for (var i = 0; filters && i < filters.length; i++) {
         var filter = filters[i];
         if (filter && filter.enabled !== false &&
             !(node instanceof WindowLayer && filter === WindowLayer.voidFilter && node.filterArea)) return 'filter';
@@ -79,12 +79,15 @@
       if (!transform || typeof transform.updateLocalTransform !== 'function') return 'transform';
       transform.updateLocalTransform();
       var local = transform.localTransform;
-      var world = {
-        a: parent.a * local.a + parent.c * local.b, b: parent.b * local.a + parent.d * local.b,
-        c: parent.a * local.c + parent.c * local.d, d: parent.b * local.c + parent.d * local.d,
-        tx: parent.a * local.tx + parent.c * local.ty + parent.tx,
-        ty: parent.b * local.tx + parent.d * local.ty + parent.ty
-      };
+      // Siblings reuse storage; ancestors and reentrant inspections retain their own matrices.
+      var world = matrices[depth];
+      if (!world) world = matrices[depth] = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
+      world.a = parent.a * local.a + parent.c * local.b;
+      world.b = parent.b * local.a + parent.d * local.b;
+      world.c = parent.a * local.c + parent.c * local.d;
+      world.d = parent.b * local.c + parent.d * local.d;
+      world.tx = parent.a * local.tx + parent.c * local.ty + parent.tx;
+      world.ty = parent.b * local.tx + parent.d * local.ty + parent.ty;
       // Local composition must not bypass Yanfly's observable translation rounding.
       if (draws && node.updateTransform === sprite &&
           (!Number.isInteger(world.tx) || !Number.isInteger(world.ty))) {
@@ -96,7 +99,7 @@
       }
       var children = node.children || [];
       for (var index = 0; index < children.length; index++) {
-        var reason = inspect(children[index], world, faces, node instanceof Window, draws);
+        var reason = inspect(children[index], world, faces, matrices, depth + 1, node instanceof Window, draws);
         if (reason) return reason;
       }
       return null;
@@ -139,7 +142,7 @@
         if (Yanfly.Core.Sprite_updateTransform !== container || Window_Selectable.prototype.updateTransform !== windowTransform ||
             arrowPredecessor && master2015hp.isatSnp.b_67 !== arrowPredecessor) reason = 'transform-predecessor';
         else if (foreignCallbacks(this)) reason = 'renderer-callback';
-        else reason = inspect(stage, { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 }, faces);
+        else reason = inspect(stage, { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 }, faces, [], 0);
         if (reason) { lastReason = reason; fallbacks++; return render.apply(this, arguments); }
         var context = { stage: stage, present: !!options && Object.prototype.hasOwnProperty.call(options, 'worldState'),
           worldState: options && options.worldState };
