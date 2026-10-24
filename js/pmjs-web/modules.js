@@ -163,6 +163,7 @@ if (PMJS.phases) PMJS.phases.on('windowLoaded', 'pmjs.desktop.loaded', function(
 var captureRequests = [];
 PMJS.tasks.onStop(function() { captureRequests.length = 0; });
 globalThis.__pmjsAfterPresent = function() {
+  if (!captureRequests.length) return;
   var pending = captureRequests.splice(0);
   pending.forEach(function(request) {
     var canvas = NativeHost.canvas.captureDrawable().handle, data;

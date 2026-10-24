@@ -91,7 +91,7 @@ EventTarget.defineEventHandlerProperty = function(prototype, type) {
   });
 };
 
-EventTarget.prototype.dispatchEvent = function(event) {
+function pmjsDispatchEvent(event) {
   if (!event || typeof event.type !== 'string') {
     throw new TypeError('event must have a string type');
   }
@@ -106,7 +106,8 @@ EventTarget.prototype.dispatchEvent = function(event) {
     if (!listeners[index].removed) pmjsInvokeEventHandler(this, listeners[index].callback, event);
   }
   return !event.defaultPrevented;
-};
+}
+EventTarget.prototype.dispatchEvent = pmjsDispatchEvent;
 
 globalThis.EventTarget = EventTarget;
 function pmjsDispatchHostEvent(target, event, isCurrent) {

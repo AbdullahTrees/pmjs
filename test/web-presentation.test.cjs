@@ -88,6 +88,27 @@ test('input snapshots reach owned subscribers independently of presentation refr
   assert.equal(canvas.getBoundingClientRect().width, 32);
 });
 
+test('input snapshot subscriptions can be added, removed and replaced between frames', () => {
+  const { context: c } = setup();
+  const input = c.PMJS.web.input, snapshots = [];
+  const listener = event => snapshots.push(event.snapshot);
+  const state = { gamepads: [], pointerEvents: [] };
+  c.__pmjsReceiveInput(state);
+  assert.equal(c.__pmjsInputSnapshot, state);
+  input.addEventListener('snapshot', listener);
+  c.__pmjsReceiveInput(state);
+  input.removeEventListener('snapshot', listener);
+  c.__pmjsReceiveInput(state);
+  input.onsnapshot = listener;
+  c.__pmjsReceiveInput(state);
+  input.onsnapshot = null;
+  c.__pmjsReceiveInput(state);
+  const dispatch = input.dispatchEvent;
+  input.dispatchEvent = function(event) { snapshots.push(event.snapshot); return dispatch.call(this, event); };
+  c.__pmjsReceiveInput(state);
+  assert.deepEqual(snapshots, [state, state, state]);
+});
+
 test('native scene canvases expose the presented rectangle for physical pointer coordinates', () => {
   let window = { width: 80, height: 80 };
   let geometry = { drawableWidth: 160, drawableHeight: 160,

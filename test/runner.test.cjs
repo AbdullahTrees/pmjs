@@ -469,6 +469,44 @@ test('quit in the final event batch closes the host without starting the guest',
   assert.equal(quits, 1);
 });
 
+test('window tasks retain event order and fullscreen changes without ordinary events', async t => {
+  const globals = ['PMJS', '__pmjsUpdateWindowState', '__pmjsDispatchWindowEvents'];
+  const previous = globals.map(key => globalThis[key]);
+  t.after(() => globals.forEach((key, index) => { globalThis[key] = previous[index]; }));
+  const options = fixture(`
+    globalThis.__pmjsUpdateWindowState = () => {};
+    globalThis.__pmjsDispatchWindowEvents = events => NativeHost.input.deliver(events);
+    globalThis.PMJS = { tasks: {
+      enqueue(fn) { NativeHost.input.enqueued(); fn(); },
+      stop() { this.stopped = true; },
+      runFrame(fn) { return Promise.resolve(fn()); }
+    } };
+    globalThis.__pmjsTick = () => {};
+    globalThis.__pmjsRender = () => {};
+  `);
+  options.assetPreparation = 'off';
+  const host = require(options.addon);
+  let frame = -2, queued = 0;
+  const delivered = [];
+  const frames = [
+    { fullscreen: false, events: [] },
+    { fullscreen: false, events: [] },
+    { fullscreen: true, events: [] },
+    { fullscreen: true, events: [{ type: 'move', x: 3, y: 4 }] },
+    { fullscreen: true, events: [] },
+    { fullscreen: false, events: [{ type: 'leave-fullscreen' }] },
+    { fullscreen: false, events: [] }
+  ];
+  host.pollEvents = () => ++frame < frames.length;
+  host.runtime.windowState = () => ({ fullscreen: frames[frame].fullscreen });
+  host.runtime.windowEvents = () => frames[frame].events;
+  host.input.enqueued = () => { queued++; };
+  host.input.deliver = events => { delivered.push([frame, events]); };
+  await run(options);
+  assert.equal(queued, 4);
+  assert.deepEqual(delivered, [0, 2, 3, 5].map(index => [index, frames[index].events]));
+});
+
 for (const operation of ['snapshot', 'consumePressed']) {
   test(`input handoff ${operation} failure closes the host and prevents guest boot`, async () => {
     const options = fixture('throw new Error("guest must not boot after handoff failure");');

@@ -460,7 +460,7 @@ async function runSession(input, diagnostics, setNative) {
     await new Promise((resolve, reject) => {
       finishSession = resolve;
       native.runtime.scheduling.onFatal = reject;
-      let frameHandle, immediateFrame = false;
+      let frameHandle, immediateFrame = false, previousFullscreen;
       cancelFrameSchedule = () => {
         if (immediateFrame) hostTimers.clearImmediate(frameHandle);
         else hostTimers.clearTimeout(frameHandle);
@@ -479,13 +479,18 @@ async function runSession(input, diagnostics, setNative) {
         try {
           flushPreparationInvalidations();
           if (!native.pollEvents()) { flushPreparationInvalidations(true); resolve(); return; }
+          let windowState;
           if (typeof globalThis.__pmjsUpdateWindowState === 'function') {
-            globalThis.__pmjsUpdateWindowState(native.runtime.windowState());
+            windowState = native.runtime.windowState();
+            globalThis.__pmjsUpdateWindowState(windowState);
           }
           if (typeof native.runtime.windowEvents === 'function' && globalThis.__pmjsDispatchWindowEvents) {
             const events = native.runtime.windowEvents();
-            if (dispatcher) dispatcher.enqueue(() => globalThis.__pmjsDispatchWindowEvents(events), { errorMode: 'event' });
-            else globalThis.__pmjsDispatchWindowEvents(events);
+            if (events.length || !windowState || windowState.fullscreen !== previousFullscreen) {
+              if (dispatcher) dispatcher.enqueue(() => globalThis.__pmjsDispatchWindowEvents(events), { errorMode: 'event' });
+              else globalThis.__pmjsDispatchWindowEvents(events);
+            }
+            previousFullscreen = windowState && windowState.fullscreen;
           }
           if (typeof globalThis.__pmjsReceiveInput === 'function' &&
               typeof native.input.snapshot === 'function') {

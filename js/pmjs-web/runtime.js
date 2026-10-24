@@ -323,7 +323,12 @@ globalThis.__pmjsReceiveInput = function(state) {
         heldKeys.indexOf(source.keyCode) < 0) pendingKeyReleases.push(source);
     else dispatchNativeKey(source);
   }
-  if (PMJS.web.input) PMJS.web.input.dispatchEvent({ type: 'snapshot', snapshot: state });
+  var input = PMJS.web.input;
+  if (input && (input.dispatchEvent !== pmjsDispatchEvent ||
+      input._listeners.snapshot && input._listeners.snapshot.length ||
+      typeof input.onsnapshot === 'function')) {
+    input.dispatchEvent({ type: 'snapshot', snapshot: state });
+  }
 };
 globalThis.__pmjsFinishInputStep = function() {
   for (var i = 0; i < pendingKeyReleases.length; i++) dispatchNativeKey(pendingKeyReleases[i]);
