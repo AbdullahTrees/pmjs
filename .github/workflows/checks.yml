@@ -22,7 +22,7 @@ jobs:
             libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev \
             libpng-dev libwebp-dev zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev \
-            xvfb xauth
+            xvfb xauth libegl-mesa0 libgl1-mesa-dri
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
@@ -38,3 +38,10 @@ jobs:
           cmake --preset dev
           cmake --build --preset dev --target pmjs_native pmjs-filter-target-lifetime-test --parallel 4
           ctest --preset dev -R '^(native-yanfly-core-text|native-srd-shaking-text|native-filter-target-lifetime)$'
+      - name: Verify relocated runtime graphics
+        run: |
+          cmake --install build/dev --prefix "$PWD/dist/runtime-host" --component native-addon
+          cmake --install build/dev --prefix "$PWD/dist/runtime-host" --component runtime
+          python3 tools/release.py manifest --stage dist/runtime-host --build build/dev --source .
+          python3 tools/release.py verify --stage dist/runtime-host \
+            --report dist/verification-host.json --graphics --xvfb
