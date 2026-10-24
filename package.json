@@ -8,7 +8,7 @@
     "test:all": "node tools/test-js.cjs"
   },
   "devDependencies": {
-    "eslint": "9.35.0",
+    "eslint": "10.13.0",
     "globals": "16.3.0"
   }
 }

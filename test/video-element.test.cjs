@@ -228,6 +228,7 @@ function makeRendererHarness() {
   context.renderNativeStage = () => calls.push(['stage']);
   context.NativeHost.render = {
     setScreenRenderSize() {},
+    setClearColor() {},
     quad(...args) { calls.push(['quad', ...args]); },
     image(...args) { calls.push(['image', ...args]); },
     setPresentationLayers(...args) { calls.push(['presentation', ...args]); }
