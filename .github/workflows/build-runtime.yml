@@ -34,7 +34,7 @@ jobs:
           build_id="v$build_date-$build_time.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           echo "PMJS_BUILD_ID=$build_id" >> "$GITHUB_ENV"
           echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
-          title="PMJS $build_date ${build_time:0:2}:${build_time:2:2}:${build_time:4:2} UTC (${GITHUB_SHA:0:7}, run $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)"
+          title="PMJS-$build_date-$build_time"
           echo "title=$title" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
