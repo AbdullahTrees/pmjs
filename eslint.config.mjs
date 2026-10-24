@@ -8,7 +8,7 @@ const safetyRules = {
 export default [
   { ignores: ['build/**', 'build-*/**', 'build-js/**'] },
   {
-    files: ['js/**/*.js'],
+    files: ['js/**/*.js', 'patches/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       globals: { ...globals.browser, ...globals.node },

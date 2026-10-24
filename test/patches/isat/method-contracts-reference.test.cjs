@@ -1,0 +1,125 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+const vm = require('node:vm');
+const methodHash = require('./test-fixtures/method-hash.cjs')();
+const game = process.env.PMJS_ISAT_REFERENCE_GAME;
+
+function method(context, file, assignment) {
+  const source = fs.readFileSync(file, 'utf8');
+  const start = source.indexOf(assignment);
+  assert.ok(start >= 0, assignment);
+  const body = source.slice(source.indexOf('function', start));
+  for (const match of body.matchAll(/};/g)) {
+    const expression = '(' + body.slice(0, match.index + 1) + ')';
+    let script;
+    try { script = new vm.Script(expression); } catch { continue; }
+    return script.runInContext(context);
+  }
+  assert.fail('missing function expression: ' + assignment);
+}
+
+function fixture(name) {
+  const hooks = [], refused = [];
+  const context = vm.createContext({
+    PMJS: { isatSourceQualification: { verified: true }, isatMethodHash: methodHash,
+      optimizations: { register() {}, isEnabled() { return true; }, refuse(...args) { refused.push(args); } },
+      phases: { on(_phase, _id, callback) { hooks.push(callback); } } }
+  });
+  const guestMethod = (file, assignment) => method(context, path.join(game, file), assignment);
+  function install() {
+    vm.runInContext(fs.readFileSync(require.resolve(`../../../patches/isat/${name}.js`), 'utf8'), context);
+    hooks.forEach(hook => hook());
+    assert.deepEqual(refused, []);
+  }
+  return { context, guestMethod, install };
+}
+
+test('plain-word admission accepts the purchased methods and the shared raster wrapper', { skip: !game }, () => {
+  for (const shared of [false, true]) {
+    const f = fixture('plain-word-measure'), c = f.context;
+    c.Window_Base = function() {};
+    const raw = f.guestMethod('js/plugins/YEP_MessageCore.js', 'Window_Base.prototype.textWidthExCheck =');
+    c.Window_Base.prototype.textWidthExCheck = shared ? method(c,
+      require.resolve('../../../js/pmjs-plugins/yanfly/message-core.js'), 'windowProto.textWidthExCheck =') : raw;
+    c.VictorEngine = { ControlText: { textWidth: f.guestMethod('js/rpg_windows.js', 'Window_Base.prototype.textWidth =') } };
+    c.SRD = { TranslationEngine: { translate: f.guestMethod('js/plugins/SRD_TranslationEngine.js', '$.translate =') } };
+    const original = c.Window_Base.prototype.textWidthExCheck;
+    f.install();
+    assert.notEqual(c.Window_Base.prototype.textWidthExCheck, original);
+  }
+});
+
+test('screen-effect admission accepts the effective weather wrapper and preserves update results', { skip: !game }, () => {
+  const f = fixture('screen-effects'), c = f.context;
+  c.Spriteset_Base = function() {};
+  const proto = c.Spriteset_Base.prototype;
+  for (const key of ['createScreenEffectFilters', 'updateScreenEffects']) {
+    proto[key] = f.guestMethod('js/plugins/Aries001_AnimationScreenEffects.js', `Spriteset_Base.prototype.${key} =`);
+  }
+  proto.update = f.guestMethod('js/plugins/MOG_Weather_EX.js', 'Spriteset_Base.prototype.update =');
+  const original = proto.update;
+  f.install();
+  assert.notEqual(proto.update, original);
+  function Filter() { this.enabled = true; }
+  c.PIXI = { filters: Object.fromEntries(['BlurFilter', 'ZoomBlurFilter', 'AdvancedBloomFilter',
+    'ShockwaveFilter', 'GlitchFilter'].map(name => [name, Filter])) };
+  c.Point = function(x, y) { this.x = x; this.y = y; };
+  c.Graphics = { boxWidth: 816, boxHeight: 624 };
+  c.ConfigManager = { screenEffectsEnabled: false };
+  c.$gameMap = { _mapId: 30 }; c.$gameSystem = {};
+  c._mog_weatherEX_sprtbase_update = function() {
+    this.baseUpdates = (this.baseUpdates || 0) + 1;
+    this._filters.forEach(filter => { filter.enabled = true; });
+  };
+  const scene = Object.create(proto);
+  scene.updateWeatherEX_Base = function() { this.weatherUpdates = (this.weatherUpdates || 0) + 1; };
+  assert.equal(scene.createScreenEffectFilters(), undefined);
+  assert.ok(scene._filters.every(filter => !filter.enabled));
+  assert.equal(scene.update(), undefined);
+  assert.equal(scene.baseUpdates, 1); assert.equal(scene.weatherUpdates, 1);
+  assert.equal(c.$gameSystem._weatherEX_MapId, 30);
+  assert.ok(scene._filters.every(filter => !filter.enabled));
+  scene.updateScreenEffects = function() {};
+  scene.update();
+  assert.ok(scene._filters.every(filter => filter.enabled), 'instance overrides retain the authored path');
+  delete scene.updateScreenEffects;
+  c.PMJS.isatSourceQualification = { verified: false };
+  scene.update();
+  assert.ok(scene._filters.every(filter => filter.enabled), 'revoked qualification retains the authored path');
+});
+
+test('neutral-tone admission accepts the purchased engine lifecycle', { skip: !game }, () => {
+  const f = fixture('neutral-tone'), c = f.context;
+  c.Spriteset_Base = function() {};
+  c.ToneFilter = function() {
+    this.enabled = true; this.alpha = 1; this.blendMode = 0;
+    this.matrix = Array.from({ length: 20 }, (_, i) => [0, 6, 12, 18].includes(i) ? 1 : 0);
+  };
+  const proto = c.Spriteset_Base.prototype;
+  for (const key of ['createWebGLToneChanger', 'updateToneChanger', 'updateWebGLToneChanger']) {
+    proto[key] = f.guestMethod('js/rpg_sprites.js', `Spriteset_Base.prototype.${key} =`);
+  }
+  const original = proto.updateToneChanger;
+  f.install();
+  assert.notEqual(proto.updateToneChanger, original);
+  c.Graphics = { isWebGL() { return true; } }; c.PIXI = { BLEND_MODES: { NORMAL: 0 } };
+  vm.runInContext(`
+    Array.prototype.equals = function(other) { return this.length === other.length && this.every(function(v,i) { return v === other[i]; }); };
+    Array.prototype.clone = function() { return this.slice(); };
+    var tone = [0,0,0,0], $gameScreen = { tone: function() { return tone; } };
+  `, c);
+  const filter = new c.ToneFilter(), scene = Object.create(proto);
+  scene._tone = vm.runInContext('[0,0,0,0]', c);
+  scene._toneFilter = filter; scene._baseSprite = { filters: [filter] };
+  assert.equal(scene.updateToneChanger(), undefined); assert.equal(filter.enabled, false);
+  c.PMJS.isatSourceQualification = { verified: false };
+  scene.updateToneChanger(); assert.equal(filter.enabled, true);
+  let updates = 0;
+  scene.updateWebGLToneChanger = () => { updates++; };
+  vm.runInContext('tone[0] = 10;', c);
+  scene.updateToneChanger(); assert.equal(updates, 1); assert.equal(filter.enabled, true);
+});

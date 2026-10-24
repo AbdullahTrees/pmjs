@@ -1,0 +1,6 @@
+{
+  "modules": [
+    "../source-patches.js",
+    "animated-picture-loading.js"
+  ]
+}

@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const inventory = JSON.parse(fs.readFileSync(path.join(root, 'third_party/provenance.json')));
 const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z',
-  'js', 'src', 'runner', 'tools', 'test', 'third_party', 'example', 'cmake'], { cwd: root }).toString().split('\0').filter(Boolean);
+  'js', 'patches', 'src', 'runner', 'tools', 'test', 'third_party', 'example', 'cmake'], { cwd: root }).toString().split('\0').filter(Boolean);
 const errors = [];
 for (const file of Object.keys(inventory.files)) {
   if (path.isAbsolute(file) || file.split('/').includes('..')) {

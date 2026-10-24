@@ -467,3 +467,31 @@ test('portable indexes preserve resolved options and processor identities with o
     }
     assert.deepEqual(indexes[1], indexes[0], 'processor identities, recipes and records must be identical');
   });
+
+test('full-game and demo ISAT inventories remain explicit and preserve adapter order', () => {
+  const output = path.join(temporaryDirectory('pmjs-isat-composition-'), 'bootstrap.js');
+  const inventories = ['entry.json', 'demo/entry.json'].map(file => {
+    const inventory = path.join(runtimeRoot, 'patches/isat', file);
+    return require(inventory).modules.map(module => path.resolve(path.dirname(inventory), module));
+  });
+  function build(adapters) {
+    childProcess.execFileSync(process.execPath, [tool, '--profile', 'mv',
+      ...adapters.flatMap(file => ['--adapter', file]), '--output', output]);
+    const bundle = fs.readFileSync(output, 'utf8');
+    assert.doesNotThrow(() => new vm.Script(bundle));
+    return [...bundle.matchAll(/^\/\/ BEGIN (.+)$/gm)].map(match => match[1]);
+  }
+  const baseline = build([]);
+  const allNames = inventories.flat().map(file => path.basename(file));
+  assert.ok(baseline.every(name => !allNames.includes(name)));
+  for (const modules of inventories) {
+    assert.equal(new Set(modules).size, modules.length);
+    modules.forEach(file => assert.ok(fs.statSync(file).isFile()));
+    const included = build(modules);
+    const names = modules.map(file => path.basename(file));
+    const positions = names.map(file => included.indexOf(file));
+    assert.ok(positions.every((value, index) => value >= 0 && (!index || value > positions[index - 1])));
+    assert.ok(positions.at(-1) < included.indexOf('js/pmjs-mv/bootstrap.js'));
+    assert.deepEqual(included.filter(name => !baseline.includes(name)), names);
+  }
+});
