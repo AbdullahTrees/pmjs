@@ -157,7 +157,10 @@ function createPreparationLog(details, { log = message => console.log(message), 
 
 async function prepareStartupAssets(options, native) {
   const preparationStarted = performance.now();
+  const recheckFile = path.join(options.assetPreparation.cacheRoot, 'asset-recheck.json');
+  const fastBoot = options.assetPreparation.fastBoot && !fs.existsSync(recheckFile);
   console.log(`[pmjs] preparation event=start workspace_bytes=${options.assetPreparation.workspaceBytes} ` +
+    `fast_boot=${fastBoot ? 'on' : 'off'} ` +
     `processor=${JSON.stringify(native.assets.preparationVersion || null)} ` +
     `lz4_version=${JSON.stringify(native.assets.preparationLz4Version || null)}`);
   const portableIndex = require('./asset-index.cjs').loadAssetIndex(options.assetIndex, native, options);
@@ -201,7 +204,8 @@ async function prepareStartupAssets(options, native) {
     const all = await prepareGameAssets({ gameRoot: options.gameRoot,
       sourceRoots: [path.join(options.saveRoot, 'game-files', 'files')],
       cacheRoot: options.assetPreparation.cacheRoot, native,
-      ...options.assetPreparation, images: options.assetPreparation.enabled,
+      ...options.assetPreparation, fastBoot, assetIndexPath: options.assetIndex,
+      images: options.assetPreparation.enabled,
       recipes: options.assetPreparation.recipes,
       policyOverrides: options.assetPolicyOverrides,
       portableIndex, portableAssetRoot: portableIndex && path.dirname(options.assetIndex),
@@ -228,6 +232,7 @@ async function prepareStartupAssets(options, native) {
     console.log('[pmjs] preparation summary ' + JSON.stringify({
       images: { discovered: imageResults.total || 0, prepared: imageResults.prepared || 0,
         installed: imageResults.installed || 0, decrypted: imageResults.decrypted || 0,
+        fast: !!imageResults.fast,
         storageDecisions: imageResults.storageEntries?.length || 0,
         ordinaryChoices: outcomes.filter(value => value.id.startsWith('image:') && value.outcome === 'ordinary-choice').length,
         failed: (imageResults.failedFiles || 0) + (imageResults.error ? 1 : 0) },
@@ -252,6 +257,9 @@ async function prepareStartupAssets(options, native) {
   } finally {
     clearInterval(pump);
     console.log(`[pmjs] preparation event=finish status=${preparationStatus} duration_ms=${(performance.now() - preparationStarted).toFixed(1)}`);
+    if (preparationStatus === 'complete' || preparationStatus === 'partial') {
+      try { fs.rmSync(recheckFile, { force: true }); } catch (_) {}
+    }
   }
   if (preparationFailed) throw preparationError;
   return { preparation, cancelled,
@@ -293,6 +301,24 @@ async function runSession(input, diagnostics, setNative) {
   if (scan) console.log(`[pmjs] startup stage=vfs-index statistics=${JSON.stringify(scan)}`);
   console.log(`[pmjs] startup stage=host-initialized elapsed_ms=${(performance.now() - startupStarted).toFixed(1)}`);
   let pendingInvalidations = 0, retryInvalidationAt = 0;
+  let fastBootUsed = false, assetRecheckWritten = false;
+  // A cache that needs repair is recorded with one small flag; the next boot then runs the full
+  // validation (and clears it). This keeps the verified boot free of per-asset manifest reads.
+  function requestAssetRecheck(reason) {
+    if (assetRecheckWritten || !options.assetPreparation.cacheRoot) return;
+    assetRecheckWritten = true;
+    const file = path.join(options.assetPreparation.cacheRoot, 'asset-recheck.json');
+    const temporary = file + '.stage-' + process.pid;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(temporary, JSON.stringify({ version: 1,
+        requested_at: new Date().toISOString(), reason }));
+      fs.renameSync(temporary, file);
+    } catch (error) {
+      try { fs.rmSync(temporary, { force: true }); } catch (_) {}
+      console.warn('[pmjs] cannot write asset recheck flag: ' + error.message);
+    }
+  }
   let invalidatePreparation;
   let dispatcher;
   let removePromiseRejectionBridge;
@@ -322,9 +348,10 @@ async function runSession(input, diagnostics, setNative) {
     if (typeof native.assets.consumePreparationInvalidations === 'function')
       pendingInvalidations |= native.assets.consumePreparationInvalidations();
     if (!pendingInvalidations || (!force && performance.now() < retryInvalidationAt)) return;
+    requestAssetRecheck('prepared asset invalidated');
     if (invalidatePreparation && typeof native.assets.consumePreparationFailures === 'function') {
       const failures = native.assets.consumePreparationFailures();
-      if (failures.length) recordPreparationInvalidation(failures);
+      if (failures.length) { requestAssetRecheck('preparation failure'); recordPreparationInvalidation(failures); }
     }
     pendingInvalidations = 0;
     retryInvalidationAt = performance.now() + 1000;
@@ -335,6 +362,7 @@ async function runSession(input, diagnostics, setNative) {
     if (options.assetPreparation.enabled || options.portDescriptors?.length || options.preparationAdapters?.length) {
       diagnostics.stage('asset-preparation');
       const startup = await prepareStartupAssets(options, native);
+      fastBootUsed = startup.preparation?.images?.fast === true;
       invalidatePreparation = startup.invalidate;
       const { entries, decryptedEntries, releaseCacheLease, invalidateCatalog, ...preparationStats } = startup.preparation;
       if (preparationStats.maps) {
@@ -527,6 +555,7 @@ async function runSession(input, diagnostics, setNative) {
     else if (globalThis.pmjsAchievements && globalThis.pmjsAchievements.initialized) globalThis.pmjsAchievements.flush();
     return { reload: reloadRequested };
   } catch (error) {
+    if (fastBootUsed) requestAssetRecheck('fatal error after fast asset boot');
     try { flushPreparationInvalidations(true); } catch (_) {}
     try { native.runtime.quit(); } catch (_) {}
     throw error;
