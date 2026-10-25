@@ -509,6 +509,7 @@ if(BUILD_TESTING)
     node-tile-edge-filtering
     node-four-texture-tiles
     node-linear-tiling-palette
+    node-linear-sprite-palette
     node-yed-retained-tiles
     node-presentation-byte-precision
     node-render-to-image

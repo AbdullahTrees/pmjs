@@ -54,10 +54,10 @@ test('offline sparse palettes preserve pixels, ownership, and dense fallback', a
     assert.deepEqual(draw(pair.sparse, { nearest: false, crop: [0.25, 0.5, 63, 47], scale: 0.9 }),
       draw(reference, { nearest: false, crop: [0.25, 0.5, 63, 47], scale: 0.9 }));
     native.beginFrame();
-    assert.equal(owner(pair.sparse).paletteSparse, false, 'LINEAR did not fall back to the dense palette');
+    assert.equal(owner(pair.sparse).paletteSparse, false, 'LINEAR must use dense decoded-color sampling');
     const settled = native.images.memory().textureUploadBytes;
     draw(pair.sparse);
-    assert.equal(owner(pair.sparse).paletteSparse, false, 'fallback oscillated back into sparse storage');
+    assert.equal(owner(pair.sparse).paletteSparse, false, 'nearest draw must reuse dense backing');
     assert.equal(native.images.memory().textureUploadBytes, settled);
     assert.deepEqual(draw(pair.sparse, { standalone: true }), draw(reference, { standalone: true }));
     console.log(JSON.stringify({ sparseBytes: sparseOwner.gpuBytes, denseBytes: denseOwner.gpuBytes }));

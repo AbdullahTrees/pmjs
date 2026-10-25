@@ -688,12 +688,12 @@ void Renderer::renderScene() {
       if (left || right || above || below) continue;
     }
     const auto logicalInfo = images_.inspect(command.image);
-    // LINEAR tiling uses hardware filtering instead of four palette-color decodes per fragment.
-    const bool paletteEligible = !command.mipmap && command.blur <= 0 &&
+    const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
+    // Tiling keeps hardware filtering; sprites can sample decoded palette colors.
+    const bool paletteEligible = !uniformPrepared && !command.mipmap && command.blur <= 0 &&
       (command.nearest || command.primitive != RenderCommand::Primitive::tilingSprite) &&
       (command.primitive == RenderCommand::Primitive::sprite ||
        command.primitive == RenderCommand::Primitive::tilingSprite);
-    const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
     const bool exactNearestDimensions = logicalInfo && logicalInfo->width > 0 &&
       logicalInfo->height > 0 && (logicalInfo->width & (logicalInfo->width - 1)) == 0 &&
       (logicalInfo->height & (logicalInfo->height - 1)) == 0;
