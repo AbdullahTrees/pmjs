@@ -723,7 +723,6 @@ void Renderer::renderScene() {
     const std::uint32_t paletteBlocks = derived ? derived->paletteBlocks : 0U, paletteResidual = derived ? derived->paletteResidual : 0U;
     const bool compactEligible = logicalInfo && !palette && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
-      command.source[1] == 0 && command.source[3] == logicalInfo->height &&
       command.source[2] > 0 && localWidth > 0 && localHeight > 0 &&
       !command.repeat && !command.mipmap && !command.clampedTilingSampling &&
       !command.appliesColorMatrix && !command.appliesSpriteColor &&

@@ -11,17 +11,19 @@ const native = require(path.resolve(process.argv[2]));
 
 test('compact prepared sprites match full textures through filters, fades and clips', async context => {
   const root = temporaryDirectory('pmjs-compact-sprite-');
-  const columns = 5, cellWidth = 816, height = 624, width = cellWidth * columns;
+  const multiRow = process.argv.includes('--multi-row');
+  const columns = multiRow ? 4 : 5, rows = multiRow ? 5 : 1;
+  const cellWidth = 816, cellHeight = 624, height = cellHeight * rows, width = cellWidth * columns;
   const pixels = Buffer.alloc(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const cell = Math.floor(x / cellWidth), cx = x % cellWidth;
-    const inside = cx >= 158 + cell && cx < 693 - cell && y >= 156 + cell && y < 315 + cell;
-    const gray = inside ? (cx * 71 + y * 29 + cell * 53) % 256 : 0;
+    const cell = Math.floor(x / cellWidth) + Math.floor(y / cellHeight) * columns, cx = x % cellWidth, cy = y % cellHeight;
+    const inside = cx >= 158 + cell && cx < 693 - cell && cy >= 156 + cell && cy < 315 + cell;
+    const gray = inside ? (cx * 71 + cy * 29 + cell * 53) % 256 : 0;
     pixels.set([gray, gray, gray, 255], (y * width + x) * 4);
   }
   const bytes = png(width, height, pixels);
   fs.writeFileSync(path.join(root, 'source.png'), bytes);
-  native.initialize({ gameRoot: root, assetRoot: '', width: cellWidth, height,
+  native.initialize({ gameRoot: root, assetRoot: '', width: cellWidth, height: cellHeight,
     windowTitle: 'compact prepared sprite pixels', imageWarmCacheBytes: 0 });
   try {
     const schema = native.scene.schema;
@@ -29,7 +31,7 @@ test('compact prepared sprites match full textures through filters, fades and cl
     const directory = path.join(root, 'prepared');
     fs.mkdirSync(directory);
     const descriptor = await native.assets.processImage('source.png', directory,
-      { grid: [columns, 1], crop: [0, 0, cellWidth, height], backdrop: [0, 0, 0, 255] });
+      { grid: [columns, rows], crop: [0, 0, cellWidth, cellHeight], backdrop: [0, 0, 0, 255] });
     assert.ok(descriptor, 'fixture must retain prepared image storage');
     assert.equal(descriptor.compactEligible, true, 'preparation certifies compact sampling');
     if (process.argv.includes('--legacy-index')) delete descriptor.compactEligible;
@@ -41,19 +43,19 @@ test('compact prepared sprites match full textures through filters, fades and cl
     const program = native.render.createFilterProgram(fragment, vertex);
     const plan = native.render.createFilterPlan({ frame: [-4, -4, 824, 632], resolutions: [1, 1],
       passes: [{ program: program.handle, input: 0, output: 1, clear: false, blend: 0, uniforms: [], samplers: [] }] });
-    function render(image, cell, alpha, blend, filtered, scale, clip) {
+    function render(image, cell, alpha, blend, filtered, scale, clip, floatUv = false) {
       const count = filtered ? 3 : 1, sprite = filtered ? 1 : 0;
       const metadata = new Uint32Array(count * schema.metadataStride);
       const values = new Float32Array(count * schema.valueStride);
       for (let i = 0; i < count; i++) {
         metadata.set([i === sprite ? 1 : i === 0 ? 6 : 7, filtered && i > 0 ? 0 : 0xffffffff,
           i === sprite ? image.handle : i === 0 ? plan.handle : 0, 0xc3e7af,
-          i === sprite ? blend : i === 0 ? 31 : 0, i === sprite ? 1 << 8 : 0, 0], i * schema.metadataStride);
+          i === sprite ? blend : i === 0 ? 31 : 0, i === sprite ? (1 << 8) | (floatUv ? 1 << 17 : 0) : 0, 0], i * schema.metadataStride);
         values.set([1, 0, 0, 1, 0, 0, 1], i * schema.valueStride);
       }
       const at = sprite * schema.valueStride;
       values.set([scale, 0, 0, scale, 0, -15, alpha], at);
-      values.set([cell * cellWidth, 0, cellWidth, height, cellWidth, height], at + 9);
+      values.set([cell % columns * cellWidth, Math.floor(cell / columns) * cellHeight, cellWidth, cellHeight, cellWidth, cellHeight], at + 9);
       if (clip) {
         metadata[sprite * schema.metadataStride + 5] |= 1;
         values.set([180, 140, 510, 210], at + 17);
@@ -65,24 +67,31 @@ test('compact prepared sprites match full textures through filters, fades and cl
       return Buffer.from(native.canvas.captureSceneRawPremultiplied());
     }
     let comparisons = 0;
-    for (const filtered of [false, true]) for (let cell = 0; cell < columns; cell++) {
-      for (const alpha of [0.37, 1]) for (const blend of [0, 1, 2, 3]) {
-        assert.deepEqual(render(compact, cell, alpha, blend, filtered, 1, false),
-          render(original, cell, alpha, blend, filtered, 1, false),
-          `filter=${filtered} cell=${cell} alpha=${alpha} blend=${blend}`);
+    const cells = multiRow ? [0, 1, 2, 3, 4, 8, 12, 16, 19] : [0, 1, 2, 3, 4];
+    for (const floatUv of multiRow ? [false, true] : [false]) {
+      for (const filtered of [false, true]) for (const cell of cells) {
+        for (const alpha of [0.37, 1]) for (const blend of [0, 1, 2, 3]) {
+          assert.deepEqual(render(compact, cell, alpha, blend, filtered, 1, false, floatUv),
+            render(original, cell, alpha, blend, filtered, 1, false, floatUv),
+            `filter=${filtered} cell=${cell} alpha=${alpha} blend=${blend} floatUv=${floatUv}`);
+          comparisons++;
+        }
+      }
+      const posedCell = multiRow ? 19 : 2;
+      for (const filtered of [false, true]) for (const scale of [0.98, 1.31]) for (const clip of [false, true]) {
+        assert.deepEqual(render(compact, posedCell, 0.63, 0, filtered, scale, clip, floatUv),
+          render(original, posedCell, 0.63, 0, filtered, scale, clip, floatUv), `filter=${filtered} scale=${scale} clip=${clip}`);
         comparisons++;
       }
-    }
-    for (const filtered of [false, true]) for (const scale of [0.98, 1.31]) for (const clip of [false, true]) {
-      assert.deepEqual(render(compact, 2, 0.63, 0, filtered, scale, clip),
-        render(original, 2, 0.63, 0, filtered, scale, clip), `filter=${filtered} scale=${scale} clip=${clip}`);
-      comparisons++;
     }
     const memory = native.images.memory(100);
     const owner = memory.largest.find(entry => entry.handle === compact.handle);
     assert.ok(owner, 'prepared sprite owner must remain observable');
-    assert.equal(owner.gpuBytes, 1024 * 1024 + 8 * (width + height),
+    const pot = value => 2 ** Math.ceil(Math.log2(value));
+    const pageBytes = descriptor.pages.reduce((total, page) => total + pot(page.width) * pot(page.height), 0);
+    assert.equal(owner.gpuBytes, pageBytes + 8 * (width + height),
       'prepared sprites must retain one padded R8 page and four sampling tables');
+    assert.equal(memory.preparedFrameCacheMisses, 0, 'compact sampling must bypass frame reconstruction');
     context.diagnostic(JSON.stringify({ comparisons, compact: owner }));
     native.images.release(compact.handle);
     native.images.release(original.handle);

@@ -2863,16 +2863,23 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
     auto content = readPixelsRegion(handle, sx, sy, ex-sx, ey-sy);
     if (!content) return std::nullopt;
     ImagePixels pixels{extent->width, extent->height, std::vector<std::uint8_t>(extent->rgbaBytes)};
-    for (int row = 0; row < pixels.height; ++row) for (int column = 0; column < pixels.width; ++column) {
-      const int cx = std::clamp(left+column-halo, 0, logical->width-1)-sx;
+    const int leftPadding = sx - left + halo;
+    const int rightPadding = leftPadding + content->width;
+    for (int row = 0; row < pixels.height; ++row) {
       const int cy = std::clamp(top+row-halo, 0, logical->height-1)-sy;
-      std::copy_n(content->rgba.data()+(static_cast<std::size_t>(cy)*content->width+cx)*4U,
-        4, pixels.rgba.data()+(static_cast<std::size_t>(row)*pixels.width+column)*4U);
+      const auto* sourceRow = content->rgba.data() + static_cast<std::size_t>(cy)*content->width*4U;
+      auto* destinationRow = pixels.rgba.data() + static_cast<std::size_t>(row)*pixels.width*4U;
+      std::memcpy(destinationRow + leftPadding*4U, sourceRow, static_cast<std::size_t>(content->width)*4U);
+      for (int column = 0; column < leftPadding; ++column)
+        std::memcpy(destinationRow + column*4U, sourceRow, 4);
+      for (int column = rightPadding; column < pixels.width; ++column)
+        std::memcpy(destinationRow + column*4U, sourceRow + (content->width-1)*4U, 4);
     }
     if (premultiplied && !slot.premultiplied)
       for (std::size_t i = 0; i < pixels.rgba.size(); i += 4)
-        for (std::size_t c = 0; c < 3; ++c)
-          pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c]*pixels.rgba[i+3]+127)/255);
+        if (pixels.rgba[i+3] != 255)
+          for (std::size_t c = 0; c < 3; ++c)
+            pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c]*pixels.rgba[i+3]+127)/255);
     auto channelStorage = imageStorage(pixels);
     auto bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
     if (bytes > preparedFrameBudgetBytes_) {

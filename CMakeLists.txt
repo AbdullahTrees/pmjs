@@ -583,6 +583,8 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --legacy-index)
   add_test(NAME node-compact-sprite-legacy-index COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-compact-sprite.cjs" $<TARGET_FILE:pmjs_native> --legacy-index)
+  add_test(NAME node-compact-sprite-multi-row COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-compact-sprite.cjs" $<TARGET_FILE:pmjs_native> --multi-row)
   add_test(NAME node-block-sprite-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --disabled)
   add_test(NAME node-identity-filter-shader-full-resolution COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
@@ -592,7 +594,7 @@ if(BUILD_TESTING)
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
   set_tests_properties(node-prepared-frame-effects node-large-prepared-frame
     node-block-sprite node-block-sprite-disabled node-block-sprite-legacy-index
-    node-compact-sprite-legacy-index node-identity-filter-shader-full-resolution
+    node-compact-sprite-legacy-index node-compact-sprite-multi-row node-identity-filter-shader-full-resolution
     node-derived-sprite node-compact-sprite node-uniform-inline-matrix node-audio-bytes
     PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-pixi4-tiling-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
