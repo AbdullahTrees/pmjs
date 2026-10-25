@@ -1,10 +1,57 @@
 'use strict';
 
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { openPreparation, inventory, invalidateResults } = require('./preparation-state.cjs');
-const { prepareAssetsPhase } = require('./asset-preparation.cjs');
+const { prepareAssetsPhase, imageSourceList } = require('./asset-preparation.cjs');
 const { prepareMapsPhase } = require('./map-preparation.cjs');
 const { prepareForRun } = require('./port-preparation.cjs');
+const { readCatalog, writeCatalog, buildEntries, policyIdentity } = require('./prepared-catalog.cjs');
+
+const isImageResult = record => record && typeof record.source === 'string' &&
+  record.source.startsWith('img/') && record.descriptor;
+
+function imageProcessor(native, pageCodec) {
+  return { version: native.assets?.preparationVersion ?? null,
+    lz4: native.assets?.preparationLz4Version ?? null, codec: pageCodec };
+}
+
+// A verified cache can be installed from its catalog without statting or reading the game tree.
+// The fingerprint ties the catalog to the exact result set, and any failed or invalidated image
+// refuses the fast path so the full phase can repair it.
+async function tryFastImages(options, session) {
+  const { native, logger = console, pageCodec = 'lz4' } = options;
+  if (options.verifyHashes) return null;
+  if (!native.assets || typeof native.assets.installPreparedCatalog !== 'function') return null;
+  const catalog = await readCatalog(session.root);
+  if (!catalog) return null;
+  const entries = buildEntries({ root: session.root, results: session.data.results,
+    failures: session.data.failures, sources: imageSourceList(session.inventory), catalog,
+    processor: imageProcessor(native, pageCodec), policy: policyIdentity(options) });
+  if (!entries) return null;
+  const started = performance.now();
+  let report;
+  try { report = await native.assets.installPreparedCatalog(entries, false, true); }
+  catch (error) {
+    logger.warn?.('[pmjs] fast image catalog install failed: ' + error.message);
+    return null;
+  }
+  const accepted = report?.accepted ? report.accepted.length : Number.isInteger(report) ? report : entries.length;
+  if (accepted !== entries.length) {
+    native.assets.installPrepared?.([]);
+    logger.warn?.(`[pmjs] fast image catalog installed ${accepted}/${entries.length}; using full validation`);
+    return null;
+  }
+  const imageRecords = Object.values(session.data.results).filter(isImageResult);
+  return {
+    total: imageRecords.length, prepared: entries.length, installed: entries.length,
+    generated: 0, hits: entries.length, fallback: imageRecords.length - entries.length,
+    failedFiles: 0, decrypted: 0, storageEntries: [], decryptedEntries: [],
+    audioViewEntries: [], audioViews: 0, decisions: [], entries: [],
+    durationMs: performance.now() - started, fast: true
+  };
+}
+
 
 async function prepareGameAssets(options) {
   const { native, logger = console, shouldCancel = () => false,
@@ -56,8 +103,14 @@ async function prepareGameAssets(options) {
     }
   };
   try {
-    if (options.images !== false) result.images = await phase('images', onProgress => prepareAssetsPhase({
-      ...options, session, onProgress }));
+    if (options.images !== false) {
+      if (options.fastBoot !== false) {
+        try { result.images = await tryFastImages(options, session) || undefined; }
+        catch (error) { logger.warn('[pmjs] fast image boot unavailable: ' + error.message); }
+      }
+      if (!result.images) result.images = await phase('images', onProgress => prepareAssetsPhase({
+        ...options, session, onProgress }));
+    }
     if (preparationContext === 'offline')
       for (const entry of result.images?.decryptedEntries || []) native.assets.addDerived?.(entry.logicalSource, entry.file);
     if (!shouldCancel() && options.maps && (session.inventory.some(file => /^data\/Map\d+\.json$/i.test(file)) || session.data.indices.maps))
@@ -83,6 +136,21 @@ async function prepareGameAssets(options) {
         if (result.maps) Object.assign(result.maps, { error: error.message, installed: 0, index: {} });
         result.portArtifacts = new Map();
         for (const id of session.outcomes.keys()) session.outcome(id, 'ordinary-failure', error.message);
+      }
+      // Only a completed, fully verified image phase can produce a catalog: storage and decrypted
+      // entries are installed separately each boot and are not represented in it.
+      // Failed sources have no result and are recorded in the fingerprint; the full phase would
+      // also leave them on ordinary loading. Rejected installs are different: they would make a
+      // prepared result silently disappear from the catalog, so those keep the full path.
+      if (preparationContext !== 'offline' && !result.images?.fast && !result.images?.error &&
+          result.images?.entries?.length && session.phaseStates.get('images') === 'completed' &&
+          !result.images.installFailures &&
+          !result.images.storageEntries?.length && !result.images.decryptedEntries?.length) {
+        await writeCatalog({ root: session.root, results: session.data.results,
+          failures: session.data.failures, sources: imageSourceList(session.inventory),
+          entries: result.images.entries, processor: imageProcessor(native, options.pageCodec),
+          policy: policyIdentity(options) })
+          .catch(error => { logger.warn('[pmjs] prepared catalog could not be written: ' + error.message); return false; });
       }
     }
     result.records = session.data.results;

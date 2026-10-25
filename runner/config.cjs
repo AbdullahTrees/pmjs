@@ -81,7 +81,7 @@ function resolveDefaults(input) {
     losslessPrefixes: Object.hasOwn(configAssetPreparation, 'losslessPrefixes') || Object.hasOwn(inputAssetPreparation, 'losslessPrefixes'),
     recipes: Object.hasOwn(configAssetPreparation, 'recipes') || Object.hasOwn(inputAssetPreparation, 'recipes') || input.assetRecipes !== undefined
   };
-  assetPreparation = { enabled: true, maps: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 256 * 1024 * 1024, ...assetPreparation,
+  assetPreparation = { enabled: true, maps: true, fastBoot: true, verifyHashes: false, pageCodec: 'lz4', workspaceBytes: 256 * 1024 * 1024, ...assetPreparation,
     ...inputAssetPreparation };
   if (input.assetPreparation === 'on' || input.assetPreparation === 'off') {
     assetPreparation.enabled = input.assetPreparation === 'on';
@@ -93,6 +93,7 @@ function resolveDefaults(input) {
     assetPreparation.maps = input.mapPreparation === 'on';
   }
   if (typeof assetPreparation.maps !== 'boolean') throw new Error('assetPreparation.maps must be a boolean');
+  if (typeof assetPreparation.fastBoot !== 'boolean') throw new Error('assetPreparation.fastBoot must be a boolean');
   if (!['png', 'lz4'].includes(assetPreparation.pageCodec)) throw new Error('assetPreparation.pageCodec must be png or lz4');
   if (typeof assetPreparation.verifyHashes !== 'boolean') throw new Error('assetPreparation.verifyHashes must be a boolean');
   if (!Number.isSafeInteger(assetPreparation.workspaceBytes) || assetPreparation.workspaceBytes < 0 ||
