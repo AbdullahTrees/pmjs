@@ -112,3 +112,65 @@ for (const mode of ['mutate', 'replace', 'interrupt', 'replace-output']) test('c
   await assert.rejects(files.copyVerified(source, target, hash(bytes)), /changed|differs|interrupted/);
   assert.equal(fs.existsSync(target), false);
 });
+
+for (const mode of ['async', 'sync']) for (const scenario of [
+  { name: 'FUSE inode drift', field: 'ino', type: 0x65735546, reused: true },
+  { name: 'ordinary filesystem inode change', field: 'ino', type: 0xef53 },
+  { name: 'FUSE modification time change', field: 'mtimeNs', type: 0x65735546 },
+  { name: 'FUSE change time change', field: 'ctimeNs', type: 0x65735546 },
+  { name: 'FUSE birth time change', field: 'birthtimeNs', type: 0x65735546 },
+  { name: 'FUSE size change', field: 'size', type: 0x65735546 },
+  { name: 'FUSE device change', field: 'dev', type: 0x65735546 },
+  { name: 'FUSE full verification', field: 'ino', type: 0x65735546, verify: true },
+  { name: 'unavailable filesystem type', field: 'ino', type: null },
+  { name: 'malformed saved inode', field: 'ino', type: 0x65735546, malformed: true },
+]) test(mode + ' receipt reuse: ' + scenario.name, async t => {
+  const root = temporaryDirectory('receipt-inode-'), file = path.join(root, 'source');
+  const bytes = Buffer.from('unchanged asset');
+  fs.writeFileSync(file, bytes);
+  let dirty = 0;
+  const session = { data: { files: {} }, markDirty() { dirty++; }, checkpoint: async () => {} };
+  const initial = await preparationFiles(session);
+  await initial.inspect(file);
+  const receipt = session.data.files[file];
+  dirty = 0;
+  if (scenario.malformed) {
+    const fields = receipt.identity.split(':'); fields[1] = 'invalid';
+    receipt.identity = fields.join(':');
+  }
+  const stat = fs.lstatSync(file, { bigint: true });
+  const changed = { ...stat, [scenario.field]: stat[scenario.field] + 1n, isFile: () => true, isSymbolicLink: () => false };
+  t.mock.method(fs.promises, 'lstat', async () => changed);
+  t.mock.method(fs.promises, 'stat', async () => changed);
+  t.mock.method(fs, 'lstatSync', () => changed);
+  t.mock.method(fs, 'statfsSync', () => {
+    if (scenario.type === null) throw new Error('unavailable');
+    return { type: scenario.type };
+  });
+  const files = await preparationFiles(session, scenario.verify);
+  const checked = mode === 'sync' ? files.inspectSync(file, bytes) : await files.inspect(file);
+  assert.equal(checked.hash, hash(bytes));
+  assert.equal(files.stats.hashedFiles, scenario.reused ? 0 : 1);
+  assert.equal(files.stats.reusedFiles, scenario.reused ? 1 : 0);
+  if (scenario.reused) {
+    assert.equal(session.data.files[file], receipt, 'inode drift must not rewrite the state');
+    assert.equal(dirty, 0);
+  }
+});
+
+for (const mode of ['async', 'sync']) test(mode + ' symlink receipts retain strict inode checks on FUSE', async t => {
+  const root = temporaryDirectory('receipt-symlink-'), file = path.join(root, 'source'), link = path.join(root, 'link');
+  const bytes = Buffer.from('unchanged asset'); fs.writeFileSync(file, bytes); fs.symlinkSync(file, link);
+  const session = { gameRoot: root, data: { files: {} }, checkpoint: async () => {} };
+  await (await preparationFiles(session)).inspect(link);
+  const before = fs.statSync(file, { bigint: true });
+  const changed = { ...before, ino: before.ino + 1n, isFile: () => true };
+  t.mock.method(fs.promises, 'stat', async () => changed);
+  t.mock.method(fs, 'statSync', () => changed);
+  t.mock.method(fs, 'statfsSync', () => ({ type: 0x65735546 }));
+  const files = await preparationFiles(session);
+  if (mode === 'sync') files.inspectSync(link, bytes);
+  else await files.inspect(link);
+  assert.equal(files.stats.hashedFiles, 1);
+  assert.equal(files.stats.reusedFiles, 0);
+});
