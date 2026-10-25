@@ -848,7 +848,8 @@ void Renderer::renderScene() {
     }
     // Tiling retains GPU projection so texel-boundary interpolation uses the
     // same arithmetic as the sprite vertex transform.
-    const bool worldVertices = (command.spriteWorldVertices || command.pixiSpritePacking ||
+    const bool worldVertices = command.primitive != RenderCommand::Primitive::screenFill &&
+                              (command.spriteWorldVertices || command.pixiSpritePacking ||
                                command.primitive == RenderCommand::Primitive::tilingSprite) &&
                                viewportMapping == std::array<float, 4>{1, 1, 0, 0};
     const auto project = [&](const std::array<float, 2>& pixel) {

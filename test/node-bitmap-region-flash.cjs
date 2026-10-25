@@ -34,8 +34,7 @@ function render(handle, region, opacity, nearest, rotation) {
 
 try {
   native.canvas.writePremultipliedPixels(atlas.handle, atlasX, atlasY, width, height, pixels);
-  for (const opacity of [0, 25, 33.6, 128, 255]) {
-    const alpha = Math.min(255, Math.floor(opacity / 255 * 256));
+  for (const [opacity, alpha] of [[0, 0], [25, 24], [33.6, 33], [47.175, 46], [128, 128], [255, 255]]) {
     const flashed = pixels.slice();
     for (let offset = 0; offset < flashed.length; offset += 4) for (let channel = 0; channel < 3; channel++) {
       if (opacity > 0) {
@@ -45,8 +44,8 @@ try {
     }
     native.canvas.writePremultipliedPixels(image.handle, 0, 0, width, height, flashed);
     for (const nearest of [false, true]) for (const rotation of [0, 0.23, -0.41]) {
-      assert.deepEqual(render(atlas.handle, true, opacity, nearest, rotation),
-        render(image.handle, false, 0, nearest, rotation),
+      assert.ok(render(atlas.handle, true, opacity, nearest, rotation).equals(
+        render(image.handle, false, 0, nearest, rotation)),
         `stored flash versus atlas flash: opacity ${opacity}, nearest ${nearest}, rotation ${rotation}`);
     }
   }

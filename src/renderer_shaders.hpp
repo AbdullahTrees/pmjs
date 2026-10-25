@@ -1463,7 +1463,8 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
     if (!spriteColorEnabled || spriteBlendColor.a <= 0.0) return vec4(premultiplied, texel.a);
     ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
     ivec3 blendBytes = ivec3(floor(spriteBlendColor.rgb * 255.0 + 0.5));
-    int blendAlpha = min(255, int(floor(spriteBlendColor.a * 256.0)));
+    highp int blendScale = int(floor(spriteBlendColor.a * 256.0 + 0.5));
+    int blendAlpha = (255 * blendScale) / 256;
     int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
     ivec3 atop = (sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127) / 255;
     return vec4(vec3((atop * (sourceAlpha + 1)) / 256) / 255.0, texel.a);
@@ -1890,7 +1891,8 @@ constexpr const char* tileFragmentSource = R"(#version 300 es
       // Preserve those RGBA8 writes instead of fusing their real-number algebra.
       ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
       ivec3 blendBytes = ivec3(floor(meshPostTintOverlayColor.rgb * 255.0 + 0.5));
-      int blendAlpha = min(255, int(floor(meshPostTintOverlayColor.a * 256.0)));
+      highp int blendScale = int(floor(meshPostTintOverlayColor.a * 256.0 + 0.5));
+      int blendAlpha = (255 * blendScale) / 256;
       int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
       ivec3 atop = (sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127) / 255;
       premultiplied = vec3((atop * (sourceAlpha + 1)) / 256) / 255.0;
