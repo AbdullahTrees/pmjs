@@ -289,7 +289,7 @@ class ImageStore {
   // Frame textures use ordinary sampling with approximate filtering.
   std::optional<SpriteImageRegion> resolvePreparedFrameRegion(
       ImageHandle handle, float x, float y, float width, float height,
-      bool premultiplied = true);
+      bool premultiplied = true, bool linearPalette = false);
   void setPreparedFrameCacheBudget(std::size_t bytes);
   std::size_t preparedFrameCacheBudget() const { return preparedFrameBudgetBytes_; }
   std::size_t preparedFrameCacheBytes() const { return preparedFrameBytes_; }

@@ -2828,7 +2828,7 @@ void ImageStore::clearPreparedFrames(const PreparedBacking* owner) {
 }
 
 std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHandle handle,
-    float x, float y, float width, float height, bool premultiplied) {
+    float x, float y, float width, float height, bool premultiplied, bool linearPalette) {
   if (!preparedFrameBudgetBytes_) return std::nullopt;
   const auto logical = inspect(handle);
   if (!logical || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(width) ||
@@ -2838,12 +2838,12 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
   if (!slot.prepared || slot.tiles || slot.prepared->descriptor.uniform) return std::nullopt;
   const int left = static_cast<int>(std::floor(x)), top = static_cast<int>(std::floor(y));
   const int right = static_cast<int>(std::ceil(x + width)), bottom = static_cast<int>(std::ceil(y + height));
-  if (left == 0 && top == 0 && right == logical->width && bottom == logical->height)
+  if (!linearPalette && left == 0 && top == 0 && right == logical->width && bottom == logical->height)
     return std::nullopt;
   const std::array<int, 4> source{left, top, right-left, bottom-top};
   const int halo = std::max(1, slot.prepared->descriptor.halo);
   const auto extent = checkedImageExtent(source[2]+2*halo, source[3]+2*halo);
-  if (!extent) return std::nullopt;
+  if (!extent || (linearPalette && extent->rgbaBytes > preparedFrameBudgetBytes_)) return std::nullopt;
   const bool targetPremultiplied = premultiplied || slot.premultiplied;
   auto found = std::find_if(preparedFrames_.begin(), preparedFrames_.end(), [&](const auto& frame) {
     return frame.owner == slot.prepared.get() && frame.source == source &&
@@ -2882,7 +2882,7 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
             pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c]*pixels.rgba[i+3]+127)/255);
     auto channelStorage = imageStorage(pixels);
     auto bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
-    if (bytes > preparedFrameBudgetBytes_) {
+    if (linearPalette || bytes > preparedFrameBudgetBytes_) {
       int x0 = pixels.width, y0 = pixels.height, x1 = 0, y1 = 0;
       for (int row = 0; row < pixels.height; ++row) for (int column = 0; column < pixels.width; ++column) {
         const auto* pixel = pixels.rgba.data()+(static_cast<std::size_t>(row)*pixels.width+column)*4U;
