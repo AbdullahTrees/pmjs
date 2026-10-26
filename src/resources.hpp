@@ -310,6 +310,15 @@ class ImageStore {
       bool premultiplied = true);
 
   std::uint64_t preparedFrameCacheHits() const { return preparedFrameHits_; }
+  std::vector<std::array<float,4>> preparedSpriteParts(ImageHandle handle, const std::array<float,4>& source) const;
+  void trimPreparedPageTextures();
+  std::size_t preparedPageTextureBytes() const;
+  std::uint64_t preparedFrameConversions() const { return preparedFrameConversions_; }
+  double preparedFrameConversionMs() const { return preparedFrameConversionMs_; }
+  std::uint64_t preparedFrameCacheBypasses() const { return preparedFrameBypasses_; }
+  std::uint64_t renderReadbacks() const { return renderReadbacks_; }
+  std::uint64_t preparedFrameUploadBytes() const { return preparedFrameUploadBytes_; }
+  std::uint64_t paletteReadbacks() const { return paletteReadbacks_; }
   std::uint64_t preparedFrameCacheMisses() const { return preparedFrameMisses_; }
   std::uint64_t preparedFrameCacheEvictions() const { return preparedFrameEvictions_; }
   std::optional<CompactImageRegion> resolveCompactRegion(
@@ -389,6 +398,12 @@ class ImageStore {
   std::vector<ImageMemoryEntry> memoryEntries() const;
 
  private:
+  friend class Renderer;
+  bool rendering_ = false;
+  mutable std::uint64_t renderReadbacks_ = 0;
+  std::uint64_t preparedFrameUploadBytes_ = 0;
+  std::optional<ImagePixels> readTexturePixels(const ImageInfo& image, ImageChannelStorage storage = {},
+      std::optional<std::array<int,4>> region = std::nullopt) const;
   std::unordered_map<ImageHandle, std::vector<std::weak_ptr<ImagePixelSnapshot>>> pixelReads_;
   struct SharedPreparedPage;
   struct PreparedPool;
@@ -402,6 +417,11 @@ class ImageStore {
       std::size_t bytes, ImageChannelStorage storage);
   std::string preparedTextureKey(PreparedBacking& backing, bool premultiplied);
 
+  std::optional<ImageInfo> convertPreparedFrame(ImageHandle handle, const std::array<int, 4>& storage, bool premultiplied);
+  std::uint32_t preparedCopyProgram_ = 0, preparedCopyVao_ = 0;
+  std::uint64_t preparedFrameConversions_ = 0, preparedFrameBypasses_ = 0;
+  mutable std::uint64_t paletteReadbacks_ = 0;
+  double preparedFrameConversionMs_ = 0;
   struct PreparedFrame {
     const PreparedBacking* owner;
     std::array<int, 4> source;

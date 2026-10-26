@@ -44,7 +44,7 @@ async function classifiedSheet() {
     for (let i = 0; i < actual.length; ++i) maximum = Math.max(maximum, Math.abs(actual[i] - expected[i]));
     assert.ok(maximum <= 1, 'classified frame changed ordinary filtering');
     const owner = () => native.images.memory(100).largest.find(entry => entry.handle === image.handle);
-    assert.equal(owner().fullTextureResident, budget !== null,
+    assert.equal(owner().fullTextureResident, false,
       'an eligible frame must not allocate the full source palette');
     drawPacket(native, spritePacket(native, image, { ...options, nearest: true }));
     assert.equal(owner().fullTextureResident, true, 'nearest drawing must retain the full palette fallback');
@@ -59,8 +59,11 @@ async function classifiedSheet() {
     const directory = path.join(root, 'prepared'); fs.mkdirSync(directory);
     const descriptor = await native.assets.processImage('source.png', directory, { grid: [1, 1], backdrop: [0, 0, 0, 0] });
     assert.ok(descriptor);
+    const sourceIdentity = native.assets.sourceIdentity('source.png');
+    const storage = await native.assets.classifyImageStorage(path.join(root, 'source.png'));
+    native.assets.installImageStorage([{source:'source.png',sourceIdentity,storage}]);
     native.assets.installPrepared([{ source: 'source.png', directory, descriptor,
-      sourceIdentity: native.assets.sourceIdentity('source.png') }]);
+      sourceIdentity }]);
     reference = native.canvas.create(64, 48);
     native.canvas.writePixels(reference.handle, 0, 0, 64, 48, pixels);
     prepared = await native.images.loadAsync('source.png');
@@ -85,11 +88,12 @@ async function classifiedSheet() {
       await classifiedSheet();
       return;
     }
-    assert.ok(memory().preparedFrameCacheMisses > 0);
+    assert.equal(memory().preparedFrameCacheMisses, 0, 'single-cell linear frames draw their prepared page directly');
     const packet = spritePacket(native, prepared, { nearest: false, crop: [0, 0, 64, 48] });
-    const first = drawPacket(native, packet), uploads = memory().textureUploadBytes, hits = memory().preparedFrameCacheHits;
+    const first = drawPacket(native, packet), uploads = memory().textureUploadBytes, hits = memory().preparedRegions;
     assert.deepEqual(drawPacket(native, packet), first);
-    assert.ok(memory().preparedFrameCacheHits > hits);
+    assert.ok(memory().preparedRegions > hits);
+    assert.equal(memory().paletteReadbacks, 0);
     assert.equal(memory().textureUploadBytes, uploads);
     assert.ok(memory().preparedFrameCacheBytes <= memory().preparedFrameCacheBudget);
     native.images.release(prepared.handle); prepared = null; native.beginFrame();
