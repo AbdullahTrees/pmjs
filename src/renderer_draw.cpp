@@ -1079,7 +1079,8 @@ void Renderer::renderScene() {
   applyBlendMode(activeBlend);
   bool reuseFilterContent = false;
   for (const auto& operation : operations) {
-    if (reuseFilterContent && operation.action == RenderCommand::Action::draw) continue;
+    if (reuseFilterContent && (operation.action == RenderCommand::Action::draw ||
+        operation.action == RenderCommand::Action::clearRect)) continue;
     if (operation.action == RenderCommand::Action::clearRect) {
       if (filterDepth == 0) throw std::logic_error("rectangle clear requires an isolated target");
       const auto& rectangle = operation.command->clearRectangle;
@@ -2084,7 +2085,11 @@ void Renderer::renderScene() {
       }
       continue;
     }
-    const auto& spriteEffect = directSprite ? directSprite_ :
+    const bool plainRegion = operation.standaloneBitmapRegion && operation.blur <= 0 &&
+      !operation.appliesSpriteColor && operation.premultipliedSpriteTexture &&
+      !operation.derivedImage && !operation.paletteTable && !operation.block &&
+      !operation.maskImage && !operation.inlineMatrix;
+    const auto& spriteEffect = directSprite ? directSprite_ : plainRegion ? plainBitmapRegion_ :
       operation.standaloneBitmapRegion && operation.blur <= 0 &&
         !operation.appliesSpriteColor ? bitmapRegion_ : spriteEffect_;
     const std::uint32_t spriteProgram = simpleSprite ? simpleProgram_ : spriteEffect.program;

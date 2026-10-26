@@ -215,10 +215,16 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
 
   function createPresenter(effect, plugin, flashRate, needsClip) {
     var retainedPresenter = null;
+    function releaseFlashAtlases(presenter) {
+      if (!presenter._flashAtlases) return;
+      presenter._flashAtlases.forEach(function(entry) { entry.texture.destroy(true); });
+      presenter._flashAtlases.clear();
+    }
     var originalClear = effect.clear;
     effect.clear = function() {
       if (retainedPresenter && retainedPresenter._atlas) {
         PMJS.pixi4.releaseSceneResources(retainedPresenter);
+        releaseFlashAtlases(retainedPresenter);
         retainedPresenter._atlas.destroy(true);
         if (retainedPresenter._backgroundTexture) retainedPresenter._backgroundTexture.destroy(true);
         retainedPresenter._backgroundTexture = null;
@@ -232,6 +238,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
         retainedPresenter._items.forEach(function(item) {
           item.flashDuration = 0;
           item.flashColor = [0, 0, 0, 0];
+          item.image.texture = item.texture;
           item.image._blendColor = item.flashColor;
         });
         retainedPresenter.update();
@@ -244,6 +251,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
       } catch (error) {
         // These textures and meshes belong solely to the failed presenter.
         PMJS.pixi4.releaseSceneResources(this);
+        releaseFlashAtlases(this);
         if (this._items) this._items.forEach(function(item) {
           PMJS.pixi4.releaseSceneResources(item.image);
           item.image.destroy();
@@ -261,6 +269,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
       PMJS.pixi4.setStageRenderOptions(this, { worldState: 'pixi' });
       this._fragments = fragments;
       this._items = [];
+      this._flashAtlases = new Map();
       this._broken = fragments.map(function() { return false; });
       this._clipBackground = needsClip();
       var texture = fragments[0]._isatGpuSnap;
@@ -342,6 +351,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
         image.anchor.x = item.anchorX;
         image.anchor.y = item.anchorY;
         item.image = image;
+        item.texture = image.texture;
         old.destroy();
       }, this);
       var atlasCounters = stats();
@@ -376,6 +386,44 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
       counters.backgroundBytes = Graphics.width * Graphics.height * 4;
       this.update();
     };
+    GpuPresenter.prototype.flashRegion = function(item, color) {
+      if (this._flashCacheDisabled) return null;
+      var key = color.join(','), entry = this._flashAtlases.get(key);
+      if (!entry) {
+        // Bound temporary GPU storage when a custom effect supplies more colors.
+        if (this._flashAtlases.size >= 4) return null;
+        var before = performance.now(), sprite = new Sprite(), texture = null;
+        var scale = this._atlas.baseTexture.scaleMode;
+        sprite.texture = this._atlas;
+        sprite._blendColor = color.slice();
+        this._atlas.baseTexture.scaleMode = PIXI.SCALE_MODES.NEAREST;
+        try {
+          texture = Graphics._renderer.generateTextureGpu(sprite, scale, 1,
+            new PIXI.Rectangle(0, 0, this._atlas.width, this._atlas.height), { alphaMode: 'premultiplied' });
+        } catch (error) {
+          this._flashCacheDisabled = true;
+          return null;
+        } finally {
+          this._atlas.baseTexture.scaleMode = scale;
+          PMJS.pixi4.releaseSceneResources(sprite);
+          sprite.destroy();
+        }
+        entry = { texture: texture, regions: new Map() };
+        this._flashAtlases.set(key, entry);
+        var counters = stats();
+        counters.flashAtlasBuilds = (counters.flashAtlasBuilds || 0) + 1;
+        counters.flashAtlasBuildMs = (counters.flashAtlasBuildMs || 0) + performance.now() - before;
+        counters.flashAtlasBytes = (counters.flashAtlasBytes || 0) + this._atlas.width * this._atlas.height * 4;
+      }
+      var region = entry.regions.get(item);
+      if (!region) {
+        var tile = item.atlasRect;
+        region = PMJS.pixi4.createGpuStandaloneBitmapRegion(entry.texture,
+          new PIXI.Rectangle(tile[0], tile[1], tile[2], tile[3]));
+        entry.regions.set(item, region);
+      }
+      return region;
+    };
     GpuPresenter.prototype.update = function() {
       var clearPoints = [], clearRectangles = [];
       for (var index = 0; index < this._fragments.length; index++) {
@@ -406,7 +454,9 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
           var duration = item.flashDuration--;
           item.flashColor[3] *= (duration - 1) / duration;
           if (duration % flashRate === 1) {
-            item.image._blendColor = item.flashColor.slice();
+            var region = item.flashColor[3] > 0 ? this.flashRegion(item, item.flashColor) : null;
+            item.image.texture = region || item.texture;
+            item.image._blendColor = region ? [0, 0, 0, 0] : item.flashColor.slice();
           }
         }
       }

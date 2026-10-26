@@ -487,7 +487,7 @@ class Renderer {
   bool matchesColorMatrixPlan(const CustomFilterPlan& plan,
                              const std::array<double, 20>& matrix) const;
   void reduceConstantBlackGroups();
-  void drawCustomFilterPlan(const CustomFilterPlan& plan, const RenderTarget& source,
+  void drawCustomFilterPlan(const CustomFilterPlan& plan, RenderTarget& source,
                             const RenderTarget& output, const RenderCommand& command,
                             float sourceResolution, float outputResolution, bool outputYDown,
                             const std::array<float, 4>& outputFrame, bool sourcePaddingKnownZero, const std::string& cacheKey = {});
@@ -576,6 +576,7 @@ class Renderer {
     int matrixAlpha = -1;
   };
   SpriteEffectProgram spriteEffect_, bitmapRegion_, directSprite_;
+  SpriteEffectProgram plainBitmapRegion_;
   std::uint32_t clearTriangleProgram_ = 0;
   int clearTrianglePointsUniform_ = -1;
   int clearTriangleNormalsUniform_ = -1;

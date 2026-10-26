@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace pmjs::renderer_shaders {
 constexpr const char* triangleClipCoverageSource = R"(
@@ -1461,12 +1462,19 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       texelFetch(image, ivec2(address), 0);
     highp vec3 premultiplied = texturePremultiplied ? texel.rgb : texel.rgb * texel.a;
     if (!spriteColorEnabled || spriteBlendColor.a <= 0.0) return vec4(premultiplied, texel.a);
-    ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
-    ivec3 blendBytes = ivec3(floor(spriteBlendColor.rgb * 255.0 + 0.5));
+    highp ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
+    highp ivec3 blendBytes = ivec3(floor(spriteBlendColor.rgb * 255.0 + 0.5));
     highp int blendScale = int(floor(spriteBlendColor.a * 256.0 + 0.5));
-    int blendAlpha = (255 * blendScale) / 256;
-    int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
-    ivec3 atop = (sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127) / 255;
+    highp int blendAlpha = (255 * blendScale) / 256;
+    highp int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
+    highp ivec3 numerator = sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127;
+    highp ivec3 atop;
+    if (blendAlpha >= 0 && blendAlpha <= 255 &&
+        all(greaterThanEqual(blendBytes, ivec3(0))) && all(lessThanEqual(blendBytes, ivec3(255)))) {
+      // Exact division by 255 for the nonnegative sixteen-bit byte numerator.
+      highp ivec3 rounded = numerator + ivec3(1);
+      atop = (rounded + (rounded >> 8)) >> 8;
+    } else atop = numerator / 255;
     return vec4(vec3((atop * (sourceAlpha + 1)) / 256) / 255.0, texel.a);
   }
   highp vec4 spriteBitmap() {
@@ -1481,6 +1489,23 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
     highp vec4 sampled;
     if (nearestSampling) sampled = spriteTexel(floor(position + vec2(0.5)) + offset);
     else {
+#ifdef PMJS_PLAIN_BITMAP_REGION
+      // Byte products and sums fit exactly in highp float; round each axis.
+      highp ivec2 low = ivec2(clamp(pixel, spriteFrame.xy, spriteFrame.zw));
+      highp ivec2 high = ivec2(clamp(pixel + vec2(1.0), spriteFrame.xy, spriteFrame.zw));
+      highp vec4 rawA = texelFetch(image, low, 0);
+      highp vec4 rawB = texelFetch(image, ivec2(high.x, low.y), 0);
+      highp vec4 rawC = texelFetch(image, ivec2(low.x, high.y), 0);
+      highp vec4 rawD = texelFetch(image, high, 0);
+      if (max(max(rawA.a, rawB.a), max(rawC.a, rawD.a)) == 0.0) discard;
+      highp vec4 a = floor(rawA * 255.0 + 0.5);
+      highp vec4 b = floor(rawB * 255.0 + 0.5);
+      highp vec4 c = floor(rawC * 255.0 + 0.5);
+      highp vec4 d = floor(rawD * 255.0 + 0.5);
+      highp vec4 top = floor(mix(a, b, weight.x) + 0.5);
+      highp vec4 bottom = floor(mix(c, d, weight.x) + 0.5);
+      sampled = floor(mix(top, bottom, weight.y) + 0.5) / 255.0;
+#else
       ivec2 weights = ivec2(weight * 256.0);
       ivec4 a = ivec4(floor(spriteTexel(pixel) * 255.0 + 0.5));
       ivec4 b = ivec4(floor(spriteTexel(pixel + vec2(1, 0)) * 255.0 + 0.5));
@@ -1489,6 +1514,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       ivec4 top = (a * (256 - weights.x) + b * weights.x + 128) / 256;
       ivec4 bottom = (c * (256 - weights.x) + d * weights.x + 128) / 256;
       sampled = vec4((top * (256 - weights.y) + bottom * weights.y + 128) / 256) / 255.0;
+#endif
     }
     return vec4(sampled.a > 0.0 ? sampled.rgb / sampled.a : vec3(0.0), sampled.a);
   }
@@ -1889,12 +1915,19 @@ constexpr const char* tileFragmentSource = R"(#version 300 es
     if (meshPostTintOverlayColor.a > 0.0) {
       // MV stores the source-atop bitmap before its destination-in pass.
       // Preserve those RGBA8 writes instead of fusing their real-number algebra.
-      ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
-      ivec3 blendBytes = ivec3(floor(meshPostTintOverlayColor.rgb * 255.0 + 0.5));
+      highp ivec3 sourceBytes = ivec3(floor(premultiplied * 255.0 + 0.5));
+      highp ivec3 blendBytes = ivec3(floor(meshPostTintOverlayColor.rgb * 255.0 + 0.5));
       highp int blendScale = int(floor(meshPostTintOverlayColor.a * 256.0 + 0.5));
-      int blendAlpha = (255 * blendScale) / 256;
-      int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
-      ivec3 atop = (sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127) / 255;
+      highp int blendAlpha = (255 * blendScale) / 256;
+      highp int sourceAlpha = int(floor(texel.a * 255.0 + 0.5));
+      highp ivec3 numerator = sourceBytes * (255 - blendAlpha) + blendBytes * blendAlpha + 127;
+      highp ivec3 atop;
+      if (blendAlpha >= 0 && blendAlpha <= 255 &&
+          all(greaterThanEqual(blendBytes, ivec3(0))) && all(lessThanEqual(blendBytes, ivec3(255)))) {
+        // Exact division by 255 for the nonnegative sixteen-bit byte numerator.
+        highp ivec3 rounded = numerator + ivec3(1);
+        atop = (rounded + (rounded >> 8)) >> 8;
+      } else atop = numerator / 255;
       premultiplied = vec3((atop * (sourceAlpha + 1)) / 256) / 255.0;
     }
     return vec4(premultiplied, texel.a);
@@ -1992,6 +2025,28 @@ inline std::string bitmapRegionFragmentSource() {
   std::string source(spriteEffectFragmentSource);
   source.replace(source.find("uniform highp vec4 spriteFrame;"),
     std::string("uniform highp vec4 spriteFrame;").size(), "flat in highp vec4 spriteFrame;");
+  // This program only receives unblurred regions without sprite color effects.
+  for (const auto& replacement : {
+      std::pair{"uniform bool standaloneBitmapRegion;", "const bool standaloneBitmapRegion = true;"},
+      std::pair{"uniform bool spriteColorEnabled;", "const bool spriteColorEnabled = false;"},
+      std::pair{"uniform float blurRadius;", "const float blurRadius = 0.0;"}}) {
+    source.replace(source.find(replacement.first), std::string(replacement.first).size(), replacement.second);
+  }
+  return source;
+}
+inline std::string plainBitmapRegionFragmentSource() {
+  auto source = withBlockSpriteSampling(bitmapRegionFragmentSource());
+  for (const auto& replacement : {
+      std::pair{"uniform bool derivedImage;", "const bool derivedImage = false;"},
+      std::pair{"uniform int paletteImage;", "const int paletteImage = 0;"},
+      std::pair{"uniform bool blockImage, blockNearest;", "const bool blockImage = false; uniform bool blockNearest;"},
+      std::pair{"uniform bool texturePremultiplied;", "const bool texturePremultiplied = true;"},
+      std::pair{"uniform bool maskEnabled;", "const bool maskEnabled = false;"},
+      std::pair{"uniform bool colorMatrixEnabled;", "const bool colorMatrixEnabled = false;"}}) {
+    source.replace(source.find(replacement.first), std::string(replacement.first).size(), replacement.second);
+  }
+  source.insert(source.find('\n', source.find("#version")) + 1,
+    "#define PMJS_PLAIN_BITMAP_REGION\n");
   return source;
 }
 }  // namespace pmjs::renderer_shaders
