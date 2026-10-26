@@ -3262,9 +3262,12 @@ std::optional<std::size_t> ImageStore::uploadPreparedCrops(Slot& slot, std::uint
   if (!slot.prepared || slot.prepared->descriptor.uniform) return std::nullopt;
   auto& backing = *slot.prepared;
   const auto& cells = backing.descriptor.cells;
-  const auto fill = cells.front().fill;
-  if (fill[0] != fill[1] || fill[0] != fill[2] || fill[3] != 255 ||
-      std::any_of(cells.begin(), cells.end(), [&](const auto& cell) { return cell.fill != fill; }))
+  const bool fullyPopulated = std::all_of(cells.begin(), cells.end(), [](const auto& cell) {
+    return cell.crop == std::array<int, 4>{0, 0, cell.rect[2], cell.rect[3]};
+  });
+  const auto fill = fullyPopulated ? std::array<std::uint8_t, 4>{0, 0, 0, 255} : cells.front().fill;
+  if (!fullyPopulated && (fill[0] != fill[1] || fill[0] != fill[2] || fill[3] != 255 ||
+      std::any_of(cells.begin(), cells.end(), [&](const auto& cell) { return cell.fill != fill; })))
     return std::nullopt;
   // Only retained crops determine the image; atlas padding may be transparent or colored.
   std::vector<std::vector<std::uint8_t>> crops(cells.size());
