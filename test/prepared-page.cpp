@@ -18,6 +18,17 @@ void put(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t val
   for (int i = 0; i < 4; ++i) bytes[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
 }
 void headerChecksum(std::vector<std::uint8_t>& bytes) { put(bytes, 28, crc32(0, bytes.data(), 28)); }
+void checkRows(const pmjs::SparsePalettePage& page, const std::vector<std::uint8_t>& rgba) {
+  for (int y : {0, 7, 8, page.height - 1}) for (int x : {0, 7, 31, page.width - 17}) {
+    const int count = std::min(17, page.width - x);
+    std::vector<std::uint8_t> row(count * 4 + 16, 199);
+    page.copyRow(x, y, std::span(row).subspan(8, count * 4));
+    require(std::equal(row.begin() + 8, row.end() - 8,
+      rgba.begin() + (static_cast<std::size_t>(y) * page.width + x) * 4));
+    require(std::all_of(row.begin(), row.begin() + 8, [](auto value) { return value == 199; }));
+    require(std::all_of(row.end() - 8, row.end(), [](auto value) { return value == 199; }));
+  }
+}
 }
 int main() {
   const auto root = std::filesystem::temp_directory_path() / ("pmjs-lz4-test-" + std::to_string(getpid()));
@@ -79,6 +90,7 @@ int main() {
       }
       const auto sparse = pmjs::makeSparsePalettePage(width, height, rgba);
       require(sparse && sparse->pixels().rgba == rgba && sparse->residual.size() / 2 > rarePixels);
+      checkRows(*sparse, rgba);
       const auto denseBytes = rgba.size() / 2 + ((sparse->colors.size() + 1023) / 1024) * 1024;
       require(sparse->gpuBytes() * 100 <= denseBytes * 85);
       const auto file = root / "sparse.pml4";
@@ -127,6 +139,7 @@ int main() {
       require(indexed && indexed->packed && indexed->colors.size() == count * 4 &&
         indexed->blocks.empty() && indexed->residual.empty());
       require(indexed->pixels().rgba == rgba);
+      checkRows(*indexed, rgba);
       require(indexed->gpuBytes() == rgba.size() / 4 + 1024);
       const auto file = root / "indexed.pml4";
       pmjs::writeLz4Page(file, 512, 512, rgba, true);

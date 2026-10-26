@@ -1098,6 +1098,16 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const 
   return result;
 }
 
+bool ImageStore::hasPaletteStorage(ImageHandle handle) const {
+  const auto info = inspect(handle);
+  if (!info) return false;
+  const auto& slot = slots_[(handle & indexMask) - 1U];
+  if (slot.palette) return true;
+  const auto* decision = storageDecision(slot.cacheKey);
+  return decision && decision->width == slot.width && decision->height == slot.height &&
+    decision->paletteBits != 0;
+}
+
 std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle handle, bool premultiplied) {
   auto info = inspect(handle);
   if (!info) return std::nullopt;
@@ -2473,17 +2483,29 @@ bool ImageStore::readPreparedRegionInto(PreparedBacking& backing, int x, int y,
     const int copyRight = std::min(right, cropX + cell.crop[2]);
     const int copyBottom = std::min(bottom, cropY + cell.crop[3]);
     if (copyLeft >= copyRight || copyTop >= copyBottom) continue;
-    const auto* page = preparedPixels(backing, cell.page, acquired);
-    if (!page) return false;
+    auto& page = backing.pages[cell.page];
+    const bool hadSparse = bool(page.sparse);
+    const bool sparse = !page.pixels && preparedSparsePage(backing, cell.page);
+    const auto* pixels = sparse ? nullptr : preparedPixels(backing, cell.page, acquired);
+    if (!sparse && !pixels) return false;
+    if (sparse) {
+      if (!hadSparse && acquired) *acquired = true;
+      page.shared->lastCpuUse.store(backing.pool->cpuClock.fetch_add(1, std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
+    }
     const auto rowBytes = static_cast<std::size_t>(copyRight - copyLeft) * 4U;
     for (int row = copyTop; row < copyBottom; ++row) {
       auto* destinationPixel = destination.rgba.data() +
           (static_cast<std::size_t>(destinationY + row - y) * destination.width +
            destinationX + copyLeft - x) * 4U;
-      const auto* source = page->rgba.data() +
-          (static_cast<std::size_t>(cell.atlas[1] + row - cropY) * page->width +
-           cell.atlas[0] + copyLeft - cropX) * 4U;
-      std::memcpy(destinationPixel, source, rowBytes);
+      const int sourceX = cell.atlas[0] + copyLeft - cropX;
+      const int sourceY = cell.atlas[1] + row - cropY;
+      if (sparse) page.sparse->copyRow(sourceX, sourceY, std::span(destinationPixel, rowBytes));
+      else {
+        const auto* source = pixels->rgba.data() +
+          (static_cast<std::size_t>(sourceY) * pixels->width + sourceX) * 4U;
+        std::memcpy(destinationPixel, source, rowBytes);
+      }
     }
   }
   return true;

@@ -269,6 +269,7 @@ class ImageStore {
       ImageHandle handle, float x, float y, float width, float height,
       bool premultiplied = true, bool paletteOnly = false, bool sparseAllowed = false);
   std::optional<PaletteImageRegion> resolvePaletteImage(ImageHandle handle, bool premultiplied);
+  bool hasPaletteStorage(ImageHandle handle) const;
   std::uint64_t sceneryWindowHits() const { return sceneryWindowHits_; }
   std::uint64_t sceneryWindowUploads() const { return sceneryWindowUploads_; }
   std::uint64_t sceneryFullFallbacks() const { return sceneryFullFallbacks_; }

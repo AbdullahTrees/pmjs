@@ -15,9 +15,45 @@ for (let y = 3; y < 45; y++) for (let x = 4; x < 60; x++) {
 }
 const bytes = png(64, 48, pixels);
 fs.writeFileSync(path.join(root, 'source.png'), bytes);
+const sheetPixels = Buffer.alloc(192 * 64 * 4);
+for (let i = 0; i < sheetPixels.length; i += 4) {
+  const value = i / 4;
+  sheetPixels.set([value % 251, value * 53 % 251, 37, value % 3 * 127], i);
+}
+fs.writeFileSync(path.join(root, 'sheet.png'), png(192, 64, sheetPixels));
 native.initialize({ gameRoot: root, width: 96, height: 80, windowTitle: 'Prepared linear palette', imageWarmCacheBytes: 0,
   ...(budget === null ? {} : { preparedFrameCacheBytes: budget }) });
 let reference, prepared;
+async function classifiedSheet() {
+  const directory = path.join(root, 'sheet'); fs.mkdirSync(directory);
+  const descriptor = await native.assets.processImage('sheet.png', directory,
+    { grid: [3, 1], backdrop: [0, 0, 0, 0] });
+  const storage = await native.assets.classifyImageStorage(path.join(root, 'sheet.png'));
+  assert.ok(storage.paletteBits);
+  const sourceIdentity = native.assets.sourceIdentity('sheet.png');
+  assert.equal(native.assets.installImageStorage([{ source: 'sheet.png', sourceIdentity, storage }]), 1);
+  assert.equal(native.assets.installPrepared([{ source: 'sheet.png', sourceIdentity, directory, descriptor }]), 1);
+  const image = await native.images.loadAsync('sheet.png');
+  const reference = native.canvas.create(192, 64);
+  try {
+    native.canvas.writePixels(reference.handle, 0, 0, 192, 64, sheetPixels);
+    const options = { nearest: false, crop: [0, 0, 128, 64], scale: 0.7 };
+    const actual = drawPacket(native, spritePacket(native, image, options));
+    const expected = drawPacket(native, spritePacket(native, reference, { ...options, premultiplied: true }));
+    let maximum = 0;
+    for (let i = 0; i < actual.length; ++i) maximum = Math.max(maximum, Math.abs(actual[i] - expected[i]));
+    assert.ok(maximum <= 1, 'classified frame changed ordinary filtering');
+    const owner = () => native.images.memory(100).largest.find(entry => entry.handle === image.handle);
+    assert.equal(owner().fullTextureResident, budget !== null,
+      'an eligible frame must not allocate the full source palette');
+    drawPacket(native, spritePacket(native, image, { ...options, nearest: true }));
+    assert.equal(owner().fullTextureResident, true, 'nearest drawing must retain the full palette fallback');
+  } finally {
+    native.images.release(image.handle);
+    native.canvas.release(reference.handle);
+    native.beginFrame();
+  }
+}
 (async () => {
   try {
     const directory = path.join(root, 'prepared'); fs.mkdirSync(directory);
@@ -46,6 +82,7 @@ let reference, prepared;
     if (budget !== null) {
       assert.equal(memory().preparedFrameCacheMisses, 0);
       assert.equal(memory().preparedFrameCacheBytes, 0);
+      await classifiedSheet();
       return;
     }
     assert.ok(memory().preparedFrameCacheMisses > 0);
@@ -73,6 +110,7 @@ let reference, prepared;
     let maximum = 0;
     for (let i = 0; i < replaced.length; i++) maximum = Math.max(maximum, Math.abs(replaced[i] - expected[i]));
     assert.ok(maximum <= 1, 'replacement must use new source pixels');
+    await classifiedSheet();
   } finally {
     if (prepared) native.images.release(prepared.handle);
     if (reference) native.canvas.release(reference.handle);
