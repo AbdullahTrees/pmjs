@@ -2371,14 +2371,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
     // Upload a bounded set of immutable pages before publishing image readiness.
     // Larger page sets remain pageable rather than expanding the source sheet.
     std::size_t staged = 0;
-    bool stagePages = hasPaletteStorage(handle);
-    if (descriptor.blockGrid) {
-      const auto& grid = *descriptor.blockGrid;
-      const double width = double(grid[1]) + 2 * descriptor.halo + 1;
-      const double height = double(grid[2]) + 2 * descriptor.halo + 1;
-      stagePages = stagePages && width * height * 4 <= preparedFrameBudgetBytes_;
-    }
-    if (stagePages) for (std::size_t page=0; page<slot.prepared->pages.size(); ++page) {
+    if (hasPaletteStorage(handle)) for (std::size_t page=0; page<slot.prepared->pages.size(); ++page) {
       const auto& dimensions = slot.prepared->descriptor.pages[page];
       const auto bytes = static_cast<std::size_t>(dimensions.width)*dimensions.height*4U;
       if (bytes>preparedPageCacheBudget-staged) break;
@@ -2803,7 +2796,6 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
     if (auto existing = preparedTextures_[key].lock()) {
       shared = std::move(existing); texture = shared->texture; page.storage = shared->storage; ++preparedSharedTextureHits_;
       const auto& d = backing.descriptor.pages[index];
-      if (slot.palette) page.pixels.reset();
       if (acquired) trimPreparedPages();
       return ImageInfo{0, d.width, d.height, texture, premultiplied, false};
     }
@@ -2838,7 +2830,6 @@ std::optional<ImageInfo> ImageStore::preparedPage(Slot& slot, std::size_t index,
     gpuBytes_ += uploaded; peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
     shared = shareTexture(key, texture, uploaded, page.storage);
     if (!shared) backing.gpuBytes += uploaded;
-    if (slot.palette) page.pixels.reset();
     if (acquired) trimPreparedPages();
   }
   const auto& dimensions = backing.descriptor.pages[index];
