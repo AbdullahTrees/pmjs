@@ -195,22 +195,30 @@ def read_submission(directory):
             'metadata': metadata, 'screenshot': screenshot, 'cover': cover}
 
 
-def stage_submission(payload, port, data, stage, info, notices, extra_notices):
-    """Stage official source metadata in the layout of PortMaster's release ZIPs."""
+def stage_submission(destination, port, data, stage, info, notices, extra_notices):
+    """Stage authored metadata at the selected package level."""
     architecture = {'arm64': 'aarch64', 'aarch64': 'aarch64',
                     'x64': 'x86_64', 'x86_64': 'x86_64'}.get(info['architecture'])
     if architecture is None or data['metadata']['attr']['arch'] != [architecture]:
         raise ValueError('port.json architecture does not match the packaged runtime')
     source = data['directory']
-    shutil.copyfile(source / 'port.json', payload / 'port.json')
-    shutil.copyfile(source / 'README.md', payload / 'README.md')
+    shutil.copyfile(source / 'port.json', destination / 'port.json')
+    shutil.copyfile(source / 'README.md', destination / 'README.md')
     for file in (data['screenshot'], data['cover']):
         if file:
-            shutil.copyfile(file, payload / file.name)
-    gameinfo = ElementTree.parse(source / 'gameinfo.xml')
-    image = gameinfo.getroot().find('game').find('image')
-    image.text = './' + Path(image.text).name
-    gameinfo.write(payload / 'gameinfo.xml', encoding='utf-8', xml_declaration=True)
+            shutil.copyfile(file, destination / file.name)
+    shutil.copyfile(source / 'gameinfo.xml', destination / 'gameinfo.xml')
+    thread = source / 'testing_thread.txt'
+    if thread.exists():
+        shutil.copyfile(_regular(thread), destination / thread.name)
+    patches = source / 'patches'
+    if patches.exists():
+        for file in (patches, *patches.rglob('*')):
+            if file.is_symlink() or not (file.is_file() or file.is_dir()):
+                raise ValueError('Patches must contain only regular files and directories')
+            if file.is_file() and (destination / file.relative_to(source)).exists():
+                raise ValueError('Submission patch conflicts with a bundled file: ' + file.name)
+        shutil.copytree(patches, destination / 'patches', dirs_exist_ok=True)
 
     licenses = port / 'licenses'
     licenses.mkdir()

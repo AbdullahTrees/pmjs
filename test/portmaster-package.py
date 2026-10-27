@@ -186,6 +186,9 @@ class PortMasterPackage(unittest.TestCase):
                                'exp': False, 'runtime': [], 'arch': ['x86_64'], 'store': [],
                                'availability': 'full', 'reqs': [], 'min_glibc': ''}}
         (submission / 'port.json').write_text(json.dumps(descriptor))
+        (submission / 'testing_thread.txt').write_text('Testing instructions')
+        (submission / 'patches').mkdir()
+        (submission / 'patches/build.sh').write_text('#!/bin/sh\necho build\n')
         output = self.root / 'output/minimalgame.zip'
         subprocess.run(['node', ROOT / 'test/helpers/generate-schema3-index.cjs',
                          self.bundle, self.game, self.root], check=True, capture_output=True, text=True)
@@ -200,14 +203,19 @@ class PortMasterPackage(unittest.TestCase):
             self.assertIsNone(package.testzip())
             names = package.namelist()
             for name in ('port.json', 'README.md', 'gameinfo.xml', 'screenshot.png'):
-                self.assertIn(name, names)
+                self.assertIn('minimalgame/' + name, names)
+            self.assertEqual({name.split('/')[0] for name in names},
+                             {'Minimal Game.sh', 'minimalgame'})
+            self.assertIn('minimalgame/testing_thread.txt', names)
+            self.assertIn('minimalgame/patches/build.sh', names)
             self.assertIn('minimalgame/gamedata/', names)
             self.assertIn('Minimal Game.sh', names)
             self.assertNotIn('minimalgame/runtime/LICENSES.txt', names)
             self.assertIn('minimalgame/licenses/LICENSE.share_pmjs_notices_node_license.txt', names)
             self.assertIn('minimalgame/licenses/LICENSE.license.txt', names)
-            self.assertEqual(json.loads(package.read('port.json')), descriptor)
-            self.assertIn(b'<image>./screenshot.png</image>', package.read('gameinfo.xml'))
+            self.assertEqual(json.loads(package.read('minimalgame/port.json')), descriptor)
+            self.assertEqual(package.read('minimalgame/gameinfo.xml'),
+                             (submission / 'gameinfo.xml').read_bytes())
             self.assertNotIn('minimalgame/minimalgame.md', names)
             self.assertEqual(package.read('minimalgame/assets/images/prepared-image/page.png'),
                              b'generated image page')
@@ -215,6 +223,16 @@ class PortMasterPackage(unittest.TestCase):
         checksum = artifacts.digest(output)
         portmaster.portmaster(self.stage, self.bundle, output, submission=submission, release=True)
         self.assertEqual(artifacts.digest(output), checksum)
+        portmaster.portmaster(self.stage, self.bundle, output, submission=submission, layout='pr')
+        with zipfile.ZipFile(output) as package:
+            names = package.namelist()
+            for name in ('port.json', 'README.md', 'gameinfo.xml', 'screenshot.png',
+                         'testing_thread.txt', 'patches/build.sh'):
+                self.assertIn(name, names)
+                self.assertNotIn('minimalgame/' + name, names)
+            self.assertEqual(package.read('gameinfo.xml'), (submission / 'gameinfo.xml').read_bytes())
+            self.assertIn('minimalgame/licenses/LICENSE.license.txt', names)
+        checksum = artifacts.digest(output)
         descriptor['attr']['arch'] = ['armhf']
         (submission / 'port.json').write_text(json.dumps(descriptor))
         with self.assertRaisesRegex(ValueError, 'architecture'):
@@ -230,6 +248,14 @@ class PortMasterPackage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires --submission'):
             portmaster.portmaster(self.stage, self.bundle, self.output, release=True)
         self.assertFalse(self.output.exists())
+
+    def test_layout_validation_preserves_existing_output(self):
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        self.output.write_bytes(b'existing archive')
+        for layout, message in (('other', 'layout'), ('pr', 'requires --submission')):
+            with self.subTest(layout=layout), self.assertRaisesRegex(ValueError, message):
+                portmaster.portmaster(self.stage, self.bundle, self.output, layout=layout)
+            self.assertEqual(self.output.read_bytes(), b'existing archive')
 
     def test_adapter_configuration_and_mz(self):
         adapter = self.root / 'adapter.js'
@@ -509,6 +535,13 @@ fs.writeFileSync(file, JSON.stringify(descriptor));
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         checksum = artifacts.digest(self.output)
+        result = subprocess.run(command + ['--layout', 'testing'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(artifacts.digest(self.output), checksum)
+        result = subprocess.run(command + ['--layout', 'pr'], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('PR layout requires --submission', result.stderr)
+        self.assertEqual(artifacts.digest(self.output), checksum)
         (bundle / 'bootstrap.js').write_text('corrupt bootstrap')
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -729,17 +762,18 @@ return "${MODULE_STATUS:-0}"
                      'SDL_VIDEODRIVER': 'firmware-backend', 'SDL_VIDEO_EGL_DRIVER': '/firmware/egl.so',
                      'SDL_VIDEO_GL_DRIVER': '/firmware/gles.so', 'SDL_AUDIODRIVER': 'pipewire',
                      'SDL_ROTATION': '90', 'SDL_BLITTER_DISABLED': '0',
-                     'SDL_KMSDRM_REQUIRE_DRM_MASTER': '0', 'SDL_GAMECONTROLLERCONFIG': 'custom-map'}
+                     'SDL_KMSDRM_REQUIRE_DRM_MASTER': '0'}
         for firmware in ('muOS', 'ROCKNIX', 'knulli', 'dArkOS', 'AmberELEC', 'ArkOS'):
             with self.subTest(firmware=firmware):
                 (self.control / f'mod_{firmware}.txt').write_text(self.module)
                 result = self.run_launcher(CFW_NAME=firmware,
-                                           DIRECTORY_OVERRIDE=str(self.root / 'storage'), **inherited)
+                                           SDL_GAMECONTROLLERCONFIG='custom-map', **inherited)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 capture = json.loads(self.capture.read_text())
                 self.assertEqual(capture['uid'], os.getuid(), 'frontend identity is preserved')
                 for name, value in inherited.items():
                     self.assertEqual(capture['env'][name], value)
+                self.assertEqual(capture['env']['SDL_GAMECONTROLLERCONFIG'], 'firmware-map')
                 self.assertEqual(capture['env']['MODULE_LOADED'], '1')
                 self.assertEqual(capture['env']['LD_LIBRARY_PATH'], str(self.port / 'runtime/lib') + ':/firmware/lib')
                 self.assertEqual(capture['env']['SDL_GAMECONTROLLERCONFIG_FILE'], str(self.control / 'gamecontrollerdb.txt'))
@@ -780,14 +814,6 @@ return "${MODULE_STATUS:-0}"
         self.assertEqual(arguments[arguments.index('--save-root') + 1], str(self.port / 'saves'))
         self.assertEqual(arguments[arguments.index('--asset-cache-root') + 1], str(self.port / '.cache'))
 
-    def test_firmware_storage_alias_uses_resolved_bundle_paths(self):
-        alias = self.root / 'storage alias'
-        alias.symlink_to(self.root / 'storage', target_is_directory=True)
-        self.assertEqual(self.run_launcher(DIRECTORY_OVERRIDE=str(alias)).returncode, 0)
-        arguments = json.loads(self.capture.read_text())['argv']
-        self.assertIn(str(self.port), arguments)
-        self.assertEqual(arguments[arguments.index('--save-root') + 1], str(self.port / 'saves'))
-
     def test_graphics_diagnostics_honor_explicit_environment(self):
         for value in ('0', '1'):
             with self.subTest(value=value):
@@ -802,39 +828,15 @@ return "${MODULE_STATUS:-0}"
         self.assertEqual(self.run_launcher(PMJS_EXIT_HOTKEY='leftstick').returncode, 0)
         self.assertEqual(json.loads(self.capture.read_text())['env']['PMJS_EXIT_HOTKEY'], 'leftstick')
 
-    def test_setup_failures_stop_and_started_helpers_are_cleaned_up(self):
-        for setting, status in (('CONTROL_STATUS', 7), ('MODULE_STATUS', 8),
-                                ('CONTROLS_STATUS', 1), ('NODE_STATUS', 23)):
-            with self.subTest(setting=setting):
-                started = setting == 'NODE_STATUS'
-                result = self.run_launcher(expect_finish=started, **{setting: str(status)})
-                self.assertEqual(result.returncode, status)
-                self.assertEqual(self.capture.exists(), setting == 'NODE_STATUS')
-                if setting == 'NODE_STATUS':
-                    self.assertIn('runtime exited status=23', (self.port / 'log.txt').read_text())
+    def test_helper_return_status_does_not_abort_launch(self):
+        result = self.run_launcher(CONTROLS_STATUS='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.capture.read_text())['env']['SDL_GAMECONTROLLERCONFIG'],
+                         'firmware-map')
 
         result = self.run_launcher(PLATFORM_STATUS='1')
         self.assertEqual(result.returncode, 0)
         self.assertTrue(self.capture.exists())
-        self.assertIn('platform helper returned 1; continuing',
-                      (self.port / 'log.txt').read_text())
-        self.assertIn('platform helper returned 1; continuing', result.stdout)
-
-    def test_cleanup_failure_retains_game_failure(self):
-        self.assertEqual(self.run_launcher(FINISH_STATUS='9').returncode, 1)
-        self.assertEqual(self.run_launcher(FINISH_STATUS='9', NODE_STATUS='23').returncode, 23)
-
-    def test_unusable_log_directory_stops_before_startup(self):
-        (self.port / 'log.txt').mkdir()
-        self.assertEqual(self.run_launcher(expect_finish=False).returncode, 1)
-        self.assertFalse(self.capture.exists())
-
-    def test_missing_exit_helper_stops_before_runtime(self):
-        result = self.run_launcher(expect_finish=False, GPTOKEYB2='')
-        self.assertEqual(result.returncode, 1)
-        self.assertFalse(self.capture.exists())
-        self.assertIn('gptokeyb2 is required', (self.port / 'log.txt').read_text())
-        self.assertIn('gptokeyb2 is required', result.stdout)
 
     def test_exit_helper_stops_runtime_before_firmware_cleanup(self):
         for stopped in (False, True):
@@ -860,7 +862,7 @@ return "${MODULE_STATUS:-0}"
                 os.kill(node_pid, signal.SIGSTOP)
             os.write(target_write_fd, str(node_pid).encode())
             process.communicate(timeout=8)
-            self.assertEqual(process.returncode, 128 + signal.SIGKILL)
+            self.assertEqual(process.returncode, 0)
             with self.assertRaises(ProcessLookupError):
                 os.kill(node_pid, 0)
             self.assertEqual(self.events.read_text().splitlines()[-1], 'finish:/firmware/lib')

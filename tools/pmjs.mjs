@@ -37,7 +37,7 @@ Usage:
       [--include-port-assets] [--asset-cache-root DIR]
   pmjs BUNDLE [--game DIR]
   pmjs package BUNDLE --runtime DIR --output ZIP [--sources FILE --sources-url URL]
-      [--submission DIR]
+      [--submission DIR] [--layout testing|pr]
   pmjs run --game DIR [--state DIR] [--save-root DIR] [--asset-cache-root DIR]
   pmjs prepare --game DIR [--state DIR] [--config FILE] [--manifest FILE]
   pmjs self-test [--graphics]
@@ -169,12 +169,16 @@ async function main() {
     const sourceUrlAt = args.indexOf('--sources-url');
     const sourceUrl = sourceUrlAt < 0 ? undefined : args.splice(sourceUrlAt, 2)[1];
     if (sourceUrlAt >= 0 && !sourceUrl) throw new Error('--sources-url requires a URL');
+    const layoutAt = args.indexOf('--layout');
+    const layout = layoutAt < 0 ? undefined : args.splice(layoutAt, 2)[1];
+    if (layoutAt >= 0 && !layout) throw new Error('--layout requires testing or pr');
     const options = parse(args, ['--runtime', '--output', '--sources', '--submission'], false);
     if (!options['--runtime'] || !options['--output']) throw new Error('package requires --runtime and --output');
     const result = spawnSync('python3', [path.join(share, 'tools/portmaster.py'),
       '--stage', options['--runtime'], '--bundle', path.resolve(bundleArgument), '--output', options['--output'],
       ...(options['--sources'] ? ['--sources', options['--sources']] : []),
       ...(options['--submission'] ? ['--submission', options['--submission']] : []),
+      ...(layout ? ['--layout', layout] : []),
       ...(sourceUrl ? ['--sources-url', sourceUrl] : [])],
     { stdio: 'inherit', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
     if (result.error) throw result.error;

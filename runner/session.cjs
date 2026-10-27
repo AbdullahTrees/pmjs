@@ -14,6 +14,10 @@ function writeEmergency(error) {
 }
 // Observation only; unlike uncaughtException this does not change Node's exit policy.
 sessionProcess.on('uncaughtExceptionMonitor', writeEmergency);
+sessionProcess.once('disconnect', () => {
+  writeEmergency(new Error('Supervisor connection lost; stopping session'));
+  sessionProcess.exit(1);
+});
 try { fs.writeSync(2, '[pmjs] worker-start pid=' + sessionProcess.pid + '\n'); } catch (_) {}
 require('./logging.cjs').installConsoleLogging();
 const { run } = require('./index.cjs');
