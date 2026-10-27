@@ -36,8 +36,9 @@ unsigned paletteIndex(const SparsePalettePage& page, std::size_t pixel) {
     const auto& block = page.blocks[(y / 8) * ((page.width + 7) / 8) + x / 8];
     const auto rank = std::popcount(block[bit / 32] & ((1U << (bit % 32)) - 1)) +
       (bit >= 32 ? std::popcount(block[0]) : 0);
-    const auto at = (block[2] + rank) * 2;
+    const auto at = (block[2] + rank) * page.indexBytes;
     index = page.residual[at] | (unsigned(page.residual[at + 1]) << 8);
+    if (page.indexBytes == 3) index |= unsigned(page.residual[at + 2]) << 16;
   }
   return index;
 }
@@ -50,8 +51,8 @@ void writeLz4Page(const std::filesystem::path& path, int width, int height,
   std::vector<std::uint8_t> payload;
   std::optional<SparsePalettePage> sparse;
   if (sparsePalette) {
-    sparse = makeSparsePalettePage(width, height, rgba);
-    if (!sparse) sparse = makeIndexedPalettePage(width, height, rgba);
+    sparse = makeIndexedPalettePage(width, height, rgba);
+    if (!sparse) sparse = makeSparsePalettePage(width, height, rgba);
   }
   if (sparse) {
     if (sparse->packed) {
@@ -125,21 +126,67 @@ std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> enco
         static_cast<int>(decoded) || checksum(pixels.rgba) != get(encoded, 24)) return std::nullopt;
   return pixels;
 }
+std::size_t ChannelBlockPage::gpuBytes() const {
+  return blocks.size() * 16 + ((bytes.size() + 8191) / 8192) * 8192;
+}
+PreparedPagePixels ChannelBlockPage::pixels() const {
+  PreparedPagePixels result{width, height, std::vector<std::uint8_t>(std::size_t(width) * height * 4)};
+  for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+    for (int channel = 0; channel < 4; ++channel) {
+      const auto entry = blocks[std::size_t(y / 8) * ((width + 7) / 8) + x / 8][channel];
+      result.rgba[(std::size_t(y) * width + x) * 4 + channel] = entry & 0x80000000U ?
+        entry & 255U : bytes[entry + (y % 8) * 8 + x % 8];
+    }
+  return result;
+}
+std::optional<ChannelBlockPage> makeChannelBlockPage(int width, int height,
+    std::span<const std::uint8_t> rgba) {
+  if (width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+      rgba.size() != std::size_t(width) * height * 4 || rgba.size() < 256 * 1024) return std::nullopt;
+  struct Hash {
+    std::size_t operator()(const std::array<std::uint8_t, 64>& bytes) const {
+      std::size_t hash = 14695981039346656037ULL;
+      for (auto value : bytes) hash = (hash ^ value) * 1099511628211ULL;
+      return hash;
+    }
+  };
+  ChannelBlockPage page;
+  page.width = width; page.height = height;
+  page.blocks.resize(std::size_t((width + 7) / 8) * ((height + 7) / 8));
+  std::unordered_map<std::array<std::uint8_t, 64>, std::uint32_t, Hash> dictionary;
+  for (int by = 0; by < height; by += 8) for (int bx = 0; bx < width; bx += 8)
+    for (int channel = 0; channel < 4; ++channel) {
+      std::array<std::uint8_t, 64> block;
+      for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        block[y * 8 + x] = rgba[(std::size_t(std::min(by + y, height - 1)) * width +
+          std::min(bx + x, width - 1)) * 4 + channel];
+      auto& entry = page.blocks[std::size_t(by / 8) * ((width + 7) / 8) + bx / 8][channel];
+      if (std::all_of(block.begin(), block.end(), [&](auto value) { return value == block[0]; }))
+        entry = 0x80000000U | block[0];
+      else {
+        const auto [at, inserted] = dictionary.try_emplace(block, page.bytes.size());
+        if (inserted) page.bytes.insert(page.bytes.end(), block.begin(), block.end());
+        entry = at->second;
+      }
+    }
+  if (page.bytes.empty() || page.gpuBytes() * 100 > rgba.size() * 85) return std::nullopt;
+  return page;
+}
 std::size_t SparsePalettePage::gpuBytes() const {
-  const auto count = residual.size() / 2;
-  const auto residualWidth = std::min<std::size_t>(1024, count);
+  const auto texels = residual.size() / (indexBytes == 3 ? 1 : 2);
+  const auto residualWidth = std::min<std::size_t>(indexBytes == 3 ? 2048 : 1024, texels);
   return base.size() + blocks.size() * 12 + ((colors.size() + 1023) / 1024) * 1024 +
-    (residualWidth ? ((count + residualWidth - 1) / residualWidth) * residualWidth * 2 : 0);
+    (residualWidth ? ((texels + residualWidth - 1) / residualWidth) * residualWidth * (indexBytes == 3 ? 1 : 2) : 0);
 }
 std::vector<std::uint8_t> SparsePalettePage::denseIndices() const {
-  std::vector<std::uint8_t> indices(base.size() * 2);
+  std::vector<std::uint8_t> indices(base.size() * indexBytes);
   if (packed) {
-    for (std::size_t i = 0; i < base.size(); ++i) indices[i * 2] = base[i];
+    for (std::size_t i = 0; i < base.size(); ++i) indices[i * indexBytes] = base[i];
     return indices;
   }
   for (std::size_t i = 0; i < base.size(); ++i) {
     const unsigned index = paletteIndex(*this, i);
-    indices[i * 2] = index & 255; indices[i * 2 + 1] = index >> 8;
+    for (int byte = 0; byte < indexBytes; ++byte) indices[i * indexBytes + byte] = index >> (byte * 8);
   }
   return indices;
 }
@@ -155,20 +202,23 @@ PreparedPagePixels SparsePalettePage::pixels() const {
   return result;
 }
 std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
-    std::span<const std::uint8_t> rgba) {
-  if (width <= 0 || height <= 0 || width > int(maximumExtent) || height > int(maximumExtent) ||
+    std::span<const std::uint8_t> rgba, std::size_t colorLimit) {
+  if (width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
       rgba.size() != std::size_t(width) * height * 4 || rgba.size() < 256 * 1024) return std::nullopt;
   struct Color { std::uint32_t value, count; };
   std::vector<Color> colors;
   std::unordered_map<std::uint32_t, std::uint32_t> lookup;
-  for (std::size_t i = 0; i < rgba.size(); i += 4) {
+  for (std::size_t i = 0; i < rgba.size();) {
     const auto value = get(rgba, i);
+    auto end = i + 4;
+    while (end < rgba.size() && get(rgba, end) == value) end += 4;
     auto [at, inserted] = lookup.try_emplace(value, colors.size());
     if (inserted) {
-      if (colors.size() == 65536) return std::nullopt;
+      if (colors.size() == std::min<std::size_t>(colorLimit, 262144)) return std::nullopt;
       colors.push_back({value, 0});
     }
-    ++colors[at->second].count;
+    colors[at->second].count += (end - i) / 4;
+    i = end;
   }
   if (colors.size() <= 256) return std::nullopt;
   std::sort(colors.begin(), colors.end(), [](const auto& a, const auto& b) {
@@ -176,16 +226,16 @@ std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
   });
   std::size_t exceptions = 0;
   for (std::size_t i = 255; i < colors.size(); ++i) exceptions += colors[i].count;
-  if (exceptions > rgba.size() / 4 / 16) return std::nullopt;
+  if (colorLimit <= 65536 && exceptions > rgba.size() / 4 / 16) return std::nullopt;
   SparsePalettePage page;
-  page.width = width; page.height = height;
+  page.width = width; page.height = height; page.indexBytes = colors.size() > 65536 ? 3 : 2;
   page.base.resize(rgba.size() / 4); page.colors.resize(colors.size() * 4);
   page.blocks.resize(std::size_t((width + 7) / 8) * ((height + 7) / 8));
-  page.residual.reserve(exceptions * 2);
+  page.residual.reserve(exceptions * page.indexBytes);
   for (std::size_t i = 0; i < colors.size(); ++i) { put(page.colors, i * 4, colors[i].value); lookup[colors[i].value] = i; }
   for (int by = 0; by < height; by += 8) for (int bx = 0; bx < width; bx += 8) {
     auto& block = page.blocks[(by / 8) * ((width + 7) / 8) + bx / 8];
-    block[2] = page.residual.size() / 2;
+    block[2] = page.residual.size() / page.indexBytes;
     for (int y = by; y < std::min(by + 8, height); ++y) for (int x = bx; x < std::min(bx + 8, width); ++x) {
       const auto pixel = std::size_t(y) * width + x;
       const auto index = lookup.at(get(rgba, pixel * 4));
@@ -193,11 +243,11 @@ std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,
       if (index >= 255) {
         const auto bit = (y % 8) * 8 + x % 8;
         block[bit / 32] |= 1U << (bit % 32);
-        page.residual.push_back(index & 255); page.residual.push_back(index >> 8);
+        for (int byte = 0; byte < page.indexBytes; ++byte) page.residual.push_back(index >> (byte * 8));
       }
     }
   }
-  const auto denseBytes = page.base.size() * 2 + ((page.colors.size() + 1023) / 1024) * 1024;
+  const auto denseBytes = page.base.size() * page.indexBytes + ((page.colors.size() + 1023) / 1024) * 1024;
   if (page.gpuBytes() * 100 > denseBytes * 85) return std::nullopt;
   return page;
 }
@@ -209,20 +259,29 @@ std::optional<SparsePalettePage> makeIndexedPalettePage(int width, int height,
   if (count < 4096) return std::nullopt;
   std::vector<std::uint32_t> colors;
   std::unordered_map<std::uint32_t, std::uint16_t> lookup;
-  for (std::size_t i = 0; i < count; ++i) {
+  for (std::size_t i = 0; i < count;) {
     const auto value = get(rgba, i * 4);
-    if (lookup.contains(value)) continue;
-    if (colors.size() == 256) return std::nullopt;
-    lookup.emplace(value, static_cast<std::uint16_t>(colors.size()));
-    colors.push_back(value);
+    auto end = i + 1;
+    while (end < count && get(rgba, end * 4) == value) ++end;
+    if (!lookup.contains(value)) {
+      if (colors.size() == 256) return std::nullopt;
+      lookup.emplace(value, static_cast<std::uint16_t>(colors.size()));
+      colors.push_back(value);
+    }
+    i = end;
   }
   SparsePalettePage page;
   page.width = width; page.height = height; page.packed = true;
   page.colors.resize(colors.size() * 4);
   for (std::size_t i = 0; i < colors.size(); ++i) put(page.colors, i * 4, colors[i]);
   page.base.resize(count);
-  for (std::size_t i = 0; i < count; ++i)
-    page.base[i] = static_cast<std::uint8_t>(lookup.at(get(rgba, i * 4)));
+  for (std::size_t i = 0; i < count;) {
+    const auto value = get(rgba, i * 4);
+    auto end = i + 1;
+    while (end < count && get(rgba, end * 4) == value) ++end;
+    std::fill(page.base.begin() + i, page.base.begin() + end, static_cast<std::uint8_t>(lookup.at(value)));
+    i = end;
+  }
   if (page.gpuBytes() >= rgba.size()) return std::nullopt;
   return page;
 }

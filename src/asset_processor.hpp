@@ -21,6 +21,7 @@ struct AssetRecipe {
   int rows = 1;
   std::optional<AssetRect> crop;
   AssetColor backdrop{};
+  bool framePages = false;
 };
 struct PreparedAssetCell {
   AssetRect rect{};
@@ -45,6 +46,8 @@ struct PreparedAsset {
   std::vector<PreparedAssetCell> cells;
   std::vector<PreparedAssetPage> pages;
   std::string compression;
+  std::filesystem::path textureArtifact;
+  bool framePages = false;
 };
 struct AssetPreparationStats {
   std::uint64_t sourceDecodes = 0, sourceCacheHits = 0;

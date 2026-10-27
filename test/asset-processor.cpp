@@ -13,6 +13,7 @@
 #include <string>
 #include <unistd.h>
 #include <png.h>
+#include <zlib.h>
 
 namespace {
 void require(bool condition, const std::source_location& location = std::source_location::current()) {
@@ -189,6 +190,27 @@ int main() {
     try { pmjs::prepareAssetImage(source,root/"nonuniform",{1,1,pmjs::AssetRect{0,0,20,12},{}}); }
     catch (const pmjs::AssetPreparationUnsupported&) { nonuniformRefused = true; }
     require(nonuniformRefused);
+    const std::array<std::array<std::uint8_t, 8>, 2> collisions{{
+      {0x46,0xd0,0x32,0x5b,0x53,0x02,0xa3,0x0c}, {0x8c,0x95,0x5e,0x00,0xcd,0xef,0xf3,0x56}}};
+    require(crc32(0, collisions[0].data(), 8) == crc32(0, collisions[1].data(), 8));
+    result = check(16,8,[&](int x,int y) {
+      if (y != 2 || x % 8 < 2 || x % 8 >= 4) return AssetColor{};
+      const auto* bytes = collisions[x / 8].data() + (x % 8 - 2) * 4;
+      return AssetColor{bytes[0],bytes[1],bytes[2],bytes[3]};
+    }, {2,1,pmjs::AssetRect{2,2,2,1},{}});
+    require(result.cells[0].atlas != result.cells[1].atlas);
+    for (const int shift : {0,1}) {
+      auto overlapping = result;
+      ++overlapping.pages[0].width;
+      overlapping.cells[1].page = overlapping.cells[0].page;
+      overlapping.cells[1].atlas = overlapping.cells[0].atlas;
+      overlapping.cells[1].atlas[0] += shift;
+      const auto destination = root / ("conflicting-atlas-" + std::to_string(shift));
+      const auto repaired = pmjs::prepareAssetImage(source, destination,
+        {2,1,pmjs::AssetRect{2,2,2,1},{}}, &overlapping);
+      verify(source, destination, repaired);
+      require(repaired.cells[0].atlas != repaired.cells[1].atlas);
+    }
     // Modal ties use RGBA byte order, independently of the native word order.
     result = check(128,64,[](int x,int) {
       return x % 64 >= 16 && x % 64 < 48 ? AssetColor{2,0,0,0} : AssetColor{1,200,0,0};
@@ -637,6 +659,18 @@ int main() {
     write(source, 8, 8, [](int,int) { return AssetColor{13,27,31,0}; }, 0, 16);
     const auto wideTransparent = pmjs::prepareAssetImage(source, root / "16bit");
     require(wideTransparent.uniform == AssetColor({13,27,31,0}));
+    {
+      write(source, 512, 256, [](int x, int y) {
+        return AssetColor{std::uint8_t(x%127), std::uint8_t(y%7), 47, 93};
+      });
+      pmjs::AssetRecipe recipe; recipe.columns = 2; recipe.rows = 1; recipe.framePages = true;
+      pmjs::AssetPreparationStats stats;
+      pmjs::AssetPreparationOptions options; options.workspaceBytes = 1024*1024; options.statistics = &stats;
+      const auto limited = pmjs::prepareAssetImage(source,root/"texture-limited",recipe,nullptr,options);
+      require(limited.framePages && limited.textureArtifact.empty() && stats.workspaceConstrained);
+      require(stats.peakWorkspaceBytes <= options.workspaceBytes && stats.liveWorkspaceBytes == 0);
+      verify(source,root/"texture-limited",limited);
+    }
     {
       pmjs::AssetPreparationOptions options;
       options.workspaceBytes = 64U * 1024U * 1024U;

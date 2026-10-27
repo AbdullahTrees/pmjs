@@ -49,6 +49,20 @@ int main() try {
   auto duplicateSource=pmjs::ImageStore::openFile(root/"source.png");
   const auto duplicate=pmjs::prepareTileAssets({{std::shared_ptr<pmjs::ImageFileSource>(std::move(duplicateSource)),{{32,32,32,32},{64,64,32,32}}}},root);
   require(duplicate.sources[0].regions[0].atlas==duplicate.sources[0].regions[1].atlas);
+  const std::array<std::array<std::uint8_t,8>,2> collisions{{
+    {0x46,0xd0,0x32,0x5b,0x53,0x02,0xa3,0x0c}, {0x8c,0x95,0x5e,0x00,0xcd,0xef,0xf3,0x56}}};
+  std::vector<pmjs::TileAssetInput> collisionInputs;
+  for (std::size_t i=0;i<collisions.size();++i) {
+    std::vector<std::uint8_t> bytes(8*8*4);
+    std::copy(collisions[i].begin(),collisions[i].end(),bytes.begin()+(2*8+2)*4);
+    const auto file=root/("collision-"+std::to_string(i)+".png");
+    pmjs::writePreparedPng(file,8,8,bytes);
+    collisionInputs.push_back({std::shared_ptr<pmjs::ImageFileSource>(pmjs::ImageStore::openFile(file)),{{0,0,8,8}}});
+  }
+  std::filesystem::create_directories(root/"collisions");
+  const auto collided=pmjs::prepareTileAssets(collisionInputs,root/"collisions");
+  require(collided.sources[0].regions[0].atlas!=collided.sources[1].regions[0].atlas);
+  require(pmjs::verifyTileAssets(collisionInputs,collided,root/"collisions")==2);
   bool rejected=false;
   try {
     auto invalid=pmjs::ImageStore::openFile(root/"source.png");

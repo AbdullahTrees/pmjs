@@ -202,6 +202,7 @@ Renderer::Renderer(int width, int height, ImageStore& images)
     effect.block.nearest = glGetUniformLocation(effect.program, "blockNearest");
     effect.block.grid = glGetUniformLocation(effect.program, "blockGrid");
     effect.block.tableWidth = glGetUniformLocation(effect.program, "blockTableWidth");
+    effect.block.planar = glGetUniformLocation(effect.program, "blockPlanar");
     glUseProgram(effect.program);
     glUniform1i(glGetUniformLocation(effect.program, "blockTable"), 2);
     glUniform1i(glGetUniformLocation(effect.program, "paletteTable"), 3);
@@ -503,6 +504,7 @@ void Renderer::createPixiPrograms(const std::string& precision) {
   simpleBlock_.nearest = glGetUniformLocation(simpleProgram_, "blockNearest");
   simpleBlock_.grid = glGetUniformLocation(simpleProgram_, "blockGrid");
   simpleBlock_.tableWidth = glGetUniformLocation(simpleProgram_, "blockTableWidth");
+  simpleBlock_.planar = glGetUniformLocation(simpleProgram_, "blockPlanar");
   glUseProgram(simpleProgram_);
   glUniform1i(glGetUniformLocation(simpleProgram_, "blockTable"), 2);
   glUniform1i(glGetUniformLocation(simpleProgram_, "paletteTable"), 3);

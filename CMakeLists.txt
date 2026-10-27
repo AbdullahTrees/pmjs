@@ -142,7 +142,7 @@ endif()
 add_library(pmjs_vfs_objects OBJECT
   src/vfs.cpp
   src/file_identity.cpp)
-add_library(pmjs_prepared_page_objects OBJECT src/prepared_page.cpp)
+add_library(pmjs_prepared_page_objects OBJECT src/prepared_page.cpp src/image_storage.cpp src/texture_artifact.cpp)
 add_library(pmjs_asset_processor_objects OBJECT
   src/asset_processor.cpp
   src/astc_encoder.cpp)
@@ -152,7 +152,7 @@ foreach(PMJS_OBJECT_TARGET pmjs_vfs_objects pmjs_prepared_page_objects pmjs_asse
   target_compile_options(${PMJS_OBJECT_TARGET} PRIVATE ${PMJS_BASE_COMPILE_OPTIONS})
 endforeach()
 target_link_libraries(pmjs_vfs_objects PRIVATE PkgConfig::AVUTIL)
-target_link_libraries(pmjs_prepared_page_objects PRIVATE pmjs_lz4 PkgConfig::ZLIB)
+target_link_libraries(pmjs_prepared_page_objects PRIVATE pmjs_lz4 PkgConfig::ZLIB PkgConfig::AVUTIL)
 target_link_libraries(pmjs_asset_processor_objects PRIVATE PkgConfig::PNG pmjs_astcenc)
 
 add_library(pmjs_runtime STATIC ${PMJS_RUNTIME_SOURCES})
@@ -240,8 +240,8 @@ if(BUILD_TESTING)
     $<TARGET_OBJECTS:pmjs_asset_processor_objects> $<TARGET_OBJECTS:pmjs_prepared_page_objects>)
   pmjs_add_cpp_test(pmjs-prepared-page-test native-prepared-page test/prepared-page.cpp
     $<TARGET_OBJECTS:pmjs_prepared_page_objects>)
-  target_link_libraries(pmjs-prepared-page-test PRIVATE pmjs_lz4 PkgConfig::ZLIB)
-  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB pmjs_lz4 pmjs_astcenc pthread)
+  target_link_libraries(pmjs-prepared-page-test PRIVATE pmjs_lz4 PkgConfig::ZLIB PkgConfig::AVUTIL)
+  target_link_libraries(pmjs-asset-processor-test PRIVATE PkgConfig::PNG PkgConfig::ZLIB PkgConfig::AVUTIL pmjs_lz4 pmjs_astcenc pthread)
   if(PMJS_ENABLE_SKIA65)
     target_compile_definitions(pmjs-asset-processor-test PRIVATE PMJS_HAS_SKIA65)
     target_link_libraries(pmjs-asset-processor-test PRIVATE pmjs_skia65)
@@ -596,6 +596,16 @@ if(BUILD_TESTING)
     add_test(NAME node-prepared-linear-palette-${mode} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
       "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-linear-palette.cjs" $<TARGET_FILE:pmjs_native> --${mode})
     set_tests_properties(node-prepared-linear-palette-${mode} PROPERTIES ENVIRONMENT
+      "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  endforeach()
+  foreach(codec png lz4)
+    add_test(NAME node-frame-pages-${codec} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/node-frame-pages.cjs" $<TARGET_FILE:pmjs_native> ${codec})
+    set_tests_properties(node-frame-pages-${codec} PROPERTIES ENVIRONMENT
+      "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+    add_test(NAME node-frame-pages-${codec}-palette COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/node-frame-pages.cjs" $<TARGET_FILE:pmjs_native> ${codec} palette)
+    set_tests_properties(node-frame-pages-${codec}-palette PROPERTIES ENVIRONMENT
       "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   endforeach()
   add_test(NAME node-block-sprite-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}

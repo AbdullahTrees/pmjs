@@ -537,7 +537,7 @@ class Renderer {
   int simpleDerivedUvTransformUniform_ = -1;
   int simpleDerivedSampleBoundsUniform_ = -1;
   struct BlockSpriteUniforms {
-    int enabled = -1, nearest = -1, grid = -1, tableWidth = -1;
+    int enabled = -1, nearest = -1, grid = -1, tableWidth = -1, planar = -1;
   };
   BlockSpriteUniforms simpleBlock_;
   struct SpriteEffectProgram {

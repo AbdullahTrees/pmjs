@@ -3,6 +3,7 @@
 #include "astc_texture.hpp"
 #include <EGL/egl.h>
 #include "prepared_page.hpp"
+#include "texture_artifact.hpp"
 #include "file_identity.hpp"
 #include "checked_bounds.hpp"
 #include "png_recovery.hpp"
@@ -10,6 +11,7 @@
 #include "psd_decoder.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <chrono>
 #include <charconv>
@@ -110,49 +112,7 @@ ImageChannelStorage grayscaleStorage(int channels) {
   return {};
 }
 
-ImageChannelStorage imageStorage(const ImagePixels& pixels) {
-  if (pixels.width == 1 && pixels.height == 1) return {};
-  const int grayscale = grayscaleChannels(pixels);
-  if (grayscale != 4) return grayscaleStorage(grayscale);
-  std::array<bool, 3> zero{true, true, true}, one{true, true, true};
-  std::array<std::array<bool, 3>, 3> equal{{{true, true, true}, {true, true, true}, {true, true, true}}};
-  bool opaque = true;
-  for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
-    const auto* pixel = pixels.rgba.data() + i;
-    for (int c = 0; c < 3; ++c) {
-      zero[c] &= pixel[c] == 0;
-      one[c] &= pixel[c] == 255;
-      for (int previous = 0; previous < c; ++previous)
-        equal[previous][c] &= pixel[previous] == pixel[c];
-    }
-    if (!zero[0] && !zero[1] && !zero[2] && !one[0] && !one[1] && !one[2] &&
-        !equal[0][1] && !equal[0][2] && !equal[1][2]) return {};
-    opaque &= pixel[3] == 255;
-  }
-  ImageChannelStorage result{0};
-  for (int c = 0; c < 3; ++c) {
-    if (zero[c]) result.swizzle[c] = 4;
-    else if (opaque && one[c]) result.swizzle[c] = 5;
-    else {
-      int component = 0;
-      for (; component < result.channels; ++component) {
-        const int previous = result.source[component];
-        if (equal[previous][c]) break;
-      }
-      if (component == result.channels) result.source[result.channels++] = static_cast<std::uint8_t>(c);
-      result.swizzle[c] = static_cast<std::uint8_t>(component);
-    }
-  }
-  if (opaque) result.swizzle[3] = 5;
-  else {
-    // Keep alpha separate: an RGB/alpha equality need not survive premultiplication.
-    result.source[result.channels] = 3;
-    result.swizzle[3] = static_cast<std::uint8_t>(result.channels++);
-  }
-  if (result.channels > 2) return {};
-  result.channels = std::max(1, result.channels);
-  return result;
-}
+ImageChannelStorage imageStorage(const ImagePixels& pixels) { return imageChannelStorage(pixels); }
 
 std::uint32_t uploadTexture(int width, int height, const void* rgba, ImageChannelStorage storage,
                             std::uint32_t texture = 0, bool packed = false) {
@@ -589,8 +549,13 @@ struct ImageStore::PreparedBacking {
     bool verifyHash = false;
   };
   PreparedImageDescriptor descriptor;
+  std::shared_ptr<ImageFileSource> textureSource;
+  std::filesystem::path texturePath;
+  std::string textureHash;
+  bool textureChecked = false;
   std::vector<Page> pages;
   std::vector<ImageHandle> cellImages;
+  std::vector<std::size_t> recentCells;
   std::vector<std::array<int,4>> evictedFrames;
   bool frameCacheDisabled = false;
   std::size_t gpuBytes = 0;
@@ -603,10 +568,29 @@ struct ImageStore::PreparedBacking {
     std::shared_ptr<SharedTexture> sharedAtlas;
   };
   std::array<BlockTextures, 2> blockTextures{};
+  std::uint32_t channelAtlas = 0, channelTable = 0;
+  int channelHeight = 0;
+  bool channelChecked = false;
   std::optional<bool> blockEligible;
   bool blockRealizationFailed = false;
 
+  std::optional<bool> sourceSampling;
+  bool requiresSourceSampling() {
+    if (!sourceSampling) {
+      sourceSampling = false;
+      if (descriptor.framePages) {
+        GLint maximum = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+        sourceSampling = descriptor.width <= maximum && descriptor.height <= maximum &&
+          checkedImageExtent(descriptor.width, descriptor.height).has_value();
+      }
+    }
+    return *sourceSampling;
+  }
+
   void clearBlockTextures() {
+    glDeleteTextures(1, &channelAtlas); glDeleteTextures(1, &channelTable);
+    channelAtlas = channelTable = 0;
     for (auto& textures : blockTextures) {
       if (!textures.sharedAtlas) glDeleteTextures(1, &textures.atlas);
       glDeleteTextures(1, &textures.table);
@@ -942,31 +926,7 @@ std::size_t ImageStore::decodedStorageBytes(const ImagePixels& pixels) {
   return pixels.rgba.size()/4*imageStorage(pixels).channels;
 }
 
-ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) {
-  ImageStorageDecision result{pixels.width, pixels.height, 0, imageStorage(pixels)};
-  result.hasPixelFacts = true;
-  result.opaque = true;
-  result.allZero = true;
-  for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
-    result.opaque &= pixels.rgba[i+3] == 255;
-    result.allZero &= !(pixels.rgba[i] || pixels.rgba[i+1] || pixels.rgba[i+2] || pixels.rgba[i+3]);
-  }
-  if (result.channels.channels == 1) return result;
-  const std::size_t limit = result.channels.channels == 2 ? 256 : 65536;
-  std::unordered_set<std::uint32_t> colors;
-  for (std::size_t i = 0; i < pixels.rgba.size(); i += 4) {
-    std::uint32_t key;
-    std::memcpy(&key, pixels.rgba.data() + i, 4);
-    colors.insert(key);
-    if (colors.size() > limit) return result;
-  }
-  const int bits = colors.size() <= 256 ? 8 : 16;
-  if (pixels.rgba.size()/4*(result.channels.channels - bits/8) <=
-      ((colors.size()+255)/256)*1024) return result;
-  result.paletteBits = bits;
-  result.channels = {};
-  return result;
-}
+ImageStorageDecision ImageStore::classifyStorage(const ImagePixels& pixels) { return classifyImageStorage(pixels); }
 
 bool ImageStore::installStorageDecision(const std::filesystem::path& path,
     const std::string& sourceIdentity, ImageStorageDecision decision, const std::string& backingHash) {
@@ -1063,9 +1023,10 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makePalette(const ImageP
 }
 
 std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const SparsePalettePage& page, bool sparseAllowed) {
-  if (page.packed && (!page.blocks.empty() || !page.residual.empty())) return {};
+  if ((page.packed && (!page.blocks.empty() || !page.residual.empty())) ||
+      (!sparseAllowed && page.indexBytes != 2)) return {};
   auto result = std::make_shared<PaletteBacking>();
-  result->owner = this; result->indexChannels = page.packed ? 1 : 2;
+  result->owner = this; result->indexChannels = page.packed ? 1 : page.indexBytes;
   result->height = (page.colors.size() / 4 + 255) / 256;
   result->colors = page.colors; result->colors.resize(std::size_t(result->height) * 1024);
   const auto record = [&](std::size_t bytes) { result->bytes += bytes; gpuBytes_ += bytes; };
@@ -1088,10 +1049,13 @@ std::shared_ptr<ImageStore::PaletteBacking> ImageStore::makeSparsePalette(const 
       0, GL_RGB_INTEGER, GL_UNSIGNED_INT, page.blocks.data());
     if (!result->blocks || glGetError() != GL_NO_ERROR) return {};
     record(page.blocks.size() * 12);
-    const auto count = page.residual.size() / 2;
-    const int width = std::min<std::size_t>(1024, count), height = (count + width - 1) / width;
-    auto residual = page.residual; residual.resize(std::size_t(width) * height * 2);
-    result->residual = uploadTexture(width, height, residual.data(), ImageChannelStorage{2}, 0, true);
+    const auto count = page.residual.size() / page.indexBytes;
+    const auto texels = page.indexBytes == 3 ? page.residual.size() : count;
+    const int channels = page.indexBytes == 3 ? 1 : 2;
+    const int width = std::min<std::size_t>(page.indexBytes == 3 ? 2048 : 1024, texels);
+    const int height = (texels + width - 1) / width;
+    auto residual = page.residual; residual.resize(std::size_t(width) * height * channels);
+    result->residual = uploadTexture(width, height, residual.data(), ImageChannelStorage{channels}, 0, true);
     if (!result->residual) return {};
     record(residual.size());
   } else {
@@ -1119,18 +1083,185 @@ bool ImageStore::hasPaletteStorage(ImageHandle handle) const {
     decision->paletteBits != 0;
 }
 
+bool ImageStore::realizeSourceTexture(ImageHandle handle) try {
+  auto& slot = slots_[(handle & indexMask)-1U];
+  if (!slot.prepared || !slot.prepared->requiresSourceSampling() || slot.texture || slot.premultipliedTexture) return false;
+  auto& backing = *slot.prepared;
+  if (backing.textureChecked) return slot.palette || backing.channelAtlas;
+  backing.textureChecked = true;
+  std::optional<PreparedTexture> built;
+  std::optional<TextureLayout> layout;
+  const auto source = std::move(backing.textureSource);
+  std::unique_ptr<AVSHA, decltype(&av_free)> artifactDigest(nullptr, &av_free);
+  std::size_t hashedBytes = 0;
+  if (source && !backing.textureHash.empty()) {
+    artifactDigest.reset(av_sha_alloc());
+    if (!artifactDigest) throw std::bad_alloc();
+    av_sha_init(artifactDigest.get(), 256);
+  }
+  TextureReader reader;
+  if (source) {
+    reader = [source, &artifactDigest, &hashedBytes](std::size_t offset, std::span<std::uint8_t> bytes) {
+      if (offset > source->size_ || bytes.size() > source->size_-offset) return false;
+      std::size_t done = 0;
+      while (done < bytes.size()) {
+        const auto count = pread(source->descriptor_, bytes.data()+done, bytes.size()-done, offset+done);
+        if (count <= 0) return false;
+        done += count;
+      }
+      if (artifactDigest) {
+        if (offset != hashedBytes) return false;
+        av_sha_update(artifactDigest.get(), bytes.data(), bytes.size());
+        hashedBytes += bytes.size();
+      }
+      return true;
+    };
+    layout = readTextureLayout(reader, source->size_);
+    if (!layout || layout->width != slot.width || layout->height != slot.height) {
+      layout.reset(); ++textureArtifactFailures_; textureArtifactFailureReason_ = "layout";
+    }
+  } else if (!backing.descriptor.textureArtifact.empty()) {
+    ++textureArtifactFailures_; textureArtifactFailureReason_ = "missing";
+  }
+  auto upload = [&](const TextureLayout& l, bool artifact) {
+    if (l.kind == TextureKind::Channels && !compactSamplingEnabled_) return false;
+    struct UnpackState {
+      std::array<GLenum,4> names{GL_UNPACK_ALIGNMENT,GL_UNPACK_ROW_LENGTH,GL_UNPACK_SKIP_ROWS,GL_UNPACK_SKIP_PIXELS};
+      std::array<GLint,4> values{};
+      GLint binding = 0, buffer = 0;
+      UnpackState() {
+        glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING,&buffer);
+        for (std::size_t i=0;i<names.size();++i) glGetIntegerv(names[i],&values[i]);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);
+        for (std::size_t i=0;i<names.size();++i) glPixelStorei(names[i],i == 0 ? 1 : 0);
+      }
+      ~UnpackState() {
+        glBindTexture(GL_TEXTURE_2D,binding); glBindBuffer(GL_PIXEL_UNPACK_BUFFER,buffer);
+        for (std::size_t i=0;i<names.size();++i) glPixelStorei(names[i],values[i]);
+      }
+    } unpack;
+    GLint maximum = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+    for (const auto& p : l.planes) if (p.width > unsigned(maximum) || p.height > unsigned(maximum)) return false;
+    struct Textures {
+      std::vector<GLuint> ids;
+      ~Textures() { glDeleteTextures(ids.size(), ids.data()); }
+    } textures;
+    textures.ids.resize(l.planes.size());
+    auto palette = std::make_shared<PaletteBacking>(); palette->owner = this;
+    std::size_t bytes = 0;
+    const auto formats = [](TextureFormat f) -> std::array<GLenum,3> {
+      switch(f) {
+        case TextureFormat::R8:return {GL_R8,GL_RED,GL_UNSIGNED_BYTE};
+        case TextureFormat::RG8:return {GL_RG8,GL_RG,GL_UNSIGNED_BYTE};
+        case TextureFormat::RGBA8:return {GL_RGBA8,GL_RGBA,GL_UNSIGNED_BYTE};
+        case TextureFormat::RGB32UI:return {GL_RGB32UI,GL_RGB_INTEGER,GL_UNSIGNED_INT};
+        case TextureFormat::RGBA32UI:return {GL_RGBA32UI,GL_RGBA_INTEGER,GL_UNSIGNED_INT};
+      }
+      return {};
+    };
+    while (glGetError() != GL_NO_ERROR) {}
+    for (std::size_t i = 0; i < l.planes.size(); ++i) {
+      const auto& p = l.planes[i]; const auto f = formats(p.format);
+      glGenTextures(1,&textures.ids[i]); glBindTexture(GL_TEXTURE_2D,textures.ids[i]);
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+      glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+      glTexImage2D(GL_TEXTURE_2D,0,f[0],p.width,p.height,0,f[1],f[2],nullptr);
+      if (!textures.ids[i] || glGetError()!=GL_NO_ERROR) return false;
+      bytes += std::size_t(p.width)*p.height*textureTexelBytes(p.format);
+    }
+    const auto consume = [&](std::size_t i, const TextureChunk& c, std::span<const std::uint8_t> data) {
+      const auto& p = l.planes[i]; const auto f = formats(p.format);
+      glBindTexture(GL_TEXTURE_2D,textures.ids[i]);
+      glTexSubImage2D(GL_TEXTURE_2D,0,0,c.y,p.width,c.rows,f[1],f[2],data.data());
+      if (glGetError()!=GL_NO_ERROR) return false;
+      if (l.kind != TextureKind::Channels && i == 1) palette->colors.insert(palette->colors.end(),data.begin(),data.end());
+      return true;
+    };
+    if (artifact) {
+      if (!readTextureChunks(reader,l,consume,textureArtifactStagingBytes_)) return false;
+      if (artifactDigest) {
+        std::array<std::uint8_t,32> digest{};
+        av_sha_final(artifactDigest.get(), digest.data());
+        constexpr char digits[] = "0123456789abcdef";
+        std::string hash;
+        for (const auto byte : digest) { hash += digits[byte >> 4]; hash += digits[byte & 15]; }
+        if (hashedBytes != source->size_ || hash != backing.textureHash) return false;
+      }
+    } else {
+      for (std::size_t i = 0; i < l.planes.size(); ++i) {
+        if constexpr (std::endian::native == std::endian::big) {
+          auto& data = built->bytes[i];
+          if (textureTexelBytes(l.planes[i].format) >= 12)
+            for (std::size_t j = 0; j < data.size(); j += 4) std::reverse(data.begin()+j,data.begin()+j+4);
+        }
+        if (!consume(i,TextureChunk{0,l.planes[i].height},built->bytes[i])) return false;
+      }
+    }
+    if (l.kind == TextureKind::Channels) {
+      backing.channelAtlas = textures.ids[0]; backing.channelTable = textures.ids[1];
+      backing.channelHeight = l.planes[0].height; backing.channelChecked = true;
+      backing.gpuBytes += bytes; ++blockTextureUploads_;
+    } else {
+      palette->indices = textures.ids[0]; palette->table = textures.ids[1];
+      palette->indexChannels = l.kind == TextureKind::Dense8 ? 1 : l.kind == TextureKind::Sparse24 ? 3 : 2;
+      palette->height = l.planes[1].height; palette->bytes = bytes;
+      if (textures.ids.size() == 4) { palette->blocks = textures.ids[2]; palette->residual = textures.ids[3]; }
+      slot.palette = std::move(palette);
+    }
+    textureCreates_ += textures.ids.size(); textureEpoch_ += textures.ids.size();
+    std::fill(textures.ids.begin(),textures.ids.end(),0);
+    gpuBytes_ += bytes; peakGpuBytes_ = std::max(peakGpuBytes_,gpuBytes_); textureUploadBytes_ += bytes;
+    for (auto& p : backing.pages) { p.pixels.reset(); p.sparse.reset(); }
+    return true;
+  };
+  if (layout) {
+    if (upload(*layout,true)) { ++textureArtifactLoads_; return true; }
+    ++textureArtifactFailures_; textureArtifactFailureReason_ = "chunk-or-upload";
+  }
+  ++sourceTextureBuilds_;
+  auto pixels = readPixelsRegion(handle,0,0,slot.width,slot.height);
+  if (!pixels) return false;
+  const auto* decision = storageDecision(slot.cacheKey);
+  if (decision && (decision->width != slot.width || decision->height != slot.height)) decision = nullptr;
+  built = makePreparedTexture(*pixels,decision);
+  return built && upload(built->layout,false);
+} catch (const std::bad_alloc&) {
+  ++textureArtifactFailures_; textureArtifactFailureReason_ = "allocation"; return false;
+}
+
 std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle handle, bool premultiplied) {
   auto info = inspect(handle);
   if (!info) return std::nullopt;
   auto& slot = slots_[(handle & indexMask) - 1U];
   if (!slot.paletteChecked && !slot.texture && !slot.astc) {
+    if (realizeSourceTexture(handle)) {
+      slot.paletteChecked = true;
+      if (!slot.palette) return std::nullopt;
+    }
     slot.paletteChecked = true;
     const auto* decision = storageDecision(slot.cacheKey);
     if (decision && (decision->width != slot.width || decision->height != slot.height)) decision = nullptr;
     if (decision) ++storageDecisionHits_;
-    if (decision && !decision->paletteBits) return std::nullopt;
-    auto pixels = readPixelsRegion(handle, 0, 0, slot.width, slot.height);
-    if (pixels) slot.palette = makePalette(*pixels, decision);
+    const bool sourcePalette = slot.prepared && slot.prepared->requiresSourceSampling();
+    if (decision && !decision->paletteBits && !sourcePalette) return std::nullopt;
+    auto pixels = slot.palette ? std::optional<ImagePixels>{} : readPixelsRegion(handle, 0, 0, slot.width, slot.height);
+    if (pixels) {
+      if (sourcePalette && decision && decision->paletteBits == 16) {
+        auto sparse = makeSparsePalettePage(pixels->width, pixels->height, pixels->rgba);
+        if (sparse) slot.palette = makeSparsePalette(*sparse, true);
+      }
+      if (!slot.palette) slot.palette = makePalette(*pixels, decision);
+      if (!slot.palette && sourcePalette) {
+        auto sparse = makeSparsePalettePage(pixels->width, pixels->height, pixels->rgba, 262144);
+        if (sparse && sparse->indexBytes == 3 &&
+            sparse->gpuBytes() + sparse->colors.size() * 3 < pixels->rgba.size())
+          slot.palette = makeSparsePalette(*sparse, true);
+      }
+    }
     if (slot.palette && slot.prepared)
       for (auto& page : slot.prepared->pages) page.pixels.reset();
   }
@@ -1139,7 +1270,7 @@ std::optional<PaletteImageRegion> ImageStore::resolvePaletteImage(ImageHandle ha
   if (!table) return std::nullopt;
   info->texture = slot.palette->indices;
   info->premultiplied = premultiplied;
-  return PaletteImageRegion{*info, table};
+  return PaletteImageRegion{*info, table, slot.palette->blocks, slot.palette->residual};
 }
 
 std::uint32_t ImageStore::paletteTable(PaletteBacking& palette, bool premultiplied) {
@@ -1459,6 +1590,7 @@ std::vector<ImageMemoryEntry> ImageStore::memoryEntries() const {
     entry.astc = bool(slot.astc);
     entry.fullTextureResident = slot.texture || slot.premultipliedTexture || slot.palette;
     entry.palette = bool(slot.palette);
+    entry.paletteSparse = slot.palette && slot.palette->blocks != 0;
     entry.paletteIndexBits = slot.palette ? slot.palette->indexChannels * 8 : 0;
     if (slot.prepared) for (const auto& page : slot.prepared->pages) if (page.palette) {
       entry.palette = true;
@@ -2065,7 +2197,8 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
                                 PreparedImageDescriptor descriptor,
                                 const std::string& expectedSourceIdentity,
                                 const std::vector<std::string>* pageIdentities, std::vector<std::string>* capturedPages,
-                                const std::string& backingHash, const std::vector<std::string>* pageHashes) {
+                                const std::string& backingHash, const std::vector<std::string>* pageHashes,
+                                const std::string& textureHash) {
   if (descriptor.version != 1 || descriptor.halo < 1 || descriptor.halo > 32 || !checkedImageExtent(descriptor.width, descriptor.height,
       8192, 128U * 1024U * 1024U)) return false;
   auto original = pageIdentities ? nullptr : openFile(sourcePath);
@@ -2073,6 +2206,7 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
       (!original || (!expectedSourceIdentity.empty() && original->key() != expectedSourceIdentity &&
         !(validContentHash(backingHash) && inodeOnlyChange(expectedSourceIdentity, original->key()))))) return false;
   if ((!backingHash.empty() && !validContentHash(backingHash)) ||
+      (!textureHash.empty() && !validContentHash(textureHash)) ||
       (pageHashes && (pageHashes->size() != descriptor.pages.size() ||
         !std::all_of(pageHashes->begin(), pageHashes->end(), validContentHash)))) return false;
   auto backing = std::make_shared<PreparedBacking>();
@@ -2151,6 +2285,11 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
     backing->pages.push_back(std::move(prepared));
   }
   if (capturedPages) for (const auto& page : backing->pages) capturedPages->push_back(page.identity);
+  if (!descriptor.textureArtifact.empty()) {
+    if (descriptor.textureArtifact != "texture.pmtx" || !descriptor.framePages || astc || descriptor.uniform) return false;
+    backing->texturePath = directory / descriptor.textureArtifact;
+    backing->textureHash = textureHash;
+  }
   backing->descriptor = std::move(descriptor);
   backing->sourceIdentity = sourceIdentity;
   backing->sourceHash = backingHash;
@@ -2216,6 +2355,10 @@ std::shared_ptr<ImageStore::PreparedLoad> ImageStore::capturePrepared(
     captured.modifiedNanoseconds_ = source.modifiedNanoseconds_;
     captured.path_ = source.path_; captured.key_ = source.key_;
   }
+  backing.texturePath = prototype->texturePath;
+  backing.textureHash = prototype->textureHash;
+  backing.textureSource = prototype->textureSource ? prototype->textureSource :
+    backing.texturePath.empty() ? nullptr : openFile(backing.texturePath);
   for (const auto& page : prototype->pages) {
     auto file = page.source ? page.source : std::shared_ptr<ImageFileSource>(openFile(page.path));
     if (!file || (file->key() != page.identity &&
@@ -2371,7 +2514,7 @@ std::optional<ImageInfo> ImageStore::installPreparedLoad(const ImageFileSource& 
     // Upload a bounded set of immutable pages before publishing image readiness.
     // Larger page sets remain pageable rather than expanding the source sheet.
     std::size_t staged = 0;
-    if (hasPaletteStorage(handle)) for (std::size_t page=0; page<slot.prepared->pages.size(); ++page) {
+    if (!descriptor.framePages && hasPaletteStorage(handle)) for (std::size_t page=0; page<slot.prepared->pages.size(); ++page) {
       const auto& dimensions = slot.prepared->descriptor.pages[page];
       const auto bytes = static_cast<std::size_t>(dimensions.width)*dimensions.height*4U;
       if (bytes>preparedPageCacheBudget-staged) break;
@@ -2595,7 +2738,25 @@ bool ImageStore::readPreparedRegionInto(PreparedBacking& backing, int x, int y,
   return true;
 }
 
+void ImageStore::reserveFramePage(PreparedBacking& backing, std::size_t index) {
+  if (!backing.descriptor.framePages || backing.pages[index].pixels || backing.pages[index].sparse) return;
+  for (;;) {
+    std::size_t resident = 0;
+    PreparedBacking::Page* oldest = nullptr;
+    for (std::size_t i = 0; i < backing.pages.size(); ++i) {
+      auto& page = backing.pages[i];
+      if (i == index || (!page.pixels && !page.sparse)) continue;
+      ++resident;
+      if (!oldest || page.shared->lastCpuUse.load(std::memory_order_relaxed) <
+          oldest->shared->lastCpuUse.load(std::memory_order_relaxed)) oldest = &page;
+    }
+    if (resident < 4) return;
+    oldest->pixels.reset(); oldest->sparse.reset();
+  }
+}
+
 bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index) {
+  reserveFramePage(backing, index);
   auto& page = backing.pages[index];
   if (page.sparse) return true;
   if (page.sparseChecked && !page.sparseFormat) return false;
@@ -2633,6 +2794,7 @@ bool ImageStore::preparedSparsePage(PreparedBacking& backing, std::size_t index)
 }
 
 ImagePixels* ImageStore::preparedPixels(PreparedBacking& backing, std::size_t index, bool* acquired) {
+  reserveFramePage(backing, index);
   auto& page = backing.pages[index];
   if (!page.pixels && preparedSparsePage(backing, index)) {
     std::lock_guard lock(page.shared->mutex);
@@ -2847,6 +3009,7 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
   if (slot.tiles) return resolveTileRegion(slot, x, y, width, height, premultiplied);
   if (!slot.prepared) return std::nullopt;
   auto& backing = *slot.prepared;
+  if (backing.requiresSourceSampling()) return std::nullopt;
   if (backing.descriptor.uniform && paletteOnly) return std::nullopt;
   if (backing.descriptor.uniform) {
     auto& image = backing.cellImages.back();
@@ -2864,7 +3027,7 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
     const auto& cell = backing.descriptor.cells[i]; const auto& r = cell.rect;
     if (x < r[0] || y < r[1] || x + width > r[0] + r[2] || y + height > r[1] + r[3]) continue;
     const bool zero = std::all_of(cell.fill.begin(), cell.fill.end(), [](std::uint8_t v) { return v == 0; });
-    if (zero && cell.crop[2] && cell.crop[3]) {
+    if (zero && cell.crop[2] && cell.crop[3] && (!backing.descriptor.framePages || paletteOnly)) {
       PaletteImageRegion palette;
       auto physical = preparedPage(slot, cell.page, premultiplied, paletteOnly ? &palette : nullptr, sparseAllowed);
       if (!physical) return std::nullopt;
@@ -2876,6 +3039,17 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
          static_cast<float>(cell.atlas[2]), static_cast<float>(cell.atlas[3])}, info->width, info->height, backing.descriptor.halo, palette.table, palette.blocks, palette.residual};
     }
     if (paletteOnly) return std::nullopt;
+    if (backing.descriptor.framePages) {
+      auto& recent = backing.recentCells;
+      std::erase(recent, i);
+      while (recent.size() >= 4) {
+        const auto oldest = recent.front();
+        release(backing.cellImages[oldest]);
+        backing.cellImages[oldest] = 0;
+        recent.erase(recent.begin());
+      }
+      recent.push_back(i);
+    }
     auto& image = backing.cellImages[i];
     if (!image) {
       const int halo = backing.descriptor.halo;
@@ -2895,6 +3069,11 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
       auto created = createDecoded(pixels);
       if (!created) return std::nullopt;
       image = created->handle;
+    }
+    if (backing.descriptor.framePages &&
+        std::find(activePreparedFrames_.begin(), activePreparedFrames_.end(), image) == activePreparedFrames_.end()) {
+      beginUse(image);
+      activePreparedFrames_.push_back(image);
     }
     auto physical = premultiplied ? lookupPremultiplied(image) : lookup(image);
     if (!physical) return std::nullopt;
@@ -3062,6 +3241,7 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
       x + width > logical->width || y + height > logical->height) return std::nullopt;
   auto& slot = slots_[(handle & indexMask)-1U];
   if (!slot.prepared || slot.tiles || slot.prepared->descriptor.uniform) return std::nullopt;
+  if (slot.prepared->requiresSourceSampling()) return std::nullopt;
   const int left = static_cast<int>(std::floor(x)), top = static_cast<int>(std::floor(y));
   const int right = static_cast<int>(std::ceil(x + width)), bottom = static_cast<int>(std::ceil(y + height));
   if (!linearPalette && left == 0 && top == 0 && right == logical->width && bottom == logical->height)
@@ -3192,6 +3372,50 @@ std::optional<BlockImageRegion> ImageStore::resolveBlockRegion(ImageHandle handl
   if (!slot.prepared || slot.tiles) return std::nullopt;
   auto& backing = *slot.prepared;
   const auto& descriptor = backing.descriptor;
+  if (backing.requiresSourceSampling() && !slot.texture && !slot.premultipliedTexture) {
+    if (!backing.channelChecked) {
+      backing.channelChecked = true;
+      auto pixels = readPreparedRegion(backing, 0, 0, logical->width, logical->height);
+      auto channel = pixels ? makeChannelBlockPage(pixels->width, pixels->height, pixels->rgba) :
+        std::optional<ChannelBlockPage>{};
+      if (channel) {
+        const int height = (channel->bytes.size() + 8191) / 8192;
+        GLint maximum = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
+        if (maximum >= 2048 && height <= maximum) {
+          channel->bytes.resize(std::size_t(height) * 8192);
+          const auto atlas = uploadTexture(2048, height, channel->bytes.data(), {});
+          GLuint table = 0;
+          if (atlas) {
+            while (glGetError() != GL_NO_ERROR) {}
+            glGenTextures(1, &table); glBindTexture(GL_TEXTURE_2D, table);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, (logical->width + 7) / 8,
+              (logical->height + 7) / 8, 0, GL_RGBA_INTEGER, GL_UNSIGNED_INT, channel->blocks.data());
+          }
+          if (atlas && table && glGetError() == GL_NO_ERROR) {
+            backing.channelAtlas = atlas; backing.channelTable = table; backing.channelHeight = height;
+            const auto bytes = channel->gpuBytes();
+            backing.gpuBytes += bytes; gpuBytes_ += bytes;
+            peakGpuBytes_ = std::max(peakGpuBytes_, gpuBytes_);
+            textureCreates_ += 2; textureEpoch_ += 2; textureUploadBytes_ += bytes;
+            for (auto& page : backing.pages) { page.pixels.reset(); page.sparse.reset(); }
+            ++blockTextureUploads_;
+          } else { glDeleteTextures(1, &atlas); glDeleteTextures(1, &table); ++blockUploadFailures_; }
+        }
+      }
+    }
+    if (backing.channelAtlas) {
+      ++blockRegions_;
+      return BlockImageRegion{{0, 2048, backing.channelHeight, backing.channelAtlas,
+          premultiplied || slot.premultiplied, false}, backing.channelTable,
+        {8, logical->width, logical->height}, {(logical->width + 7) / 8, (logical->height + 7) / 8},
+        logical->width, logical->height, premultiplied && !slot.premultiplied ? 2 : 1};
+    }
+  }
   if (!descriptor.blockGrid || descriptor.pages.size() != 1 ||
       backing.blockRealizationFailed || (descriptor.blockChannels && !*descriptor.blockChannels) ||
       (backing.blockEligible && !*backing.blockEligible)) return std::nullopt;

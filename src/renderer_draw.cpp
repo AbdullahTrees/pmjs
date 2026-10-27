@@ -790,7 +790,8 @@ void Renderer::renderScene() {
       command.source[0], command.source[1], command.source[2], command.source[3],
       command.pixiSpritePacking && !command.premultipliedSpriteTexture);
     const std::uint32_t paletteTable = palette ? palette->table : derived ? derived->paletteTable : 0U;
-    const std::uint32_t paletteBlocks = derived ? derived->paletteBlocks : 0U, paletteResidual = derived ? derived->paletteResidual : 0U;
+    const std::uint32_t paletteBlocks = palette ? palette->blocks : derived ? derived->paletteBlocks : 0U,
+      paletteResidual = palette ? palette->residual : derived ? derived->paletteResidual : 0U;
     const bool compactEligible = logicalInfo && !palette && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
       command.source[2] > 0 && localWidth > 0 && localHeight > 0 &&
@@ -2162,7 +2163,7 @@ void Renderer::renderScene() {
     }
     projectTarget(spriteProgram, operation.primitive != RenderCommand::Primitive::screenFill);
     glBindTexture(GL_TEXTURE_2D, operation.texture);
-    glUniform1i(simpleSprite ? simplePaletteUniform_ : spriteEffect.palette, operation.paletteTable ? (operation.paletteBlocks ? 3 : operation.nearest ? 1 : 2) : 0);
+    glUniform1i(simpleSprite ? simplePaletteUniform_ : spriteEffect.palette, operation.paletteTable ? (operation.paletteBlocks ? (operation.nearest ? 3 : 4) : operation.nearest ? 1 : 2) : 0);
     if (operation.paletteTable) {
       glActiveTexture(GL_TEXTURE3);
       glBindTexture(GL_TEXTURE_2D, operation.paletteTable);
@@ -2215,6 +2216,7 @@ void Renderer::renderScene() {
     if (operation.block) {
       const auto& region = *operation.block;
       glUniform1i(blockUniforms.nearest, operation.nearest);
+      glUniform1i(blockUniforms.planar, region.planar);
       glUniform3iv(blockUniforms.grid, 1, region.blockGrid.data());
       glUniform1i(blockUniforms.tableWidth, region.tableSize[0]);
       glActiveTexture(GL_TEXTURE2);

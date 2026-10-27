@@ -1,6 +1,7 @@
 #include "platform.hpp"
 #include "resources.hpp"
 #include "asset_processor.hpp"
+#include "texture_artifact.hpp"
 
 #include <GLES3/gl3.h>
 #include <algorithm>
@@ -94,6 +95,45 @@ int main() try {
   pmjs::Platform platform(32, 32, "Compact allocation failure");
   FixtureDirectory directory;
   const auto& root = directory.path;
+  {
+    pmjs::ImagePixels pixels{512,256,std::vector<std::uint8_t>(512*256*4)};
+    for (std::size_t i=0;i<pixels.rgba.size();i+=4) {
+      pixels.rgba[i]=(i/4)%127; pixels.rgba[i+1]=31; pixels.rgba[i+2]=47; pixels.rgba[i+3]=93;
+    }
+    pmjs::writePreparedPng(root/"artifact-source.png",pixels.width,pixels.height,pixels.rgba);
+    pmjs::AssetRecipe recipe; recipe.columns=2; recipe.rows=1; recipe.framePages=true;
+    const auto prepared=pmjs::prepareAssetImage(root/"artifact-source.png",root/"artifact",recipe);
+    require(prepared.textureArtifact=="texture.pmtx","texture artifact was not prepared");
+    pmjs::PreparedImageDescriptor descriptor;
+    descriptor.width=prepared.width; descriptor.height=prepared.height; descriptor.halo=prepared.halo;
+    descriptor.framePages=true; descriptor.textureArtifact=prepared.textureArtifact;
+    for(const auto& page:prepared.pages)descriptor.pages.push_back({page.path,page.width,page.height});
+    for(const auto& cell:prepared.cells)descriptor.cells.push_back({cell.rect,cell.crop,cell.atlas,cell.fill,cell.page});
+    for(const int failAt:{0,1,2}) {
+      pmjs::ImageStore images; images.setWarmBudgetBytes(0);
+      require(images.installPrepared(root/"artifact-source.png",root/"artifact",descriptor),"artifact install failed");
+      auto image=images.loadPng(root/"artifact-source.png");require(image.has_value(),"artifact load failed");
+      GLuint texture=0,buffer=0;glGenTextures(1,&texture);glBindTexture(GL_TEXTURE_2D,texture);
+      glGenBuffers(1,&buffer);glBindBuffer(GL_PIXEL_UNPACK_BUFFER,buffer);glBufferData(GL_PIXEL_UNPACK_BUFFER,256,nullptr,GL_STATIC_DRAW);
+      glPixelStorei(GL_UNPACK_ALIGNMENT,8);glPixelStorei(GL_UNPACK_ROW_LENGTH,17);
+      glPixelStorei(GL_UNPACK_SKIP_ROWS,2);glPixelStorei(GL_UNPACK_SKIP_PIXELS,3);
+      const UnpackState before;
+      uploadedTextures.clear();captureUploads=true;textureCountdown=failAt;
+      const auto palette=images.resolvePaletteImage(image->handle,false);
+      captureUploads=false;textureCountdown=0;
+      require(palette.has_value(),"artifact failure did not recover through the source representation");
+      require(UnpackState().values==before.values,"artifact upload changed caller unpack state");
+      require(images.textureArtifactLoads()==(failAt?0U:1U),"artifact activation differs");
+      require(images.sourceTextureBuilds()==(failAt?1U:0U),"artifact fallback differs");
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0);glBindTexture(GL_TEXTURE_2D,0);
+      glPixelStorei(GL_UNPACK_ALIGNMENT,1);glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+      glPixelStorei(GL_UNPACK_SKIP_ROWS,0);glPixelStorei(GL_UNPACK_SKIP_PIXELS,0);
+      images.release(image->handle);images.update();
+      require(images.gpuBytes()==0,"artifact allocation failure leaked texture bytes");
+      for(auto id:uploadedTextures)require(!glIsTexture(id),"artifact allocation failure leaked a texture");
+      glDeleteTextures(1,&texture);glDeleteBuffers(1,&buffer);
+    }
+  }
   pmjs::PreparedImageDescriptor descriptor;
   descriptor.width = 48; descriptor.height = 12;
   descriptor.pages = {{"page.png", 6, 6}};

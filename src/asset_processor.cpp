@@ -3,6 +3,7 @@
 #include "astc_encoder.hpp"
 #include "checked_bounds.hpp"
 #include "prepared_page.hpp"
+#include "texture_artifact.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -23,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <zlib.h>
 #include <utility>
 #include <png.h>
 
@@ -158,7 +160,7 @@ class Workspace {
     limit_ = std::min({limit, std::size_t{256U * 1024U * 1024U}, allowance_});
     stats.workspaceLimitBytes = limit_;
   }
-  std::shared_ptr<Buffer> retain(std::size_t size) {
+  std::shared_ptr<Buffer> retain(std::size_t size, bool allocate = true) {
     if (!size) return {};
     if (size > limit_) { stats.workspaceConstrained = true; return {}; }
     const auto now = std::chrono::steady_clock::now();
@@ -173,8 +175,8 @@ class Workspace {
     if (processBytes_ > limit_ || size > limit_ - processBytes_ || size > allowance_) {
       stats.workspaceConstrained = true; return {};
     }
-    std::unique_ptr<std::uint8_t[]> bytes(new (std::nothrow) std::uint8_t[size]);
-    if (!bytes) { stats.workspaceConstrained = true; return {}; }
+    std::unique_ptr<std::uint8_t[]> bytes(allocate ? new (std::nothrow) std::uint8_t[size] : nullptr);
+    if (allocate && !bytes) { stats.workspaceConstrained = true; return {}; }
     buffer->owner = this; buffer->bytes = std::move(bytes); buffer->size = size;
     processBytes_ += size; bytes_ += size;
     stats.liveWorkspaceBytes = bytes_;
@@ -281,7 +283,7 @@ class TileStore {
       }
       workspace_.stats.spillBytesWritten += bytes.size();
     }
-    for (auto byte : bytes) record.hash = (record.hash ^ byte) * 1099511628211ULL;
+    record.hash = crc32(record.hash, bytes.data(), static_cast<uInt>(bytes.size()));
     record.written += bytes.size();
   }
   void read(std::size_t index, std::size_t offset, std::span<std::uint8_t> bytes) const {
@@ -346,7 +348,7 @@ class TileStore {
     std::shared_ptr<Workspace::Buffer> buffer;
     std::uint64_t offset;
     std::size_t size, written = 0;
-    std::uint64_t hash = 14695981039346656037ULL;
+    std::uint64_t hash = 0;
   };
   Workspace& workspace_;
   std::filesystem::path directory_, file_;
@@ -400,9 +402,7 @@ void writePng(const std::filesystem::path& path, int width, int height,
   png_image_free(&image);
 }
 std::uint64_t digest(std::span<const std::uint8_t> bytes) {
-  std::uint64_t value = 14695981039346656037ULL;
-  for (const auto byte : bytes) { value ^= byte; value *= 1099511628211ULL; }
-  return value;
+  return crc32(0, bytes.data(), static_cast<uInt>(bytes.size()));
 }
 struct Tile {
   int width = 0, height = 0;
@@ -553,6 +553,20 @@ std::vector<std::uint8_t> renderPage(PreparationSource& source, const PreparedAs
       const int paddedWidth = cell.crop[2] + asset.halo * 2;
       for (int py = firstRow; py <= lastRow; ++py) {
         const auto offset = (static_cast<std::size_t>(cell.atlas[1] - asset.halo + py) * width + cell.atlas[0] - asset.halo);
+        if (left >= 0 && paddedWidth <= source.width - left) {
+          const auto* from = rows.row.data() + static_cast<std::size_t>(left) * 4;
+          const auto begin = written.begin() + offset, end = begin + paddedWidth;
+          if (std::find(begin, end, 1) == end) {
+            std::memcpy(bytes.data() + offset * 4, from, static_cast<std::size_t>(paddedWidth) * 4);
+            std::fill(begin, end, 1);
+            continue;
+          }
+          if (std::find(begin, end, 0) == end) {
+            if (std::memcmp(bytes.data() + offset * 4, from, static_cast<std::size_t>(paddedWidth) * 4))
+              throw AssetPreparationUnsupported("prepared shared tile differs");
+            continue;
+          }
+        }
         for (int x = 0; x < paddedWidth; ++x) {
           const auto* color = rows.row.data() + static_cast<std::size_t>(std::clamp(left + x, 0, source.width - 1)) * 4;
           auto* target = bytes.data() + (offset + x) * 4;
@@ -659,11 +673,10 @@ std::optional<PreparedAsset> sharedInteriorLayout(PreparationSource& source, con
       asset.pages[region.page].width + region.rect[0]) * 4;
   };
   const auto regionHash = [&](const Region& region) {
-    std::uint64_t hash = 14695981039346656037ULL;
+    std::uint64_t hash = 0;
     for (int y = 0; y < region.rect[3]; ++y) {
       const auto* row = regionRow(region, y);
-      for (std::size_t x = 0; x < static_cast<std::size_t>(region.rect[2]) * 4; ++x)
-        hash = (hash ^ row[x]) * 1099511628211ULL;
+      hash = crc32(hash, row, static_cast<uInt>(region.rect[2]) * 4);
     }
     return hash;
   };
@@ -1111,7 +1124,10 @@ static PreparedAsset prepareAssetCells(PreparationSource& source,
       const int repetitions = 1 + (y == 0 ? std::max(0, -startY) : 0) +
         (y == result.height - 1 ? std::max(0, startY + tile.height - result.height) : 0);
       const int startX = cell.rect[0] + cell.crop[0] - result.halo;
-      for (int x = 0; x < tile.width; ++x) {
+      if (startX >= 0 && tile.width <= result.width - startX)
+        std::memcpy(haloRow.data(), extraction.row.data() + static_cast<std::size_t>(startX) * 4,
+          static_cast<std::size_t>(tile.width) * 4);
+      else for (int x = 0; x < tile.width; ++x) {
         const int sourceX = std::clamp(startX + x, 0, result.width - 1);
         std::memcpy(haloRow.data() + static_cast<std::size_t>(x) * 4,
           extraction.row.data() + static_cast<std::size_t>(sourceX) * 4, 4);
@@ -1146,17 +1162,22 @@ static PreparedAsset prepareAssetCells(PreparationSource& source,
       const auto index = static_cast<std::size_t>(y / cellHeight) * recipe.columns + column;
       const auto& cell = result.cells[index];
       const int localY = y - cell.rect[1];
+      const auto* sourceRow = check.row.data() + static_cast<std::size_t>(cell.rect[0]) * 4;
+      const auto verifyFill = [&](int first, int last) {
+        for (int x = first; x < last; ++x)
+          if (pixel(sourceRow + static_cast<std::size_t>(x) * 4) != cell.fill)
+            throw std::runtime_error("prepared image reconstruction differs");
+      };
       if (cell.crop[2] && localY >= cell.crop[1] && localY < cell.crop[1] + cell.crop[3]) {
         const auto offset = static_cast<std::size_t>(localY - cell.crop[1] + result.halo) * tiles[index].width * 4;
         storage.read(records[canonical[index]], offset,
           std::span(tileRow).first(static_cast<std::size_t>(tiles[index].width) * 4));
-      }
-      for (int x = 0; x < cellWidth; ++x) {
-        const bool stored = inside(x, localY, cell.crop);
-        const auto actual = stored ? pixel(tileRow.data() + static_cast<std::size_t>(x - cell.crop[0] + result.halo) * 4) : cell.fill;
-        if (actual != pixel(check.row.data() + static_cast<std::size_t>(cell.rect[0] + x) * 4))
+        if (std::memcmp(tileRow.data() + static_cast<std::size_t>(result.halo) * 4,
+            sourceRow + static_cast<std::size_t>(cell.crop[0]) * 4, static_cast<std::size_t>(cell.crop[2]) * 4))
           throw std::runtime_error("prepared image reconstruction differs");
-      }
+        verifyFill(0, cell.crop[0]);
+        verifyFill(cell.crop[0] + cell.crop[2], cellWidth);
+      } else verifyFill(0, cellWidth);
     }
   }
   check.finish();
@@ -1177,6 +1198,36 @@ static PreparedAsset prepareAssetCells(PreparationSource& source,
 }
 
 namespace {
+void emitTexture(PreparationSource& source, const std::filesystem::path& staging,
+                 PreparedAsset& asset, const AssetRecipe& recipe) {
+  asset.textureArtifact.clear();
+  if (!asset.framePages || asset.uniform || recipe.crop || recipe.backdrop != AssetColor{} ||
+      asset.width != source.width || asset.height != source.height || source.width > 8192 || source.height > 8192) return;
+  source.releaseCache();
+  const auto size = std::size_t(source.width)*source.height*4;
+  // Reserve input, output, dictionary overhead and chunk encoding scratch together.
+  auto reservation = source.workspace.retain(size*4 + 32U*1024U*1024U, false);
+  if (!reservation) return;
+  try {
+    ImagePixels pixels{source.width, source.height, std::vector<std::uint8_t>(size)};
+    auto rows = source.rows();
+    for (int y = 0; y < source.height; ++y) {
+      rows.read();
+      std::memcpy(pixels.rgba.data()+std::size_t(y)*source.width*4, rows.row.data(), rows.row.size());
+    }
+    rows.finish();
+    auto texture = makePreparedTexture(pixels);
+    if (!texture) return;
+    writeTextureArtifact(staging / "texture.pmtx", *texture);
+    asset.textureArtifact = "texture.pmtx";
+  } catch (const std::invalid_argument&) {
+    std::filesystem::remove(staging / "texture.pmtx");
+  } catch (const std::bad_alloc&) {
+    source.workspace.stats.workspaceConstrained = true;
+    std::filesystem::remove(staging / "texture.pmtx");
+  }
+}
+
 std::optional<PreparedAsset> prepareAstc(PreparationSource& source,
     const std::filesystem::path& staging, const AssetRecipe& recipe,
     const AssetPreparationOptions& options) {
@@ -1226,12 +1277,13 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
   stats = {};
   Workspace workspace(options.workspaceBytes, stats);
   PreparationSource source(path, workspace);
-  if (auto astc = prepareAstc(source, staging, recipe, options)) return *astc;
-  if (layout && layout->compression.empty()) {
+  if (!recipe.framePages) if (auto astc = prepareAstc(source, staging, recipe, options)) return *astc;
+  if (layout && layout->compression.empty() && layout->framePages == recipe.framePages) {
     try {
       validateLayout(source, recipe, *layout);
       auto result = *layout;
       emitLayout(source, staging, result, recipe, options.lz4Pages);
+      emitTexture(source, staging, result, recipe);
       return result;
     }
     catch (const AssetPreparationUnsupported&) {}
@@ -1286,7 +1338,7 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
         else tryModal();
       }
       if (!selected) std::rethrow_exception(unsupported);
-      selected = optimize(std::move(*selected));
+      if (!recipe.framePages) selected = optimize(std::move(*selected));
     }
   } catch (const AssetPreparationUnsupported&) {
     if (!options.lz4Pages || recipe.crop || recipe.columns <= 0 || recipe.rows <= 0 ||
@@ -1308,7 +1360,19 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
     }
     selected = std::move(flat);
   }
+  if (recipe.framePages && !selected->uniform) {
+    selected->framePages = true;
+    selected->pages.clear();
+    for (auto& cell : selected->cells) {
+      if (!cell.crop[2] || !cell.crop[3]) continue;
+      cell.page = static_cast<int>(selected->pages.size());
+      cell.atlas = {selected->halo, selected->halo, cell.crop[2], cell.crop[3]};
+      selected->pages.push_back({"page-" + std::to_string(cell.page) + ".png",
+        cell.crop[2] + 2 * selected->halo, cell.crop[3] + 2 * selected->halo});
+    }
+  }
   if (!selected->uniform) emitLayout(source, staging, *selected, recipe, options.lz4Pages);
+  emitTexture(source, staging, *selected, recipe);
   return std::move(*selected);
 }
 }

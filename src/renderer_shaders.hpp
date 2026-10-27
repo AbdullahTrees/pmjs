@@ -1069,7 +1069,36 @@ constexpr const char* blockSpriteSamplingSource = R"(
   uniform highp usampler2D blockTable;
   uniform highp ivec3 blockGrid;
   uniform highp int blockTableWidth;
+  uniform int blockPlanar;
+  highp ivec4 channelBlockTexel(highp ivec2 pixel) {
+    pixel = clamp(pixel, ivec2(0), ivec2(imageDimensions) - ivec2(1));
+    highp uvec4 entries = texelFetch(blockTable, pixel / 8, 0);
+    highp ivec4 color;
+    highp uint width = uint(textureSize(image, 0).x);
+    for (int channel = 0; channel < 4; ++channel) {
+      highp uint entry = entries[channel];
+      if ((entry & 2147483648u) != 0u) color[channel] = int(entry & 255u);
+      else {
+        highp uint address = entry + uint((pixel.y % 8) * 8 + pixel.x % 8);
+        highp uint texel = address / 4u;
+        highp vec4 bytes = texelFetch(image, ivec2(texel % width, texel / width), 0);
+        color[channel] = int(floor(bytes[int(address % 4u)] * 255.0 + 0.5));
+      }
+    }
+    if (blockPlanar == 2) color.rgb = (color.rgb * color.a + 127) / 255;
+    return color;
+  }
   highp vec4 sampleBlockImage(highp vec2 coordinate) {
+    if (blockPlanar != 0) {
+      if (blockNearest) return vec4(channelBlockTexel(ivec2(floor(coordinate)))) / 255.0;
+      highp vec2 position = roundEven((coordinate - vec2(0.5)) * 256.0) / 256.0;
+      highp ivec2 pixel = ivec2(floor(position)), weight = ivec2(fract(position) * 256.0);
+      highp ivec4 a = channelBlockTexel(pixel), b = channelBlockTexel(pixel + ivec2(1, 0));
+      highp ivec4 c = channelBlockTexel(pixel + ivec2(0, 1)), d = channelBlockTexel(pixel + ivec2(1));
+      highp ivec4 top = (a * (256 - weight.x) + b * weight.x + 128) / 256;
+      highp ivec4 bottom = (c * (256 - weight.x) + d * weight.x + 128) / 256;
+      return vec4((top * (256 - weight.y) + bottom * weight.y + 128) / 256) / 255.0;
+    }
     highp vec2 position = clamp(coordinate, vec2(0.5), imageDimensions - vec2(0.5));
     highp ivec2 pixel = ivec2(floor(position));
     highp ivec2 frame = pixel / blockGrid.yz;
@@ -1132,7 +1161,7 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   precision mediump float;
   // Half-precision byte normalization can cross RGBA8 rounding boundaries.
   uniform highp sampler2D image;
-  // 1/2 select dense nearest/linear colors; 3 selects sparse nearest colors.
+  // 1/2 select dense nearest/linear colors; 3/4 select sparse nearest/linear colors.
   uniform int paletteImage;
   uniform highp sampler2D paletteTable;
   uniform highp usampler2D paletteBlocks;
@@ -1145,7 +1174,7 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
   }
   highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
-    if (paletteImage == 3 && bytes.r == 255.0) {
+    if (paletteImage >= 3 && bytes.r == 255.0) {
       highp ivec2 size = textureSize(image, 0);
       highp ivec2 pixel = ivec2(clamp(floor(coord * vec2(size)), vec2(0.0), vec2(size - 1)));
       highp uvec3 block = texelFetch(paletteBlocks, pixel / 8, 0).rgb;
@@ -1155,7 +1184,16 @@ constexpr const char* simpleFragmentSource = R"(#version 300 es
       if (bit >= 32u) rank += paletteRank(block.x);
       highp uint offset = block.z + rank;
       highp uint width = uint(textureSize(paletteResidual, 0).x);
-      bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
+      if (textureSize(paletteTable, 0).y > 256) {
+        offset *= 3u;
+        highp vec3 indexBytes;
+        for (int channel = 0; channel < 3; ++channel) {
+          highp uint address = offset + uint(channel);
+          indexBytes[channel] = floor(texelFetch(paletteResidual,
+            ivec2(address % width, address / width), 0).r * 255.0 + 0.5);
+        }
+        bytes = vec2(indexBytes.r, indexBytes.g + indexBytes.b * 256.0);
+      } else bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
     }
     return texelFetch(paletteTable, ivec2(bytes), 0);
   }
@@ -1373,7 +1411,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   precision mediump float;
   precision highp int;
   uniform highp sampler2D image;
-  // 1/2 select dense nearest/linear colors; 3 selects sparse nearest colors.
+  // 1/2 select dense nearest/linear colors; 3/4 select sparse nearest/linear colors.
   uniform int paletteImage;
   uniform highp sampler2D paletteTable;
   uniform highp usampler2D paletteBlocks;
@@ -1386,7 +1424,7 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
   }
   highp vec4 paletteColor(highp vec2 coord) {
     highp vec2 bytes = floor(texture(image, coord).rg * 255.0 + 0.5);
-    if (paletteImage == 3 && bytes.r == 255.0) {
+    if (paletteImage >= 3 && bytes.r == 255.0) {
       highp ivec2 size = textureSize(image, 0);
       highp ivec2 pixel = ivec2(clamp(floor(coord * vec2(size)), vec2(0.0), vec2(size - 1)));
       highp uvec3 block = texelFetch(paletteBlocks, pixel / 8, 0).rgb;
@@ -1396,7 +1434,16 @@ constexpr const char* spriteEffectFragmentSource = R"(#version 300 es
       if (bit >= 32u) rank += paletteRank(block.x);
       highp uint offset = block.z + rank;
       highp uint width = uint(textureSize(paletteResidual, 0).x);
-      bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
+      if (textureSize(paletteTable, 0).y > 256) {
+        offset *= 3u;
+        highp vec3 indexBytes;
+        for (int channel = 0; channel < 3; ++channel) {
+          highp uint address = offset + uint(channel);
+          indexBytes[channel] = floor(texelFetch(paletteResidual,
+            ivec2(address % width, address / width), 0).r * 255.0 + 0.5);
+        }
+        bytes = vec2(indexBytes.r, indexBytes.g + indexBytes.b * 256.0);
+      } else bytes = floor(texelFetch(paletteResidual, ivec2(offset % width, offset / width), 0).rg * 255.0 + 0.5);
     }
     return texelFetch(paletteTable, ivec2(bytes), 0);
   }

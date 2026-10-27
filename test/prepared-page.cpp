@@ -1,4 +1,6 @@
 #include "prepared_page.hpp"
+#include "texture_artifact.hpp"
+#include <bit>
 
 #include <algorithm>
 #include <filesystem>
@@ -58,6 +60,7 @@ int main() {
       const std::vector<std::uint8_t> encoded(std::istreambuf_iterator<char>(input), {});
       const auto decoded = pmjs::readLz4Page(encoded, rgba.size());
       require(decoded && decoded->width == width && decoded->height == height && decoded->rgba == rgba);
+      require(!pmjs::makeChannelBlockPage(width, height, rgba));
       require(!pmjs::readLz4Page(encoded, rgba.size() - 1));
       for (const auto offset : {0U,4U,8U,12U,16U,20U,24U,28U}) {
         auto damaged = encoded; damaged[offset] ^= 1;
@@ -77,6 +80,39 @@ int main() {
           const auto checked = pmjs::readLz4Page(damaged, rgba.size());
           require(!checked || checked->rgba == rgba);
         }
+      }
+    }
+    {
+      const int width = 1051, height = 1027;
+      std::vector<std::uint8_t> rgba(std::size_t(width) * height * 4);
+      for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        const auto at = (std::size_t(y) * width + x) * 4;
+        rgba[at] = x % 251; rgba[at + 1] = y % 251;
+        rgba[at + 2] = (x + y) % 251; rgba[at + 3] = (x / 8 + y / 8) % 2 ? 0 : 255;
+      }
+      const auto channel = pmjs::makeChannelBlockPage(width, height, rgba);
+      require(channel && channel->pixels().rgba == rgba && channel->gpuBytes() < rgba.size());
+      require(channel->bytes.size() < std::size_t(width) * height);
+    }
+    {
+      const int width = 1051, height = 1027;
+      std::vector<std::uint8_t> rgba(std::size_t(width) * height * 4);
+      for (std::size_t i = 0; i < rgba.size() / 4; i += 11) {
+        const unsigned color = i / 11 + 1;
+        rgba[i * 4] = color; rgba[i * 4 + 1] = color >> 8;
+        rgba[i * 4 + 2] = color >> 16; rgba[i * 4 + 3] = color % 256;
+      }
+      require(!pmjs::makeSparsePalettePage(width, height, rgba));
+      const auto sparse = pmjs::makeSparsePalettePage(width, height, rgba, 262144);
+      require(sparse && sparse->indexBytes == 3 && sparse->pixels().rgba == rgba);
+      require(sparse->gpuBytes() < rgba.size());
+      checkRows(*sparse, rgba);
+      const auto dense = sparse->denseIndices();
+      require(dense.size() == std::size_t(width) * height * 3);
+      for (std::size_t i = 0; i < dense.size(); i += 3) {
+        const unsigned color = dense[i] | (unsigned(dense[i + 1]) << 8) | (unsigned(dense[i + 2]) << 16);
+        require(std::equal(rgba.begin() + i / 3 * 4, rgba.begin() + i / 3 * 4 + 4,
+          sparse->colors.begin() + color * 4));
       }
     }
     for (const auto [width, height] : {std::pair{257,259}, {512,512}}) {
@@ -128,10 +164,10 @@ int main() {
       std::cout << "sparse palette " << width << 'x' << height << ": dense=" << denseBytes
         << " sparse=" << sparse->gpuBytes() << " exceptions=" << sparse->residual.size() / 2 << '\n';
     }
-    for (const unsigned count : {200U, 256U}) {
+    for (const unsigned count : {200U, 256U}) for (const unsigned run : {1U, 511U}) {
       std::vector<std::uint8_t> rgba(512 * 512 * 4);
       for (std::size_t i = 0; i < rgba.size() / 4; ++i) {
-        const auto color = i % count;
+        const auto color = (i / run) % count;
         rgba[i * 4] = color & 255; rgba[i * 4 + 1] = (color >> 8) & 255;
         rgba[i * 4 + 2] = color >> 16; rgba[i * 4 + 3] = 255;
       }
@@ -170,6 +206,77 @@ int main() {
       require(!pmjs::makeIndexedPalettePage(512, 512, rgba) || count == 256);
     }
     require(!pmjs::makeIndexedPalettePage(32, 32, std::vector<std::uint8_t>(32 * 32 * 4)));
+    for (int variant = 0; variant < 5; ++variant) {
+      pmjs::ImagePixels pixels{variant == 3 ? 2055 : 1031, variant == 3 ? 1025 : 513, {}};
+      pixels.rgba.resize(std::size_t(pixels.width)*pixels.height*4);
+      for (int y = 0; y < pixels.height; ++y) for (int x = 0; x < pixels.width; ++x) {
+        const auto i = std::size_t(y)*pixels.width+x;
+        const auto color = variant == 0 ? i%127 : variant == 1 ? i%1024 : variant == 2 ? (i%31 ? 0 : (i/31)%1023+1) :
+          variant == 3 ? (i%23 ? 0 : i/23+1) : 0;
+        auto* p = pixels.rgba.data()+i*4;
+        if (variant == 4) { p[0]=x%251; p[1]=y%251; p[2]=(x+y)%251; p[3]=(x/8+y/8)%3 ? 96+x%8*19 : 0; }
+        else { p[0]=color; p[1]=color>>8; p[2]=color>>16; p[3]=color%255; }
+      }
+      auto texture = pmjs::makePreparedTexture(pixels);
+      require(texture.has_value());
+      auto unsupported = *texture; unsupported.layout.height = 8193;
+      bool unsupportedRejected = false;
+      try { pmjs::writeTextureArtifact(root / "unsupported.pmtx",unsupported); }
+      catch(const std::invalid_argument&) { unsupportedRejected = true; }
+      require(unsupportedRejected);
+      require(int(texture->layout.kind) == variant+1);
+      const auto file = root / "texture.pmtx";
+      pmjs::writeTextureArtifact(file,*texture);
+      std::ifstream in(file,std::ios::binary);
+      std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)),{});
+      const pmjs::TextureReader read = [&](std::size_t at, std::span<std::uint8_t> out) {
+        if (at > bytes.size() || out.size() > bytes.size()-at) return false;
+        std::copy_n(bytes.begin()+at,out.size(),out.begin()); return true;
+      };
+      auto layout = pmjs::readTextureLayout(read,bytes.size()); require(layout.has_value());
+      std::vector<std::vector<std::uint8_t>> decoded(texture->bytes.size());
+      std::size_t peak = 0;
+      require(pmjs::readTextureChunks(read,*layout,[&](auto i,const auto&,auto data) {
+        decoded[i].insert(decoded[i].end(),data.begin(),data.end()); return true;
+      },peak));
+      require(decoded == texture->bytes && peak <= pmjs::textureChunkLimit);
+      if (variant == 4) {
+        pmjs::ChannelBlockPage p; p.width=pixels.width; p.height=pixels.height;
+        p.bytes=decoded[0]; p.blocks.resize(decoded[1].size()/16);
+        for (std::size_t i=0;i<p.blocks.size();++i) for(int j=0;j<4;++j) {
+          unsigned v=0;for(int k=0;k<4;++k)v|=unsigned(decoded[1][i*16+j*4+k])<<(8*k);
+          p.blocks[i][j]=v;
+        }
+        require(p.pixels().rgba == pixels.rgba);
+      } else {
+        for (std::size_t i=0;i<pixels.rgba.size()/4;++i) {
+          unsigned index=decoded[0][i];
+          if(variant==1) index=unsigned(decoded[0][i*2])|(unsigned(decoded[0][i*2+1])<<8);
+          if(variant>=2 && index==255) {
+            const auto x=i%pixels.width,y=i/pixels.width, bit=(y%8)*8+x%8;
+            const auto at=((y/8)*((pixels.width+7)/8)+x/8)*12;
+            auto word=[&](auto n){unsigned v=0;for(int k=0;k<4;++k)v|=unsigned(decoded[2][at+n*4+k])<<(k*8);return v;};
+            const auto rank=std::popcount(word(bit/32)&((1U<<(bit%32))-1))+(bit>=32?std::popcount(word(0)):0);
+            const auto offset=(word(2)+rank)*(variant==3?3:2);
+            index=decoded[3][offset]|unsigned(decoded[3][offset+1])<<8;
+            if(variant==3)index|=unsigned(decoded[3][offset+2])<<16;
+          }
+          require(std::equal(pixels.rgba.begin()+i*4,pixels.rgba.begin()+i*4+4,decoded[1].begin()+index*4));
+        }
+      }
+      auto corrupt=bytes; bytes.back()^=1;
+      require(!pmjs::readTextureChunks(read,*layout,[](auto,const auto&,auto){return true;},peak));
+      bytes=corrupt;
+      require(!pmjs::readTextureChunks(read,*layout,[](auto,const auto&,auto){return false;},peak));
+      require(!pmjs::readTextureLayout(read,bytes.size()-1));
+      for (const auto field : {std::size_t(4),std::size_t(32+layout->planes.size()*16),std::size_t(32+layout->planes.size()*16+16)}) {
+        bytes=corrupt; put(bytes,field,0xffffffff);
+        require(!pmjs::readTextureLayout(read,bytes.size()));
+      }
+      bytes=corrupt;
+      put(bytes,32+layout->planes.size()*16+8,0);
+      require(!pmjs::readTextureLayout(read,bytes.size()));
+    }
     bool refused = false;
     try { pmjs::writeLz4Page(root / "invalid", 2049, 1, {}); }
     catch (const std::runtime_error&) { refused = true; }

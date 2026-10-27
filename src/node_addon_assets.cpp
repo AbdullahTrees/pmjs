@@ -132,6 +132,8 @@ AssetRecipe recipeValue(napi_env env, napi_value value) {
     const auto grid = integers<2>(env, property(env, value, "grid"));
     recipe.columns = grid[0]; recipe.rows = grid[1];
   }
+  if (hasProperty(env, value, "framePages"))
+    check(env, napi_get_value_bool(env, property(env, value, "framePages"), &recipe.framePages), "invalid frame pages recipe");
   if (hasProperty(env, value, "backdrop")) recipe.backdrop = color(env, property(env, value, "backdrop"));
   if (hasProperty(env, value, "crop")) {
     const auto crop = property(env, value, "crop");
@@ -165,6 +167,8 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset, bool workspaceCo
   set(env, result, "halo", number(env, asset.halo));
   set(env, result, "workspaceConstrained", boolean(env, workspaceConstrained));
   if (!asset.compression.empty()) set(env, result, "compression", string(env, asset.compression));
+  if (asset.framePages) set(env, result, "framePages", boolean(env, true));
+  if (!asset.textureArtifact.empty()) set(env, result, "textureArtifact", string(env, asset.textureArtifact.string()));
   if (asset.uniform) set(env, result, "uniform", arrayValue(env, *asset.uniform));
   if (asset.blockGrid) set(env, result, "blockGrid", arrayValue(env, *asset.blockGrid));
   if (asset.blockChannels) set(env, result, "blockChannels", number(env, *asset.blockChannels));
@@ -299,6 +303,8 @@ napi_value processImage(napi_env env, napi_callback_info info) try {
   if (args.size() > 4 && layoutType != napi_undefined && layoutType != napi_null) {
     const auto value = args[4];
     PreparedAsset layout;
+    if (hasProperty(env, value, "framePages"))
+      check(env, napi_get_value_bool(env, property(env, value, "framePages"), &layout.framePages), "invalid frame pages layout");
     if (integer(env, property(env, value, "version")) != 1)
       throw std::runtime_error("unsupported indexed image layout");
     layout.width = integer(env, property(env, value, "width"));
@@ -693,7 +699,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
 #else
   set(env, version, "colorManagement", string(env, "none"));
 #endif
-  set(env, version, "processor", string(env, "images-v16-color-managed-astcenc4.7"));
+  set(env, version, "processor", string(env, "images-v17-texture-chunks-astcenc4.7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-color-v2"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);

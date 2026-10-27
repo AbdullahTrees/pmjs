@@ -574,6 +574,11 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
   napi_set_named_property(env, result, "blockTextureUploads", number(env, images.blockTextureUploads()));
   napi_set_named_property(env, result, "blockUploadFailures", number(env, images.blockUploadFailures()));
   napi_set_named_property(env, result, "blockRegions", number(env, images.blockRegions()));
+  napi_set_named_property(env, result, "textureArtifactLoads", number(env, images.textureArtifactLoads()));
+  napi_set_named_property(env, result, "textureArtifactFailures", number(env, images.textureArtifactFailures()));
+  napi_set_named_property(env, result, "textureArtifactStagingBytes", number(env, images.textureArtifactStagingBytes()));
+  napi_set_named_property(env, result, "sourceTextureBuilds", number(env, images.sourceTextureBuilds()));
+  napi_set_named_property(env, result, "textureArtifactFailureReason", string(env, images.textureArtifactFailureReason()));
   napi_value preparedFallbacks;
   check(env, napi_create_object(env, &preparedFallbacks), "cannot create prepared fallback counts");
   for (const auto& [reason, count] : images.preparedFallbacks())
@@ -735,6 +740,9 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
       if (!directory.is_absolute()) throw std::runtime_error("prepared directory must be absolute");
       const auto object = property(env, entry, "descriptor");
       PreparedImageDescriptor descriptor;
+      if (hasProperty(env, object, "textureArtifact")) descriptor.textureArtifact = asString(env, property(env, object, "textureArtifact"));
+      if (hasProperty(env, object, "framePages"))
+        check(env, napi_get_value_bool(env, property(env, object, "framePages"), &descriptor.framePages), "invalid frame pages descriptor");
       descriptor.version = asInt32(env, property(env, object, "version"));
       if (hasProperty(env, object, "compression")) descriptor.compression = asString(env, property(env, object, "compression"));
       descriptor.width = asInt32(env, property(env, object, "width"));
@@ -808,6 +816,8 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
       }
       const auto backingHash = hasProperty(env, entry, "backingHash") ?
         asString(env, property(env, entry, "backingHash")) : std::string{};
+      const auto textureHash = hasProperty(env, entry, "textureHash") ?
+        asString(env, property(env, entry, "textureHash")) : std::string{};
       std::vector<std::string> pageHashes;
       const bool hashedPages = hasProperty(env, entry, "pageHashes");
       if (hashedPages) {
@@ -823,7 +833,7 @@ napi_value installPreparedAssetsImpl(napi_env env, napi_callback_info info, bool
       std::vector<std::filesystem::path> pagePaths;
       pagePaths.reserve(descriptor.pages.size());
       for (const auto& page : descriptor.pages) pagePaths.push_back(directory / page.path);
-      if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr, backingHash, hashedPages ? &pageHashes : nullptr)) {
+      if (value.images.installPrepared(*path, directory, std::move(descriptor), identity, catalog ? &identities : nullptr, capture ? &captured : nullptr, backingHash, hashedPages ? &pageHashes : nullptr, textureHash)) {
         ++installed;
         if (capture) {
           napi_value list; check(env, napi_create_array_with_length(env, captured.size(), &list), "cannot create identities");

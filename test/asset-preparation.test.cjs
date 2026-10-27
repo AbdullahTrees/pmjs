@@ -1486,3 +1486,71 @@ for (const engine of ['MV', 'MZ']) test(engine + ' storage decisions bind to the
   assert.equal(installed[0].backingHash, crypto.createHash('sha256').update(PNG).digest('hex'),
     'storage recovery verifies plaintext rather than the encrypted source');
 });
+
+test('frame page recipes pass through preparation and invalidate the cached layout', async () => {
+  const f = fixture();
+  const checksum = crypto.createHash('sha256').update(PNG).digest('hex');
+  const recipes = [{ source: f.source, sourceHash: checksum, grid: [1, 1], framePages: true }];
+  const processor = f.native.assets.processImage;
+  const seen = [];
+  f.native.assets.processImage = async (...args) => { seen.push(args[2]); return processor(...args); };
+  try {
+    await prepareAssets({ ...f, recipes });
+    await prepareAssets({ ...f, recipes });
+    assert.equal(f.jobs, 1);
+    assert.equal(seen[0].framePages, true);
+    await prepareAssets({ ...f, recipes: [{ ...recipes[0], framePages: false }] });
+    assert.equal(f.jobs, 2);
+    assert.equal(seen[1].framePages, false);
+    const descriptor = JSON.parse(JSON.stringify(f.installs.at(-1)[0].descriptor));
+    assert.equal(validDescriptor({ ...descriptor, framePages: 'true' }), false);
+    assert.throws(() => validate({ gameRoot: f.gameRoot, assetPreparation: {
+      recipes: [{ ...recipes[0], framePages: 4 }] } }), /frame pages recipe/);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('texture artifacts participate in cache validation and repair', async () => {
+  const f = fixture(), processImage = f.native.assets.processImage;
+  f.native.assets.preparationVersion = { processor: 'texture-v1' };
+  f.native.assets.processImage = async (...args) => {
+    const descriptor = await processImage(...args);
+    const bytes = Buffer.alloc(64);
+    bytes.write('PMTX'); bytes.writeUInt32LE(1, 4); bytes.writeUInt32LE(1, 12); bytes.writeUInt32LE(1, 16);
+    fs.writeFileSync(path.join(args[1], 'texture.pmtx'), bytes);
+    return { ...descriptor, framePages: true, textureArtifact: 'texture.pmtx' };
+  };
+  try {
+    const generated = await prepareAssets({ ...f, verifyHashes: true });
+    assert.equal(generated.cacheBytes, PNG.length + 64);
+    const descriptor = f.installs.at(-1)[0].descriptor;
+    assert.equal(descriptor.textureArtifact, 'texture.pmtx');
+    assert.equal(validDescriptor({ ...descriptor, textureArtifact: '../texture.pmtx' }), false);
+    assert.equal(validDescriptor({ ...descriptor, framePages: false }), false);
+    const manifest = readManifest(f, manifests(f)[0]);
+    assert.equal(Object.keys(manifest.outputs).length, 2);
+    assert.match(manifest.outputs['texture.pmtx'], /^[a-f0-9]{64}$/);
+    assert.equal(f.installs.at(-1)[0].textureHash, manifest.outputs['texture.pmtx']);
+    await prepareAssets({ ...f, verifyHashes: true });
+    assert.equal(f.jobs, 1);
+    fs.writeFileSync(path.join(f.installs.at(-1)[0].directory, 'texture.pmtx'), Buffer.alloc(64));
+    await prepareAssets({ ...f, verifyHashes: true });
+    assert.equal(f.jobs, 2);
+    const repaired = readManifest(f, manifests(f).find(file => readManifest(f, file).descriptor?.textureArtifact));
+    const portableAssetRoot = path.join(f.root, 'portable');
+    const outputs = Object.entries(repaired.outputs).map(([name, hash]) => {
+      const relative = `assets/images/${repaired.key}/${name}`;
+      fs.mkdirSync(path.dirname(path.join(portableAssetRoot, relative)), { recursive: true });
+      fs.copyFileSync(path.join(f.installs.at(-1)[0].directory, name), path.join(portableAssetRoot, relative));
+      return { path: relative, hash };
+    });
+    const portableIndex = { processor: f.native.assets.preparationVersion, images: [{ source: f.source,
+      sourceHash: repaired.sourceHash, recipe: null, encryptionSettingsSha256: null, descriptor: repaired.descriptor, outputs }] };
+    const copied = await prepareAssets({ ...f, portableIndex, portableAssetRoot, cacheRoot: path.join(f.root, 'copied') });
+    assert.equal(copied.indexedPageCopies, 1);
+    assert.equal(copied.cacheBytes, PNG.length + 64);
+    assert.equal(f.jobs, 2);
+    await prepareAssets({ ...f, portableIndex: { ...portableIndex, processor: { processor: 'old' } },
+      portableAssetRoot, cacheRoot: path.join(f.root, 'upgraded') });
+    assert.equal(f.jobs, 3);
+  } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
+});

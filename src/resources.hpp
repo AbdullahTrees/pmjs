@@ -1,5 +1,7 @@
 #pragma once
 
+#include "image_storage.hpp"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -44,25 +46,6 @@ struct ImageInfo {
   bool knownAllZero = false;
 };
 
-struct ImagePixels {
-  int width = 0;
-  int height = 0;
-  std::vector<std::uint8_t> rgba;
-};
-
-struct ImageChannelStorage {
-  int channels = 4;
-  std::array<std::uint8_t, 4> source{0, 1, 2, 3};
-  // Stored component indices, followed by constant zero and one.
-  std::array<std::uint8_t, 4> swizzle{0, 1, 2, 3};
-};
-
-struct ImageStorageDecision {
-  int width = 0, height = 0, paletteBits = 0;
-  ImageChannelStorage channels;
-  bool hasPixelFacts = false, opaque = false, allZero = false;
-};
-
 // A deferred reader keeps its crop alive at the revision it observed. Pixel
 // storage is captured only if the image changes before the reader executes.
 struct ImagePixelSnapshot {
@@ -92,6 +75,8 @@ struct PreparedImageDescriptor {
   std::optional<int> blockChannels = std::nullopt;
   std::optional<bool> compactEligible = std::nullopt;
   std::string compression;
+  std::filesystem::path textureArtifact;
+  bool framePages = false;
 };
 
 struct PreparedTileRegion {
@@ -141,6 +126,7 @@ struct BlockImageRegion {
   std::array<int, 3> blockGrid{};
   std::array<int, 2> tableSize{};
   int logicalWidth = 0, logicalHeight = 0;
+  int planar = 0;
 };
 
 struct ImageMemoryEntry {
@@ -251,7 +237,8 @@ class ImageStore {
                        const std::vector<std::string>* pageIdentities = nullptr,
                        std::vector<std::string>* capturedPages = nullptr,
                        const std::string& backingHash = {},
-                       const std::vector<std::string>* pageHashes = nullptr);
+                       const std::vector<std::string>* pageHashes = nullptr,
+                       const std::string& textureHash = {});
   std::optional<ImageInfo> acquirePrepared(const ImageFileSource& source,
                                           bool retainCpuPixels = false);
   struct PreparedLoad;
@@ -305,6 +292,11 @@ class ImageStore {
   std::uint64_t preparedCropUploadBytes() const { return preparedCropUploadBytes_; }
   std::uint64_t blockTextureUploads() const { return blockTextureUploads_; }
   std::uint64_t blockUploadFailures() const { return blockUploadFailures_; }
+  std::uint64_t textureArtifactLoads() const { return textureArtifactLoads_; }
+  std::uint64_t textureArtifactFailures() const { return textureArtifactFailures_; }
+  std::size_t textureArtifactStagingBytes() const { return textureArtifactStagingBytes_; }
+  std::uint64_t sourceTextureBuilds() const { return sourceTextureBuilds_; }
+  const std::string& textureArtifactFailureReason() const { return textureArtifactFailureReason_; }
   std::uint64_t blockRegions() const { return blockRegions_; }
   std::optional<BlockImageRegion> resolveBlockRegion(ImageHandle handle,
       bool premultiplied = true);
@@ -410,6 +402,10 @@ class ImageStore {
   struct SharedTexture;
   struct PaletteBacking;
   struct PreparedBacking;
+  bool realizeSourceTexture(ImageHandle handle);
+  std::uint64_t textureArtifactLoads_ = 0, textureArtifactFailures_ = 0, sourceTextureBuilds_ = 0;
+  std::size_t textureArtifactStagingBytes_ = 0;
+  std::string textureArtifactFailureReason_;
   std::shared_ptr<PreparedPool> preparedPool_;
   std::unordered_map<std::string, std::weak_ptr<SharedTexture>> preparedTextures_;
   std::unordered_map<std::string, std::weak_ptr<PaletteBacking>> preparedPalettes_;
@@ -547,6 +543,7 @@ class ImageStore {
   std::unordered_map<std::string, std::uint64_t> tileFallbacks_, tileRegionSets_;
   void clearPrepared(Slot& slot);
   void trimPreparedPages() const;
+  static void reserveFramePage(PreparedBacking& backing, std::size_t index);
   std::unordered_map<std::string, ImageStorageDecision> storageDecisions_;
   std::uint64_t storageDecisionHits_ = 0;
   const ImageStorageDecision* storageDecision(const std::string& key) const;

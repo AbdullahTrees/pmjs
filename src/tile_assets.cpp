@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <numeric>
 #include <tuple>
+#include <zlib.h>
 
 namespace pmjs {
 namespace {
@@ -125,13 +126,16 @@ PreparedTileAssets prepareTileAssets(const std::vector<TileAssetInput>& inputs,
           decoded->rgba.capacity() > budget-metadataReserve-uniqueBytes-pieceBytes)
         throw AssetPreparationUnsupported("tile packing exceeds the working storage budget");
       piece.bytes.resize(pieceBytes);
-      for (int y = -halo; y < r[3]+halo; ++y) for (int x = -halo; x < r[2]+halo; ++x) {
-        const int sx = std::clamp(r[0]+x, 0, source.width-1), sy = std::clamp(r[1]+y, 0, source.height-1);
-        std::copy_n(decoded->rgba.data()+(static_cast<std::size_t>(sy)*source.width+sx)*4, 4,
-          piece.bytes.data()+(static_cast<std::size_t>(y+halo)*piece.width+x+halo)*4);
+      for (int y = -halo; y < r[3]+halo; ++y) {
+        const int sy = std::clamp(r[1]+y, 0, source.height-1), left = r[0]-halo;
+        auto* target = piece.bytes.data()+static_cast<std::size_t>(y+halo)*piece.width*4;
+        const auto* row = decoded->rgba.data()+static_cast<std::size_t>(sy)*source.width*4;
+        if (left >= 0 && piece.width <= source.width-left)
+          std::copy_n(row+static_cast<std::size_t>(left)*4, static_cast<std::size_t>(piece.width)*4, target);
+        else for (int x = 0; x < piece.width; ++x)
+          std::copy_n(row+static_cast<std::size_t>(std::clamp(left+x,0,source.width-1))*4,4,target+static_cast<std::size_t>(x)*4);
       }
-      std::uint64_t hash = 14695981039346656037ULL;
-      for (const auto byte : piece.bytes) hash = (hash ^ byte)*1099511628211ULL;
+      const auto hash = crc32(0, piece.bytes.data(), static_cast<uInt>(piece.bytes.size()));
       const auto candidates = unique.equal_range(hash);
       auto index = pieces.size();
       for (auto entry = candidates.first; entry != candidates.second; ++entry) {
