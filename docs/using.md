@@ -55,7 +55,9 @@ settings and discard calculated layouts and output descriptions.
 Local validation and results live in `preparation-state.json`, under the
 `preparation-v1` cache namespace. Unchanged file metadata reuses saved checksums;
 new or changed metadata triggers hashing, with each shared file hashed once per
-preparation run. `assetPreparation.verifyHashes: true` rereads inputs and outputs.
+preparation run. On FUSE filesystems, inode-only changes reuse receipts when the
+path, device, size and timestamps still match; symbolic links retain strict inode
+checks. `assetPreparation.verifyHashes: true` rereads inputs and outputs.
 The supplied index remains unchanged. Logs distinguish local reuse, package reuse,
 generation, an ordinary-loading choice and fallback after failure.
 

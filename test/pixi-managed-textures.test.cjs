@@ -19,6 +19,7 @@ function createRenderers(count = 1, configure) {
   };
   context.PIXI.WebGLRenderer = class {};
   context.NativeHost.render.setScreenRenderSize = () => {};
+  context.NativeHost.render.setClearColor = () => {};
   context.NativeHost.render.setRenderTargetSize = () => {};
   for (const name of ['renderer-managers', 'renderer-facade']) {
     runModule(context, 'js/pmjs-pixi4/' + name + '.js');

@@ -99,8 +99,8 @@ async function main() {
   if (disabled) {
     assert.equal(loaded.preparedFrameCacheBytes, 0);
     assert.equal(loaded.preparedFrameCacheMisses, before.preparedFrameCacheMisses);
-    assert.ok(loaded.preparedMaterializations > before.preparedMaterializations,
-      'disabled drawing must retain compatible full-sheet backing');
+    assert.equal(loaded.preparedMaterializations, before.preparedMaterializations,
+      'disabled frame caching must draw prepared pages without expanding the sheet');
     native.images.release(image.handle);
     return;
   }

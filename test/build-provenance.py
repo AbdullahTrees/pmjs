@@ -1,4 +1,4 @@
-"""Incremental native builds and installation provenance using a compiled fixture."""
+"""Native installation and archive integrity using a compiled fixture."""
 import ctypes
 import json
 import os
@@ -71,7 +71,7 @@ class BuildProvenance(unittest.TestCase):
         for directory in ('src', 'cmake', 'tools', 'third_party', 'docs', 'js', 'runner', 'profiles', 'bin', 'test', 'dependencies'):
             (self.root / directory).mkdir()
         for source in ('tools/release.py', 'tools/runtime_artifact.py', 'tools/dependencies.py',
-                       'cmake/Install.cmake', 'cmake/Release.cmake', 'cmake/InstallMetadata.cmake.in',
+                       'cmake/Install.cmake', 'cmake/InstallMetadata.cmake.in',
                        'cmake/build-config.json.in'):
             shutil.copy2(ROOT / source, self.root / source)
         for name in ('LICENSE', 'THIRD_PARTY_NOTICES.md', 'third_party/effekseer.LICENSE',
@@ -106,12 +106,8 @@ include(cmake/NativeOptions.cmake)
 target_include_directories(pmjs_native PRIVATE dependencies)
 target_link_libraries(pmjs_native PRIVATE pmjs_runtime "${CMAKE_SOURCE_DIR}/dependencies/libprovider.so")
 set_target_properties(pmjs_native PROPERTIES PREFIX "" SUFFIX ".node" INSTALL_RPATH "$ORIGIN")
-set(PMJS_RELEASE_PROVENANCE ON CACHE BOOL "")
 install(FILES dependencies/libprovider.so DESTINATION lib COMPONENT runtime)
 include(cmake/Install.cmake)
-if(PMJS_RELEASE_PROVENANCE)
-  include(cmake/Release.cmake)
-endif()
 ''')
         self.command('git', 'init', '-q', str(self.root))
         self.command('git', '-C', str(self.root), 'add', '.')
@@ -157,15 +153,14 @@ endif()
         project = self.root / 'CMakeLists.txt'
         project.write_text(project.read_text().replace('find_package(Python3 REQUIRED COMPONENTS Interpreter)', ''))
         build = self.root / 'ordinary-build'
-        self.command('cmake', '-S', str(self.root), '-B', str(build), '-G', 'Unix Makefiles',
-                     '-DPMJS_RELEASE_PROVENANCE=OFF')
+        self.command('cmake', '-S', str(self.root), '-B', str(build), '-G', 'Unix Makefiles')
         self.command('cmake', '--build', str(build), '--target', 'pmjs_native')
         stage = self.root / 'plain-installation'
         self.command('cmake', '--install', str(build), '--prefix', str(stage))
         info = json.loads((stage / 'build-info.json').read_text())
         self.assertNotIn('files', info)
-        self.assertFalse(info['compiledProvenance'])
-        self.assertEqual(info['source']['commit'], 'unqualified')
+        self.assertNotIn('compiledProvenance', info)
+        self.assertEqual(info['source']['commit'], 'unknown')
         self.assertFalse((build / 'build-source.json').exists())
         self.assertFalse((build / 'build-compiled.json').exists())
         self.assertEqual(info['schema'], 2)
@@ -175,57 +170,30 @@ endif()
 
     def test_distribution_edits_do_not_reconfigure_or_relink(self):
         addon = self.build / 'pmjs_native.node'
-        before = (addon.read_bytes(), addon.stat().st_mtime_ns, (self.build / 'build-source.json').read_bytes())
+        before = (addon.read_bytes(), addon.stat().st_mtime_ns)
         first, _ = self.install('first')
         for name in ('docs/using.md', 'js/module.js', 'test/check.cjs'):
             (self.root / name).write_text('Changed distribution content\n')
         result = self.compile()
         self.assertNotIn('Re-running CMake', result.stdout)
         self.assertNotIn('Linking', result.stdout)
-        self.assertEqual(before, (addon.read_bytes(), addon.stat().st_mtime_ns,
-                                  (self.build / 'build-source.json').read_bytes()))
+        self.assertEqual(before, (addon.read_bytes(), addon.stat().st_mtime_ns))
         second, _ = self.install('second')
         old = release.checked_manifest(first)
         new = release.checked_manifest(second)
         self.assertNotEqual(old['source']['sourceSha256'], new['source']['sourceSha256'])
         self.assertNotIn('share/pmjs/docs/using.md', new['files'])
         self.assertIn('share/pmjs/js/module.js', new['files'])
-        self.assertEqual(old['compiledInputs'], new['compiledInputs'])
-
-    def test_native_headers_libraries_flags_and_binary_are_checked(self):
-        for index, (file, text) in enumerate([
-            ('src/value.h', '#define VALUE 11\n'),
-            ('dependencies/provider.h', '#define HEADER_VALUE 21\n')
-        ]):
-            (self.root / file).write_text(text)
-            _, rejected = self.install(f'rejected-header-{index}', success=False)
-            self.assertIn('Native inputs or binary changed', rejected.stdout + rejected.stderr)
-            self.compile()
-            self.install(f'header-{index}')
-        self.provider(2)
-        self.install('rejected-library', success=False)
-        result = self.compile()
-        self.assertIn('Linking', result.stdout)
-        self.install('library')
-        self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-DCMAKE_CXX_FLAGS=-DFIXTURE=1')
-        self.install('rejected-flags', success=False)
-        self.compile()
-        self.install('flags')
-        addon = self.build / 'pmjs_native.node'
-        with addon.open('ab') as file:
-            file.write(b'tampered')
-        self.install('rejected-binary', success=False)
 
     def test_installation_cmake_changes_do_not_relink_native_code(self):
         addon = self.build / 'pmjs_native.node'
-        before = (addon.read_bytes(), addon.stat().st_mtime_ns,
-                  (self.build / 'build-source.json').read_bytes(), (self.build / 'build-compiled.json').read_bytes())
+        before = (addon.read_bytes(), addon.stat().st_mtime_ns)
         first, _ = self.install('original-installation')
         installation = self.root / 'cmake/Install.cmake'
         installation.write_text(installation.read_text() +
             '\ninstall(FILES docs/using.md DESTINATION share/pmjs/notices RENAME extra.LICENSE)\n')
         # Even native CMake files can change without changing effective commands.
-        for name in ('cmake/Release.cmake', 'cmake/NativeOptions.cmake', 'CMakeLists.txt'):
+        for name in ('cmake/NativeOptions.cmake', 'CMakeLists.txt'):
             file = self.root / name
             file.write_text(file.read_text() + '\n# Documentation-only edit\n')
         (self.root / 'src/unused.h').write_text('#define UNUSED 1\n')
@@ -234,47 +202,13 @@ endif()
         result = self.compile()
         self.assertIn('Re-running CMake', result.stdout)
         self.assertNotIn('Linking', result.stdout)
-        self.assertEqual(before, (addon.read_bytes(), addon.stat().st_mtime_ns,
-                                 (self.build / 'build-source.json').read_bytes(),
-                                 (self.build / 'build-compiled.json').read_bytes()))
+        self.assertEqual(before, (addon.read_bytes(), addon.stat().st_mtime_ns))
         second, _ = self.install('changed-installation')
         self.assertEqual((second / 'share/pmjs/notices/extra.LICENSE').read_text(), 'Original documentation\n')
         old = release.checked_manifest(first)
         new = release.checked_manifest(second)
         self.assertEqual(new['distributionMarker'], 'fixture')
         self.assertNotEqual(old['source']['sourceSha256'], new['source']['sourceSha256'])
-        self.assertEqual(old['compiledInputs'], new['compiledInputs'])
-
-    def test_native_cmake_changes_require_a_rebuild(self):
-        before = (self.build / 'build-compiled.json').read_bytes()
-        (self.root / 'cmake/NativeOptions.cmake').write_text(
-            'target_compile_definitions(pmjs_native PRIVATE FIXTURE_OPTION=2)\n')
-        _, rejected = self.install('stale-native-options', success=False)
-        self.assertIn('Native inputs or binary changed', rejected.stdout + rejected.stderr)
-        result = self.compile()
-        self.assertIn('Linking', result.stdout)
-        self.assertNotEqual(before, (self.build / 'build-compiled.json').read_bytes())
-        self.install('rebuilt-native-options')
-
-    def test_native_link_options_require_a_rebuild(self):
-        options = self.root / 'cmake/NativeOptions.cmake'
-        options.write_text(options.read_text() +
-                           '\ntarget_link_options(pmjs_native PRIVATE -Wl,--no-undefined)\n')
-        _, rejected = self.install('stale-link-options', success=False)
-        self.assertIn('Native inputs or binary changed', rejected.stdout + rejected.stderr)
-        self.compile()
-        self.install('rebuilt-link-options')
-
-    def test_qualification_rejects_an_unrelated_installed_addon(self):
-        stage = self.root / 'dist/unrelated-addon'
-        self.runtime_install(stage)
-        with (stage / 'lib/pmjs_native.node').open('ab') as stream:
-            stream.write(b'changed installed artifact')
-        result = self.command(sys.executable, str(self.root / 'tools/release.py'), 'manifest',
-                              '--stage', str(stage), '--build', str(self.build), '--source', str(self.root),
-                              success=False)
-        self.assertIn('Installed addon differs', result.stderr)
-        self.assertFalse(json.loads((stage / 'build-info.json').read_text())['compiledProvenance'])
 
     def test_build_id_is_saved_at_install_without_relinking(self):
         addon = self.build / 'pmjs_native.node'
@@ -320,7 +254,7 @@ endif()
         report = self.root / 'verification.json'
         release.verify(stage, report, static=True)
         output = self.root / 'archives/pmjs-linux-x64-1234567.tar.gz'
-        release.archive(stage, report, output, development=True)
+        release.archive(stage, report, output)
         self.assertEqual({file.name for file in output.parent.iterdir()},
                          {output.name, output.name + '.release.json', output.name + '.verification.json'})
         with tarfile.open(output) as archive:
@@ -335,10 +269,10 @@ endif()
         self.assertIn('.debug_info', self.command('readelf', '-S', '--wide',
                                                  str(stage / 'lib/pmjs_native.node')).stdout)
 
-    def test_stripped_release_can_be_qualified_again(self):
+    def test_stripped_installation_manifest_is_repeatable(self):
         self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-DCMAKE_CXX_FLAGS=-g')
         self.compile()
-        stage, _ = self.install('repeat-qualification')
+        stage, _ = self.install('repeat-manifest')
         record = release.release_record(stage)
         before = (release.inventory(stage), (stage / 'build-info.json').read_bytes(), record.read_bytes())
         command = [sys.executable, str(self.root / 'tools/release.py'), 'manifest',
@@ -346,16 +280,6 @@ endif()
                    '--strip', release.cache_values(self.build)['CMAKE_STRIP']]
         self.command(*command)
         self.assertEqual(before, (release.inventory(stage), (stage / 'build-info.json').read_bytes(), record.read_bytes()))
-        addon = stage / 'lib/pmjs_native.node'
-        addon.write_bytes(addon.read_bytes() + b'modified after qualification')
-        rejected = self.command(*command, success=False)
-        self.assertIn('Installed addon differs', rejected.stderr)
-        self.assertEqual(before[1:], ((stage / 'build-info.json').read_bytes(), record.read_bytes()))
-        # A valid installed binary must still fail if its compilation inputs drift.
-        self.runtime_install(stage)
-        (self.root / 'src/value.h').write_text('#define VALUE 99\n')
-        rejected = self.command(*command, success=False)
-        self.assertIn('Native inputs or binary changed', rejected.stderr)
 
     def test_installation_rejects_strip_tool_that_leaves_symbols(self):
         self.command('cmake', '-S', str(self.root), '-B', str(self.build), '-DCMAKE_STRIP=/bin/true')
@@ -373,7 +297,7 @@ endif()
         self.assertNotIn('compiledInputs', info)
         self.assertNotIn('files', info['source'])
         self.assertNotIn('loader', info)
-        self.assertIn('compiledInputs', details)
+        self.assertNotIn('compiledInputs', details)
         self.assertIn('files', details['source'])
         self.assertFalse((stage / 'share/pmjs/docs').exists())
         self.assertFalse((stage / 'share/pmjs/tools/portmaster.py').exists())
@@ -383,7 +307,7 @@ endif()
         report = self.root / 'verification.json'
         release.verify(stage, report, static=True)
         output = self.root / 'candidate.tar.gz'
-        release.archive(stage, report, output, development=True)
+        release.archive(stage, report, output)
         verification = json.loads(output.with_name(output.name + '.verification.json').read_text())
         self.assertEqual(verification['archive']['sha256'], release.digest(output))
         self.assertEqual(verification['releaseRecordSha256'], release.digest(record))
@@ -393,6 +317,11 @@ endif()
                                  item.name.endswith('.release.json') or item.name.endswith('.verification.json')
                                  for item in archive))
         release.verify_archive(output)
+        self.assertNotIn('distribution', verification)
+        archived_report = output.with_name(output.name + '.verification.json')
+        for distribution in ('development', 'release'):
+            release.write_json(archived_report, {**verification, 'distribution': distribution})
+            release.verify_archive(output)
         before = output.read_bytes()
         output.write_bytes(b'changed archive')
         with self.assertRaisesRegex(ValueError, 'Archive differs'):
@@ -401,7 +330,7 @@ endif()
         details['source']['commit'] = 'different provenance'
         release.write_json(record, details)
         with self.assertRaisesRegex(ValueError, 'different release record'):
-            release.archive(stage, report, output, development=True)
+            release.archive(stage, report, output)
         self.assertEqual(output.read_bytes(), before)
         info['architecture'] = 'different runtime'
         release.write_json(stage / 'build-info.json', info)
@@ -508,7 +437,7 @@ class DependencySources(unittest.TestCase):
             report = self.root / 'verification.json'
             release.verify(stage, report, static=True)
             exported = self.root / 'exported/runtime.tar.gz'
-            release.archive(stage, report, exported, development=True)
+            release.archive(stage, report, exported)
             self.assertEqual((exported.parent / output.name).read_bytes(), before)
             release.verify_archive(exported)
             output.write_bytes(b'corrupt source archive')

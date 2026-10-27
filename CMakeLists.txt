@@ -11,7 +11,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(PMJS_DEPENDENCY_PREFIX "" CACHE PATH "Prefix containing target runtime dependencies")
 set(PMJS_DEPENDENCY_LOCK "" CACHE FILEPATH "CMake file with exact target pkg-config versions")
 set(PMJS_PKG_CONFIG_DIRS "" CACHE STRING "Explicit target pkg-config directories, separated by semicolons")
-option(PMJS_RELEASE_PROVENANCE "Record native inputs for explicit release qualification" OFF)
 option(BUILD_TESTING "Configure native and JavaScript tests" OFF)
 option(PMJS_OFFLINE "Require prepared third-party inputs without downloads" OFF)
 message(STATUS "PMJS compiler: ${CMAKE_CXX_COMPILER} (${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
@@ -510,6 +509,8 @@ if(BUILD_TESTING)
     node-tile-edge-filtering
     node-four-texture-tiles
     node-linear-tiling-palette
+    node-linear-sprite-palette
+    node-prepared-linear-palette
     node-yed-retained-tiles
     node-presentation-byte-precision
     node-render-to-image
@@ -558,6 +559,12 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/test/${PMJS_NODE_TEST}.cjs" $<TARGET_FILE:pmjs_native> "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
     set_tests_properties(${PMJS_NODE_TEST} PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1")
   endforeach()
+  foreach(PMJS_FRAME_BUDGET 0 64 8000 32000 262144)
+    add_test(NAME node-prepared-animation-pressure-${PMJS_FRAME_BUDGET} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-animation-pressure.cjs" $<TARGET_FILE:pmjs_native> ${PMJS_FRAME_BUDGET})
+    set_tests_properties(node-prepared-animation-pressure-${PMJS_FRAME_BUDGET} PROPERTIES
+      ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  endforeach()
   add_test(NAME node-prepared-frame-cache COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-frame-cache.cjs" $<TARGET_FILE:pmjs_native>
     "${CMAKE_CURRENT_BINARY_DIR}/test-assets")
@@ -583,6 +590,14 @@ if(BUILD_TESTING)
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --legacy-index)
   add_test(NAME node-compact-sprite-legacy-index COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-compact-sprite.cjs" $<TARGET_FILE:pmjs_native> --legacy-index)
+  add_test(NAME node-compact-sprite-multi-row COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+    "${CMAKE_CURRENT_SOURCE_DIR}/test/node-compact-sprite.cjs" $<TARGET_FILE:pmjs_native> --multi-row)
+  foreach(mode disabled small-budget)
+    add_test(NAME node-prepared-linear-palette-${mode} COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/node-prepared-linear-palette.cjs" $<TARGET_FILE:pmjs_native> --${mode})
+    set_tests_properties(node-prepared-linear-palette-${mode} PROPERTIES ENVIRONMENT
+      "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
+  endforeach()
   add_test(NAME node-block-sprite-disabled COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
     "${CMAKE_CURRENT_SOURCE_DIR}/test/node-block-sprite.cjs" $<TARGET_FILE:pmjs_native> --disabled)
   add_test(NAME node-identity-filter-shader-full-resolution COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
@@ -592,7 +607,7 @@ if(BUILD_TESTING)
     "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy;PMJS_WINDOW_SIZE=256x256")
   set_tests_properties(node-prepared-frame-effects node-large-prepared-frame
     node-block-sprite node-block-sprite-disabled node-block-sprite-legacy-index
-    node-compact-sprite-legacy-index node-identity-filter-shader-full-resolution
+    node-compact-sprite-legacy-index node-compact-sprite-multi-row node-identity-filter-shader-full-resolution
     node-derived-sprite node-compact-sprite node-uniform-inline-matrix node-audio-bytes
     PROPERTIES ENVIRONMENT "LIBGL_ALWAYS_SOFTWARE=1;SDL_AUDIODRIVER=dummy")
   add_test(NAME node-pixi4-tiling-pixels COMMAND ${XVFB_RUN} -a ${NODE_EXECUTABLE}
@@ -751,6 +766,3 @@ if(BUILD_TESTING)
   endif()
 endif()
 include(cmake/Install.cmake)
-if(PMJS_RELEASE_PROVENANCE)
-  include(cmake/Release.cmake)
-endif()

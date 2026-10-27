@@ -39,8 +39,11 @@ test('large prepared frames fit by trimming only zero exterior pixels', async ()
   let original, prepared;
   try {
     const directory = path.join(root, 'prepared'); fs.mkdirSync(directory);
-    const descriptor = await native.assets.processImage('sheet.png', directory, { grid: [3, 1] });
+    const descriptor = await native.assets.processImage('sheet.png', directory, { grid: [6, 2] });
     assert.ok(descriptor);
+    native.assets.installImageStorage([{ source: 'sheet.png', sourceIdentity: native.assets.sourceIdentity('sheet.png'),
+      storage: { version: 1, width: 384, height: 128, paletteBits: 0, channels: 4,
+        source: [0, 1, 2, 3], swizzle: [0, 1, 2, 3] } }]);
     native.assets.installPrepared([{ source: 'sheet.png', directory, descriptor,
       sourceIdentity: native.assets.sourceIdentity('sheet.png') }]);
     original = native.images.loadBytes(sourceBytes);

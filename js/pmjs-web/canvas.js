@@ -1100,20 +1100,56 @@ globalThis.__pmjsCanvasReleaseStats = function() {
 
 
 CanvasContext2D.prototype.save = function() {
-  var state = { transform: this._transform.slice(), clipPaths: this._clipPaths.map(function(region) {
-    return { rule: region.rule, paths: region.paths.map(function(path) {
-      return path.map(function(point) { return point.slice(); });
-    }) };
-  }) };
-  for (var key in canvasStateDefaults) state[key] = this[key];
-  state._lineDash = this._lineDash.slice();
-  this._stateStack.push(state);
+  this._stateStack.push({
+    _transform: this._transform.slice(),
+    _clipPaths: this._clipPaths.map(function(region) {
+      return { rule: region.rule, paths: region.paths.map(function(path) {
+        return path.map(function(point) { return point.slice(); });
+      }) };
+    }),
+    _fillStyle: this._fillStyle,
+    _strokeStyle: this._strokeStyle,
+    _globalAlpha: this._globalAlpha,
+    _compositeOperation: this._compositeOperation,
+    _font: this._font,
+    textAlign: this.textAlign,
+    textBaseline: this.textBaseline,
+    _lineWidth: this._lineWidth,
+    _lineCap: this._lineCap,
+    _lineJoin: this._lineJoin,
+    _miterLimit: this._miterLimit,
+    _imageSmoothingEnabled: this._imageSmoothingEnabled,
+    _lineDashOffset: this._lineDashOffset,
+    _shadowColor: this._shadowColor,
+    _shadowBlur: this._shadowBlur,
+    _shadowOffsetX: this._shadowOffsetX,
+    _shadowOffsetY: this._shadowOffsetY,
+    _lineDash: this._lineDash.slice()
+  });
 };
 CanvasContext2D.prototype.restore = function() {
   if (!this._stateStack.length) return;
   var state = this._stateStack.pop();
-  for (var key in state) this[key === 'transform' ? '_transform' :
-    key === 'clipPaths' ? '_clipPaths' : key] = state[key];
+  this._transform = state._transform;
+  this._clipPaths = state._clipPaths;
+  this._fillStyle = state._fillStyle;
+  this._strokeStyle = state._strokeStyle;
+  this._globalAlpha = state._globalAlpha;
+  this._compositeOperation = state._compositeOperation;
+  this._font = state._font;
+  this.textAlign = state.textAlign;
+  this.textBaseline = state.textBaseline;
+  this._lineWidth = state._lineWidth;
+  this._lineCap = state._lineCap;
+  this._lineJoin = state._lineJoin;
+  this._miterLimit = state._miterLimit;
+  this._imageSmoothingEnabled = state._imageSmoothingEnabled;
+  this._lineDashOffset = state._lineDashOffset;
+  this._shadowColor = state._shadowColor;
+  this._shadowBlur = state._shadowBlur;
+  this._shadowOffsetX = state._shadowOffsetX;
+  this._shadowOffsetY = state._shadowOffsetY;
+  this._lineDash = state._lineDash;
 };
 CanvasContext2D.prototype.setTransform = function(a, b, c, d, e, f) {
   if (arguments.length < 6 && canvasReferenceEngine() === 'mv') throw new TypeError('setTransform requires six arguments');

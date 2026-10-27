@@ -35,8 +35,8 @@ function render(resource, opacity, nearest) {
 }
 try {
   native.canvas.writePremultipliedPixels(source.handle, 0, 0, width, height, pixels);
-  for (const opacity of [0, 25, 33.6, 128, 255]) {
-    const alpha = Math.min(255, Math.floor(opacity / 255 * 256)), flashed = pixels.slice();
+  for (const [opacity, alpha] of [[0, 0], [25, 24], [33.6, 33], [47.175, 46], [128, 128], [255, 255]]) {
+    const flashed = pixels.slice();
     for (let at = 0; at < pixels.length; at += 4) for (let channel = 0; channel < 3; channel++) {
       if (opacity) {
         const atop = Math.floor((pixels[at + channel] * (255 - alpha) + 255 * alpha + 127) / 255);

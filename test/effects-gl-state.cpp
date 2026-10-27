@@ -77,6 +77,13 @@ std::vector<Attribute> attributes() {
 
 int main(int argc, char** argv) {
   if (argc != 3) return 2;
+  pmjs::EffectClock fractional, whole;
+  if (fractional.advance(0.5F) != 0 || fractional.seconds != 0.5F / 60.0F ||
+      fractional.advance(0) != 0 || fractional.seconds != 0.5F / 60.0F ||
+      fractional.advance(0.5F) != 1 || fractional.remainder != 0 ||
+      whole.advance(1) != 1 || fractional.seconds != whole.seconds ||
+      fractional.advance(3) != 3 || whole.advance(3) != 3 || fractional.seconds != whole.seconds)
+    throw std::runtime_error("Effect clock disagrees for fractional, zero and whole-frame updates");
   const bool es3 = std::string(argv[2]) == "3";
   setenv("SDL_AUDIODRIVER", "dummy", 1);
   Context context(es3 ? 3 : 2);

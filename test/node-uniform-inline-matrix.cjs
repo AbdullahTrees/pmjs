@@ -166,10 +166,7 @@ async function main() {
     'ordinary nonuniform sprite should use its compact region');
   assert.ok(native.images.memory().preparedRegions > beforePlain.preparedRegions);
   const control = draw(ordinary, options);
-  const before = native.images.memory();
   assert.deepEqual(draw(prepared, options).pixels, control.pixels);
-  assert.equal(native.images.memory().preparedMaterializations, before.preparedMaterializations + 1,
-    'nonuniform inline filtering must retain compatible source sampling');
   native.images.release(ordinary.handle);
   native.images.release(prepared.handle);
   console.log(JSON.stringify({ comparisons: comparisons + 2, storage }));

@@ -27,6 +27,54 @@ test('created HTML elements share extensible interfaces and detach with focus cl
   assert.equal(c.document.activeElement, c.document.body);
   assert.deepEqual(toggles.slice(-2), [true, false]);
 });
+for (const property of ['textContent', 'innerHTML']) test(property + ' replacement releases focus in a detached subtree', () => {
+  const { c, toggles } = setup();
+  const parent = c.document.createElement('div'), branch = c.document.createElement('span');
+  const input = c.document.createElement('input');
+  branch.appendChild(input); parent.appendChild(branch); c.document.body.appendChild(parent);
+  input.value = 'retained'; input.focus();
+  const events = [];
+  input.addEventListener('blur', () => events.push('blur'));
+  parent[property] = 'replacement';
+  assert.equal(branch.parentNode, null);
+  assert.equal(input.isConnected, false);
+  assert.equal(c.document.activeElement, c.document.body);
+  assert.deepEqual(toggles, [true, false]);
+  assert.deepEqual(events, ['blur']);
+  c.__pmjsReceiveInput({ keyEvents: [{ text: 'unexpected' }] });
+  assert.equal(input.value, 'retained');
+  assert.equal(parent.textContent, 'replacement');
+});
+for (const property of ['textContent', 'innerHTML']) {
+  test(property + ' replacement tolerates removal and reparenting during blur', () => {
+    for (const action of ['remove', 'reparent']) {
+      const { c } = setup();
+      const parent = c.document.createElement('div'), other = c.document.createElement('div');
+      const input = c.document.createElement('input'), sibling = c.document.createElement('span');
+      parent.appendChild(input); parent.appendChild(sibling);
+      c.document.body.appendChild(parent); c.document.body.appendChild(other);
+      input.focus();
+      input.addEventListener('blur', () => {
+        if (action === 'remove') input.remove();
+        else other.appendChild(input);
+      });
+      parent[property] = 'replacement';
+      assert.equal(parent.children.length, 0);
+      assert.equal(sibling.parentNode, null, action);
+      assert.equal(sibling.isConnected, false, action);
+      assert.equal(input.parentNode, action === 'remove' ? null : other);
+      assert.equal(c.document.activeElement, c.document.body);
+    }
+  });
+  test(property + ' replacement does not invoke a guest removeChild override', () => {
+    const { c } = setup(), parent = c.document.createElement('div'), child = c.document.createElement('span');
+    parent.appendChild(child);
+    parent.removeChild = () => { throw new Error('guest override'); };
+    parent[property] = 'replacement';
+    assert.equal(child.parentNode, null);
+    assert.equal(parent.textContent, 'replacement');
+  });
+}
 test('element and document searches visit descendants in tree order', () => {
   const { c } = setup();
   const parent = c.document.createElement('div'), child = c.document.createElement('input');

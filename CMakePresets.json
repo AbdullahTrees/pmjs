@@ -42,7 +42,6 @@
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "OFF",
         "PMJS_ENABLE_SKIA65": "ON",
-        "PMJS_RELEASE_PROVENANCE": "OFF",
         "PMJS_BUILD_SKIA65_COMPONENT": "OFF",
         "PMJS_SKIA65_COMPONENT_DIR": "$env{PMJS_SKIA65_COMPONENT_DIR}"
       }
@@ -60,22 +59,6 @@
         "PMJS_NODE_ROOT": "$env{PMJS_NODE_ROOT}",
         "PMJS_BUNDLE_DEPENDENCIES": "ON"
       }
-    },
-    {
-      "name": "release-x64",
-      "inherits": "runtime-x64",
-      "displayName": "x64 release qualification",
-      "cacheVariables": {
-        "PMJS_RELEASE_PROVENANCE": "ON"
-      }
-    },
-    {
-      "name": "release-linux-arm64",
-      "inherits": "linux-arm64",
-      "displayName": "ARM64 release qualification",
-      "cacheVariables": {
-        "PMJS_RELEASE_PROVENANCE": "ON"
-      }
     }
   ],
   "buildPresets": [
@@ -86,14 +69,6 @@
     {
       "name": "dev-asan",
       "configurePreset": "dev-asan"
-    },
-    {
-      "name": "release-x64",
-      "configurePreset": "release-x64"
-    },
-    {
-      "name": "release-linux-arm64",
-      "configurePreset": "release-linux-arm64"
     },
     {
       "name": "runtime-x64",

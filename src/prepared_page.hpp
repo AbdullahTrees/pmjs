@@ -20,6 +20,7 @@ struct SparsePalettePage {
   std::size_t gpuBytes() const;
   std::size_t cpuBytes() const { return base.capacity() + colors.capacity() + residual.capacity() + blocks.capacity() * 12; }
   std::vector<std::uint8_t> denseIndices() const;
+  void copyRow(int x, int y, std::span<std::uint8_t> rgba) const;
   PreparedPagePixels pixels() const;
 };
 struct PreparedPagePixels {

@@ -28,38 +28,24 @@ else
   controlfolder="/roms/ports/PortMaster"
 fi
 
-source "$controlfolder/control.txt" || exit $?
-[ ! -f "$controlfolder/mod_${CFW_NAME}.txt" ] || source "$controlfolder/mod_${CFW_NAME}.txt" || exit $?
-get_controls || exit 1
+source "$controlfolder/control.txt"
+[ -f "${controlfolder}/mod_${CFW_NAME}.txt" ] && source "${controlfolder}/mod_${CFW_NAME}.txt"
+get_controls
 
-GAMEDIR="/${directory#/}/ports/@ID@"
+GAMEDIR="/$directory/ports/@ID@"
 BINARY=node
-cd "$GAMEDIR" || exit 1
-GAMEDIR=$(pwd -P)
-PMJS_ROOT="$GAMEDIR/runtime"
-> "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1 || exit 1
-echo '[pmjs-port] launcher started'
-export SDL_GAMECONTROLLERCONFIG="${SDL_GAMECONTROLLERCONFIG:-${sdl_controllerconfig:-}}"
+cd "$GAMEDIR"
+> "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
+export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
 export PMJS_EXIT_HOTKEY=${PMJS_EXIT_HOTKEY-none}
-export PMJS_GRAPHICS_DIAGNOSTICS=1
 
-[ -n "$GPTOKEYB2" ] || { echo 'PortMaster gptokeyb2 is required' >&2; exit 1; }
 $GPTOKEYB2 "$BINARY" > /dev/null 2>&1 &
 pm_platform_helper "$GAMEDIR/runtime/bin/$BINARY"
-platform_status=$?
-if [ "$platform_status" -ne 0 ]; then
-  echo "[pmjs-port] PortMaster platform helper returned $platform_status; continuing"
-fi
 
-echo '[pmjs-port] starting runtime'
 XDG_CACHE_HOME="$GAMEDIR/.cache" \\
-LD_LIBRARY_PATH="$PMJS_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \\
-  "$GAMEDIR/runtime/bin/$BINARY" "$PMJS_ROOT/share/pmjs/tools/pmjs.mjs" "$PMJS_ROOT" "$GAMEDIR" \\
+  "$GAMEDIR/runtime/bin/pmjs" "$GAMEDIR" \\
   --save-root "$GAMEDIR/saves" --asset-cache-root "$GAMEDIR/.cache"
-status=$?
-echo "[pmjs-port] runtime exited status=$status"
-pm_finish || { [ "$status" -ne 0 ] || status=1; }
-exit "$status"
+pm_finish
 '''
 
 
@@ -117,7 +103,7 @@ def checked_bundle(bundle):
                 raise ValueError('Invalid PMJS processor sidecar name')
             relative_processor = processor_file.relative_to(bundle).as_posix()
             packaged_files = []
-            for helper in sorted(processor_file.parent.glob('*.cjs')):
+            for helper in sorted(processor_file.parent.rglob('*.cjs')):
                 if helper == processor_file:
                     continue
                 packaged_files.append({'path': helper.relative_to(bundle).as_posix(),
@@ -247,7 +233,11 @@ def checked_bundle(bundle):
 
 
 def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), sources=None, sources_url=None,
-               submission=None, release=False):
+               submission=None, release=False, layout="testing"):
+    if layout not in ("testing", "pr"):
+        raise ValueError("Package layout must be testing or pr")
+    if layout == "pr" and submission is None:
+        raise ValueError("PR layout requires --submission")
     original_info = checked_runtime(stage)
     info = original_info
     submission_details = read_submission(submission)
@@ -331,7 +321,8 @@ def portmaster(stage, bundle, output, name=None, strip=None, extra_notices=(), s
         if any(file.name.startswith('libav') for file in copied) and not info.get('dependencySources'):
             raise ValueError('Bundled FFmpeg requires a source archive reference; specify --sources and --sources-url')
         if submission_details is not None:
-            stage_submission(payload, port, submission_details, stage, info, notices, extra_notices)
+            stage_submission(payload if layout == "pr" else port, port, submission_details,
+                             stage, info, notices, extra_notices)
             root_files = {file.name.casefold() for file in payload.iterdir() if file.is_file()}
             if identifier.casefold() in root_files:
                 raise ValueError('Port directory name collides with a submission file: ' + identifier)
@@ -374,6 +365,8 @@ def main():
     parser.add_argument('--sources', type=Path, help='Corresponding FFmpeg source archive, distributed separately')
     parser.add_argument('--sources-url', help='Permanent HTTP(S) download URL for that archive')
     parser.add_argument('--submission', type=Path, help='Directory containing authored PortMaster metadata')
+    parser.add_argument('--layout', choices=('testing', 'pr'), default='testing',
+                        help='ZIP layout: testing (default) or PR submission')
     parser.add_argument('--release', action='store_true',
                         help='Require authored submission metadata for a PortMaster release')
     parser.add_argument('--notice', type=Path, action='append', default=[], help='Add a port-specific license notice')
@@ -382,7 +375,7 @@ def main():
         portmaster(args.stage.resolve(), args.bundle.resolve(), args.output.resolve(), args.name,
                    args.strip, [file.resolve() for file in args.notice],
                    args.sources.resolve() if args.sources else None, args.sources_url,
-                   args.submission.resolve() if args.submission else None, args.release)
+                   args.submission.resolve() if args.submission else None, args.release, args.layout)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

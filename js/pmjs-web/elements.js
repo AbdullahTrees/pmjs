@@ -199,16 +199,19 @@ GenericElement.prototype.appendChild = function(child) {
   prepareConnectedScripts(child);
   return child;
 };
-GenericElement.prototype.removeChild = function(child) {
-  var index = this.children.indexOf(child);
-  if (index < 0) throw new Error('The node is not a child of this element');
+function removeElementChild(parent, child) {
+  if (parent.children.indexOf(child) < 0) throw new Error('The node is not a child of this element');
   if (typeof documentTarget !== 'undefined' && child.contains(documentTarget.activeElement)) {
     documentTarget.activeElement.blur();
   }
-  this.children.splice(index, 1);
-  child.parentNode = null;
+  var index = parent.children.indexOf(child);
+  if (index >= 0) {
+    parent.children.splice(index, 1);
+    child.parentNode = null;
+  }
   return child;
-};
+}
+GenericElement.prototype.removeChild = function(child) { return removeElementChild(this, child); };
 GenericElement.prototype.setAttribute = function(name, value) { this[name] = String(value); };
 GenericElement.prototype.getAttribute = function(name) { return this[name] || null; };
 GenericElement.prototype.removeAttribute = function(name) {
@@ -278,8 +281,7 @@ Object.defineProperties(GenericElement.prototype, {
       return text + this.children.map(function(child) { return child.textContent || ''; }).join('');
     },
     set: function(value) {
-      this.children.forEach(function(child) { child.parentNode = null; });
-      this.children = [];
+      while (this.children.length) removeElementChild(this, this.children[0]);
       this._innerHTML = undefined;
       this._textContent = value === null ? '' : String(value);
     }

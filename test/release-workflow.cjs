@@ -58,7 +58,7 @@ try {
     rows.push(row);
   }
   fs.mkdirSync(path.join(game, 'img/pictures'), { recursive: true });
-  fs.writeFileSync(path.join(game, 'img/pictures/fixture.png'), Buffer.concat([
+  fs.writeFileSync(path.join(game, 'img/pictures/fixture[1x1].png'), Buffer.concat([
     Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
     chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))
   ]));
@@ -124,7 +124,7 @@ try {
   assert.equal(prepared.status, 0, prepared.stdout + prepared.stderr);
   const bundle = path.join(temporary, 'game bundle');
   const originalImageHash = crypto.createHash('sha256').update(
-    fs.readFileSync(path.join(game, 'img/pictures/fixture.png'))).digest('hex');
+    fs.readFileSync(path.join(game, 'img/pictures/fixture[1x1].png'))).digest('hex');
   const bundled = cli('bundle', game, '--output', bundle, '--config', config, '--manifest', manifest,
     '--patch', firstAdapter, '--patch', secondAdapter, '--patch', duplicateAdapter);
   assert.equal(bundled.status, 0, bundled.stdout + bundled.stderr);
@@ -140,11 +140,11 @@ try {
   assert.equal(descriptor.assetIndex, 'asset-index.json');
   const index = JSON.parse(fs.readFileSync(path.join(bundle, 'asset-index.json')));
   assert.equal(index.images.length, 1);
-  assert.ok(index.images[0].descriptor);
+  assert.ok(index.images[0].calculated.descriptor);
   assert.equal(index.sections.imageStorage, 1);
   assert.equal(index.imageStorageVersion, 1);
-  assert.equal(index.images[0].storage.version, 1);
-  assert.ok([0, 8, 16].includes(index.images[0].storage.paletteBits));
+  assert.equal(index.images[0].calculated.storage.version, 1);
+  assert.ok([0, 8, 16].includes(index.images[0].calculated.storage.paletteBits));
   assert.equal(fs.existsSync(path.join(bundle, 'assets')), false, 'artwork is not bundled by default');
   const noIndexBundle = path.join(temporary, 'bundle without index');
   const noIndex = cli('bundle', game, '--output', noIndexBundle, '--no-index');
@@ -160,12 +160,12 @@ try {
   const assetsBundle = cli('bundle', game, '--output', withAssets, '--include-assets');
   assert.equal(assetsBundle.status, 0, assetsBundle.stdout + assetsBundle.stderr);
   const included = JSON.parse(fs.readFileSync(path.join(withAssets, 'asset-index.json')));
-  assert.ok(fs.existsSync(path.join(withAssets, included.images[0].outputs[0].path)));
+  assert.ok(fs.existsSync(path.join(withAssets, included.images[0].calculated.outputs[0].path)));
   const invalidCombination = cli('bundle', game, '--output', path.join(temporary, 'invalid bundle'),
     '--include-assets', '--no-index');
   assert.notEqual(invalidCombination.status, 0);
   assert.equal(crypto.createHash('sha256').update(
-    fs.readFileSync(path.join(game, 'img/pictures/fixture.png'))).digest('hex'), originalImageHash,
+    fs.readFileSync(path.join(game, 'img/pictures/fixture[1x1].png'))).digest('hex'), originalImageHash,
   'bundle creation leaves original game files unchanged');
   const movedBundle = path.join(temporary, 'moved bundle');
   fs.renameSync(bundle, movedBundle);
@@ -262,14 +262,13 @@ try {
     fs.writeFileSync(builder, builderSource);
   }
   const gameId = crypto.createHash('sha256').update(game).digest('hex').slice(0, 24);
+  const preparationId = crypto.createHash('sha256').update(JSON.stringify(game)).digest('hex').slice(0, 16);
   function preparedImage(data) {
-    const entries = path.join(data, 'pmjs', gameId, 'saves/asset-cache/entries');
-    for (const key of fs.readdirSync(entries)) {
-      const manifestPath = path.join(entries, key, 'manifest.json');
-      if (!fs.existsSync(manifestPath)) continue;
-      const manifest = JSON.parse(fs.readFileSync(manifestPath));
+    const root = path.join(data, 'pmjs', gameId, 'saves/asset-cache/preparation-v1', preparationId);
+    const results = JSON.parse(fs.readFileSync(path.join(root, 'preparation-state.json'))).data.results;
+    for (const [key, manifest] of Object.entries(results)) {
       if (manifest.descriptor?.pages?.length) return { manifest,
-        page: fs.readFileSync(path.join(entries, key, manifest.descriptor.pages[0].path)) };
+        page: fs.readFileSync(path.join(root, key, manifest.descriptor.pages[0].path)) };
     }
     throw new Error('prepared fixture image not found');
   }
@@ -283,7 +282,7 @@ try {
   assert.deepEqual(preparedImage(assetsData).page, baselineImage.page);
   const damagedAssets = path.join(temporary, 'damaged assets bundle');
   fs.cpSync(withAssets, damagedAssets, { recursive: true });
-  fs.appendFileSync(path.join(damagedAssets, included.images[0].outputs[0].path), 'damaged');
+  fs.appendFileSync(path.join(damagedAssets, included.images[0].calculated.outputs[0].path), 'damaged');
   const damagedData = path.join(temporary, 'data-damaged-assets');
   const damagedRun = cliAt(damagedData, damagedAssets, '--game', game);
   assertGuestReached(damagedRun);
@@ -304,11 +303,11 @@ try {
   assertGuestReached(incompatibleRun);
   assert.deepEqual(preparedImage(incompatibleData).page, baselineImage.page,
     'incompatible decoder uses ordinary preparation');
-  const originalImage = fs.readFileSync(path.join(game, 'img/pictures/fixture.png'));
+  const originalImage = fs.readFileSync(path.join(game, 'img/pictures/fixture[1x1].png'));
   for (const row of rows) for (let x = 16; x < 48; ++x) if (row[1 + x * 4 + 3]) {
     row[1 + x * 4] = 0; row[1 + x * 4 + 1] = 255;
   }
-  fs.writeFileSync(path.join(game, 'img/pictures/fixture.png'), Buffer.concat([
+  fs.writeFileSync(path.join(game, 'img/pictures/fixture[1x1].png'), Buffer.concat([
     Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
     chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))
   ]));
@@ -318,7 +317,7 @@ try {
   assert.notEqual(preparedImage(replacedData).manifest.sourceHash, baselineImage.manifest.sourceHash);
   assert.notDeepEqual(preparedImage(replacedData).page, baselineImage.page,
     'source replacement uses newly prepared pixels');
-  fs.writeFileSync(path.join(game, 'img/pictures/fixture.png'), originalImage);
+  fs.writeFileSync(path.join(game, 'img/pictures/fixture[1x1].png'), originalImage);
   const record = fs.readFileSync(path.join(state, 'prepared.json'), 'utf8');
   const broken = cli('prepare', '--game', game, '--state', state, '--config', path.join(temporary, 'missing.json'));
   assert.notEqual(broken.status, 0);
@@ -362,28 +361,29 @@ try {
     }
     fs.writeFileSync(path.join(runtimeStage, 'share/pmjs/notices/unicode-😀-é.txt'), 'payload checksum fixture');
     stage = runtimeStage;
-    const qualified = spawnSync('python3', [path.resolve(__dirname, '../tools/release.py'), 'manifest',
+    const manifested = spawnSync('python3', [path.resolve(__dirname, '../tools/release.py'), 'manifest',
       '--stage', stage, '--build', path.resolve(process.argv[3]), '--source', path.resolve(__dirname, '..')],
     { encoding: 'utf8' });
-    assert.equal(qualified.status, 0, qualified.stdout + qualified.stderr);
+    assert.equal(manifested.status, 0, manifested.stdout + manifested.stderr);
   }
   const packageSha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(stage, 'build-info.json'))).digest('hex');
   const releaseRecord = path.join(path.dirname(stage), path.basename(stage) + '.release.json');
   const releaseRecordSha256 = crypto.createHash('sha256').update(fs.readFileSync(releaseRecord)).digest('hex');
   const report = path.join(temporary, 'verification.json');
-  function archive(verification, development = false) {
+  function archive(verification) {
     fs.writeFileSync(report, JSON.stringify({ releaseRecordSha256, ...verification }));
     return spawnSync('python3', [path.resolve(__dirname, '../tools/release.py'), 'archive',
-      '--stage', stage, '--report', report, '--output', path.join(temporary, 'release.tar.gz'),
-      ...(development ? ['--development'] : [])],
+      '--stage', stage, '--report', report, '--output', path.join(temporary, 'release.tar.gz')],
     { encoding: 'utf8' });
   }
   const wrongPackage = archive({ schema: 2, packageSha256: '0'.repeat(64), static: 'passed' });
   assert.notEqual(wrongPackage.status, 0);
   assert.match(wrongPackage.stderr, /different package/);
   const noExecution = archive({ schema: 2, packageSha256, static: 'passed', smoke: null });
-  assert.notEqual(noExecution.status, 0);
-  assert.match(noExecution.stderr, /executed smoke test is required/);
+  assert.equal(noExecution.status, 0, noExecution.stdout + noExecution.stderr);
+  const noAudit = archive({ schema: 2, packageSha256, smoke: null });
+  assert.notEqual(noAudit.status, 0);
+  assert.match(noAudit.stderr, /Static package verification is required/);
   const incompleteReceipt = archive({ schema: 2, packageSha256, static: 'passed', smoke: { load: true } });
   assert.notEqual(incompleteReceipt.status, 0);
   assert.match(incompleteReceipt.stderr, /does not verify this exact package/);
@@ -393,10 +393,7 @@ try {
   assert.equal(receipt.test, 'package-load');
   assert.equal(receipt.graphics, null);
   const loadOnly = archive({ schema: 2, packageSha256, static: 'passed', smoke: receipt });
-  assert.notEqual(loadOnly.status, 0);
-  assert.match(loadOnly.stderr, /require a graphics smoke receipt/);
-  const development = archive({ schema: 2, packageSha256, static: 'passed', smoke: null }, true);
-  assert.equal(development.status, 0, development.stdout + development.stderr);
+  assert.equal(loadOnly.status, 0, loadOnly.stdout + loadOnly.stderr);
   fs.chmodSync(path.join(stage, 'LICENSE'), 0o755);
   const synthesizedModes = cli('self-test');
   assert.equal(synthesizedModes.status, 0, synthesizedModes.stdout + synthesizedModes.stderr);
@@ -415,7 +412,7 @@ try {
   const tampered = cli('self-test');
   assert.notEqual(tampered.status, 0);
   assert.match(tampered.stderr, /package checksum|runtime payload checksum/);
-  console.log('Installed preparation, relocation, archive gates and tamper checks passed');
+  console.log('Installed preparation, relocation, archive integrity and tamper checks passed');
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

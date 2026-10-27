@@ -34,10 +34,10 @@ test('startup receipts reuse unchanged bytes and rehash edits, replacements, upg
 
 test('runtime identity notices added and removed files while warm content reads remain zero', () => {
   const root = temporaryDirectory('runtime-identity-');
-  for (const directory of ['js', 'profiles', 'tools']) fs.mkdirSync(path.join(root, directory));
+  for (const directory of ['js', 'profiles', 'tools', 'runner']) fs.mkdirSync(path.join(root, directory));
   for (const file of ['js/base.js', 'profiles/base.json', 'tools/build-js-runtime.mjs',
     'tools/build-js-composition.mjs',
-    'tools/game-inspect.mjs', 'tools/achievement-discovery.mjs']) fs.writeFileSync(path.join(root, file), file);
+    'tools/game-inspect.mjs', 'tools/achievement-discovery.mjs', 'runner/plugin-manifest.cjs']) fs.writeFileSync(path.join(root, file), file);
   const receipt = path.join(root, 'receipt.json'), cold = startupFiles(receipt, 'build');
   const original = runtimeIdentity(root, cold.hash); cold.save();
   const warm = startupFiles(receipt, 'build');
@@ -61,4 +61,38 @@ test('startup verification rejects mutation of an opened input', t => {
   });
   const checked = startupFiles(path.join(root, 'receipt.json'), 'build');
   assert.throws(() => checked.hash(file), /changed while hashing/);
+});
+
+test('composition identity follows plugin parser changes and ignores documentation edits', () => {
+  const crypto = require('node:crypto');
+  const { spawnSync } = require('node:child_process');
+  const root = temporaryDirectory('composition-identity-'), share = path.join(root, 'runtime');
+  fs.mkdirSync(share);
+  for (const directory of ['js', 'profiles']) fs.cpSync(path.join(__dirname, '..', directory), path.join(share, directory), { recursive: true });
+  for (const directory of ['tools', 'runner']) fs.mkdirSync(path.join(share, directory));
+  for (const name of ['build-js-runtime.mjs', 'build-js-composition.mjs', 'game-inspect.mjs', 'achievement-discovery.mjs']) {
+    fs.copyFileSync(path.join(__dirname, '../tools', name), path.join(share, 'tools', name));
+  }
+  const parser = path.join(share, 'runner/plugin-manifest.cjs');
+  fs.copyFileSync(path.join(__dirname, '../runner/plugin-manifest.cjs'), parser);
+  const game = path.join(root, 'game');
+  fs.mkdirSync(path.join(game, 'js/libs'), { recursive: true });
+  fs.writeFileSync(path.join(game, 'js/libs/pixi.js'), 'PIXI.VERSION = "4.5.4";');
+  fs.writeFileSync(path.join(game, 'js/libs/pixi-tilemap.js'), '');
+  for (const [name, text] of Object.entries({ 'rpg_core.js': 'Utils.RPGMAKER_VERSION = "1.6.2";',
+    'rpg_managers.js': '', 'plugins.js': 'var $plugins = [];' })) fs.writeFileSync(path.join(game, 'js', name), text);
+  const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const build = () => {
+    const output = path.join(root, 'bootstrap.js');
+    const result = spawnSync(process.execPath, [path.join(share, 'tools/build-js-runtime.mjs'), '--game', game, '--output', output], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return hash(output);
+  };
+  const originalIdentity = runtimeIdentity(share, hash), originalBundle = build();
+  fs.writeFileSync(path.join(share, 'README.md'), 'Changed documentation');
+  assert.equal(runtimeIdentity(share, hash), originalIdentity);
+  assert.equal(build(), originalBundle);
+  fs.writeFileSync(parser, 'module.exports = { parsePluginManifest() { return { plugins: [{ name: "YEP_CoreEngine", status: true, parameters: {} }] }; } };');
+  assert.notEqual(build(), originalBundle, 'parser changes affect the actual composed bootstrap');
+  assert.notEqual(runtimeIdentity(share, hash), originalIdentity, 'changed composition must invalidate bootstrap reuse');
 });

@@ -172,11 +172,19 @@ test('presenter retains bitmap Sprites and clears each background triangle once'
   assert.deepEqual(invalidated, []);
   assert.equal(scene.testSprite._background.visible, false);
   assert.deepEqual(cleared[0].points, [0, 0, 80, 0, 0, 60]);
-  assert.equal(item.image._blendColor[3], 192);
-  for (let tick = 0; tick < 8; tick++) scene.testSprite.update();
-  assert.equal(item.image._blendColor[3], 128);
+  assert.equal(item.image._blendColor[3], 0);
+  assert.equal(context.capture.stage._blendColor[3], 192);
+  assert.notEqual(item.image.texture, item.texture);
+  const firstFlash = item.image.texture;
+  for (let tick = 0; tick < 7; tick++) scene.testSprite.update();
+  assert.equal(item.image.texture, firstFlash, 'retain the flash between authored refreshes');
+  scene.testSprite.update();
+  assert.equal(context.capture.stage._blendColor[3], 128);
+  assert.notEqual(item.image.texture, firstFlash);
   for (let tick = 0; tick < 17; tick++) scene.testSprite.update();
   assert.equal(item.image._blendColor[3], 0);
+  assert.equal(item.image.texture, item.texture);
+  assert.equal(context.__isatMppGpuFragmentStats.flashAtlasBuilds, 3);
   assert.equal(invalidated.length, 0);
   assert.equal(cleared.length, 1);
 });
@@ -219,7 +227,9 @@ test('battle handoff transfers retained Sprites and resets authored Sprite flash
   piece.flashColor = [255, 0, 0];
   piece.flashColor.clone = function() { return this.slice(); };
   presenter.update();
-  assert.ok(presenter._items[0].image._blendColor[3] > 0);
+  assert.ok(presenter._items[0].flashDuration > 0);
+  assert.notEqual(presenter._items[0].image.texture, presenter._items[0].texture);
+  const flashAtlases = [...presenter._flashAtlases.values()].map(entry => entry.texture);
   scene.createEncEffSprites();
   assert.equal(scene.testSprite, presenter);
   assert.equal(presenter.parent, scene._encEffContainer);
@@ -228,10 +238,13 @@ test('battle handoff transfers retained Sprites and resets authored Sprite flash
   assert.equal(retained[0].strokeSamples, 4);
   assert.equal(presenter._items[0].image._blendColor[3], 0);
   assert.equal(presenter._items[0].flashDuration, 0);
+  assert.equal(presenter._items[0].image.texture, presenter._items[0].texture);
   const atlas = presenter._atlas;
   context.fixtureEffect.clear();
   assert.ok(released.includes(presenter));
   assert.equal(presenter._atlas, null);
+  assert.equal(presenter._flashAtlases.size, 0);
+  assert.ok(flashAtlases.every(texture => texture.destroys === 1));
   assert.ok(atlas);
   context.fixtureEffect._data = [fragment()];
   context.fixtureEffect._isatGpuActive = true;
@@ -335,4 +348,38 @@ test('encounter restores absent worldState without clearing later fields or fore
     } else if (update === 'foreign-world-state') assert.equal(restored, foreign);
     else assert.equal(restored, undefined);
   }
+});
+
+
+test('flash cache bounds storage and falls back to per-sprite color for extra colors', () => {
+  const { context, scene } = setup();
+  const piece = fragment(); piece.visible = true;
+  context.fixtureEffect._data = [piece]; context.fixtureEffect._isatGpuActive = true;
+  scene.createEncEffSprites();
+  const presenter = scene.testSprite, item = presenter._items[0];
+  for (let color = 0; color < 4; color++) assert.ok(presenter.flashRegion(item, [color, 0, 0, 192]));
+  assert.equal(presenter._flashAtlases.size, 4);
+  piece.flashColor = [4, 0, 0]; piece.flashColor.clone = function() { return this.slice(); };
+  presenter.update();
+  assert.equal(item.image.texture, item.texture);
+  assert.deepEqual(Array.from(item.image._blendColor), [4, 0, 0, 192]);
+  assert.equal(presenter._flashAtlases.size, 4);
+});
+
+test('flash capture failure restores sampling and retains the ordinary flash fallback', () => {
+  const { context, scene } = setup();
+  const piece = fragment(); piece.visible = true;
+  context.fixtureEffect._data = [piece]; context.fixtureEffect._isatGpuActive = true;
+  scene.createEncEffSprites();
+  const presenter = scene.testSprite, item = presenter._items[0], scale = presenter._atlas.baseTexture.scaleMode;
+  context.failCapture = true;
+  piece.flashColor = [2, 3, 4]; piece.flashColor.clone = function() { return this.slice(); };
+  presenter.update();
+  assert.equal(presenter._atlas.baseTexture.scaleMode, scale);
+  assert.equal(item.image.texture, item.texture);
+  assert.deepEqual(Array.from(item.image._blendColor), [2, 3, 4, 192]);
+  assert.equal(presenter._flashCacheDisabled, true);
+  context.failCapture = false;
+  for (let tick = 0; tick < 8; tick++) presenter.update();
+  assert.equal(presenter._flashAtlases.size, 0, 'failed allocation is not retried during the effect');
 });

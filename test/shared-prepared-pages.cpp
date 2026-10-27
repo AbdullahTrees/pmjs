@@ -252,6 +252,26 @@ int main() {
       }
       write(indexed.source, width, height, indexed.pixels);
       pmjs::writeLz4Page(indexed.directory / "page-0.pml4", pageWidth, pageHeight, page, true);
+      if (grayscale) {
+        auto descriptor = d;
+        descriptor.blockGrid = std::array<int, 3>{64, width, height};
+        descriptor.blockChannels = 1;
+        pmjs::ImageStore blocks;
+        blocks.setWarmBudgetBytes(0);
+        require(blocks.installPrepared(indexed.source, indexed.directory, descriptor), "block fixture install failed");
+        const auto image = blocks.loadPng(indexed.source);
+        require(image && blocks.resolveBlockRegion(image->handle, false), "indexed block upload failed");
+        require(blocks.cpuBytes() < std::size_t(pageWidth) * pageHeight * 4,
+          "block upload retained expanded indexed pixels");
+        const auto decodes = blocks.preparedPageDecodes();
+        const auto uploads = blocks.textureUploadBytes();
+        require(blocks.readPixelsRegion(image->handle, 0, 0, width, height)->rgba == indexed.pixels,
+          "block upload lost reconstructible CPU pixels");
+        require(blocks.resolveBlockRegion(image->handle, false) && blocks.preparedPageDecodes() == decodes &&
+          blocks.textureUploadBytes() == uploads, "repeated block use decoded or uploaded pixels");
+        blocks.release(image->handle); blocks.update();
+        require(blocks.cpuBytes() == 0 && blocks.gpuBytes() == 0, "block storage outlived its owner");
+      }
       pmjs::ImageStore images;
       images.setWarmBudgetBytes(0); images.setPreparedFrameCacheBudget(0);
       install(images, indexed);
@@ -263,6 +283,8 @@ int main() {
         const auto ordinary = images.lookup(loaded->handle);
         require(ordinary && images.gpuBytes() == std::size_t(width) * height,
           "opaque grayscale fallback did not retain single-channel storage");
+        require(images.cpuBytes() < std::size_t(pageWidth) * pageHeight * 4,
+          "grayscale upload retained expanded indexed pages");
       } else {
         require(region && region->paletteTable != 0, "indexed palette region unavailable");
         require(images.gpuBytes() == std::size_t(pageWidth) * pageHeight + 1024,

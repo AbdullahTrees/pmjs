@@ -28,6 +28,19 @@ std::uint32_t get(std::span<const std::uint8_t> bytes, std::size_t offset) {
   for (int i = 0; i < 4; ++i) value |= static_cast<std::uint32_t>(bytes[offset + i]) << (8 * i);
   return value;
 }
+unsigned paletteIndex(const SparsePalettePage& page, std::size_t pixel) {
+  unsigned index = page.base[pixel];
+  if (!page.packed && index == 255) {
+    const int x = pixel % page.width, y = pixel / page.width;
+    const int bit = (y % 8) * 8 + x % 8;
+    const auto& block = page.blocks[(y / 8) * ((page.width + 7) / 8) + x / 8];
+    const auto rank = std::popcount(block[bit / 32] & ((1U << (bit % 32)) - 1)) +
+      (bit >= 32 ? std::popcount(block[0]) : 0);
+    const auto at = (block[2] + rank) * 2;
+    index = page.residual[at] | (unsigned(page.residual[at + 1]) << 8);
+  }
+  return index;
+}
 }
 void writeLz4Page(const std::filesystem::path& path, int width, int height,
                   std::span<const std::uint8_t> rgba, bool sparsePalette) {
@@ -124,28 +137,21 @@ std::vector<std::uint8_t> SparsePalettePage::denseIndices() const {
     for (std::size_t i = 0; i < base.size(); ++i) indices[i * 2] = base[i];
     return indices;
   }
-  const int columns = (width + 7) / 8;
   for (std::size_t i = 0; i < base.size(); ++i) {
-    unsigned index = base[i];
-    if (index == 255) {
-      const int x = i % width, y = i / width, bit = (y % 8) * 8 + x % 8;
-      const auto& block = blocks[(y / 8) * columns + x / 8];
-      const auto rank = std::popcount(block[bit / 32] & ((1U << (bit % 32)) - 1)) +
-        (bit >= 32 ? std::popcount(block[0]) : 0);
-      const auto at = (block[2] + rank) * 2;
-      index = residual[at] | (unsigned(residual[at + 1]) << 8);
-    }
+    const unsigned index = paletteIndex(*this, i);
     indices[i * 2] = index & 255; indices[i * 2 + 1] = index >> 8;
   }
   return indices;
 }
+void SparsePalettePage::copyRow(int x, int y, std::span<std::uint8_t> rgba) const {
+  const auto first = static_cast<std::size_t>(y) * width + x;
+  for (std::size_t i = 0; i < rgba.size() / 4; ++i)
+    std::copy_n(colors.data() + paletteIndex(*this, first + i) * 4, 4, rgba.data() + i * 4);
+}
 PreparedPagePixels SparsePalettePage::pixels() const {
-  const auto indices = denseIndices();
   PreparedPagePixels result{width, height, std::vector<std::uint8_t>(base.size() * 4)};
-  for (std::size_t i = 0; i < base.size(); ++i) {
-    const auto index = unsigned(indices[i * 2]) | (unsigned(indices[i * 2 + 1]) << 8);
-    std::copy_n(colors.data() + index * 4, 4, result.rgba.data() + i * 4);
-  }
+  for (int y = 0; y < height; ++y)
+    copyRow(0, y, std::span(result.rgba).subspan(static_cast<std::size_t>(y) * width * 4, width * 4));
   return result;
 }
 std::optional<SparsePalettePage> makeSparsePalettePage(int width, int height,

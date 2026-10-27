@@ -3,6 +3,7 @@
 #include "vfs.hpp"
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -15,6 +16,18 @@ struct EffectDraw {
   std::array<float, 16> projection{};
   std::array<float, 16> camera{};
   std::array<float, 2> resetViewport{};
+};
+
+struct EffectClock {
+  float seconds = 0;
+  float remainder = 0;
+  int advance(float frames) {
+    seconds += frames / 60.0F;
+    const float pending = frames + remainder;
+    const int steps = static_cast<int>(std::floor(pending));
+    remainder = pending - steps;
+    return steps;
+  }
 };
 
 class Effects {

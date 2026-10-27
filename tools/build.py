@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--target", choices=["local", "arm64"], default="local")
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 4))
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--build-type", choices=["Debug", "Release", "RelWithDebInfo"])
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be positive")
@@ -68,8 +69,12 @@ def main():
         if missing:
             raise ValueError("Missing native development libraries: " + ", ".join(missing) +
                              ". See docs/building.md.")
-    build_dir = ROOT / "build" / ("pmjs-arm64" if args.target == "arm64" else "local")
-    run("cmake", "--preset", preset, "-B", build_dir, "-DBUILD_TESTING=OFF", env=env)
+    build_name = "pmjs-arm64" if args.target == "arm64" else "local"
+    if args.build_type:
+        build_name += "-" + args.build_type.lower()
+    build_dir = ROOT / "build" / build_name
+    configuration = ["-DCMAKE_BUILD_TYPE=" + args.build_type] if args.build_type else []
+    run("cmake", "--preset", preset, "-B", build_dir, "-DBUILD_TESTING=OFF", *configuration, env=env)
     run("cmake", "--build", build_dir, "--target", "pmjs_native",
         "--parallel", args.jobs, env=env)
     output.parent.mkdir(parents=True, exist_ok=True)

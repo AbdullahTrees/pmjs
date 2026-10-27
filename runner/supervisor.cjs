@@ -6,6 +6,24 @@ const { fork } = require('node:child_process');
 const { performance } = require('node:perf_hooks');
 const { processMappingDetails, parseProcessStatus } = require('./diagnostics.cjs');
 
+const terminalStates = new WeakMap();
+function terminalState(stream) {
+  let state = terminalStates.get(stream);
+  if (state) return state;
+  state = { failed: stream.destroyed || stream.writableEnded, listeners: new Set() };
+  const unavailable = state.fail = error => {
+    if (state.failed) return;
+    state.failed = true;
+    for (const listener of state.listeners) listener(error);
+  };
+  // Standard streams outlive sessions; late write errors must remain handled
+  // after a worker exits, without adding another handler on every reload.
+  stream.on('error', unavailable);
+  stream.once('close', unavailable);
+  terminalStates.set(stream, state);
+  return state;
+}
+
 // All persistent output belongs to this process, not the game event loop.
 // Retain the first 128 KiB and the newest output within each 2 MiB file.
 const RETAIN_LOGS = 4;
@@ -333,6 +351,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         let lastOomCount = oomBefore;
         const worseningBytes = 32 * MiB;
         const drainListeners = [];
+        const outputCleanups = [];
         function setDiagnosticsReady() {
           const wasReady = diagnosticsReady;
           const wasSeen = diagnosticsReadySeen;
@@ -502,6 +521,7 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
           if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
           if (pendingSnapshotTimer) { clearTimeout(pendingSnapshotTimer); pendingSnapshotTimer = null; }
           for (const [stream, listener] of drainListeners) stream.removeListener('drain', listener);
+          for (const cleanupOutput of outputCleanups) cleanupOutput();
           active = null;
         }
         try {
@@ -524,18 +544,29 @@ async function runSupervised(prepare, { worker = path.join(__dirname, 'session.c
         for (const [name, destination] of [['stdout', process.stdout], ['stderr', process.stderr]]) {
           let blocked = false;
           const source = child[name];
+          const output = terminalState(destination);
           const resume = () => { blocked = false; source.resume(); };
+          const unavailable = error => {
+            destination.removeListener('drain', resume);
+            resume();
+            if (log) log.write('[pmjs] terminal-output-unavailable stream=' + name +
+              ' code=' + (error?.code || 'closed') + '\n');
+          };
+          output.listeners.add(unavailable);
+          outputCleanups.push(() => output.listeners.delete(unavailable));
           drainListeners.push([destination, resume]);
           child[name].on('data', chunk => {
             limiter.write(name, chunk);
-            if (blocked) return;
+            if (blocked || output.failed) return;
             try {
               if (!destination.write(chunk)) {
                 blocked = true;
                 source.pause();
                 destination.once('drain', resume);
               }
-            } catch (_) {}
+            } catch (error) {
+              output.fail(error);
+            }
           });
         }
         child.on('message', message => {

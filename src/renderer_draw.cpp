@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include <deque>
 
 #include <GLES3/gl3.h>
 
@@ -10,6 +11,11 @@
 
 namespace pmjs {
 namespace {
+float packSpriteUv(double coordinate) {
+  double packed = std::fmod(std::trunc(coordinate * 65535.0), 65536.0);
+  if (packed < 0) packed += 65536.0;
+  return static_cast<float>(packed / 65535.0);
+}
 std::array<int, 4> effectFrame(const RenderCommand* filter, int width, int height) {
   if (!filter || !filter->clipped) return {0, 0, width, height};
   return {std::clamp(filter->clip[0], 0, width),
@@ -371,6 +377,12 @@ bool Renderer::filterBoundsRect(const RenderCommand* filterBegin,
 }
 
 void Renderer::renderScene() {
+  struct RestoreReadContext {
+    bool& rendering;
+    bool previous;
+    ~RestoreReadContext() { rendering = previous; }
+  } restoreReadContext{images_.rendering_, images_.rendering_};
+  images_.rendering_ = true;
   RenderTarget& rootTarget = offscreenRender_ ? offscreenTarget_ : sceneTarget_;
   ensureTarget(rootTarget, width_, height_);
   std::uint32_t& rootFramebuffer = rootTarget.framebuffer;
@@ -584,9 +596,52 @@ void Renderer::renderScene() {
   std::size_t preparingFilterDepth = 0;
   std::array<const RenderCommand*, scene_packet::maxFilterDepth> preparingFilters{};
   std::array<float, 4> viewportMapping{1, 1, 0, 0};
-  for (std::size_t commandIndex = 0;
-       commandIndex < frame_.commands.size(); ++commandIndex) {
-    const RenderCommand& command = frame_.commands[commandIndex];
+  std::deque<RenderCommand> splitCommands;
+  std::unordered_map<const RenderCommand*,std::array<float,4>> splitUvs;
+  std::vector<std::pair<std::size_t,const RenderCommand*>> drawCommands;
+  for (std::size_t i=0;i<frame_.commands.size();++i) {
+    const auto& original = frame_.commands[i];
+    const bool eligible = original.action==RenderCommand::Action::draw &&
+      original.primitive==RenderCommand::Primitive::sprite && !original.nearest &&
+      !original.repeat && !original.mipmap && !original.roundPixels && !original.clampedTilingSampling &&
+      !original.appliesColorMatrix && !original.appliesMeshPostTintOverlay &&
+      !original.standaloneBitmapRegion && original.blur<=0 && !original.maskImage && !original.textureRotation &&
+      (!hasFilterGroups || !inlineFilterMatrix[i]);
+    const auto parts = eligible ? images_.preparedSpriteParts(original.image,original.source) :
+      std::vector<std::array<float,4>>{};
+    if (parts.empty()) { drawCommands.emplace_back(i,&original); continue; }
+    for (const auto& part : parts) {
+      auto& tile = splitCommands.emplace_back(original);
+      const float x=(part[0]-original.source[0])/original.source[2];
+      const float y=(part[1]-original.source[1])/original.source[3];
+      const float w=part[2]/original.source[2], h=part[3]/original.source[3];
+      tile.source=part;
+      tile.destination={original.destination[0]*w,original.destination[1]*h};
+      tile.transform[4]+=original.transform[0]*original.destination[0]*x+original.transform[2]*original.destination[1]*y;
+      tile.transform[5]+=original.transform[1]*original.destination[0]*x+original.transform[3]*original.destination[1]*y;
+      if (original.spriteWorldVertices) {
+        const auto point = [&](float u,float v) {
+          std::array<float,2> p{};
+          for(int axis=0;axis<2;++axis) p[axis]=original.spriteVertices[0][axis]*(1-u)*(1-v)+
+            original.spriteVertices[1][axis]*u*(1-v)+original.spriteVertices[2][axis]*u*v+original.spriteVertices[3][axis]*(1-u)*v;
+          return p;
+        };
+        tile.spriteVertices={point(x,y),point(x+w,y),point(x+w,y+h),point(x,y+h)};
+      }
+      if (original.pixiSpritePacking && !original.floatSpriteUv) {
+        const auto info = images_.inspect(original.image);
+        const float u0=packSpriteUv(double(original.source[0])/info->width);
+        const float v0=packSpriteUv(double(original.source[1])/info->height);
+        const float u1=packSpriteUv((double(original.source[0])+original.source[2])/info->width);
+        const float v1=packSpriteUv((double(original.source[1])+original.source[3])/info->height);
+        splitUvs.emplace(&tile,std::array<float,4>{u0+(u1-u0)*x,v0+(v1-v0)*y,
+          u0+(u1-u0)*(x+w),v0+(v1-v0)*(y+h)});
+      }
+      drawCommands.emplace_back(i,&tile);
+    }
+  }
+  for (const auto& [commandIndex, commandPointer] : drawCommands) {
+    const RenderCommand& command = *commandPointer;
     if (hasFilterGroups && inlineFilterBoundary[commandIndex]) continue;
     const auto* inlineMatrix = hasFilterGroups ? inlineFilterMatrix[commandIndex] : nullptr;
     if (command.action != RenderCommand::Action::draw) {
@@ -688,12 +743,12 @@ void Renderer::renderScene() {
       if (left || right || above || below) continue;
     }
     const auto logicalInfo = images_.inspect(command.image);
-    // LINEAR tiling uses hardware filtering instead of four palette-color decodes per fragment.
-    const bool paletteEligible = !command.mipmap && command.blur <= 0 &&
+    const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
+    // Tiling keeps hardware filtering; sprites can sample decoded palette colors.
+    const bool paletteEligible = !uniformPrepared && !command.mipmap && command.blur <= 0 &&
       (command.nearest || command.primitive != RenderCommand::Primitive::tilingSprite) &&
       (command.primitive == RenderCommand::Primitive::sprite ||
        command.primitive == RenderCommand::Primitive::tilingSprite);
-    const bool uniformPrepared = images_.hasUniformPreparedBacking(command.image);
     const bool exactNearestDimensions = logicalInfo && logicalInfo->width > 0 &&
       logicalInfo->height > 0 && (logicalInfo->width & (logicalInfo->width - 1)) == 0 &&
       (logicalInfo->height & (logicalInfo->height - 1)) == 0;
@@ -706,13 +761,28 @@ void Renderer::renderScene() {
       // A constant texture needs no UV remapping in the inline effect sampler.
       (inlineMatrix == nullptr || uniformPrepared);
     const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
-    auto derived = frameEligible && paletteEligible ? images_.resolveSpriteRegion(command.image,
-      command.source[0], command.source[1], command.source[2], command.source[3],
-      command.pixiSpritePacking && !command.premultipliedSpriteTexture, true, command.nearest && !command.repeat) :
+    auto derived = !command.nearest && frameEligible && paletteEligible &&
+      images_.hasPaletteStorage(command.image) ? images_.resolveSpriteRegion(command.image,
+        command.source[0], command.source[1], command.source[2], command.source[3],
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<SpriteImageRegion>{};
-    const auto palette = !derived && paletteEligible ? images_.resolvePaletteImage(command.image,
+    if (!derived && !command.nearest && frameEligible && paletteEligible && images_.hasPaletteStorage(command.image))
+      derived = images_.resolvePreparedFrameRegion(command.image,
+        command.source[0], command.source[1], command.source[2], command.source[3],
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture, true);
+    if (!derived && frameEligible && paletteEligible)
+      derived = images_.resolveSpriteRegion(command.image,
+        command.source[0], command.source[1], command.source[2], command.source[3],
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture, true, command.nearest && !command.repeat);
+    auto palette = !derived && paletteEligible ? images_.resolvePaletteImage(command.image,
       command.atlasTilingSampling || (command.pixiSpritePacking && !command.premultipliedSpriteTexture)) :
       std::optional<PaletteImageRegion>{};
+    if (!command.nearest && frameEligible && (palette || (derived && derived->paletteTable))) {
+      auto filtered = images_.resolvePreparedFrameRegion(command.image,
+        command.source[0], command.source[1], command.source[2], command.source[3],
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture, true);
+      if (filtered) { derived = std::move(filtered); palette.reset(); }
+    }
     const auto block = !palette && !derived && frameEligible ? images_.resolveBlockRegion(command.image,
       command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
       std::optional<BlockImageRegion>{};
@@ -723,7 +793,6 @@ void Renderer::renderScene() {
     const std::uint32_t paletteBlocks = derived ? derived->paletteBlocks : 0U, paletteResidual = derived ? derived->paletteResidual : 0U;
     const bool compactEligible = logicalInfo && !palette && !block && !derived && !command.nearest &&
       command.primitive == RenderCommand::Primitive::sprite &&
-      command.source[1] == 0 && command.source[3] == logicalInfo->height &&
       command.source[2] > 0 && localWidth > 0 && localHeight > 0 &&
       !command.repeat && !command.mipmap && !command.clampedTilingSampling &&
       !command.appliesColorMatrix && !command.appliesSpriteColor &&
@@ -816,18 +885,16 @@ void Renderer::renderScene() {
     // GPU Bitmap views replace private textures; their storage atlas must not
     // introduce the atlas-wide uint16 UV rounding of an authored spritesheet.
     if (command.pixiSpritePacking && !command.standaloneBitmapRegion && !command.floatSpriteUv) {
-      const auto packUv = [](double coordinate) {
-        // JS ToUint16 truncates and wraps; an out-of-range C++ cast is undefined.
-        double packed = std::fmod(std::trunc(coordinate * 65535.0), 65536.0);
-        if (packed < 0) packed += 65536.0;
-        return static_cast<float>(packed / 65535.0);
-      };
-      const float packedU0 = packUv(double(command.source[0]) / textureWidth);
-      const float packedV0 = packUv(double(command.source[1]) / textureHeight);
-      const float packedU1 = packUv((double(command.source[0]) + command.source[2]) / textureWidth);
-      const float packedV1 = packUv((double(command.source[1]) + command.source[3]) / textureHeight);
+      const float packedU0 = packSpriteUv(double(command.source[0]) / textureWidth);
+      const float packedV0 = packSpriteUv(double(command.source[1]) / textureHeight);
+      const float packedU1 = packSpriteUv((double(command.source[0]) + command.source[2]) / textureWidth);
+      const float packedV1 = packSpriteUv((double(command.source[1]) + command.source[3]) / textureHeight);
       sourceCorners = {{{packedU0, packedV0}, {packedU1, packedV0},
                         {packedU1, packedV1}, {packedU0, packedV1}}};
+    }
+    if (const auto it=splitUvs.find(&command);it!=splitUvs.end()) {
+      const auto& uv=it->second;
+      sourceCorners={{{uv[0],uv[1]},{uv[2],uv[1]},{uv[2],uv[3]},{uv[0],uv[3]}}};
     }
     constexpr std::array<std::array<std::uint8_t, 4>, 8> rotatedCorners = {{
       {{0, 1, 2, 3}}, {{1, 2, 3, 0}}, {{2, 3, 0, 1}}, {{3, 0, 1, 2}},
@@ -848,7 +915,8 @@ void Renderer::renderScene() {
     }
     // Tiling retains GPU projection so texel-boundary interpolation uses the
     // same arithmetic as the sprite vertex transform.
-    const bool worldVertices = (command.spriteWorldVertices || command.pixiSpritePacking ||
+    const bool worldVertices = command.primitive != RenderCommand::Primitive::screenFill &&
+                              (command.spriteWorldVertices || command.pixiSpritePacking ||
                                command.primitive == RenderCommand::Primitive::tilingSprite) &&
                                viewportMapping == std::array<float, 4>{1, 1, 0, 0};
     const auto project = [&](const std::array<float, 2>& pixel) {
@@ -1073,7 +1141,8 @@ void Renderer::renderScene() {
   applyBlendMode(activeBlend);
   bool reuseFilterContent = false;
   for (const auto& operation : operations) {
-    if (reuseFilterContent && operation.action == RenderCommand::Action::draw) continue;
+    if (reuseFilterContent && (operation.action == RenderCommand::Action::draw ||
+        operation.action == RenderCommand::Action::clearRect)) continue;
     if (operation.action == RenderCommand::Action::clearRect) {
       if (filterDepth == 0) throw std::logic_error("rectangle clear requires an isolated target");
       const auto& rectangle = operation.command->clearRectangle;
@@ -2078,7 +2147,11 @@ void Renderer::renderScene() {
       }
       continue;
     }
-    const auto& spriteEffect = directSprite ? directSprite_ :
+    const bool plainRegion = operation.standaloneBitmapRegion && operation.blur <= 0 &&
+      !operation.appliesSpriteColor && operation.premultipliedSpriteTexture &&
+      !operation.derivedImage && !operation.paletteTable && !operation.block &&
+      !operation.maskImage && !operation.inlineMatrix;
+    const auto& spriteEffect = directSprite ? directSprite_ : plainRegion ? plainBitmapRegion_ :
       operation.standaloneBitmapRegion && operation.blur <= 0 &&
         !operation.appliesSpriteColor ? bitmapRegion_ : spriteEffect_;
     const std::uint32_t spriteProgram = simpleSprite ? simpleProgram_ : spriteEffect.program;

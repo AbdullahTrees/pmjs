@@ -333,7 +333,7 @@ int pmjs_skia65_rect_bgra_strided(uint8_t* pixels, int width, int height,
 static int imageStrided(uint8_t* pixels, int width, int height, size_t row_bytes,
     int left, int top, const uint8_t* source, int source_width, int source_height,
     size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing,
-    bool source_bgra) try {
+    pmjs::PixelEncoding source_encoding) try {
   if (!pixels || !source || width <= 0 || height <= 0 || source_width <= 0 || source_height <= 0 ||
       row_bytes < static_cast<size_t>(width) * 4 || source_row_bytes < static_cast<size_t>(source_width) * 4 ||
       row_bytes > SIZE_MAX / static_cast<size_t>(height) ||
@@ -346,12 +346,13 @@ static int imageStrided(uint8_t* pixels, int width, int height, size_t row_bytes
   const int source_bottom = std::clamp<double>(std::ceil(static_cast<double>(src[1]) + src[3]) + 1, 0, source_height);
   const int cropped_width = source_right - source_left, cropped_height = source_bottom - source_top;
   if (cropped_width <= 0 || cropped_height <= 0) return 1;
+  const bool source_bgra = source_encoding == pmjs::PixelEncoding::PremultipliedBGRA8;
   std::vector<uint8_t> premul;
   if (!source_bgra) premul.resize(static_cast<size_t>(cropped_width) * cropped_height * 4);
   if (!source_bgra) for (int row = 0; row < cropped_height; ++row) for (int column = 0; column < cropped_width; ++column) {
     const auto* original = source + static_cast<size_t>(source_top + row) * source_row_bytes + (source_left + column) * 4;
     auto* pixel = premul.data() + (static_cast<size_t>(row) * cropped_width + column) * 4;
-    pmjs::convertPixel(original, pmjs::PixelEncoding::StraightRGBA8,
+    pmjs::convertPixel(original, source_encoding,
                        pixel, pmjs::PixelEncoding::PremultipliedBGRA8);
   }
   SkBitmap bitmap;
@@ -379,13 +380,19 @@ int pmjs_skia65_image_bgra_strided(uint8_t* pixels, int width, int height, size_
     int left, int top, const uint8_t* source, int source_width, int source_height,
     size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing) {
   return imageStrided(pixels, width, height, row_bytes, left, top, source, source_width,
-    source_height, source_row_bytes, src, dst, alpha, smoothing, true);
+    source_height, source_row_bytes, src, dst, alpha, smoothing, pmjs::PixelEncoding::PremultipliedBGRA8);
 }
 int pmjs_skia65_image_rgba_strided(uint8_t* pixels, int width, int height, size_t row_bytes,
     int left, int top, const uint8_t* source, int source_width, int source_height,
     size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing) {
   return imageStrided(pixels, width, height, row_bytes, left, top, source, source_width,
-    source_height, source_row_bytes, src, dst, alpha, smoothing, false);
+    source_height, source_row_bytes, src, dst, alpha, smoothing, pmjs::PixelEncoding::StraightRGBA8);
+}
+int pmjs_skia65_image_premul_rgba_strided(uint8_t* pixels, int width, int height, size_t row_bytes,
+    int left, int top, const uint8_t* source, int source_width, int source_height,
+    size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing) {
+  return imageStrided(pixels, width, height, row_bytes, left, top, source, source_width,
+    source_height, source_row_bytes, src, dst, alpha, smoothing, pmjs::PixelEncoding::PremultipliedRGBA8);
 }
 int pmjs_skia65_image_bgra(uint8_t* pixels, int width, int height, int left, int top,
     const uint8_t* source, int source_width, int source_height,
