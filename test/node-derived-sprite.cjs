@@ -125,14 +125,21 @@ async function main() {
         'culling must respect a nonidentity scene projection');
     }
     if (fixture.uniform) {
-      // Warm ordinary premultiplied storage before measuring the prepared image.
-      frame(original, [0, 0, fixture.width, fixture.height], [1, 0, 0, 1, 0, 0], true);
+      // Warm the control's ordinary storage before measuring the prepared image.
+      native.beginFrame();
+      native.render.image(original.handle, 1, 0, 0, 1, 0, 0,
+        0, 0, fixture.width, fixture.height, 1, 0xffffff, 0);
+      native.renderScene();
+      for (const flags of [0, 1 << 11]) for (const nearest of [true, false]) {
+        frame(original, [0, 0, fixture.width, fixture.height], [1, 0, 0, 1, 0, 0], nearest, 1, 0, flags);
+      }
     }
     const before = native.images.memory();
     const sources = [[0, 0, fixture.cw, fixture.ch],
       [Math.min(fixture.width - fixture.cw, fixture.cw), 0, fixture.cw, fixture.ch],
       [5.25, 3.5, Math.min(14.5, fixture.cw - 6), Math.min(13.5, fixture.ch - 5)]];
     const transforms = [[2, 0, 0, 2, 8, 8], [1.31, 0.17, -0.2, 1.19, 28.25, 15.5], [-1.75, 0, 0, 1.5, 94, 20]];
+    let nearestBacking;
     for (const nearest of [true, false]) for (const source of sources) for (const transform of transforms) {
       const control = frame(original, source, transform, nearest, 0.63);
       const candidate = frame(derived, source, transform, nearest, 0.63);
@@ -146,6 +153,13 @@ async function main() {
       }
       assert.deepEqual(frame(derived, source, transform, nearest, 0.63), candidate,
         'frozen derived frame changed');
+      ++comparisons;
+      if (nearest) nearestBacking = native.images.memory(100);
+    }
+    for (const transform of transforms) {
+      assert.deepEqual(frame(derived, sources[0], transform, false, 0.63, 0, 1 << 11),
+        frame(original, sources[0], transform, false, 0.63, 0, 1 << 11),
+        `${fixture.name}: packed UVs changed with prepared backing`);
       ++comparisons;
     }
     if (fixture.uniform) {
@@ -186,7 +200,9 @@ async function main() {
     }
     const after = native.images.memory();
     if (fixture.uniform || fixture.name === 'power-of-two' || fixture.name === 'wide') {
-      assert.ok(after.preparedRegions > before.preparedRegions, 'eligible sprites did not use prepared regions');
+      assert.ok(nearestBacking.preparedRegions > before.preparedRegions ||
+        nearestBacking.largest.some(entry => entry.handle === derived.handle && entry.palette),
+      `${fixture.name}: nearest sprites did not reuse prepared regions or indexed backing`);
     } else {
       assert.ok(after.preparedFallbacks['non-power-of-two-sampling'] > 0,
         'non-power-of-two nearest sampling must use compatible backing');

@@ -84,6 +84,17 @@ for (const affine of [false, true]) {
   assert.deepEqual(Array.from(native.canvas.readPixels(canvas.handle, 8, 2, 1, 1)), [255, 255, 255, 128]);
   native.canvas.release(canvas.handle);
 }
+for (const scaled of [false, true]) for (const occupied of [false, true]) {
+  const canvas = native.canvas.create(32, 8);
+  if (occupied) native.canvas.fillRect(canvas.handle, 0, 0, 32, 8, 0x000000ff);
+  native.canvas.drawImage(canvas.handle, premultiplied.handle,
+    0, 0, scaled ? 16 : 32, 8, 0, 0, 32, 8, 1, false);
+  const actual = Array.from(native.canvas.readPixels(canvas.handle, 8, 2, 1, 1));
+  const expected = occupied ? [128, 128, 128, 255] : [255, 255, 255, 128];
+  assert.ok(actual.every((value, index) => Math.abs(value - expected[index]) <= 1),
+    `GPU image Canvas draw scaled=${scaled} occupied=${occupied}: ${actual}`);
+  native.canvas.release(canvas.handle);
+}
 native.renderFrame();
 const afterResize = native.canvas.captureScene();
 assert.equal(native.canvas.pixel(afterResize.handle, 8, 2), topPixel,

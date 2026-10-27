@@ -39,18 +39,18 @@ sudo apt-get install build-essential cmake ninja-build pkg-config git python3 \
 `build.sh` reports missing build tools but does not install system packages.
 Prepare ARM64 dependencies separately as shown below.
 
-## x64 release build
+## x64 runtime build
 
 The public `./build.sh` command makes a FreeType development installation.
-For an x64 release candidate with Skia65, install Clang/LLVM 20.1.2
+For an x64 runtime with Skia65, install Clang/LLVM 20.1.2
 (`clang-20`, `clang++-20`, `llvm-ar-20`, and `llvm-strip-20`), then:
 
 ```sh
 export PMJS_SKIA65_COMPONENT_DIR="$PWD/.cache/components/x64"
 python3 tools/skia65/build.py --arch x64 --output "$PMJS_SKIA65_COMPONENT_DIR" --reuse
-cmake --preset release-x64
-cmake --build --preset release-x64 --target pmjs_native --parallel 4
-python3 tools/release.py stage --build build/release-x64 --output dist/stage-x64
+cmake --preset runtime-x64
+cmake --build --preset runtime-x64 --target pmjs_native --parallel 4
+python3 tools/release.py stage --build build/runtime-x64 --output dist/stage-x64
 ```
 
 Use an empty destination for `release.py stage`. Skia65 is checked and
@@ -126,6 +126,6 @@ duplicate `js-*` registrations while retaining build, setup, native and
 integration checks.
 
 `./build.sh` makes a runnable installation. A public release also needs
-the verification and device checks in [Releases](releases.md).
+the packaging and verification steps in [Releases](releases.md).
 See [Using PMJS](using.md) to run a game and [Porting a game](porting.md) to
 make a bundle or PortMaster ZIP.

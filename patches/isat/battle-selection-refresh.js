@@ -10,7 +10,7 @@
     var settled = new WeakSet();
     prototype.refresh = function() {
       var result = refresh.apply(this, arguments);
-      if (PMJS.isatSourceQualification === qualification && globalThis.$gameTroop && $gameTroop._troopId === 26 &&
+      if (PMJS.isatSourceQualification === qualification &&
           this._battler && !this._showEnemyName && this._requestRefresh) {
         this._requestRefresh = false;
         settled.add(this);

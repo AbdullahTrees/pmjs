@@ -67,7 +67,7 @@ export function readBundle(directory) {
 }
 
 export async function createBundle({ root, share, game, output, config, manifest, adapters = [],
-  runtimeIdentity, index = true, includeAssets = false, portProcessors = [], includePortAssets = false }) {
+  runtimeIdentity, index = true, includeAssets = false, portProcessors = [], includePortAssets = false, cacheRoot }) {
   if (includeAssets && !index) throw new Error('--include-assets requires an asset index');
   output = path.resolve(output);
   if (fs.existsSync(output) && (fs.lstatSync(output).isSymbolicLink() ||
@@ -154,7 +154,7 @@ export async function createBundle({ root, share, game, output, config, manifest
       const report = await generateAssetIndex({ root, gameRoot: game, options,
         config: indexConfig, output: stage, includeAssets, portDescriptors: portPreparation,
         includePortAssets: includePreparedPortAssets, writeIndex: index,
-        shouldCancel: () => cancelled });
+        shouldCancel: () => cancelled, cacheRoot });
       console.log(`Asset index: ${report.preparedImages}/${report.images} images, ${report.maps} maps`);
       for (const warning of report.warnings) console.warn(warning);
       if (report.warningCount > report.warnings.length)

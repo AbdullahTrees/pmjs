@@ -555,6 +555,13 @@ napi_value imageMemory(napi_env env, napi_callback_info info) try {
   napi_set_named_property(env, result, "preparedFrameCacheBudget", number(env, images.preparedFrameCacheBudget()));
   napi_set_named_property(env, result, "preparedFrameCacheBytes", number(env, images.preparedFrameCacheBytes()));
   napi_set_named_property(env, result, "preparedFrameCacheHits", number(env, images.preparedFrameCacheHits()));
+  napi_set_named_property(env, result, "preparedPageTextureBytes", number(env, images.preparedPageTextureBytes()));
+  napi_set_named_property(env, result, "preparedFrameConversions", number(env, images.preparedFrameConversions()));
+  napi_set_named_property(env, result, "preparedFrameConversionMs", number(env, images.preparedFrameConversionMs()));
+  napi_set_named_property(env, result, "preparedFrameCacheBypasses", number(env, images.preparedFrameCacheBypasses()));
+  napi_set_named_property(env, result, "renderReadbacks", number(env, images.renderReadbacks()));
+  napi_set_named_property(env, result, "preparedFrameUploadBytes", number(env, images.preparedFrameUploadBytes()));
+  napi_set_named_property(env, result, "paletteReadbacks", number(env, images.paletteReadbacks()));
   napi_set_named_property(env, result, "preparedFrameCacheMisses", number(env, images.preparedFrameCacheMisses()));
   napi_set_named_property(env, result, "preparedFrameCacheEvictions", number(env, images.preparedFrameCacheEvictions()));
   napi_set_named_property(env, result, "preparedFrameResidentBytes", number(env, images.preparedFrameResidentBytes()));

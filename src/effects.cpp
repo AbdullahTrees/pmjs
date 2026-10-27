@@ -268,8 +268,7 @@ struct Effects::Impl {
     Effekseer::ManagerRef manager;
     Effekseer::RefPtr<Files> files;
     Effekseer::RefPtr<WavePlayer> sound;
-    float time = 0;
-    float remainder = 0;
+    EffectClock clock;
   };
   struct Effect { std::uint32_t context; Effekseer::EffectRef effect; };
   struct Handle { std::uint32_t context; Effekseer::Handle handle; };
@@ -377,11 +376,9 @@ std::uint32_t Effects::play(std::uint32_t contextId, std::uint32_t effectId,
 
 void Effects::update(std::uint32_t contextId, float frames) {
   auto& context = lookup(impl_->contexts, contextId, "context");
-  frames += context.remainder;
-  context.remainder = frames - std::floor(frames);
-  for (int frame = 0; frame < static_cast<int>(frames); ++frame) context.manager->Update(1.0F);
-  context.time += frames / 60.0F;
-  context.renderer->SetTime(context.time);
+  const int steps = context.clock.advance(frames);
+  for (int frame = 0; frame < steps; ++frame) context.manager->Update(1.0F);
+  context.renderer->SetTime(context.clock.seconds);
 }
 
 void Effects::stopAll(std::uint32_t context) {

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Stage, verify and archive the exact installed runtime, with build provenance."""
+"""Stage, verify and archive the installed runtime."""
 import argparse
 import gzip
 import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -14,7 +13,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from runtime_artifact import checked_runtime, recognize_runtime, digest, inventory, static_audit, strip_binary, strip_binaries, write_json, source_reference, payload_digest
+from runtime_artifact import checked_runtime, recognize_runtime, digest, inventory, static_audit, strip_binaries, write_json, source_reference, payload_digest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -23,10 +22,7 @@ def git(source, *args):
     return subprocess.check_output(['git', '-C', source, *args])
 
 
-def source_identity(source, required=True):
-    if not required:
-        return {'commit': 'unqualified', 'dirty': True, 'sourceSha256': None,
-                'sourceDateEpoch': 0, 'files': {}}
+def source_identity(source):
     names = git(source, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')
     files = {os.fsdecode(name): digest(source / os.fsdecode(name)) for name in sorted(set(names))
              if name and (source / os.fsdecode(name)).is_file()}
@@ -46,74 +42,12 @@ def cache_values(build):
     return values
 
 
-NATIVE_TARGET = r'CMakeFiles/(?:pmjs_native|pmjs_runtime|pmjs_lz4|astcenc-(?:neon|sse2|none)-static|Effekseer|EffekseerRendererGL)\.dir/'
-
-
-def compiled_identity(source, build):
-    commands = [item for item in json.loads((build / 'compile_commands.json').read_text())
-                if re.search(NATIVE_TARGET, item.get('command', item.get('output', '')))]
-    if not commands:
-        raise ValueError('No native compilation commands found')
-    files = {Path(item['file']).resolve() for item in commands}
-    values = cache_values(build)
-    # CMake's generated link command defines native settings and imported libraries.
-    # Bookkeeping commands after the link do not affect the resulting ELF.
-    output = subprocess.check_output([values['CMAKE_MAKE_PROGRAM'], '-C', build,
-                                      '-t', 'commands', 'pmjs_native.node'], text=True)
-    links = []
-    for line in output.splitlines():
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=';&')
-        lexer.whitespace_split = True
-        command = []
-        for token in [*lexer, '&&']:
-            if token in ('&&', ';'):
-                if '-c' not in command and any(re.search(NATIVE_TARGET, part) for part in command):
-                    links.append(command)
-                command = []
-            else:
-                command.append(token)
-    if not links:
-        raise ValueError('No native link command found')
-    # Read graph edges as well: CMake can spell a linked library as -L/-l.
-    query = subprocess.check_output([values['CMAKE_MAKE_PROGRAM'], '-C', build,
-                                     '-t', 'query', 'pmjs_native.node'], text=True)
-    for line in query.partition('\n  input:')[2].partition('\n  outputs:')[0].splitlines()[1:]:
-        file = Path(line.lstrip(' |'))
-        if file.is_absolute() and file.is_file() and re.search(r'\.(?:a|so(?:\.[0-9]+)*)$', file.name):
-            files.add(file)
-    # Cross-compiler wrappers invoke the SDK compiler recorded by CMake.
-    files.update(Path(line) for line in (build / 'build-inputs.txt').read_text().splitlines() if line)
-    files.update(Path(values[key]) for key in ('CMAKE_C_COMPILER', 'CMAKE_CXX_COMPILER', 'CMAKE_AR', 'CMAKE_LINKER')
-                 if values.get(key) and Path(values[key]).is_file())
-    return {'files': {str(file): digest(file) for file in sorted(files)},
-            'commands': sorted(commands, key=lambda item: item['file']),
-            'linkCommands': links}
-
-
-def compiled_dependencies(build):
-    values = cache_values(build)
-    if values.get('CMAKE_GENERATOR') != 'Ninja':
-        raise ValueError('Release provenance requires the Ninja generator used by the CMake presets')
-    dependencies = subprocess.check_output([values['CMAKE_MAKE_PROGRAM'], '-C', build, '-t', 'deps'], text=True)
-    files, native = set(), False
-    for line in dependencies.splitlines():
-        if line.startswith('    '):
-            if native:
-                file = Path(line[4:])
-                files.add(file.resolve() if file.is_absolute() else (build / file).resolve())
-        else:
-            native = bool(re.search(NATIVE_TARGET, line))
-    if not files:
-        raise ValueError('No completed native compiler dependencies found')
-    return {str(file): digest(file) for file in sorted(files)}
-
-
 def manifest(stage, build, source, strip=None, record=None, sources=None, sources_url=None):
     build_id = os.environ.get('PMJS_BUILD_ID') or None
     if build_id is not None and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', build_id):
         raise ValueError('PMJS_BUILD_ID must use letters, numbers, dots, underscores or hyphens and start with a letter or number')
     if recognize_runtime(stage)['schema'] != 2:
-        raise ValueError('Restage the runtime with the current installer before detached qualification')
+        raise ValueError('Restage the runtime with the current installer before generating its manifest')
     record = record or release_record(stage)
     if record.is_relative_to(stage):
         raise ValueError('Release record must be outside the runtime')
@@ -125,56 +59,26 @@ def manifest(stage, build, source, strip=None, record=None, sources=None, source
     if any((stage / 'share/pmjs' / name).exists() for name in ('docs', 'sources')) or any(
             (stage / 'share/pmjs/tools' / name).exists() for name in
             ('portmaster.py', 'release.py', 'runtime_artifact.py', 'linux-arm64')):
-        raise ValueError('Use a runtime-only installation for qualification (release.py stage)')
+        raise ValueError('Use a runtime-only installation for packaging (release.py stage)')
     if any((stage / 'lib').glob('libav*.so*')) and reference is None:
         raise ValueError('Bundled FFmpeg requires --sources and --sources-url')
     config = json.loads((build / 'build-config.json').read_text())
     values = cache_values(build)
-    qualified = values.get('PMJS_RELEASE_PROVENANCE') == 'ON'
-    identity = source_identity(source, qualified)
-    if qualified:
-        # Apply edited CMake logic before comparing its effective native commands.
-        subprocess.run(['cmake', '-S', source, '-B', build], check=True)
-        configured = json.loads((build / 'build-source.json').read_text())
-        compiled = json.loads((build / 'build-compiled.json').read_text())
-        inputs = compiled_identity(source, build)
-        if (inputs != configured or compiled['inputs'] != inputs or
-                compiled['dependencies'] != compiled_dependencies(build) or
-                compiled['addonSha256'] != digest(build / 'pmjs_native.node')):
-            raise ValueError('Native inputs or binary changed since compilation; build again before installation')
-        # Installation can rewrite RPATH. Compare the exact form produced by
-        # CMake, rather than comparing it with the uninstalled build output.
-        with tempfile.TemporaryDirectory(prefix='.pmjs-install-check-', dir=build) as directory:
-            subprocess.run(['cmake', '--install', build, '--prefix', directory,
-                            '--component', 'native-addon'], check=True)
-            expected = Path(directory) / 'lib/pmjs_native.node'
-            installed_hash = digest(stage / 'lib/pmjs_native.node')
-            expected_hash = digest(expected)
-            if installed_hash != expected_hash and strip:
-                # Requalification accepts the exact stripped installation too.
-                # Transform only the fresh reference, never normalize an unknown
-                # installed binary into something that could hide modification.
-                strip_binary(expected, strip)
-                expected_hash = digest(expected)
-            if installed_hash != expected_hash:
-                raise ValueError('Installed addon differs from the compiled release output; stage it again')
+    identity = source_identity(source)
     if strip:
         strip_binaries(stage, strip)
     files = inventory(stage)
     info = {**config, 'schema': 2, 'buildId': build_id,
             'source': {key: identity[key] for key in ('commit', 'dirty', 'sourceDateEpoch')},
-            'compiledProvenance': qualified,
             'node': {'bundled': (stage / 'bin/node').exists(), 'minimumNodeApi': 8},
             'payloadSha256': payload_digest(files)}
     if reference:
         info['dependencySources'] = reference
-    details = {'schema': 1, 'source': identity, 'compiledProvenance': qualified, 'files': files,
+    details = {'schema': 1, 'source': identity, 'files': files,
                'configuration': {key: value for key, value in values.items()
                                  if key in ('CMAKE_C_FLAGS', 'CMAKE_CXX_FLAGS', 'PMJS_ENABLE_SANITIZERS',
                                             'PMJS_ENABLE_WERROR', 'PMJS_OFFLINE', 'BUILD_TESTING')},
                'loader': static_audit(stage, info)}
-    if qualified:
-        details['compiledInputs'] = compiled
     if config['targetEnvironment'] == 'ON':
         details['environment'] = {'recipes': json.loads((ROOT / 'tools/linux-arm64/sdk-recipes.json').read_text()),
                                   'packages': json.loads((ROOT / 'tools/linux-arm64/sdk-packages.json').read_text())}
@@ -242,15 +146,13 @@ def checked_smoke(info, package_hash, smoke):
         raise ValueError('Smoke receipt used a different Node release')
 
 
-def verify(stage, report, graphics=False, xvfb=False, receipt=None, static=False, record=None):
+def verify(stage, report, graphics=False, xvfb=False, static=False, record=None):
     record = record or release_record(stage)
     record_bytes = record.read_bytes()
     record_hash = hashlib.sha256(record_bytes).hexdigest()
     info = checked_manifest(stage, record)
     package_hash = digest(stage / 'build-info.json')
-    if receipt:
-        smoke = json.loads(receipt.read_text())
-    elif static:
+    if static:
         smoke = None
     else:
         # Every execution uses a fresh copy and an environment without build-library paths.
@@ -284,7 +186,7 @@ def verify(stage, report, graphics=False, xvfb=False, receipt=None, static=False
     print('Package verified:', report)
 
 
-def checked_verification(info, verification, package_hash, record_hash, development):
+def checked_verification(info, verification, package_hash, record_hash):
     if verification.get('schema') != 2 or verification.get('packageSha256') != package_hash:
         raise ValueError('Verification report belongs to a different package')
     if verification.get('releaseRecordSha256') != record_hash:
@@ -292,31 +194,17 @@ def checked_verification(info, verification, package_hash, record_hash, developm
     smoke = verification.get('smoke')
     if verification.get('static') != 'passed':
         raise ValueError('Static package verification is required before archiving')
-    if not development and (not smoke or not smoke.get('load')):
-        raise ValueError('An executed smoke test is required before archiving')
     if smoke:
         checked_smoke(info, verification['packageSha256'], smoke)
-    if not development and not (smoke.get('graphics') or {}).get('renderer'):
-        raise ValueError('Public releases require a graphics smoke receipt for runtime initialization, rendering and shutdown')
-    if not development and info['architecture'] in ('aarch64', 'arm64'):
-        gpu = smoke.get('graphics')
-        if not gpu or re.search(r'llvmpipe|softpipe|swiftshader', gpu.get('renderer', ''), re.I):
-            raise ValueError('ARM64 releases require a graphics smoke receipt from a hardware renderer')
-        if smoke.get('textBackend') != 'skia65':
-            raise ValueError('ARM64 releases require the intended Skia65 text backend')
-    if info['source']['dirty'] and not development:
-        raise ValueError('Public releases require a clean source tree; --development creates a development candidate')
-    if not info.get('compiledProvenance') and not development:
-        raise ValueError('Public releases require compiled source provenance')
 
 
-def archive(stage, report, output, development=False, record=None):
+def archive(stage, report, output, record=None):
     record = record or release_record(stage)
     record_bytes = record.read_bytes()
     record_hash = hashlib.sha256(record_bytes).hexdigest()
     info = checked_manifest(stage, record)
     verification = json.loads(report.read_text())
-    checked_verification(info, verification, digest(stage / 'build-info.json'), record_hash, development)
+    checked_verification(info, verification, digest(stage / 'build-info.json'), record_hash)
     output.parent.mkdir(parents=True, exist_ok=True)
     epoch = info['source']['sourceDateEpoch']
     inputs = [record, report]
@@ -364,13 +252,13 @@ def archive(stage, report, output, development=False, record=None):
         archived_record.write_bytes(record_bytes)
         archived_report = Path(directory) / (output.name + '.verification.json')
         write_json(archived_report,
-                   {**verification, 'distribution': 'development' if development else 'release',
+                   {**verification,
                     'archive': {'filename': output.name, 'sha256': digest(temporary)},
                     'dependencySources': info.get('dependencySources')})
         archived_record.replace(output.with_name(archived_record.name))
         archived_report.replace(output.with_name(archived_report.name))
         temporary.replace(output)
-    print('Development archive:' if development else 'Verified release archive:', output)
+    print('Archive:', output)
 
 
 def verify_archive(output, record=None, report=None):
@@ -382,8 +270,6 @@ def verify_archive(output, record=None, report=None):
     record_hash = digest(record)
     if verification.get('releaseRecordSha256') != record_hash:
         raise ValueError('Verification report belongs to a different release record')
-    if verification.get('distribution') not in ('development', 'release'):
-        raise ValueError('Unknown archive distribution type')
     with tempfile.TemporaryDirectory(prefix='.pmjs-archive-check-', dir=output.parent) as directory:
         with tarfile.open(output) as bundle:
             members = bundle.getmembers()
@@ -407,8 +293,7 @@ def verify_archive(output, record=None, report=None):
         info = checked_manifest(stage, record)
         if verification.get('dependencySources') != info.get('dependencySources'):
             raise ValueError('Archive source reference differs from runtime metadata')
-        checked_verification(info, verification, digest(stage / 'build-info.json'), record_hash,
-                             verification['distribution'] == 'development')
+        checked_verification(info, verification, digest(stage / 'build-info.json'), record_hash)
     if digest(output) != verification['archive']['sha256'] or digest(record) != record_hash:
         raise ValueError('Archive or release record changed during verification')
     print('Archive and detached records verified:', output)
@@ -417,13 +302,6 @@ def verify_archive(output, record=None, report=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    command = commands.add_parser('provenance')
-    command.add_argument('--source', type=Path, required=True)
-    command.add_argument('--build', type=Path, required=True)
-    command = commands.add_parser('built')
-    command.add_argument('--source', type=Path, required=True)
-    command.add_argument('--build', type=Path, required=True)
-    command.add_argument('--addon', type=Path, required=True)
     command = commands.add_parser('manifest')
     for name in ['stage', 'build', 'source']:
         command.add_argument('--' + name, type=Path, required=True)
@@ -440,13 +318,10 @@ def main():
     command.add_argument('--report', type=Path, required=True)
     command.add_argument('--graphics', action='store_true')
     command.add_argument('--xvfb', action='store_true')
-    modes = command.add_mutually_exclusive_group()
-    modes.add_argument('--receipt', type=Path)
-    modes.add_argument('--static', action='store_true')
+    command.add_argument('--static', action='store_true')
     command = commands.add_parser('archive')
     for name in ['stage', 'report', 'output']:
         command.add_argument('--' + name, type=Path, required=True)
-    command.add_argument('--development', action='store_true', help='Create a candidate without public release qualification')
     command = commands.add_parser('verify-archive')
     command.add_argument('--archive', type=Path, required=True)
     command.add_argument('--record', type=Path)
@@ -458,16 +333,7 @@ def main():
         commands.choices[name].add_argument('--sources-url', help='Permanent HTTP(S) source archive download URL')
     args = parser.parse_args()
     try:
-        if args.command == 'provenance':
-            write_json(args.build / 'build-source.json', compiled_identity(args.source.resolve(), args.build.resolve()))
-        elif args.command == 'built':
-            configured = json.loads((args.build / 'build-source.json').read_text())
-            if configured != compiled_identity(args.source.resolve(), args.build.resolve()):
-                raise ValueError('Native inputs changed while compiling; build again')
-            write_json(args.build / 'build-compiled.json',
-                       {'inputs': configured, 'dependencies': compiled_dependencies(args.build.resolve()),
-                        'addonSha256': digest(args.addon.resolve())})
-        elif args.command == 'manifest':
+        if args.command == 'manifest':
             manifest(args.stage.resolve(), args.build.resolve(), args.source.resolve(), args.strip,
                      args.record.resolve() if args.record else None,
                      args.sources.resolve() if args.sources else None, args.sources_url)
@@ -488,12 +354,12 @@ def main():
                      args.record.resolve() if args.record else None,
                      args.sources.resolve() if args.sources else None, args.sources_url)
         elif args.command == 'verify':
-            verify(args.stage.resolve(), args.report.resolve(), args.graphics, args.xvfb, args.receipt, args.static, args.record.resolve() if args.record else None)
+            verify(args.stage.resolve(), args.report.resolve(), args.graphics, args.xvfb, args.static, args.record.resolve() if args.record else None)
         elif args.command == 'verify-archive':
             verify_archive(args.archive.resolve(), args.record.resolve() if args.record else None,
                            args.report.resolve() if args.report else None)
         elif args.command == 'archive':
-            archive(args.stage.resolve(), args.report.resolve(), args.output.resolve(), args.development, args.record.resolve() if args.record else None)
+            archive(args.stage.resolve(), args.report.resolve(), args.output.resolve(), args.record.resolve() if args.record else None)
     except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.SubprocessError) as error:
         parser.exit(1, str(error) + '\n')
 

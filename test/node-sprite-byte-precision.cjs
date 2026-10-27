@@ -34,6 +34,26 @@ try {
         [expected, expected, expected, 255], `${region ? 'region' : 'sprite'} sample ${byte}, opacity ${opacity}`);
     }
   }
+  // Pixi 4 rectangle sprites round premultiplied RGB but truncate alpha.
+  native.render.setClearColor(0, 0, 0, 0);
+  for (const [tint, opacity, expected] of [
+    [0xffffff, 15.725, [16, 16, 16, 15]],
+    [0xffffff, 47.175, [47, 47, 47, 47]],
+    [0xdf5b11, 15.725, [14, 6, 1, 15]],
+  ]) for (const projection of [null, [0.5, 0, 0, 0.5, 40, 60]]) {
+    const metadata = new Uint32Array([3, 0xffffffff, 0, tint, 0, 0, 0]);
+    const values = new Float32Array(schema.valueStride);
+    values.set([1, 0, 0, 1, 0, 0, opacity / 255]);
+    native.beginFrame();
+    if (projection) native.render.setSceneProjection(projection);
+    native.scene.submit(schema.version, metadata, values, 1);
+    native.renderScene();
+    const actual = Buffer.from(native.canvas.captureSceneRawPremultiplied());
+    for (const offset of [0, (128 * 256 + 128) * 4, actual.length - 4]) {
+      assert.deepEqual(Array.from(actual.subarray(offset, offset + 4)), expected,
+        `screen tint ${tint.toString(16)}, opacity ${opacity}, byte ${offset}`);
+    }
+  }
 } finally {
   try { if (image) native.canvas.release(image.handle); }
   finally { native.runtime.quit(); }

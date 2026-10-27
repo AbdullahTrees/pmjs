@@ -45,7 +45,7 @@ PMJS_SKIA65_API int pmjs_skia65_rect_bgra(uint8_t* pixels, int width, int height
 PMJS_SKIA65_API int pmjs_skia65_image_bgra(uint8_t* pixels, int width, int height,
   int left, int top, const uint8_t* source, int source_width, int source_height,
   const float src[4], const float dst[4], float alpha, int smoothing);
-/* Strided destinations and BGRA sources are premultiplied; RGBA sources are straight. */
+/* Strided destinations and BGRA sources are premultiplied; image_rgba sources are straight. */
 PMJS_SKIA65_API int pmjs_skia65_rect_bgra_strided(uint8_t* pixels, int width, int height,
   size_t row_bytes, int left, int top, const float rect[4], uint32_t color, float stroke,
   const float gradient[4], const float* offsets, const uint32_t* colors, size_t count);
@@ -53,6 +53,9 @@ PMJS_SKIA65_API int pmjs_skia65_image_bgra_strided(uint8_t* pixels, int width, i
   size_t row_bytes, int left, int top, const uint8_t* source, int source_width, int source_height,
   size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing);
 PMJS_SKIA65_API int pmjs_skia65_image_rgba_strided(uint8_t* pixels, int width, int height,
+  size_t row_bytes, int left, int top, const uint8_t* source, int source_width, int source_height,
+  size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing);
+PMJS_SKIA65_API int pmjs_skia65_image_premul_rgba_strided(uint8_t* pixels, int width, int height,
   size_t row_bytes, int left, int top, const uint8_t* source, int source_width, int source_height,
   size_t source_row_bytes, const float src[4], const float dst[4], float alpha, int smoothing);
 PMJS_SKIA65_API int pmjs_skia65_circle_coverage(float x, float y, float radius,

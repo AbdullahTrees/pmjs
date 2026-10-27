@@ -278,8 +278,8 @@
         if (!timers.has(timer.id)) return;
         if (!timer.interval) timers.delete(timer.id);
         try {
-          if (typeof timer.callback === 'function') timer.callback.apply(globalThis, timer.args);
-          else if (typeof timer.callback === 'string') (0, eval)(timer.callback);
+          if (typeof timer.callback === 'function') trackGuestPromise(timer.callback.apply(globalThis, timer.args), 'browser');
+          else if (typeof timer.callback === 'string') trackGuestPromise((0, eval)(timer.callback), 'browser');
         } finally {
           if (timer.interval && timers.has(timer.id)) {
             var now = performance.now();
@@ -346,7 +346,7 @@
           var callback = rafs.get(id);
           if (!callback) return;
           rafs.delete(id);
-          callback(now);
+          trackGuestPromise(callback(now), 'browser');
         }, 'event', true);
       });
     });

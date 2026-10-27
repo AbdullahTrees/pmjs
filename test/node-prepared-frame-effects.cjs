@@ -56,7 +56,7 @@ function compare(candidate, reference, label) {
   assert.ok(delta <= 1, `${label}: maximum channel difference ${delta}`);
 }
 
-test('prepared frames preserve sprite color effects without full-sheet backing', async () => {
+test('prepared frames preserve sprite color effects and packed-UV fallback', async () => {
   native.initialize({ gameRoot: root, width: 80, height: 56,
     windowTitle: 'prepared frame effects', imageWarmCacheBytes: 0 });
   native.render.setClearColor(0.17, 0.23, 0.31, 1);
@@ -86,6 +86,8 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
           `${effect.name}: blend=${blend}, alpha=${alpha}, nearest=${nearest}`);
       }
     }
+    assert.equal(native.images.memory().preparedMaterializations, before.preparedMaterializations,
+      'float-UV sprite color effects materialized the logical sheet');
     // Colored frame edges need neighboring source pixels from the halo.
     for (const packedUv of [false, true]) for (const tone of [[0, 0, 0, 0], [0.1, 0, 0, 0.3]]) {
       const options = { frame: 1, scaled: true, packedUv, tone };
@@ -99,7 +101,7 @@ test('prepared frames preserve sprite color effects without full-sheet backing',
       }
     const cached = native.images.memory(100);
     assert.equal(cached.preparedMaterializations, before.preparedMaterializations,
-      'sprite color effects materialized the logical sheet');
+      'packed-UV linear sprites must avoid full-sheet materialization');
     assert.ok(cached.preparedFrameCacheHits > before.preparedFrameCacheHits ||
       cached.largest.some(entry => entry.handle === prepared.handle && entry.palette),
     'sprite effects must retain a reusable frame or indexed backing');

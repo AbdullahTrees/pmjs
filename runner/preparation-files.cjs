@@ -6,9 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const HASH = /^[a-f0-9]{64}$/;
-// Files on a device whose identity changed only in its inode number are re-hashed until this many
-// of them have kept their recorded hash; see renumberedHash below.
-const RENUMBER_SAMPLE = 8;
+const FUSE_SUPER_MAGIC = 0x65735546;
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
 async function writeJson(file, value, flush = true) {
@@ -21,8 +19,8 @@ async function writeJson(file, value, flush = true) {
 
 async function preparationFiles(session, verifyHashes = false) {
   const previous = session.data.files;
-  const files = {}, known = new Map();
-  const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, renumberedFiles: 0, jsonReads: 0, jsonReuses: 0,
+  const files = {}, known = new Map(), filesystemTypes = new Map();
+  const stats = { hashedFiles: 0, hashedBytes: 0, reusedFiles: 0, jsonReads: 0, jsonReuses: 0,
     copiedFiles: 0, copiedBytes: 0, publicationReuses: 0, hashedBytesByCategory: {} };
   function saveReceipt(file, receipt) {
     const cached = session.data.files[file];
@@ -37,27 +35,19 @@ async function preparationFiles(session, verifyHashes = false) {
   function identity(stat) {
     return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs].join(':');
   }
-  // Some filesystems give files new inode numbers in every process (FUSE mounts without stable
-  // inodes, such as exFAT SD cards on handheld firmware), so no identity repeats across sessions
-  // and every file would be hashed again on every start. When a file's identity differs from its
-  // record only in the inode, the first RENUMBER_SAMPLE such files on that device are hashed;
-  // once all of them kept their recorded hash, the device is taken to renumber inodes and later
-  // such files reuse their record. One changed file keeps the device on full hashing. Unchanged
-  // files keep their existing record, so the saved state stays clean.
-  const renumbering = new Map();
-  function renumberedHash(cached, signature) {
-    if (verifyHashes || !cached || !HASH.test(cached.hash || '') || typeof cached.identity !== 'string') return null;
-    const recorded = cached.identity.split(':'), current = signature.split(':');
-    if (recorded.length !== 6 || current.length !== 6 || recorded[0] !== current[0] || recorded[1] === current[1] ||
-        recorded.slice(2).join(':') !== current.slice(2).join(':')) return null;
-    const device = renumbering.get(current[0]) || { verified: 0, changed: false };
-    renumbering.set(current[0], device);
-    return { device, hash: !device.changed && device.verified >= RENUMBER_SAMPLE ? cached.hash : null };
-  }
-  function verifiedRenumbering(renumbered, checksum, cached) {
-    if (!renumbered) return;
-    if (checksum === cached.hash) ++renumbered.device.verified;
-    else renumbered.device.changed = true;
+  function matchesReceipt(receipt, signature, file, stat, allowInodeDrift) {
+    if (!receipt || !HASH.test(receipt.hash)) return false;
+    if (receipt.identity === signature) return true;
+    if (!allowInodeDrift || !/^\d+(?::\d+){5}$/.test(receipt.identity || '')) return false;
+    const before = receipt.identity.split(':');
+    const after = signature.split(':');
+    if (before.length !== 6 || before.some((value, index) => index !== 1 && value !== after[index])) return false;
+    if (!filesystemTypes.has(stat.dev)) {
+      let type;
+      try { type = fs.statfsSync(file).type; } catch (_) { type = null; }
+      filesystemTypes.set(stat.dev, type);
+    }
+    return filesystemTypes.get(stat.dev) === FUSE_SUPER_MAGIC;
   }
   function containedGameFile(file) {
     return (session.sourceRoots || [session.gameRoot]).some(root => {
@@ -83,11 +73,9 @@ async function preparationFiles(session, verifyHashes = false) {
     const signature = identity(before);
     const cached = previous[file];
     const retained = known.get(signature);
+    const receipt = !verifyHashes && matchesReceipt(cached, signature, actual, before, !inspected.gameRooted) ? cached : null;
     let header = retained?.header || (cached?.header ? Buffer.from(cached.header, "base64") : undefined);
-    let checksum = (retained?.hash || !verifyHashes &&
-      cached && cached.identity === signature && HASH.test(cached.hash) && cached.hash);
-    const renumbered = !checksum && renumberedHash(cached, signature);
-    if (renumbered?.hash) { checksum = renumbered.hash; ++stats.renumberedFiles; }
+    let checksum = retained?.hash || receipt?.hash;
     const reused = !!checksum;
     if (reused) ++stats.reusedFiles;
     else {
@@ -104,10 +92,8 @@ async function preparationFiles(session, verifyHashes = false) {
       if (!after.isFile() || identity(after) !== signature ||
           inspected.gameRooted && await fsp.realpath(file) !== actual)
         throw new Error('preparation input changed while verifying');
-      verifiedRenumbering(renumbered, checksum, cached);
     }
-    saveReceipt(file, renumbered && checksum === cached.hash ? cached :
-      { identity: signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) });
+    saveReceipt(file, { identity: receipt?.identity || signature, hash: checksum, ...(header ? { header: header.toString("base64") } : {}) });
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, reused, size: Number(before.size), header };
   }
@@ -123,18 +109,15 @@ async function preparationFiles(session, verifyHashes = false) {
     }
     if (!stat.isFile()) throw new Error('preparation input is not a regular file');
     const signature = identity(stat), retained = known.get(signature), cached = previous[file];
-    let checksum = retained?.hash || !verifyHashes && cached?.identity === signature && cached.hash;
-    const renumbered = !checksum && renumberedHash(cached, signature);
-    if (renumbered?.hash) { checksum = renumbered.hash; ++stats.renumberedFiles; }
+    const receipt = !verifyHashes && matchesReceipt(cached, signature, file, stat, !link.isSymbolicLink()) ? cached : null;
+    let checksum = retained?.hash || receipt?.hash;
     if (!checksum) {
       checksum = digest(bytes);
       ++stats.hashedFiles; stats.hashedBytes += bytes.length;
       stats.hashedBytesByCategory[category] = (stats.hashedBytesByCategory[category] || 0) + bytes.length;
-      verifiedRenumbering(renumbered, checksum, cached);
     } else ++stats.reusedFiles;
     const header = Buffer.from(bytes.subarray(0, 32));
-    saveReceipt(file, renumbered && checksum === cached.hash ? cached :
-      { identity: signature, hash: checksum, header: header.toString('base64') });
+    saveReceipt(file, { identity: receipt?.identity || signature, hash: checksum, header: header.toString('base64') });
     known.set(signature, { hash: checksum, header });
     return { hash: checksum, size: bytes.length, header };
   }

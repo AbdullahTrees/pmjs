@@ -193,6 +193,44 @@ int main() try {
     require(images.gpuBytes() == 0 && images.liveCount() == 0, "recovered compact backing leaked allocations");
     require(glGetError() == GL_NO_ERROR, "compact failure left a GL error");
   }
+  for (int variant = 0; variant < 4; ++variant) {
+    pmjs::PreparedImageDescriptor whole;
+    whole.width = 32; whole.height = 16;
+    whole.pages = {{"whole-page.png", 36, 18}};
+    whole.cells = {
+      {{0, 0, 16, 16}, {0, 0, 16, 16}, {1, 1, 16, 16}, {255, 0, 255, 23}, 0},
+      {{16, 0, 16, 16}, {0, 0, 16, 16}, {19, 1, 16, 16}, {0, 0, 0, 0}, 0}};
+    std::vector<std::uint8_t> wholeSource(32*16*4), wholePage(36*18*4);
+    for (int y = 0; y < 16; ++y) for (int x = 0; x < 32; ++x) {
+      const auto offset = (y*32+x)*4;
+      const auto gray = static_cast<std::uint8_t>((x*7+y*11)%256);
+      wholeSource[offset] = wholeSource[offset+1] = wholeSource[offset+2] = gray;
+      wholeSource[offset+3] = 255;
+    }
+    if (variant == 1) wholeSource[1] = wholeSource[0]+1;
+    if (variant == 2) wholeSource[3] = 128;
+    if (variant == 3) {
+      whole.cells[1].crop[2] = whole.cells[1].atlas[2] = 15;
+      for (int y = 0; y < 16; ++y) std::fill_n(wholeSource.data()+(y*32+31)*4, 4, 0);
+    }
+    for (const auto& cell : whole.cells) for (int y = 0; y < cell.crop[3]; ++y)
+      std::copy_n(wholeSource.data()+((y+cell.rect[1])*32+cell.rect[0])*4,
+        cell.crop[2]*4, wholePage.data()+((y+cell.atlas[1])*36+cell.atlas[0])*4);
+    pmjs::writePreparedPng(root/"whole-source.png", 32, 16, wholeSource);
+    pmjs::writePreparedPng(root/"whole-page.png", 36, 18, wholePage);
+    pmjs::ImageStore images;
+    images.setWarmBudgetBytes(0);
+    require(images.installPrepared(root/"whole-source.png", root, whole), "whole crop fixture install failed");
+    const auto image = images.loadPng(root/"whole-source.png");
+    require(image.has_value(), "whole crop source load failed");
+    const auto realized = images.lookup(image->handle);
+    require(realized.has_value(), "whole crop realization failed");
+    require(images.preparedCropUploads() == (variant == 0 ? 1 : 0),
+      "unused fills or non-grayscale/translucent pixels selected the wrong upload path");
+    requireGpuPixels(*realized, wholeSource);
+    images.release(image->handle); images.update();
+    require(images.gpuBytes() == 0 && images.liveCount() == 0, "whole crop release retained allocations");
+  }
   pmjs::PreparedImageDescriptor blocks;
   blocks.width = 128; blocks.height = 64;
   blocks.blockGrid = std::array<int, 3>{64, 64, 64};

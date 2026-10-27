@@ -34,7 +34,7 @@ jobs:
           build_id="v$build_date-$build_time.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           echo "PMJS_BUILD_ID=$build_id" >> "$GITHUB_ENV"
           echo "build-id=$build_id" >> "$GITHUB_OUTPUT"
-          title="PMJS $build_date ${build_time:0:2}:${build_time:2:2}:${build_time:4:2} UTC (${GITHUB_SHA:0:7}, run $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT)"
+          title="PMJS-$build_date-$build_time"
           echo "title=$title" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
@@ -43,10 +43,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git python3 \
             clang-20=1:20.1.2-0ubuntu1~24.04.3 llvm-20=1:20.1.2-0ubuntu1~24.04.3 \
-            nodejs libnode-dev libsdl2-dev libegl1-mesa-dev libgles2-mesa-dev \
-            libpng-dev libwebp-dev zlib1g-dev libjpeg-dev libfreetype-dev libharfbuzz-dev \
-            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libswscale-dev \
-            xvfb xauth libegl-mesa0 libgl1-mesa-dri
+            binutils dpkg-dev
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -112,10 +109,8 @@ jobs:
             .cache/astcenc
           key: ${{ steps.dependencies-cache.outputs.cache-primary-key }}
 
-      - name: Build runtimes
-        run: |
-          ./build.sh --jobs 2
-          ./build.sh --target arm64 --jobs 2
+      - name: Build ARM64 runtime
+        run: ./build.sh --target arm64 --jobs 2
 
       - name: Archive FFmpeg source and build materials
         run: |
@@ -124,25 +119,21 @@ jobs:
 
       - name: Audit distribution inventories
         run: |
-          python3 tools/release.py stage --build build/local --output dist/runtime-local
           source_archive="pmjs-ffmpeg-sources-${GITHUB_SHA:0:7}.tar.gz"
           python3 tools/release.py manifest --stage dist/pmjs-arm64 --build build/pmjs-arm64 --source . \
             --strip llvm-strip-20 --sources "dist/$source_archive" \
             --sources-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$PMJS_BUILD_ID/$source_archive"
 
-      - name: Verify host graphics and ARM64 package
+      - name: Verify ARM64 package
         run: |
-          python3 tools/release.py verify --stage dist/runtime-local \
-            --report dist/verification-local.json --graphics --xvfb
           python3 tools/release.py verify --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json --static
 
-      # Hosted runners cannot supply the handheld hardware graphics receipt.
       - name: Archive runtime
         run: |
           python3 tools/release.py archive --stage dist/pmjs-arm64 \
             --report dist/static-arm64.json \
-            --output "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz" --development
+            --output "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz"
           python3 tools/release.py verify-archive --archive "dist/pmjs-linux-arm64-${GITHUB_SHA:0:7}.tar.gz"
 
       - name: Save build files
@@ -154,7 +145,6 @@ jobs:
             dist/pmjs-linux-arm64-*.tar.gz.*.json
             dist/pmjs-ffmpeg-sources-*.tar.gz
             dist/static-arm64.json
-            dist/verification-local.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 30

@@ -1,5 +1,6 @@
 #include "platform.hpp"
 #include "resources.hpp"
+#include "prepared_page.hpp"
 
 #include <algorithm>
 #include <array>
@@ -159,7 +160,7 @@ int main() {
       "border content escaped compact fallback");
     images.release(image->handle); images.update();
   }
-  for (int variant = 0; variant < 6; ++variant) {
+  for (int codec = 0; codec < 3; ++codec) for (int variant = 0; variant < 6; ++variant) {
     pmjs::ImageStore images;
     pmjs::PreparedImageDescriptor descriptor;
     descriptor.width=24; descriptor.height=8;
@@ -185,8 +186,12 @@ int main() {
     if(variant==3) for(auto& cell:descriptor.cells) cell.fill[1]=73;
     if(variant==4) for(auto& cell:descriptor.cells) cell.fill[3]=157;
     if(variant==5) descriptor.cells.back().fill={89,89,89,255};
-    for(std::size_t index=0;index<pages.size();++index)
-      write(root/descriptor.pages[index].path,7,7,pages[index]);
+    for(std::size_t index=0;index<pages.size();++index) {
+      if (codec) {
+        descriptor.pages[index].path = "crop-page-" + std::to_string(index) + ".pml4";
+        pmjs::writeLz4Page(root/descriptor.pages[index].path,7,7,pages[index],codec==2);
+      } else write(root/descriptor.pages[index].path,7,7,pages[index]);
+    }
     std::vector<std::uint8_t> original(24*8*4);
     for(const auto& cell:descriptor.cells)
       for(int y=0;y<cell.rect[3];++y) for(int x=0;x<cell.rect[2];++x) {
