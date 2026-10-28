@@ -61,6 +61,11 @@ int main() {
       const auto decoded = pmjs::readLz4Page(encoded, rgba.size());
       require(decoded && decoded->width == width && decoded->height == height && decoded->rgba == rgba);
       require(!pmjs::makeChannelBlockPage(width, height, rgba));
+      if (rgba.size() >= 256U*1024U) {
+        const auto retained = pmjs::makeChannelBlockPage(width, height, rgba, rgba.size()*2);
+        require(retained && retained->pixels().rgba == rgba);
+        require(!pmjs::makeChannelBlockPage(width, height, rgba, retained->gpuBytes()));
+      }
       require(!pmjs::readLz4Page(encoded, rgba.size() - 1));
       for (const auto offset : {0U,4U,8U,12U,16U,20U,24U,28U}) {
         auto damaged = encoded; damaged[offset] ^= 1;
@@ -206,25 +211,29 @@ int main() {
       require(!pmjs::makeIndexedPalettePage(512, 512, rgba) || count == 256);
     }
     require(!pmjs::makeIndexedPalettePage(32, 32, std::vector<std::uint8_t>(32 * 32 * 4)));
-    for (int variant = 0; variant < 5; ++variant) {
-      pmjs::ImagePixels pixels{variant == 3 ? 2055 : 1031, variant == 3 ? 1025 : 513, {}};
+    for (int variant = 0; variant < 7; ++variant) {
+      pmjs::ImagePixels pixels{variant == 5 ? 63 : variant == 3 ? 2055 : 1031,
+        variant == 5 ? 16384 : variant == 3 ? 1025 : 513, {}};
       pixels.rgba.resize(std::size_t(pixels.width)*pixels.height*4);
+      std::uint32_t noise = 0x98765432;
       for (int y = 0; y < pixels.height; ++y) for (int x = 0; x < pixels.width; ++x) {
         const auto i = std::size_t(y)*pixels.width+x;
         const auto color = variant == 0 ? i%127 : variant == 1 ? i%1024 : variant == 2 ? (i%31 ? 0 : (i/31)%1023+1) :
           variant == 3 ? (i%23 ? 0 : i/23+1) : 0;
         auto* p = pixels.rgba.data()+i*4;
-        if (variant == 4) { p[0]=x%251; p[1]=y%251; p[2]=(x+y)%251; p[3]=(x/8+y/8)%3 ? 96+x%8*19 : 0; }
+        if (variant == 6) { for (int c=0;c<4;++c) { noise=noise*1664525U+1013904223U; p[c]=noise>>24; } }
+        else if (variant == 5) { p[0]=x; p[1]=y%251; p[2]=37; p[3]=x%2 ? 0 : 255; }
+        else if (variant == 4) { p[0]=x%251; p[1]=y%251; p[2]=(x+y)%251; p[3]=(x/8+y/8)%3 ? 96+x%8*19 : 0; }
         else { p[0]=color; p[1]=color>>8; p[2]=color>>16; p[3]=color%255; }
       }
-      auto texture = pmjs::makePreparedTexture(pixels);
+      auto texture = pmjs::makePreparedTexture(pixels, nullptr, variant == 6 ? pixels.rgba.size()*2 : 0);
       require(texture.has_value());
-      auto unsupported = *texture; unsupported.layout.height = 8193;
+      auto unsupported = *texture; unsupported.layout.height = 16385;
       bool unsupportedRejected = false;
       try { pmjs::writeTextureArtifact(root / "unsupported.pmtx",unsupported); }
       catch(const std::invalid_argument&) { unsupportedRejected = true; }
       require(unsupportedRejected);
-      require(int(texture->layout.kind) == variant+1);
+      require(int(texture->layout.kind) == std::min(variant+1,5));
       const auto file = root / "texture.pmtx";
       pmjs::writeTextureArtifact(file,*texture);
       std::ifstream in(file,std::ios::binary);
@@ -240,7 +249,7 @@ int main() {
         decoded[i].insert(decoded[i].end(),data.begin(),data.end()); return true;
       },peak));
       require(decoded == texture->bytes && peak <= pmjs::textureChunkLimit);
-      if (variant == 4) {
+      if (variant >= 4) {
         pmjs::ChannelBlockPage p; p.width=pixels.width; p.height=pixels.height;
         p.bytes=decoded[0]; p.blocks.resize(decoded[1].size()/16);
         for (std::size_t i=0;i<p.blocks.size();++i) for(int j=0;j<4;++j) {

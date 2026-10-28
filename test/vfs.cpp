@@ -241,8 +241,9 @@ int main() try {
   require(!media.resolveDerived("img/a.png"), "deleted logical path resurrected derived backing");
 
   TemporaryDirectory collisionFixture("collision");
-  write(collisionFixture.path() / "Name.txt", "upper");
-  write(collisionFixture.path() / "name.TXT", "lower");
+  const auto prefix = std::string(32768, 'x');
+  write(collisionFixture.path() / "Name.txt", prefix + "upper");
+  write(collisionFixture.path() / "name.TXT", prefix + "lower");
   bool rejectedCollision = false;
   try {
     pmjs::Vfs collision(collisionFixture.path());
@@ -250,6 +251,17 @@ int main() try {
     rejectedCollision = true;
   }
   require(rejectedCollision, "ambiguous case collision was accepted");
+  write(collisionFixture.path() / "name.TXT", prefix + "upper");
+  pmjs::Vfs aliases(collisionFixture.path());
+  require(aliases.resolve("NAME.txt") == collisionFixture.path() / "Name.txt",
+          "identical aliases did not select a stable canonical path");
+  require(aliases.readText("name.TXT") == prefix + "upper", "identical alias changed file contents");
+  std::filesystem::create_directory(collisionFixture.path() / "Folder");
+  std::filesystem::create_directory(collisionFixture.path() / "folder");
+  rejectedCollision = false;
+  try { pmjs::Vfs collision(collisionFixture.path()); }
+  catch (const std::runtime_error&) { rejectedCollision = true; }
+  require(rejectedCollision, "directory aliases must remain ambiguous");
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

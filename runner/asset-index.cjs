@@ -14,6 +14,24 @@ const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).d
 const identity = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const matchesPrefix = (source, prefix) => source.toLowerCase().startsWith(prefix.toLowerCase());
 
+function identicalFiles(left, right) {
+  if (fs.statSync(left).size !== fs.statSync(right).size) return false;
+  const a = fs.openSync(left, 'r');
+  let b;
+  try {
+    b = fs.openSync(right, 'r');
+    const x = Buffer.alloc(16384), y = Buffer.alloc(16384);
+    for (;;) {
+      const count = fs.readSync(a, x, 0, x.length, null);
+      if (count !== fs.readSync(b, y, 0, y.length, null) || !x.subarray(0, count).equals(y.subarray(0, count))) return false;
+      if (!count) return true;
+    }
+  } finally {
+    fs.closeSync(a);
+    if (b !== undefined) fs.closeSync(b);
+  }
+}
+
 function offlineFilesystem(gameRoot, derived) {
   const root = fs.realpathSync(gameRoot);
   const files = new Map(), directories = new Map();
@@ -48,6 +66,10 @@ function offlineFilesystem(gameRoot, derived) {
     const inventory = directory ? directories : files;
     const previous = inventory.get(key);
     if (previous && previous !== target) {
+      if (!directory && identicalFiles(previous, target)) {
+        inventory.set(key, previous < target ? previous : target);
+        return;
+      }
       throw new Error('case-insensitive path collision: ' + previous + ' and ' + target);
     }
     inventory.set(key, target);

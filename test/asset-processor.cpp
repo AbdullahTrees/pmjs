@@ -720,6 +720,65 @@ int main() {
         options.statistics = nullptr;
       }
     }
+    for (const int height : {11200, 13488, 16384}) {
+      write(source, 16, height, [](int x, int y) { return AssetColor{static_cast<unsigned char>(x*13), static_cast<unsigned char>(y%251), 71, 255}; });
+      const auto directory = root / ("tall-" + std::to_string(height));
+      const auto tall = pmjs::prepareAssetImage(source, directory);
+      require(tall.height == height && tall.width == 16);
+      require(std::all_of(tall.pages.begin(), tall.pages.end(), [](const auto& page) { return page.width <= 2048 && page.height <= 2048; }));
+      verify(source, directory, tall);
+    }
+    write(source, 1, 16385, [](int, int) { return AssetColor{}; });
+    bool rejectedTall = false;
+    try { pmjs::prepareAssetImage(source, root / "too-tall"); }
+    catch (const pmjs::AssetPreparationUnsupported&) { rejectedTall = true; }
+    require(rejectedTall);
+    pmjs::AssetPreparationOptions automaticOptions;
+    automaticOptions.lz4Pages = true;
+    for (const bool lz4 : {false, true}) {
+      write(source, 2048, 2048, [lz4](int x, int y) {
+        if (!lz4 && (x >= 1024 || y >= 1024)) return AssetColor{};
+        return AssetColor{static_cast<unsigned char>(x%8*31), static_cast<unsigned char>(y%8*31), 63,
+          static_cast<unsigned char>((x/8)%2 ? 255 : 0)};
+      });
+      automaticOptions.lz4Pages = lz4;
+      const auto directory = root / (lz4 ? "automatic-lz4" : "automatic-png");
+      const auto automatic = pmjs::prepareAssetImage(source, directory, {}, nullptr, automaticOptions);
+      require(automatic.framePages && automatic.textureArtifact == "texture.pmtx");
+      require(automatic.textureRetainedBytes < automatic.ordinaryRetainedBytes);
+      verify(source, directory, automatic);
+    }
+    // Nonzero hidden-RGB fills in multiple cells can require source reconstruction.
+    for (const bool mixed : {false, true}) {
+      write(source, 2048, 1024, [mixed](int x, int y) {
+        if (x % 1024 == 512 && y == 512) return AssetColor{17,37,71,255};
+        return mixed && x < 1024 ? AssetColor{} : AssetColor{19,41,73,0};
+      });
+      const auto directory = root / (mixed ? "mixed-fill" : "multi-fill");
+      const auto filled = pmjs::prepareAssetImage(source, directory, {2,1,std::nullopt,{}}, nullptr, automaticOptions);
+      require(filled.cells.size() > 1);
+      require(filled.textureArtifact.empty() == mixed);
+      require(filled.framePages != mixed);
+      verify(source, directory, filled);
+    }
+    // Redundant dense palettes for fill-only cells retain ordinary preparation on ties.
+    write(source, 2048, 1024, [](int x, int) {
+      return x < 1024 ? AssetColor{159,40,214,255} : AssetColor{17,137,171,255};
+    });
+    for (const bool lz4 : {false, true}) {
+      automaticOptions.lz4Pages = lz4;
+      const auto directory = root / (lz4 ? "fill-only-lz4" : "fill-only-png");
+      const auto fillOnly = pmjs::prepareAssetImage(source, directory, {2,1,std::nullopt,{}}, nullptr, automaticOptions);
+      require(fillOnly.pages.empty() && fillOnly.cells.size() == 2);
+      require(fillOnly.textureArtifact.empty() && !fillOnly.framePages);
+      require(fillOnly.textureRetainedBytes > 0 && fillOnly.textureRetainedBytes == fillOnly.ordinaryRetainedBytes);
+      verify(source, directory, fillOnly);
+    }
+    write(source, 2048, 2048, [](int x, int y) { return AssetColor{static_cast<unsigned char>(x%8*31), static_cast<unsigned char>(y%8*31), 63, static_cast<unsigned char>((x/8)%2 ? 255 : 0)}; });
+    automaticOptions.workspaceBytes = 32U*1024U*1024U;
+    const auto constrained = pmjs::prepareAssetImage(source, root / "automatic-constrained", {}, nullptr, automaticOptions);
+    require(!constrained.framePages && constrained.textureArtifact.empty());
+    verify(source, root / "automatic-constrained", constrained);
     write(source, 8192, 4096, [](int x,int y) { return x == 4000 && y == 3000 ? AssetColor{31,41,51,61} : AssetColor{}; });
     result = pmjs::prepareAssetImage(source, root / "large");
     require(result.width == 8192 && result.height == 4096 && result.halo == 10);

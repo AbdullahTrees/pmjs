@@ -209,7 +209,7 @@ std::optional<ImagePixels> decodePngFromMemory(const void *data, std::size_t siz
   });
   png_read_info(png, info);
   const auto extent = checkedImageExtent(png_get_image_width(png, info), png_get_image_height(png, info),
-                                         8192, maxDecodedBytes);
+                                         16384, maxDecodedBytes);
   if (!extent) {
     return std::nullopt;
   }
@@ -267,7 +267,7 @@ std::optional<ImagePixels> decodeJpegFromMemory(const void* data, std::size_t si
   }
   const auto extent = checkedImageExtent(
       static_cast<int>(decoder.image_width),
-      static_cast<int>(decoder.image_height), 8192, maxDecodedBytes);
+      static_cast<int>(decoder.image_height), 16384, maxDecodedBytes);
   if (!extent) {
     jpeg_destroy_decompress(&decoder);
     return std::nullopt;
@@ -347,7 +347,7 @@ std::optional<ImagePixels> decodeMemory(const void* data, std::size_t size,
   if (size >= 12 && std::memcmp(bytes, "RIFF", 4) == 0 && std::memcmp(bytes + 8, "WEBP", 4) == 0) {
     int width = 0, height = 0;
     if (!WebPGetInfo(bytes, size, &width, &height)) return std::nullopt;
-    const auto extent = checkedImageExtent(width, height, 8192, maxDecodedBytes);
+    const auto extent = checkedImageExtent(width, height, 16384, maxDecodedBytes);
     if (!extent) return std::nullopt;
     ImagePixels pixels{width, height, std::vector<uint8_t>(extent->rgbaBytes)};
     if (!WebPDecodeRGBAInto(bytes, size, pixels.rgba.data(), pixels.rgba.size(), width * 4)) return std::nullopt;
@@ -582,7 +582,7 @@ struct ImageStore::PreparedBacking {
         GLint maximum = 0;
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum);
         sourceSampling = descriptor.width <= maximum && descriptor.height <= maximum &&
-          checkedImageExtent(descriptor.width, descriptor.height).has_value();
+          checkedImageExtent(descriptor.width, descriptor.height, 16384).has_value();
       }
     }
     return *sourceSampling;
@@ -932,7 +932,7 @@ bool ImageStore::installStorageDecision(const std::filesystem::path& path,
     const std::string& sourceIdentity, ImageStorageDecision decision, const std::string& backingHash) {
   if (sourceIdentity.empty() || decision.width <= 0 || decision.height <= 0 ||
       (!backingHash.empty() && !validContentHash(backingHash)) ||
-      decision.width > 8192 || decision.height > 8192 ||
+      decision.width > 16384 || decision.height > 16384 ||
       (decision.paletteBits != 0 && decision.paletteBits != 8 && decision.paletteBits != 16) ||
       (decision.channels.channels != 1 && decision.channels.channels != 2 && decision.channels.channels != 4)) return false;
   if (decision.paletteBits && decision.channels.channels != 4) return false;
@@ -1361,7 +1361,7 @@ std::optional<ImageInfo> ImageStore::createImage(int width, int height,
     const void* pixels, bool premultiplied, ImageChannelStorage storage,
     std::shared_ptr<PaletteBacking> palette, const ImageStorageDecision* decision) {
   const int channels = storage.channels;
-  const auto extent = checkedImageExtent(width, height);
+  const auto extent = checkedImageExtent(width, height, 16384);
   if (!extent) return std::nullopt;
   std::size_t index = 0;
   while (index < slots_.size() && slots_[index].live) ++index;
@@ -2200,7 +2200,7 @@ bool ImageStore::installPrepared(const std::filesystem::path& sourcePath,
                                 const std::string& backingHash, const std::vector<std::string>* pageHashes,
                                 const std::string& textureHash) {
   if (descriptor.version != 1 || descriptor.halo < 1 || descriptor.halo > 32 || !checkedImageExtent(descriptor.width, descriptor.height,
-      8192, 128U * 1024U * 1024U)) return false;
+      16384, 128U * 1024U * 1024U)) return false;
   auto original = pageIdentities ? nullptr : openFile(sourcePath);
   if (pageIdentities ? (expectedSourceIdentity.empty() || pageIdentities->size() != descriptor.pages.size()) :
       (!original || (!expectedSourceIdentity.empty() && original->key() != expectedSourceIdentity &&
@@ -2402,18 +2402,32 @@ bool ImageStore::validatePrepared(PreparedLoad& load, bool retainCpu) {
       if (!bytes || !contentHashMatches(std::span(*bytes).subspan(offset), backing.sourceHash)) return invalid();
       load.sourceToVerify.reset();
     }
+    const bool deferRecovery = !retainCpu && backing.textureSource &&
+      validContentHash(backing.textureHash) && std::all_of(backing.pages.begin(), backing.pages.end(),
+        [](const auto& page) { return validContentHash(page.expectedHash); });
     for (std::size_t i = 0; i < backing.pages.size(); ++i) {
+      if (deferRecovery) {
+        auto& page = backing.pages[i];
+        const auto bytes = page.source ? readCapturedBytes(*page.source) : std::nullopt;
+        if (!bytes || !contentHashMatches(*bytes, page.expectedHash)) return invalid();
+        page.verifyHash = true;
+        continue;
+      }
       if (backing.descriptor.compression == "astc-4x4") {
         const auto& page = backing.pages[i];
         const auto bytes = page.source ? readCapturedBytes(*page.source) : std::nullopt;
         if (!bytes || !validAstc4x4(*bytes, backing.descriptor.width, backing.descriptor.height) ||
             (page.verifyHash && !contentHashMatches(*bytes, page.expectedHash))) return invalid();
       } else if (!preparedSparsePage(backing, i) && !preparedPixels(backing, i)) return invalid();
+      if (!retainCpu && backing.textureSource) {
+        backing.pages[i].pixels.reset();
+        backing.pages[i].sparse.reset();
+      }
     }
     load.validated = true;
   }
   if (retainCpu && !load.pixels &&
-      checkedImageExtent(backing.descriptor.width, backing.descriptor.height)) {
+      checkedImageExtent(backing.descriptor.width, backing.descriptor.height, 16384)) {
     load.pixels = backing.descriptor.compression == "astc-4x4" ?
       (load.original ? decodeFile(*load.original) : std::nullopt) :
       readPreparedRegion(backing, 0, 0, backing.descriptor.width, backing.descriptor.height);
@@ -2623,7 +2637,7 @@ void ImageStore::trimPreparedPageTextures() {
 std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
     int x, int y, int width, int height) const {
   auto info = inspect(handle);
-  const auto extent = checkedImageExtent(width, height);
+  const auto extent = checkedImageExtent(width, height, 16384);
   if (!info || !extent || x < 0 || y < 0 || x > info->width - width ||
       y > info->height - height) return std::nullopt;
   const auto& slot = slots_[(handle & indexMask) - 1U];
@@ -2656,7 +2670,7 @@ std::optional<ImagePixels> ImageStore::readPixelsRegion(ImageHandle handle,
 
 std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backing,
     int x, int y, int width, int height, bool* acquired) {
-  const auto extent = checkedImageExtent(width, height);
+  const auto extent = checkedImageExtent(width, height, 16384);
   if (!extent) return std::nullopt;
   ImagePixels result{width, height, std::vector<std::uint8_t>(extent->rgbaBytes)};
   if (!readPreparedRegionInto(backing, x, y, width, height, result, 0, 0, acquired))
@@ -2667,7 +2681,7 @@ std::optional<ImagePixels> ImageStore::readPreparedRegion(PreparedBacking& backi
 bool ImageStore::readPreparedRegionInto(PreparedBacking& backing, int x, int y,
     int width, int height, ImagePixels& destination, int destinationX,
     int destinationY, bool* acquired) {
-  const auto extent = checkedImageExtent(width, height);
+  const auto extent = checkedImageExtent(width, height, 16384);
   if (!extent || destination.width <= 0 || destination.height <= 0 ||
       destinationX < 0 || destinationY < 0 ||
       destinationX > destination.width - width ||
@@ -3244,8 +3258,9 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
   if (slot.prepared->requiresSourceSampling()) return std::nullopt;
   const int left = static_cast<int>(std::floor(x)), top = static_cast<int>(std::floor(y));
   const int right = static_cast<int>(std::ceil(x + width)), bottom = static_cast<int>(std::ceil(y + height));
-  if (!linearPalette && left == 0 && top == 0 && right == logical->width && bottom == logical->height)
-    return std::nullopt;
+  // Whole-source palette draws can filter directly without an RGBA frame conversion.
+  if (left == 0 && top == 0 && right == logical->width && bottom == logical->height &&
+      (!linearPalette || hasPaletteStorage(handle))) return std::nullopt;
   const std::array<int, 4> source{left, top, right-left, bottom-top};
   const int halo = std::max(1, slot.prepared->descriptor.halo);
   const auto extent = checkedImageExtent(source[2]+2*halo, source[3]+2*halo);
@@ -3841,7 +3856,7 @@ bool ImageStore::materialize(Slot& slot, bool premultiplied) {
   }
   const auto started = tileDiagnostics_ ? std::chrono::steady_clock::now() :
     std::chrono::steady_clock::time_point{};
-  const auto extent = checkedImageExtent(slot.width, slot.height, 8192, 128U * 1024U * 1024U);
+  const auto extent = checkedImageExtent(slot.width, slot.height, 16384, 128U * 1024U * 1024U);
   GLint maxTexture = 0; glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
   if (!extent || slot.width > maxTexture || slot.height > maxTexture) {
     ++preparedFallbacks_["full-texture-limit"]; return false;

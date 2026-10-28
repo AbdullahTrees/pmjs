@@ -511,6 +511,7 @@ if(BUILD_TESTING)
     node-linear-tiling-palette
     node-linear-sprite-palette
     node-prepared-linear-palette
+    node-prepared-tall-image
     node-yed-retained-tiles
     node-presentation-byte-precision
     node-render-to-image

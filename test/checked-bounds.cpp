@@ -45,6 +45,9 @@ int main() {
   auto largeValid = checkedImageExtent(8192, 8192, 8192, 256 * 1024 * 1024);
   require(largeValid.has_value(), "8192x8192 must succeed with 256MB ceiling");
   require(largeValid->rgbaBytes == 8192U * 8192U * 4U, "8192x8192 byte count mismatch");
+  require(checkedImageExtent(2048, 16384, 16384).has_value(), "logical 128 MiB boundary must be inclusive");
+  require(!checkedImageExtent(2049, 16384, 16384), "logical bounds must retain the decoded-size ceiling");
+  require(!checkedImageExtent(16, 16385, 16384), "logical dimensions above 16384 must be rejected");
 
   std::cout << "native-checked-bounds: all assertions passed\n";
   return 0;

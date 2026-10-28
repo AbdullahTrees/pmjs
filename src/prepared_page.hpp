@@ -35,9 +35,10 @@ struct ChannelBlockPage {
   PreparedPagePixels pixels() const;
 };
 std::optional<ChannelBlockPage> makeChannelBlockPage(int width, int height,
-    std::span<const std::uint8_t> rgba);
+    std::span<const std::uint8_t> rgba, std::size_t retainedLimit = 0);
 void writeLz4Page(const std::filesystem::path& path, int width, int height,
-                  std::span<const std::uint8_t> rgba, bool sparsePalette = false);
+                  std::span<const std::uint8_t> rgba, bool sparsePalette = false,
+                  std::uint64_t* retainedBytes = nullptr);
 std::optional<PreparedPagePixels> readLz4Page(std::span<const std::uint8_t> encoded,
                                            std::size_t maxDecodedBytes);
 // Extended color tables are in-memory only; encoded pages retain sixteen-bit indices.

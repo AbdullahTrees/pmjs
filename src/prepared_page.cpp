@@ -44,7 +44,7 @@ unsigned paletteIndex(const SparsePalettePage& page, std::size_t pixel) {
 }
 }
 void writeLz4Page(const std::filesystem::path& path, int width, int height,
-                  std::span<const std::uint8_t> rgba, bool sparsePalette) {
+                  std::span<const std::uint8_t> rgba, bool sparsePalette, std::uint64_t* retainedBytes) {
   if (width <= 0 || height <= 0 || width > static_cast<int>(maximumExtent) ||
       height > static_cast<int>(maximumExtent) || rgba.size() != static_cast<std::size_t>(width) * height * 4)
     throw std::runtime_error("invalid LZ4 page extent");
@@ -54,6 +54,10 @@ void writeLz4Page(const std::filesystem::path& path, int width, int height,
     sparse = makeIndexedPalettePage(width, height, rgba);
     if (!sparse) sparse = makeSparsePalettePage(width, height, rgba);
   }
+  // Raw pages retain RGBA recovery pixels and at least one GPU byte per pixel.
+  if (retainedBytes) *retainedBytes = sparse
+    ? sparse->base.size() + sparse->colors.size() + sparse->residual.size() + sparse->blocks.size()*12 + sparse->gpuBytes()
+    : std::uint64_t(width)*height*5;
   if (sparse) {
     if (sparse->packed) {
       payload.resize(4 + sparse->colors.size() + sparse->base.size());
@@ -140,8 +144,9 @@ PreparedPagePixels ChannelBlockPage::pixels() const {
   return result;
 }
 std::optional<ChannelBlockPage> makeChannelBlockPage(int width, int height,
-    std::span<const std::uint8_t> rgba) {
-  if (width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+    std::span<const std::uint8_t> rgba, std::size_t retainedLimit) {
+  if (width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
+      std::uint64_t(width)*height*4 > 128U*1024U*1024U ||
       rgba.size() != std::size_t(width) * height * 4 || rgba.size() < 256 * 1024) return std::nullopt;
   struct Hash {
     std::size_t operator()(const std::array<std::uint8_t, 64>& bytes) const {
@@ -169,7 +174,8 @@ std::optional<ChannelBlockPage> makeChannelBlockPage(int width, int height,
         entry = at->second;
       }
     }
-  if (page.bytes.empty() || page.gpuBytes() * 100 > rgba.size() * 85) return std::nullopt;
+  if (page.bytes.empty() || (retainedLimit ? page.gpuBytes() >= retainedLimit :
+      page.gpuBytes() * 100 > rgba.size() * 85)) return std::nullopt;
   return page;
 }
 std::size_t SparsePalettePage::gpuBytes() const {

@@ -21,9 +21,103 @@ for (let i = 0; i < sheetPixels.length; i += 4) {
   sheetPixels.set([value % 251, value * 53 % 251, 37, value % 3 * 127], i);
 }
 fs.writeFileSync(path.join(root, 'sheet.png'), png(192, 64, sheetPixels));
+const fractional = fractionalFixture();
+const whole = wholeFixture();
 native.initialize({ gameRoot: root, width: 96, height: 80, windowTitle: 'Prepared linear palette', imageWarmCacheBytes: 0,
   ...(budget === null ? {} : { preparedFrameCacheBytes: budget }) });
 let reference, prepared;
+function fractionalFixture() {
+  const width = 256, height = 192, pixels = Buffer.alloc(width * height * 4);
+  let state = 123456789;
+  const random = () => (state = (Math.imul(state, 1664525) + 1013904223) >>> 0) >>> 24;
+  const colors = Array.from({ length: 256 }, () => [random(), random(), random(), random()]);
+  for (let i = 0; i < width * height; ++i) pixels.set(colors[random()], i * 4);
+  const bytes = png(width, height, pixels), source = 'fractional.png';
+  fs.writeFileSync(path.join(root, source), bytes);
+  return { width, height, bytes, source };
+}
+async function fractionalFrameSampling() {
+  const { width, height, bytes, source } = fractional;
+  const directory = path.join(root, 'fractional'); fs.mkdirSync(directory);
+  const descriptor = await native.assets.processImage(source, directory, { grid: [2, 2], framePages: true },
+    path.join(root, source), null, { pageCodec: 'lz4' });
+  assert.ok(descriptor.textureArtifact);
+  assert.equal(native.assets.installPrepared([{ source, directory, descriptor,
+    sourceIdentity: native.assets.sourceIdentity(source) }]), 1);
+  const reference = native.images.loadBytes(bytes), image = await native.images.loadAsync(source);
+  try {
+    const sample = (source, options) => {
+      const packet = spritePacket(native, source, options);
+      packet.metadata[3] = 0xffffff;
+      packet.values[4] = 0.25; packet.values[5] = 0.5; packet.values[6] = 1;
+      return drawPacket(native, packet);
+    };
+    for (const nearest of [true, false]) for (const scale of [0.19, 0.37, 0.61, 0.73, 0.97, 1.13]) {
+      const options = { nearest, scale, crop: [width * 0.2, height * 0.1, width * 0.6, height * 0.7] };
+      const actual = sample(image, options);
+      const expected = sample(reference, options);
+      let maximum = 0;
+      for (let i = 0; i < actual.length; ++i) maximum = Math.max(maximum, Math.abs(actual[i] - expected[i]));
+      assert.ok(maximum <= (nearest ? 0 : 1), `fractional cross-frame sampling delta ${maximum}`);
+    }
+  } finally {
+    native.images.release(reference.handle); native.images.release(image.handle); native.beginFrame();
+  }
+}
+function wholeFixture() {
+  const width = 576, height = 1008, source = 'whole.png';
+  const pixels = Buffer.alloc(width * height * 4);
+  // Colored corners retain indexed storage and force a full-size padded page.
+  pixels.set([1, 2, 3, 255], 0);
+  pixels.set([1, 2, 3, 255], pixels.length - 4);
+  // This high-contrast corner lands near an interpolation-weight boundary.
+  for (let y = 203; y <= 204; ++y) for (let x = 479; x <= 480; ++x)
+    pixels.set(x === 480 && y === 204 ? [255, 255, 255, 255] : [0, 0, 0, 255], (y * width + x) * 4);
+  const bytes = png(width, height, pixels); fs.writeFileSync(path.join(root, source), bytes);
+  return { width, height, source, bytes, pixels };
+}
+async function wholeSourceSampling() {
+  native.render.setClearColor(0, 0, 0, 0);
+  const { width, height, source, bytes, pixels } = whole;
+  const directory = path.join(root, 'whole'); fs.mkdirSync(directory);
+  const halo = 3, pageWidth = width + 2 * halo, pageHeight = height + 2 * halo;
+  const page = Buffer.alloc(pageWidth * pageHeight * 4);
+  for (let y = 0; y < pageHeight; ++y) for (let x = 0; x < pageWidth; ++x) {
+    const sourceOffset = (Math.max(0, Math.min(height - 1, y - halo)) * width +
+      Math.max(0, Math.min(width - 1, x - halo))) * 4;
+    pixels.copy(page, (y * pageWidth + x) * 4, sourceOffset, sourceOffset + 4);
+  }
+  fs.writeFileSync(path.join(directory, 'page-0.png'), png(pageWidth, pageHeight, page));
+  const descriptor = { version: 1, width, height, halo,
+    cells: [{ rect: [0, 0, width, height], crop: [0, 0, width, height], fill: [0, 0, 0, 0],
+      page: 0, atlas: [halo, halo, width, height] }],
+    pages: [{ path: 'page-0.png', width: pageWidth, height: pageHeight }] };
+  const sourceIdentity = native.assets.sourceIdentity(source);
+  const storage = await native.assets.classifyImageStorage(path.join(root, source));
+  assert.equal(storage.paletteBits, 8);
+  assert.equal(native.assets.installImageStorage([{ source, sourceIdentity, storage }]), 1);
+  assert.equal(native.assets.installPrepared([{ source, sourceIdentity, directory, descriptor }]), 1, 'whole-source fixture must install');
+  const reference = native.images.loadBytes(bytes), image = await native.images.loadAsync(source);
+  try {
+    const sample = (image, nearest) => {
+      const packet = spritePacket(native, image, { nearest, scale: 74 / height, crop: [0, 0, width, height] });
+      packet.metadata[5] = nearest ? 8 : 0;
+      packet.metadata[3] = 0xffffff;
+      packet.values[4] = 0.25; packet.values[5] = 0.5; packet.values[6] = 1;
+      return drawPacket(native, packet);
+    };
+    for (const nearest of [true, false]) {
+      const expected = sample(reference, nearest), actual = sample(image, nearest);
+      if (!nearest) assert.ok(expected.some((value, index) => index % 4 < 3 && value > 127),
+        'the high-contrast corner must contribute a visible filtered pixel');
+      let maximum = 0;
+      for (let i = 0; i < actual.length; ++i) maximum = Math.max(maximum, Math.abs(actual[i] - expected[i]));
+      assert.ok(maximum <= (nearest ? 0 : 1), `whole-source palette sampling delta ${maximum}`);
+    }
+  } finally {
+    native.images.release(reference.handle); native.images.release(image.handle); native.beginFrame();
+  }
+}
 async function classifiedSheet() {
   const directory = path.join(root, 'sheet'); fs.mkdirSync(directory);
   const descriptor = await native.assets.processImage('sheet.png', directory,
@@ -86,6 +180,7 @@ async function classifiedSheet() {
       assert.equal(memory().preparedFrameCacheMisses, 0);
       assert.equal(memory().preparedFrameCacheBytes, 0);
       await classifiedSheet();
+      await wholeSourceSampling();
       return;
     }
     assert.equal(memory().preparedFrameCacheMisses, 0, 'single-cell linear frames draw their prepared page directly');
@@ -115,6 +210,8 @@ async function classifiedSheet() {
     for (let i = 0; i < replaced.length; i++) maximum = Math.max(maximum, Math.abs(replaced[i] - expected[i]));
     assert.ok(maximum <= 1, 'replacement must use new source pixels');
     await classifiedSheet();
+    await fractionalFrameSampling();
+    await wholeSourceSampling();
   } finally {
     if (prepared) native.images.release(prepared.handle);
     if (reference) native.canvas.release(reference.handle);

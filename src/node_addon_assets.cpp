@@ -166,6 +166,8 @@ napi_value descriptor(napi_env env, const PreparedAsset& asset, bool workspaceCo
   set(env, result, "width", number(env, asset.width)); set(env, result, "height", number(env, asset.height));
   set(env, result, "halo", number(env, asset.halo));
   set(env, result, "workspaceConstrained", boolean(env, workspaceConstrained));
+  if (asset.ordinaryRetainedBytes) set(env, result, "ordinaryRetainedBytes", number(env, asset.ordinaryRetainedBytes));
+  if (asset.textureRetainedBytes) set(env, result, "textureRetainedBytes", number(env, asset.textureRetainedBytes));
   if (!asset.compression.empty()) set(env, result, "compression", string(env, asset.compression));
   if (asset.framePages) set(env, result, "framePages", boolean(env, true));
   if (!asset.textureArtifact.empty()) set(env, result, "textureArtifact", string(env, asset.textureArtifact.string()));
@@ -699,7 +701,7 @@ void registerAssetMethods(napi_env env, napi_value exports) {
 #else
   set(env, version, "colorManagement", string(env, "none"));
 #endif
-  set(env, version, "processor", string(env, "images-v17-texture-chunks-astcenc4.7"));
+  set(env, version, "processor", string(env, "images-v24-auto-texture-chunks-astcenc4.7"));
   set(env, version, "decoder", string(env, std::string("libpng-") + png_get_libpng_ver(nullptr) + "-rgba8-color-v2"));
   set(env, version, "pageSize", number(env, 2048));
   set(env, assets, "preparationVersion", version);

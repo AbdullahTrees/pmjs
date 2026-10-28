@@ -48,6 +48,7 @@ struct PreparedAsset {
   std::string compression;
   std::filesystem::path textureArtifact;
   bool framePages = false;
+  std::uint64_t ordinaryRetainedBytes = 0, textureRetainedBytes = 0;
 };
 struct AssetPreparationStats {
   std::uint64_t sourceDecodes = 0, sourceCacheHits = 0;

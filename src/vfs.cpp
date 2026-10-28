@@ -2,6 +2,7 @@
 #include "file_identity.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <sstream>
@@ -17,6 +18,18 @@
 namespace pmjs {
 
 namespace {
+
+bool identicalFiles(const std::filesystem::path& leftPath, const std::filesystem::path& rightPath) {
+  if (std::filesystem::file_size(leftPath) != std::filesystem::file_size(rightPath)) return false;
+  std::ifstream left(leftPath, std::ios::binary), right(rightPath, std::ios::binary);
+  if (!left || !right) return false;
+  std::array<char, 16384> a{}, b{};
+  do {
+    left.read(a.data(), a.size()); right.read(b.data(), b.size());
+    if (left.gcount() != right.gcount() || !std::equal(a.begin(), a.begin() + left.gcount(), b.begin())) return false;
+  } while (left.gcount());
+  return !left.bad() && !right.bad();
+}
 
 bool isContainedBy(const std::filesystem::path& root,
                    const std::filesystem::path& target) {
@@ -110,6 +123,10 @@ void Vfs::indexEntry(const std::filesystem::path& path, std::filesystem::file_st
     const auto logicalPath = path.lexically_normal();
     const auto [position, inserted] = entries.emplace(*key, logicalPath);
     if (!inserted && position->second != logicalPath) {
+      if (std::filesystem::is_regular_file(status) && identicalFiles(position->second, logicalPath)) {
+        position->second = std::min(position->second, logicalPath);
+        return;
+      }
       throw std::runtime_error("case-insensitive path collision: " +
                                position->second.string() + " and " +
                                logicalPath.string());

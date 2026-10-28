@@ -78,7 +78,7 @@ PreparedTexture sparse(SparsePalettePage page) {
   return out;
 }
 bool validLayout(const TextureLayout& l) {
-  if (l.width <= 0 || l.height <= 0 || l.width > 8192 || l.height > 8192) return false;
+  if (l.width <= 0 || l.height <= 0 || l.width > 16384 || l.height > 16384) return false;
   const auto kind = l.kind;
   if (kind < TextureKind::Dense8 || kind > TextureKind::Channels) return false;
   const bool sp = kind == TextureKind::Sparse16 || kind == TextureKind::Sparse24;
@@ -105,16 +105,17 @@ std::size_t textureTexelBytes(TextureFormat f) {
     case TextureFormat::RGB32UI:return 12; case TextureFormat::RGBA32UI:return 16; }
   return 0;
 }
-std::optional<PreparedTexture> makePreparedTexture(const ImagePixels& pixels, const ImageStorageDecision* known) {
+std::optional<PreparedTexture> makePreparedTexture(const ImagePixels& pixels, const ImageStorageDecision* known,
+                                                  std::size_t retainedLimit) {
   const auto classified = known ? *known : classifyImageStorage(pixels);
   if (classified.paletteBits == 16) {
     if (auto page = makeSparsePalettePage(pixels.width, pixels.height, pixels.rgba)) return sparse(std::move(*page));
   }
-  if (auto result = dense(pixels, classified)) return result;
+  if (auto result = dense(pixels, classified); result && validLayout(result->layout)) return result;
   if (auto page = makeSparsePalettePage(pixels.width, pixels.height, pixels.rgba, 262144)) {
     if (page->indexBytes == 3 && page->gpuBytes()+page->colors.size()*3 < pixels.rgba.size()) return sparse(std::move(*page));
   }
-  auto channel = makeChannelBlockPage(pixels.width, pixels.height, pixels.rgba);
+  auto channel = makeChannelBlockPage(pixels.width, pixels.height, pixels.rgba, retainedLimit);
   if (!channel) return {};
   PreparedTexture out; out.layout = {pixels.width, pixels.height, TextureKind::Channels, {}};
   const int height = (channel->bytes.size()+8191)/8192;

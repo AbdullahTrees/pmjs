@@ -205,7 +205,7 @@ function rect(value, positive = true) {
 }
 function validStorageDecision(value) {
   return value && value.version === 1 &&
-    [value.width, value.height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 8192) &&
+    [value.width, value.height].every(n => Number.isSafeInteger(n) && n > 0 && n <= 16384) &&
     [0, 8, 16].includes(value.paletteBits) && [1, 2, 4].includes(value.channels) &&
     Array.isArray(value.source) && value.source.length === 4 &&
     value.source.every(n => Number.isInteger(n) && n >= 0 && n < 4) &&
@@ -222,7 +222,7 @@ function descriptorOutputs(d) {
 }
 function validDescriptor(d) {
   if (!d || d.version !== 1 || !Number.isSafeInteger(d.width) || !Number.isSafeInteger(d.height) ||
-      d.width < 1 || d.height < 1 || !Array.isArray(d.pages) || !Array.isArray(d.cells) || d.pages.length > 4096 || d.cells.length > 4096) return false;
+      d.width < 1 || d.height < 1 || d.width > 16384 || d.height > 16384 || d.width * d.height > 33554432 || !Array.isArray(d.pages) || !Array.isArray(d.cells) || d.pages.length > 4096 || d.cells.length > 4096) return false;
   if (d.workspaceConstrained !== undefined && typeof d.workspaceConstrained !== 'boolean') return false;
   if (d.compression !== undefined) {
     return d.compression === 'astc-4x4' && d.width <= 8192 && d.height <= 8192 &&

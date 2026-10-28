@@ -131,7 +131,7 @@ async function main() {
   assert.ok(native.images.memory().cpuBytes <= maxPageBytes * 4);
   const blocksBeforeRetained = native.images.memory().blockRegions;
   for (let repeat = 0; repeat < 2; ++repeat) for (let frame = 0; frame < 12; ++frame) {
-    assert.deepEqual(draw(retained, frame), expected[frame][0]);
+    assertPixels(draw(retained, frame), expected[frame][0], 1);
     if (!palette && repeat === 0 && frame === 0) {
       const state = native.images.memory(20);
       const owner = state.largest.find(entry => entry.handle === retained.handle);
@@ -152,11 +152,11 @@ async function main() {
       const actualNearest = draw(retained, frame, false, false, false, true);
       let maxDelta = 0;
       for (let i = 0; i < actualNearest.length; ++i) maxDelta = Math.max(maxDelta, Math.abs(actualNearest[i] - expectedNearest[i]));
-      assert.ok(maxDelta <= 1, `nearest frame changed source samples: ${maxDelta}`);
+      assert.equal(maxDelta, 0, `nearest frame changed source samples: ${maxDelta}`);
     }
   } finally { native.images.release(nearestReference.handle); }
-  batches.forEach((batch, i) => assert.deepEqual(drawMany(retained, batch), expectedBatches[i]));
-  assert.deepEqual(draw(retained, 0, true), whole);
+  batches.forEach((batch, i) => assertPixels(drawMany(retained, batch), expectedBatches[i], 1));
+  assertPixels(draw(retained, 0, true), whole, 1);
   assertPixels(draw(retained, 0, true, true), wholeEffects, 1);
   native.images.release(retained.handle); clear();
   assert.equal(native.images.memory().cpuBytes, 0);
@@ -203,29 +203,36 @@ async function main() {
     const sparseStorage = await native.assets.classifyImageStorage(sparseFile);
     assert.equal(sparseStorage.paletteBits, sparse16 ? 16 : 0);
     assert.equal(native.assets.installImageStorage([{ source: name, sourceIdentity: sparseIdentity, storage: sparseStorage }]), 1);
+    const pageHashes = sparseDescriptor.pages.map(page => crypto.createHash('sha256')
+      .update(fs.readFileSync(path.join(sparseDirectory, page.path))).digest('hex'));
     const registryDescriptors = fs.existsSync('/proc/self/fd') ? fs.readdirSync('/proc/self/fd').length : null;
     assert.equal(native.assets.installPrepared([{ source: name, sourceIdentity: sparseIdentity,
-      directory: sparseDirectory, descriptor: sparseDescriptor,
+      directory: sparseDirectory, descriptor: sparseDescriptor, pageHashes,
       textureHash: crypto.createHash('sha256').update(fs.readFileSync(path.join(sparseDirectory, sparseDescriptor.textureArtifact))).digest('hex') }]), 1);
     if (registryDescriptors !== null) assert.equal(fs.readdirSync('/proc/self/fd').length, registryDescriptors);
     const sparseOriginal = native.images.loadBytes(sparseBytes);
+    const decodesBefore = native.images.memory().preparedPageDecodes;
     const sparsePrepared = await native.images.loadAsync(name);
+    assert.equal(native.images.memory().preparedPageDecodes, decodesBefore,
+      'hashed artifact-backed loads must not decode recovery pages');
     assert.equal(sparseDescriptor.textureArtifact, 'texture.pmtx');
     const artifactBefore = native.images.memory();
     const blocksBefore = native.images.memory().blockTextureUploads;
     try {
       for (let frame = 0; frame < 12; ++frame) for (const nearest of [false, true]) {
-        assert.deepEqual(draw(sparsePrepared, frame, false, false, false, nearest),
-          draw(sparseOriginal, frame, false, false, false, nearest));
+        assertPixels(draw(sparsePrepared, frame, false, false, false, nearest),
+          draw(sparseOriginal, frame, false, false, false, nearest), nearest ? 0 : 1);
         const actual = draw(sparsePrepared, frame, false, true, false, nearest);
         const expected = draw(sparseOriginal, frame, false, true, false, nearest);
         let maxDelta = 0;
         for (let i = 0; i < actual.length; ++i) maxDelta = Math.max(maxDelta, Math.abs(actual[i] - expected[i]));
         assert.ok(maxDelta <= 1, `sparse effect sampling changed source pixels: ${maxDelta}`);
       }
-      assert.deepEqual(draw(sparsePrepared, 0, true), draw(sparseOriginal, 0, true));
+      assertPixels(draw(sparsePrepared, 0, true), draw(sparseOriginal, 0, true), 1);
       const artifactAfter = native.images.memory();
       assert.equal(artifactAfter.textureArtifactLoads, artifactBefore.textureArtifactLoads + 1);
+      assert.equal(artifactAfter.preparedPageDecodes, decodesBefore,
+        'artifact draws must not decode recovery pages');
       assert.equal(artifactAfter.sourceTextureBuilds, artifactBefore.sourceTextureBuilds);
       assert.equal(artifactAfter.textureArtifactFailures, artifactBefore.textureArtifactFailures);
       assert.ok(artifactAfter.textureArtifactStagingBytes <= 1024 * 1024);
@@ -240,20 +247,47 @@ async function main() {
       assert.ok(owner.cpuBytes + owner.gpuBytes < sparsePixels.length);
       const canvas = native.canvas.create(width, height);
       const referenceCanvas = native.canvas.create(width, height);
+      const recoveryPath = sparse16 ? path.join(sparseDirectory, sparseDescriptor.pages[0].path) : null;
+      if (recoveryPath) {
+        fs.renameSync(recoveryPath, recoveryPath + '.retained');
+        fs.writeFileSync(recoveryPath, Buffer.alloc(32));
+      }
       try {
         for (const [target, source] of [[canvas, sparsePrepared], [referenceCanvas, sparseOriginal]])
           native.canvas.drawImage(target.handle, source.handle, 0, 0, width, height, 0, 0, width, height, 1);
         assert.deepEqual(Buffer.from(native.canvas.readPixels(canvas.handle, 0, 0, width, height)),
           Buffer.from(native.canvas.readPixels(referenceCanvas.handle, 0, 0, width, height)));
-      } finally { native.canvas.release(canvas.handle); native.canvas.release(referenceCanvas.handle); }
+      } finally {
+        native.canvas.release(canvas.handle); native.canvas.release(referenceCanvas.handle);
+        if (recoveryPath) {
+          fs.unlinkSync(recoveryPath); fs.renameSync(recoveryPath + '.retained', recoveryPath);
+        }
+      }
+      assert.ok(native.images.memory().preparedPageDecodes > decodesBefore,
+        'CPU access must recover pixels on demand');
     } finally { native.images.release(sparseOriginal.handle); native.images.release(sparsePrepared.handle); clear(); }
     assert.equal(native.images.memory().cpuBytes, 0); assert.equal(native.images.memory().gpuBytes, 64);
     if (sparse16) {
       const artifact = path.join(sparseDirectory, sparseDescriptor.textureArtifact);
       const pristine = fs.readFileSync(artifact);
       const register = () => assert.equal(native.assets.installPrepared([{ source: name,
-        sourceIdentity: sparseIdentity, directory: sparseDirectory, descriptor: sparseDescriptor,
+        sourceIdentity: sparseIdentity, directory: sparseDirectory, descriptor: sparseDescriptor, pageHashes,
         textureHash: crypto.createHash('sha256').update(pristine).digest('hex') }]), 1);
+      const pagePath = path.join(sparseDirectory, sparseDescriptor.pages[0].path);
+      const pristinePage = fs.readFileSync(pagePath);
+      const damagedPage = Buffer.from(pristinePage); damagedPage[damagedPage.length - 1] ^= 1;
+      fs.writeFileSync(pagePath, damagedPage); register();
+      const hits = native.images.memory().preparedHits;
+      const badRecovery = await native.images.loadAsync(name);
+      assert.equal(native.images.memory().preparedHits, hits, 'recovery hash mismatch must reject preparation');
+      const badReference = native.images.loadBytes(sparseBytes);
+      assertPixels(draw(badRecovery, 0, true), draw(badReference, 0, true), 1);
+      native.images.release(badRecovery.handle); native.images.release(badReference.handle); clear();
+      fs.writeFileSync(pagePath, pristinePage); register();
+      const cpuDecodes = native.images.memory().preparedPageDecodes;
+      const cpuRetained = await native.images.loadAsync(name, true);
+      assert.ok(native.images.memory().preparedPageDecodes > cpuDecodes);
+      native.images.release(cpuRetained.handle); clear();
       const expected = native.images.loadBytes(sparseBytes);
       const reference = draw(expected, 0, true);
       native.images.release(expected.handle); clear();
@@ -273,12 +307,12 @@ async function main() {
         const before = native.images.memory();
         const recovered = await native.images.loadAsync(name);
         const started = performance.now();
-        assert.deepEqual(draw(recovered, 0, true), reference);
+        assertPixels(draw(recovered, 0, true), reference, 1);
         const elapsedMs = performance.now() - started;
         const after = native.images.memory();
         assert.equal(after.textureArtifactFailures, before.textureArtifactFailures + 1);
         assert.equal(after.sourceTextureBuilds, before.sourceTextureBuilds + 1);
-        assert.deepEqual(draw(recovered, 0, true), reference);
+        assertPixels(draw(recovered, 0, true), reference, 1);
         assert.equal(native.images.memory().sourceTextureBuilds, after.sourceTextureBuilds);
         native.images.release(recovered.handle); clear();
         assert.equal(native.images.memory().cpuBytes, 0); assert.equal(native.images.memory().gpuBytes, 64);
@@ -289,7 +323,7 @@ async function main() {
       fs.renameSync(artifact, artifact + '.retained');
       fs.writeFileSync(artifact, Buffer.alloc(32));
       const before = native.images.memory();
-      assert.deepEqual(draw(retainedArtifact, 0, true), reference);
+      assertPixels(draw(retainedArtifact, 0, true), reference, 1);
       assert.equal(native.images.memory().textureArtifactLoads, before.textureArtifactLoads + 1);
       assert.equal(native.images.memory().sourceTextureBuilds, before.sourceTextureBuilds);
       native.images.release(retainedArtifact.handle); clear();
@@ -306,7 +340,7 @@ async function main() {
       register();
       const beforeSwap = native.images.memory();
       const substituted = await native.images.loadAsync(name);
-      assert.deepEqual(draw(substituted, 0, true), reference);
+      assertPixels(draw(substituted, 0, true), reference, 1);
       assert.equal(native.images.memory().textureArtifactFailures, beforeSwap.textureArtifactFailures + 1);
       assert.equal(native.images.memory().sourceTextureBuilds, beforeSwap.sourceTextureBuilds + 1);
       native.images.release(substituted.handle); clear();

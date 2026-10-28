@@ -81,6 +81,13 @@ async function main() {
             pixels.slice(index * 4, index * 4 + 4)));
         }
       } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+    } else if (name.endsWith('.jpg')) {
+      const directory = temporaryDirectory('jpeg-preparation-');
+      const source = path.join(directory, name), output = path.join(directory, 'prepared');
+      fs.writeFileSync(source, bytes);
+      await assert.rejects(native.assets.processImage(name, output, { grid: [1, 1] }, source),
+        /invalid preparation PNG/, 'the PNG-only preparation API must reject JPEG without publishing output');
+      assert.ok(!fs.existsSync(output) || fs.readdirSync(output).length === 0);
     }
     native.canvas.release(target.handle);
   }

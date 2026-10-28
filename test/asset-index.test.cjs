@@ -182,7 +182,24 @@ test('offline asset lookup follows native VFS case folding and rejects path coll
   fs.symlinkSync(path.join(outside, 'Outside.png'), path.join(root, 'Img', 'Characters', 'Outside.png'));
   assert.equal(offlineFilesystem(root, new Map()).assets.sourcePath('img/characters/outside.png'), null);
 
+  fs.writeFileSync(path.join(root, 'Img', 'Characters', 'hero.PNG'), 'hero');
+  assert.equal(offlineFilesystem(root, new Map()).assets.sourcePath('img/characters/HERO.png'),
+    path.join(root, 'Img', 'Characters', 'Hero.png'));
   fs.writeFileSync(path.join(root, 'Img', 'Characters', 'hero.PNG'), 'collision');
+  assert.throws(() => offlineFilesystem(root, new Map()), /case-insensitive path collision/);
+});
+
+test('identical aliases compare complete files and never merge directories', () => {
+  const root = temporaryDirectory('offline-aliases-');
+  const contents = Buffer.alloc(32769, 73);
+  fs.writeFileSync(path.join(root, 'Alias.png'), contents);
+  fs.writeFileSync(path.join(root, 'alias.png'), contents);
+  assert.equal(offlineFilesystem(root, new Map()).assets.sourcePath('ALIAS.PNG'), path.join(root, 'Alias.png'));
+  contents[32768] ^= 1;
+  fs.writeFileSync(path.join(root, 'alias.png'), contents);
+  assert.throws(() => offlineFilesystem(root, new Map()), /case-insensitive path collision/);
+  fs.unlinkSync(path.join(root, 'alias.png'));
+  fs.mkdirSync(path.join(root, 'Folder')); fs.mkdirSync(path.join(root, 'folder'));
   assert.throws(() => offlineFilesystem(root, new Map()), /case-insensitive path collision/);
 });
 

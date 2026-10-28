@@ -1554,3 +1554,13 @@ test('texture artifacts participate in cache validation and repair', async () =>
     assert.equal(f.jobs, 3);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test('logical image limits allow tall sources without enlarging physical pages', () => {
+  const descriptor = { version: 1, width: 16, height: 16384, halo: 1,
+    uniform: [17, 29, 43, 0], pages: [], cells: [] };
+  for (const height of [11200, 13488, 16384])
+    assert.equal(validDescriptor({ ...descriptor, height }), true);
+  assert.equal(validDescriptor({ ...descriptor, height: 16385 }), false);
+  assert.equal(validDescriptor({ ...descriptor, width: 2048 }), true, '128 MiB is inclusive');
+  assert.equal(validDescriptor({ ...descriptor, width: 2049 }), false, 'decoded size bound is independent of dimension bound');
+});

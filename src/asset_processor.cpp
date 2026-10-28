@@ -236,6 +236,7 @@ class PreparationSource {
   };
   PreparationSource(const std::filesystem::path& path, Workspace& workspace) : workspace(workspace), path_(path) {
     initial_ = open(); width = initial_->width; height = initial_->height;
+    if (!checkedImageExtent(width, height, 16384)) throw AssetPreparationUnsupported("preparation image exceeds logical limits");
     const auto size = static_cast<std::uint64_t>(width) * height * 4;
     if (size <= SIZE_MAX) cache_ = workspace.retain(static_cast<std::size_t>(size));
   }
@@ -607,6 +608,7 @@ void emitLayout(PreparationSource& source, const std::filesystem::path& staging,
       });
   }
   if (!asset.pages.empty()) std::filesystem::create_directories(staging);
+  asset.ordinaryRetainedBytes = 0;
   for (std::size_t index = 0; index < asset.pages.size(); ++index) {
     auto& page = asset.pages[index];
     auto bytes = renderPage(source, asset, static_cast<int>(index), index == 0, &recipe);
@@ -635,10 +637,13 @@ void emitLayout(PreparationSource& source, const std::filesystem::path& staging,
     }
     page.path.replace_extension(lz4Pages ? ".pml4" : ".png");
     if (lz4Pages) {
-      writeLz4Page(staging / page.path, page.width, page.height, bytes, true);
+      std::uint64_t retained = 0;
+      writeLz4Page(staging / page.path, page.width, page.height, bytes, true, &retained);
+      asset.ordinaryRetainedBytes += retained;
       ++source.workspace.stats.lz4Encodes;
     } else {
       writePng(staging / page.path, page.width, page.height, bytes);
+      asset.ordinaryRetainedBytes += std::uint64_t(page.width)*page.height*5;
       ++source.workspace.stats.pngEncodes;
     }
     source.workspace.stats.encodedPixels += static_cast<std::uint64_t>(page.width) * page.height;
@@ -1201,12 +1206,15 @@ namespace {
 void emitTexture(PreparationSource& source, const std::filesystem::path& staging,
                  PreparedAsset& asset, const AssetRecipe& recipe) {
   asset.textureArtifact.clear();
-  if (!asset.framePages || asset.uniform || recipe.crop || recipe.backdrop != AssetColor{} ||
-      asset.width != source.width || asset.height != source.height || source.width > 8192 || source.height > 8192) return;
+  const bool automatic = !recipe.framePages;
+  if ((automatic && (std::max(asset.ordinaryRetainedBytes, std::uint64_t(source.width)*source.height*4) < 4U*1024U*1024U ||
+      (asset.blockGrid && asset.blockChannels.value_or(0) > 0) || asset.compactEligible.value_or(false))) ||
+      asset.uniform || recipe.crop || recipe.backdrop != AssetColor{} ||
+      asset.width != source.width || asset.height != source.height || source.width > 16384 || source.height > 16384) return;
   source.releaseCache();
   const auto size = std::size_t(source.width)*source.height*4;
   // Reserve input, output, dictionary overhead and chunk encoding scratch together.
-  auto reservation = source.workspace.retain(size*4 + 32U*1024U*1024U, false);
+  auto reservation = source.workspace.retain(size + 8U*1024U*1024U, false);
   if (!reservation) return;
   try {
     ImagePixels pixels{source.width, source.height, std::vector<std::uint8_t>(size)};
@@ -1216,9 +1224,29 @@ void emitTexture(PreparationSource& source, const std::filesystem::path& staging
       std::memcpy(pixels.rgba.data()+std::size_t(y)*source.width*4, rows.row.data(), rows.row.size());
     }
     rows.finish();
-    auto texture = makePreparedTexture(pixels);
+    const auto classified = classifyImageStorage(pixels);
+    const bool boundedPalette = classified.paletteBits && source.width <= 8192 && source.height <= 8192;
+    auto encoding = source.workspace.retain(size*(boundedPalette ? 2 : 3) + 24U*1024U*1024U, false);
+    if (!encoding) return;
+    // Nonzero fills may require reconstructed cells or a full-source texture.
+    // Keep mixed layouts conservative: a zero-fill first draw can use only its atlas.
+    if (automatic && !asset.cells.empty() && std::all_of(asset.cells.begin(), asset.cells.end(),
+        [](const auto& cell) { return cell.fill != AssetColor{}; }))
+      asset.ordinaryRetainedBytes += std::uint64_t(source.width)*source.height*imageChannelStorage(pixels).channels;
+    auto texture = makePreparedTexture(pixels, &classified, automatic ? asset.ordinaryRetainedBytes : 0);
     if (!texture) return;
+    std::uint64_t retained = 0;
+    for (const auto& plane : texture->layout.planes)
+      retained += std::uint64_t(plane.width)*plane.height*textureTexelBytes(plane.format);
+    if (texture->layout.kind != TextureKind::Channels) retained += texture->bytes[1].size()*2;
+    asset.textureRetainedBytes = retained;
+    // Fill-only layouts already realize the same dense palette without recovery pages.
+    if (automatic && asset.pages.empty() &&
+        (texture->layout.kind == TextureKind::Dense8 || texture->layout.kind == TextureKind::Dense16))
+      asset.ordinaryRetainedBytes = retained;
+    if (automatic && retained >= asset.ordinaryRetainedBytes) return;
     writeTextureArtifact(staging / "texture.pmtx", *texture);
+    asset.framePages = true;
     asset.textureArtifact = "texture.pmtx";
   } catch (const std::invalid_argument&) {
     std::filesystem::remove(staging / "texture.pmtx");
@@ -1341,7 +1369,7 @@ PreparedAsset prepareAssetImage(const std::filesystem::path& path,
       if (!recipe.framePages) selected = optimize(std::move(*selected));
     }
   } catch (const AssetPreparationUnsupported&) {
-    if (!options.lz4Pages || recipe.crop || recipe.columns <= 0 || recipe.rows <= 0 ||
+    if ((!options.lz4Pages && source.width <= 8192 && source.height <= 8192) || recipe.crop || recipe.columns <= 0 || recipe.rows <= 0 ||
         recipe.columns > 4096 || recipe.rows > 4096 / recipe.columns ||
         source.width % recipe.columns || source.height % recipe.rows) throw;
     PreparedAsset flat;

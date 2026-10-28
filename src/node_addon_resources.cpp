@@ -699,7 +699,7 @@ std::array<int, N> preparedArray(napi_env env, napi_value object, const char* ke
     napi_value item;
     check(env, napi_get_element(env, array, i, &item), "invalid prepared image tuple value");
     const auto number = asNumber(env, item);
-    if (!std::isfinite(number) || number != std::floor(number) || number < -1 || number > 8192)
+    if (!std::isfinite(number) || number != std::floor(number) || number < -1 || number > 16384)
       throw std::runtime_error("invalid prepared image integer");
     result[i] = static_cast<int>(number);
   }

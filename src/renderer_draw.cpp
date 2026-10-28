@@ -761,10 +761,12 @@ void Renderer::renderScene() {
       // A constant texture needs no UV remapping in the inline effect sampler.
       (inlineMatrix == nullptr || uniformPrepared);
     const bool derivedEligible = frameEligible && derivedSampling && !command.appliesSpriteColor;
+    const bool wholeSource = logicalInfo && command.source[0] == 0 && command.source[1] == 0 &&
+      command.source[2] == logicalInfo->width && command.source[3] == logicalInfo->height;
     auto derived = !command.nearest && frameEligible && paletteEligible &&
       images_.hasPaletteStorage(command.image) ? images_.resolveSpriteRegion(command.image,
         command.source[0], command.source[1], command.source[2], command.source[3],
-        command.pixiSpritePacking && !command.premultipliedSpriteTexture) :
+        command.pixiSpritePacking && !command.premultipliedSpriteTexture, wholeSource) :
       std::optional<SpriteImageRegion>{};
     if (!derived && !command.nearest && frameEligible && paletteEligible && images_.hasPaletteStorage(command.image))
       derived = images_.resolvePreparedFrameRegion(command.image,
