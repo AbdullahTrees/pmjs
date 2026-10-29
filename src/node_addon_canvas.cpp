@@ -295,6 +295,40 @@ napi_value canvasDrawImage(napi_env env, napi_callback_info info) try {
   auto a=arguments(env,info,12); if(!host(env).canvases.drawImage(asUint32(env,a.at(0)),asUint32(env,a.at(1)),asNumber(env,a.at(2)),asNumber(env,a.at(3)),asNumber(env,a.at(4)),asNumber(env,a.at(5)),asNumber(env,a.at(6)),asNumber(env,a.at(7)),asNumber(env,a.at(8)),asNumber(env,a.at(9)),asNumber(env,a.at(10)), a.size() < 12 || asBoolean(env,a.at(11)))) throw std::runtime_error("invalid canvas image"); return undefined(env);
 } catch(const std::exception& error){napi_throw_range_error(env,nullptr,error.what());return nullptr;}
 
+napi_value canvasDrawImageBatch(napi_env env, napi_callback_info info) try {
+  auto args = arguments(env, info, 4);
+  auto destination = asUint32(env, args.at(0)), source = asUint32(env, args.at(1));
+  float alpha = asNumber(env, args.at(3));
+  napi_typedarray_type type;
+  size_t length = 0, offset = 0;
+  void* data = nullptr;
+  napi_value buffer;
+  check(env, napi_get_typedarray_info(env, args.at(2), &type, &length, &data, &buffer, &offset),
+    "image batch requires Float32Array");
+  if (type != napi_float32_array || length % 9 || length > 9 * 4096 ||
+      !std::isfinite(alpha) || alpha < 0 || alpha > 1)
+    throw std::invalid_argument("invalid image batch");
+  auto* rows = static_cast<const float*>(data);
+  for (size_t i = 0; i < length; i += 9) {
+    for (size_t j = 0; j < 9; ++j)
+      if (!std::isfinite(rows[i + j])) throw std::invalid_argument("invalid image batch geometry");
+    if (rows[i + 2] <= 0 || rows[i + 3] <= 0 || rows[i + 6] <= 0 || rows[i + 7] <= 0 ||
+        (rows[i + 8] != 0 && rows[i + 8] != 1))
+      throw std::invalid_argument("invalid image batch geometry");
+  }
+  auto& state = host(env);
+  if (!state.canvases.info(destination) ||
+      (!state.canvases.info(source) && !state.images.inspect(source)))
+    throw std::invalid_argument("invalid image batch resource");
+  for (size_t i = 0; i < length; i += 9)
+    if (!state.canvases.drawImage(destination, source, rows[i], rows[i+1], rows[i+2], rows[i+3],
+        rows[i+4], rows[i+5], rows[i+6], rows[i+7], alpha, rows[i+8] != 0))
+      throw std::runtime_error("image batch draw failed");
+  return undefined(env);
+} catch (const std::exception& error) {
+  napi_throw_range_error(env, nullptr, error.what()); return nullptr;
+}
+
 napi_value paintRect(napi_env env, napi_callback_info info) try {
   auto a = arguments(env, info, 13);
   std::array<float, 4> rect, gradient;
@@ -723,6 +757,7 @@ void registerCanvasBindings(napi_env env, napi_value exports) {
   method(env, canvas, "clear", clearCanvas);
   method(env, canvas, "clearRect", clearRect);
   method(env, canvas, "drawImage", canvasDrawImage);
+  method(env, canvas, "drawImageBatch", canvasDrawImageBatch);
   method(env, canvas, "paintRect", paintRect);
   method(env, canvas, "drawText", drawText);
   method(env, canvas, "drawOutlinedText", drawOutlinedText);

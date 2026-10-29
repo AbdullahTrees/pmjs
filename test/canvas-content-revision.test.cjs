@@ -32,6 +32,7 @@ function harness() {
         clearRect() {},
         drawText() {},
         drawImage() { calls.drawImage.push(Array.from(arguments)); },
+        drawImageBatch() { calls.batch = Array.from(arguments); },
         writePremultipliedPixels() { calls.writePremultipliedPixels++; },
         compositePixels() { calls.compositePixels.push(Array.from(arguments)); },
         readPremultipliedPixels(_handle, _x, _y, width, height) {
@@ -206,6 +207,23 @@ test('resizing a canvas resets the existing 2D context state', () => {
   drawing.translate(12, 8);
   drawing.globalAlpha = 0.25;
   drawing.fillStyle = '#f00';
+  drawing.strokeStyle = '#00ff00';
+  drawing.font = '24px serif';
+  drawing.globalCompositeOperation = 'copy';
+  drawing.textAlign = 'center';
+  drawing.textBaseline = 'top';
+  drawing.imageSmoothingEnabled = false;
+  drawing.lineWidth = 3;
+  drawing.lineCap = 'round';
+  drawing.lineJoin = 'bevel';
+  drawing.miterLimit = 5;
+  drawing.lineDashOffset = 2;
+  drawing.setLineDash([3, 4]);
+  drawing.shadowColor = '#ff0000';
+  drawing.shadowBlur = 4;
+  drawing.shadowOffsetX = 2;
+  drawing.shadowOffsetY = 3;
+  drawing.save();
   drawing.beginPath();
   drawing.rect(0, 0, 1, 1);
   drawing.clip();
@@ -214,6 +232,19 @@ test('resizing a canvas resets the existing 2D context state', () => {
   assert.deepEqual(Array.from(drawing._transform), [1, 0, 0, 1, 0, 0]);
   assert.equal(drawing.globalAlpha, 1);
   assert.equal(drawing.fillStyle, '#000000');
+  assert.equal(drawing.strokeStyle, '#000000');
+  assert.equal(drawing.font, '10px sans-serif');
+  assert.equal(drawing.globalCompositeOperation, 'source-over');
+  assert.equal(drawing.textAlign, 'start');
+  assert.equal(drawing.textBaseline, 'alphabetic');
+  assert.equal(drawing.imageSmoothingEnabled, true);
+  assert.deepEqual([drawing.lineWidth, drawing.lineCap, drawing.lineJoin, drawing.miterLimit], [1, 'butt', 'miter', 10]);
+  assert.equal(drawing.lineDashOffset, 0);
+  assert.equal(drawing.getLineDash().length, 0);
+  assert.deepEqual([drawing.shadowColor, drawing.shadowBlur, drawing.shadowOffsetX, drawing.shadowOffsetY],
+    ['rgba(0, 0, 0, 0)', 0, 0, 0]);
+  drawing.restore();
+  assert.equal(drawing.globalAlpha, 1);
   assert.equal(drawing._clipPaths.length, 0);
   assert.equal(drawing._stateStack.length, 0);
 });
@@ -592,4 +623,34 @@ test('affine smoothing interpolates premultiplied pixels and preserves reflectio
     assert.deepEqual(filtered, expected.flat());
     assert.notDeepEqual(filtered, nearest);
   }
+});
+
+
+test('image batches preserve revision tracking and reject unsupported state before drawing', () => {
+  const realm = harness(), destination = new realm.CanvasElement(), source = new realm.CanvasElement();
+  destination.width = destination.height = source.width = source.height = 64;
+  const context = destination.getContext('2d'), batch = realm.PMJS.web.canvas.drawImageBatch;
+  const rectangles = [0,0,16,16,0,0,32,32, 16,16,16,16,8,8,8,8];
+  context.imageSmoothingEnabled = false;
+  const revision = destination.__pmjsContentRevision;
+  assert.equal(batch(context, source, rectangles), true);
+  assert.ok(destination.__pmjsContentRevision > revision);
+  assert.equal(realm.calls.batch[2][8], 0);
+  assert.equal(realm.calls.batch[2][17], 1, 'downscaling retains the existing smoothing rule');
+  const accepted = realm.calls.batch;
+  for (const change of [() => context.translate(1,0), () => context.globalCompositeOperation = 'copy',
+    () => context._clipPaths.push([]), () => context.shadowOffsetX = 2]) {
+    context.resetTransform(); context.globalCompositeOperation = 'source-over'; context._clipPaths = [];
+    context.shadowColor = '#000000'; context.shadowOffsetX = 0;
+    change();
+    assert.equal(batch(context, source, rectangles), false);
+    assert.equal(realm.calls.batch, accepted);
+  }
+  context.shadowOffsetX = 0;
+  assert.equal(batch(context, source, [0,0,16,16,0,0,32,32, 60,0,16,16,0,0,16,16]), false);
+  assert.equal(realm.calls.batch, accepted, 'a later invalid rectangle cannot partially draw');
+  realm.NativeHost.canvas.drawImageBatch = () => { throw new Error('draw failure'); };
+  const failedRevision = destination.__pmjsContentRevision;
+  assert.throws(() => batch(context, source, rectangles), /draw failure/);
+  assert.ok(destination.__pmjsContentRevision > failedRevision, 'failed native draws invalidate cached content');
 });

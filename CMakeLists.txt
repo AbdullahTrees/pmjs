@@ -528,6 +528,7 @@ if(BUILD_TESTING)
     # Canvas and text
     node-render-to-canvas
     node-canvas-deferred
+    node-canvas-image-batch
     node-canvas-pixels
     node-canvas-webp
     node-canvas-radial-gradient

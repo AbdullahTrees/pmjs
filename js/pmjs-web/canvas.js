@@ -6,15 +6,24 @@ function CanvasContext2D(canvas) {
   resetCanvasContextState(this);
 }
 
-var canvasStateDefaults = {
-  fillStyle: '#000000', strokeStyle: '#000000', globalAlpha: 1,
-  globalCompositeOperation: 'source-over', font: '10px sans-serif',
-  textAlign: 'start', textBaseline: 'alphabetic', lineWidth: 1,
-  lineCap: 'butt', lineJoin: 'miter', miterLimit: 10, imageSmoothingEnabled: true,
-  lineDashOffset: 0, shadowColor: 'rgba(0, 0, 0, 0)', shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0
-};
 function resetCanvasContextState(context) {
-  for (var key in canvasStateDefaults) context[key] = canvasStateDefaults[key];
+  context._fillStyle = '#000000';
+  context._strokeStyle = '#000000';
+  context._globalAlpha = 1;
+  context._compositeOperation = 'source-over';
+  context._font = '10px sans-serif';
+  context.textAlign = 'start';
+  context.textBaseline = 'alphabetic';
+  context._lineWidth = 1;
+  context._lineCap = 'butt';
+  context._lineJoin = 'miter';
+  context._miterLimit = 10;
+  context._imageSmoothingEnabled = true;
+  context._lineDashOffset = 0;
+  context._shadowColor = 'rgba(0, 0, 0, 0)';
+  context._shadowBlur = 0;
+  context._shadowOffsetX = 0;
+  context._shadowOffsetY = 0;
   context._transform = [1, 0, 0, 1, 0, 0];
   context._stateStack = [];
   context._circlePath = null;
@@ -1960,7 +1969,36 @@ var nativeTextCanvasMethods = ['fillText', 'strokeText', 'save', 'restore'].map(
   return { name: name, method: CanvasContext2D.prototype[name] };
 });
 
+var batchDrawImageMethod = CanvasContext2D.prototype.drawImage;
+
 Object.assign(PMJS.web.canvas, {
+  drawImageBatch: function(context, source, rectangles) {
+    if (!canvasIsUntransformedSourceOver(context) || context.drawImage !== batchDrawImageMethod ||
+        !(source instanceof CanvasElement) || typeof NativeHost.canvas.drawImageBatch !== 'function' ||
+        !context.canvas.width || !context.canvas.height || !Number.isFinite(context.globalAlpha)) return false;
+    if (rectangles.length % 8 || rectangles.length > 8 * 4096) return false;
+    var rows = new Float32Array(rectangles.length / 8 * 9);
+    for (var i = 0, out = 0; i < rectangles.length; i += 8, out += 9) {
+      for (var j = 0; j < 8; j++) {
+        var value = rectangles[i + j];
+        if (!Number.isFinite(value) || !Number.isFinite(Math.fround(value))) return false;
+        rows[out + j] = value;
+      }
+      if (rows[out] < 0 || rows[out+1] < 0 || rows[out+2] <= 0 || rows[out+3] <= 0 ||
+          rows[out+6] <= 0 || rows[out+7] <= 0 ||
+          rows[out] + rows[out+2] > source.width || rows[out+1] + rows[out+3] > source.height) return false;
+      rows[out+8] = canvasImageSmoothing(context, rows[out+2], rows[out+3], rows[out+6], rows[out+7]) ? 1 : 0;
+    }
+    if (source._pmjsPrimitiveContent) source._pmjsPrimitiveContent.materialize();
+    var nativeSource = typeof source._pmjsNativeTextureSource === 'function'
+      ? source._pmjsNativeTextureSource() : source._nativeCanvas;
+    if (!nativeSource) nativeSource = source._ensureNativeCanvas();
+    try {
+      NativeHost.canvas.drawImageBatch(context.canvas._ensureNativeCanvas().handle,
+        nativeSource.handle, rows, Math.max(0, Math.min(1, context.globalAlpha)));
+    } finally { context.canvas._pmjsContentChanged(); }
+    return true;
+  },
   blur: function(canvas) {
     NativeHost.canvas.blur(canvas._ensureNativeCanvas().handle);
   },
