@@ -417,7 +417,7 @@ async function prepareAssetsPhase({ gameRoot, cacheRoot, recipes, native, onProg
     const frames = new Map([...discoveredFrames].map(([source, frame]) => [source.toLowerCase(), frame]));
     const automaticRecipes = { version: 1, sideview: [...frames].sort(([a], [b]) => a.localeCompare(b)) };
     report('discover');
-    const sources = session.inventory.filter(source => safeSource(source) || decryptedSource(source));
+    const sources = imageSourceList(session.inventory);
     const settings = await encryptionSettings(native, gameRoot, session.files);
     result.total = sources.length;
     report('discover');
@@ -753,7 +753,7 @@ async function prepareAssetsPhase({ gameRoot, cacheRoot, recipes, native, onProg
         return true;
       });
       const storage = native.assets.installImageStorage ? await native.assets.installImageStorage(result.storageEntries, true) : null;
-      const installed = await native.assets.installPrepared(result.entries, false, true);
+      const installed = await native.assets.installPrepared(result.entries, true, true);
       result.activation = { accepted: installed?.accepted || [], rejected: [...(result.activation?.rejected || []), ...(storage?.rejected || []), ...(installed?.rejected || [])] };
       result.prepared = result.entries.length;
       result.installed = installed?.accepted ? installed.accepted.length : Number.isInteger(installed) ? installed : result.entries.length;
@@ -796,5 +796,9 @@ async function prepareAssets(options) {
   return result.images;
 }
 
+function imageSourceList(inventory) {
+  return (inventory || []).filter(source => safeSource(source) || decryptedSource(source));
+}
+
 module.exports = { astcSettings, validLosslessPrefixes, prepareAssetsPhase, prepareAssets, validRecipes,
-  validDescriptor, validStorageDecision, automaticRecipe, PROCESSOR_IDENTITY };
+  validDescriptor, validStorageDecision, automaticRecipe, PROCESSOR_IDENTITY, imageSourceList };
