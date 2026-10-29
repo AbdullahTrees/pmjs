@@ -8,7 +8,7 @@ const vm = require('node:vm');
 
 const { runModule } = require('./helpers/runtime-context.cjs');
 
-function createHarness() {
+function createHarness(options = {}) {
   class NoiseFilter {
     constructor() {
       this.noise = 0;
@@ -63,6 +63,16 @@ function createHarness() {
   sandbox.nativeMaskWorldTransform = function() {
     return sandbox.nativeIdentityTransform;
   };
+  if (options.disabledOptimizations) {
+    const registered = [];
+    sandbox.PMJS = { optimizations: {
+      register(definition) { registered.push(definition.id); },
+      isEnabled(id) {
+        assert.ok(registered.includes(id), 'optimization checked before registration: ' + id);
+        return !options.disabledOptimizations.includes(id);
+      }
+    } };
+  }
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   runModule(sandbox, 'js/pmjs-pixi4/scene-filters.js');
@@ -138,6 +148,17 @@ test('zero-strength screen-effect filters render as identity', () => {
   ])));
   assert.equal(plan.unsupported, false);
   assert.deepEqual(plan.groups, []);
+});
+
+test('disabling identity-filter elision keeps zero-strength passes', () => {
+  const sandbox = createHarness({
+    disabledOptimizations: ['render.identity-filter-elision'] });
+  const plan = JSON.parse(JSON.stringify(sandbox.nativeSceneFilter({}, [
+    new sandbox.PIXI.filters.BlurFilter(),
+    new sandbox.PIXI.filters.ZoomBlurFilter(),
+    new sandbox.PIXI.filters.AdvancedBloomFilter()
+  ])));
+  assert.equal(plan.groups.length, 3);
 });
 
 test('an active screen-effect filter still renders', () => {
