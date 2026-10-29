@@ -271,7 +271,21 @@ function nativeWindowLayerHasContent(node) {
 // later animation can ramp them up. The custom-filter path would still run
 // every pass each frame (a zero-strength BlurFilter is two directions times its
 // quality, e.g. eight passes at quality 4), so leave identity filters out.
+// Dropping the passes also drops the group's own compositing, so pixels can
+// differ slightly from PIXI; PMJS_DISABLE_OPT=render.identity-filter-elision
+// restores the exact chain.
+var nativeIdentityFilterElision = null;
+if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
+    typeof PMJS.optimizations.register === 'function') {
+  PMJS.optimizations.register({ id: 'render.identity-filter-elision', owner: 'pmjs-pixi4',
+    fallback: 'run every enabled filter pass, including zero-strength ones' });
+}
 function nativeFilterIsIdentity(filter) {
+  if (nativeIdentityFilterElision === null) {
+    nativeIdentityFilterElision = typeof PMJS === 'undefined' || !PMJS.optimizations ||
+      PMJS.optimizations.isEnabled('render.identity-filter-elision');
+  }
+  if (!nativeIdentityFilterElision) return false;
   var BlurFilter = PIXI.filters && PIXI.filters.BlurFilter;
   if (nativeFilterMatches(filter, BlurFilter, 'BlurFilter')) {
     var blurX = filter.blurX !== undefined ? filter.blurX : filter.blur;
