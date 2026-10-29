@@ -34,7 +34,9 @@
   // Reviewed Pixi 4.8.9 / MV 1.6.1 transforms; LF and CRLF are pinned separately.
   var reviewedTransforms = {
     '1a091756d85883232da57aa53141f43968c21abfc58b6b231a46c0faa9014861': 'container',
+    'c44d52cfc99a419e1167eab4728e62535865ba7b08fbf7007256347c54279a05': 'container',
     'f611889101e9659a0c13ef6cdfa1b6a0be5edb374a52ad864169ddf6976d9a8e': 'leaf',
+    '43d25c2c3496afbacdd20beb43bf22665df1c53ee92c01ffcc5e01a9417bb06d': 'leaf',
     '82e01e278fa992ea039746f47f6a00d322d7d4eb4de96042ab43a243f90abfb5': 'Window',
     'cfcbeacef1f4ca9ed869519fdba23e734e6e70e75bce5b05bb75718e6fea548a': 'Window',
     '157efc2a1a0d853d5b1a73253fb03d8e341262a186b777058e2477f94d38699e': 'Tilemap',

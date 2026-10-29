@@ -223,3 +223,25 @@ test('Pixi baseline loads before plugin setup, with scan after adapters', () => 
     composed.indexOf('native-runtime/js/pmjs-mv/bootstrap.js'));
   assert.ok(composed.indexOf('native-runtime/js/pmjs-mv/plugin-loader.js') >= 0);
 });
+
+
+test('reviewed Pixi transforms admit both line endings and reject changed bodies', () => {
+  const reference = require('./assets/pixi4-transforms.cjs');
+  for (const newline of ['\n', '\r\n']) {
+    const sandbox = { __pmjsBuiltinRequire: require, PIXI: {}, PMJS: {} };
+    vm.createContext(sandbox);
+    vm.runInContext('function DisplayObject() {} function Container() {} ' +
+      'PIXI.DisplayObject=DisplayObject; PIXI.Container=Container;', sandbox);
+    sandbox.containerSource = reference.container.replace(/\n/g, newline);
+    sandbox.leafSource = reference.leaf.replace(/\n/g, newline);
+    vm.runInContext('Container.prototype.updateTransform=(' + sandbox.containerSource + ');' +
+      'DisplayObject.prototype.updateTransform=(' + sandbox.leafSource + ');', sandbox);
+    vm.runInContext(source, sandbox);
+    for (const Type of [sandbox.Container, sandbox.DisplayObject]) {
+      const node = new Type(); node.transform = { updateTransform() {} }; node.children = [];
+      assert.ok(sandbox.pmjsPixiRenderPreflight.transformPlan(node));
+      node.updateTransform = function() { this.customSideEffect = true; };
+      assert.equal(sandbox.pmjsPixiRenderPreflight.transformPlan(node), null);
+    }
+  }
+});
