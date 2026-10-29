@@ -22,7 +22,7 @@ def require(commands):
     missing = [name for name in commands if shutil.which(name) is None]
     if missing:
         raise ValueError("Missing build tools: " + ", ".join(missing) +
-                         ". Install the host requirements in docs/building.md.")
+                         ". Install the host requirements in README.md.")
 
 
 def main():
@@ -68,7 +68,7 @@ def main():
             ["pkg-config", "--exists", package], check=False).returncode != 0]
         if missing:
             raise ValueError("Missing native development libraries: " + ", ".join(missing) +
-                             ". See docs/building.md.")
+                             ". See README.md.")
     build_name = "pmjs-arm64" if args.target == "arm64" else "local"
     if args.build_type:
         build_name += "-" + args.build_type.lower()
