@@ -10,3 +10,4 @@ __pycache__/
 /CMakeUserPresets.json
 /tools/linux-arm64/.cache/
 tmp/
+.codegraph/
