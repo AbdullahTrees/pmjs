@@ -345,6 +345,9 @@ function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
     return;
   }
   if (nativeSceneNodeRejected(node, particleContext)) return;
+  if (!particleContext && node._cacheAsBitmap && PMJS.mv && PMJS.mv.pictureLayerCache) {
+    PMJS.mv.pictureLayerCache.validate(node, nativeSceneRenderer);
+  }
   if (!particleContext && node._cacheAsBitmap &&
       !node.__pmjsBuildingBitmapCache) {
     var cacheProducer = node.constructor && node.constructor.name || 'node';
@@ -997,6 +1000,9 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
       if (parentReplaced) {
         stage.parent = parent;
         parentReplaced = false;
+      }
+      if (PMJS.mv && PMJS.mv.pictureLayerCache) {
+        PMJS.mv.pictureLayerCache.prepare(stage, nativeSceneRenderer);
       }
       if (bindTarget) bindTarget();
       submitNativeScene(stage, backgroundColor);
