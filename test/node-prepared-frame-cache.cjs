@@ -92,7 +92,7 @@ async function main() {
   assert.deepEqual(Array.from(originalTranslucent.subarray(translucentOffset, translucentOffset + 4)),
     colors[1], 'CPU pixels must remain straight alpha');
   const before = native.images.memory();
-  assert.equal(before.preparedFrameCacheBudget, disabled ? 0 : defaultBudget ? 4194304 : budget);
+  assert.equal(before.preparedFrameCacheBudget, disabled ? 0 : defaultBudget ? 33554432 : budget);
   const first = render(image, [0]);
   assertCenters(first, [0], colors);
   const loaded = native.images.memory();

@@ -207,7 +207,7 @@ test('prepared frame cache validates its budget and resolves configuration and e
   const previous = process.env.PMJS_PREPARED_FRAME_CACHE_BYTES;
   try {
     delete process.env.PMJS_PREPARED_FRAME_CACHE_BYTES;
-    assert.equal(validate(options).preparedFrameCacheBytes, 4194304);
+    assert.equal(validate(options).preparedFrameCacheBytes, 33554432);
     for (const budget of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1,
       'invalid', null, true, {}]) {
       assert.throws(() => validate({ ...options, preparedFrameCacheBytes: budget }),
@@ -238,7 +238,7 @@ test('runner forwards the prepared frame cache budget to native initialization',
   assert.equal(initialized.preparedFrameCacheBytes, 2097152);
   delete options.preparedFrameCacheBytes;
   await run(options);
-  assert.equal(initialized.preparedFrameCacheBytes, 4194304);
+  assert.equal(initialized.preparedFrameCacheBytes, 33554432);
 });
 test('prepared rendering controls are independent and enabled by default', async () => {
   const options = fixture('globalThis.__pmjsTick=()=>{}; globalThis.__pmjsRender=()=>{};');

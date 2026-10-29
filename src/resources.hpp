@@ -177,7 +177,7 @@ class ImageFileSource {
 class ImageStore {
  public:
   static constexpr std::size_t defaultWarmBudgetBytes = 32U * 1024U * 1024U;
-  static constexpr std::size_t defaultPreparedFrameCacheBytes = 4U * 1024U * 1024U;
+  static constexpr std::size_t defaultPreparedFrameCacheBytes = 32U * 1024U * 1024U;
   static constexpr std::size_t warmEntryLimit = 256;
   static constexpr std::size_t warmFileLimit = 128;
   // Bounds retained successful inode-only content verifications.
@@ -277,7 +277,7 @@ class ImageStore {
   // Frame textures use ordinary sampling with approximate filtering.
   std::optional<SpriteImageRegion> resolvePreparedFrameRegion(
       ImageHandle handle, float x, float y, float width, float height,
-      bool premultiplied = true, bool linearPalette = false);
+      bool premultiplied = true, bool linearPalette = false, bool cachePaletteSource = false);
   void setPreparedFrameCacheBudget(std::size_t bytes);
   std::size_t preparedFrameCacheBudget() const { return preparedFrameBudgetBytes_; }
   std::size_t preparedFrameCacheBytes() const { return preparedFrameBytes_; }

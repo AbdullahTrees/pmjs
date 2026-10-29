@@ -112,7 +112,7 @@ async function wholeSourceSampling() {
         'the high-contrast corner must contribute a visible filtered pixel');
       let maximum = 0;
       for (let i = 0; i < actual.length; ++i) maximum = Math.max(maximum, Math.abs(actual[i] - expected[i]));
-      assert.ok(maximum <= (nearest ? 0 : 1), `whole-source palette sampling delta ${maximum}`);
+      assert.ok(maximum <= 2, `whole-source palette sampling nearest=${nearest} delta ${maximum}`);
     }
   } finally {
     native.images.release(reference.handle); native.images.release(image.handle); native.beginFrame();

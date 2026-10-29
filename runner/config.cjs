@@ -141,7 +141,7 @@ function validate(input) {
   }
   const configuredFrameBytes = options.preparedFrameCacheBytes === undefined ?
     process.env.PMJS_PREPARED_FRAME_CACHE_BYTES : options.preparedFrameCacheBytes;
-  const preparedFrameCacheBytes = configuredFrameBytes === undefined ? 4 * 1024 * 1024 :
+  const preparedFrameCacheBytes = configuredFrameBytes === undefined ? 32 * 1024 * 1024 :
     Number(configuredFrameBytes);
   if ((configuredFrameBytes !== undefined &&
        typeof configuredFrameBytes !== 'number' && typeof configuredFrameBytes !== 'string') ||
