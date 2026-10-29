@@ -545,7 +545,7 @@ int pmjs_skia65_shadow_bgra(const uint8_t* source, int source_width, int source_
   return 1;
 } catch (...) { return 0; }
 
-int pmjs_skia65_triangle_coverage(const float points[6],
+int pmjs_skia65_polygon_coverage(const float* points, size_t point_count,
     float stroke_width, float miter_limit, float stroke_alpha,
     float left, float top, int width, int height, uint8_t* coverage) try {
   std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4, 0);
@@ -556,8 +556,7 @@ int pmjs_skia65_triangle_coverage(const float points[6],
   canvas->translate(-left, -top);
   SkPath path;
   path.moveTo(points[0], points[1]);
-  path.lineTo(points[2], points[3]);
-  path.lineTo(points[4], points[5]);
+  for (size_t i = 1; i < point_count; ++i) path.lineTo(points[i * 2], points[i * 2 + 1]);
   path.close();
   SkPaint paint;
   paint.setColor(SK_ColorWHITE);
@@ -634,6 +633,13 @@ int pmjs_skia65_triangle_coverage(const float points[6],
   }
   return 1;
 } catch (...) { return 0; }
+
+int pmjs_skia65_triangle_coverage(const float points[6],
+    float stroke_width, float miter_limit, float stroke_alpha,
+    float left, float top, int width, int height, uint8_t* coverage) {
+  return pmjs_skia65_polygon_coverage(points, 3, stroke_width, miter_limit, stroke_alpha,
+    left, top, width, height, coverage);
+}
 
 const char* pmjs_skia65_identity() {
   return "skia65/bd0dafbc8112f6cfa92a8096d8cb5696d8535ef9;freetype/707cd028b2b419a5491d444b128d8092afd9f201;harfbuzz/1.7.3;icu/60.2;abi/2";

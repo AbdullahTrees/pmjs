@@ -111,10 +111,13 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
     var worldStateScenes = new Map();
     effect.gpuFragmentsFor = function(type) {
       if (!PMJS.isatSourceQualification || PMJS.isatSourceQualification.verified !== true ||
-          !PMJS.optimizations.isEnabled('sprite.native-tint') || !spriteTransformCompatible() || type !== 3 || !Graphics._renderer ||
+          !PMJS.optimizations.isEnabled('sprite.native-tint') || !spriteTransformCompatible() || (type !== 1 && type !== 3) || !Graphics._renderer ||
           typeof Graphics._renderer.generateTextureGpu !== 'function') {
         return false;
       }
+      if (type === 1) return !!(PMJS.plugins.mpp.supportsPolygonBitmaps && Graphics.isWebGL() && PIXI.mesh && PIXI.mesh.Mesh &&
+        typeof PMJS.plugins.mpp.setPolygonBitmap === 'function' &&
+        typeof PMJS.plugins.mpp.clearBackgroundPolygons === 'function' && plugin.TypeParams && plugin.TypeParams[1]);
       var params = plugin.TypeParams && plugin.TypeParams[3];
       return !!(Graphics.isWebGL() && PIXI.mesh && PIXI.mesh.Mesh && params &&
         params['Shape Type'] === 1 && params['Split X'] === 10 && params['Split Y'] === 6);
@@ -272,6 +275,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
       this._flashAtlases = new Map();
       this._broken = fragments.map(function() { return false; });
       this._clipBackground = needsClip();
+      this._polygonFragments = effect.type === 1;
       var texture = fragments[0]._isatGpuSnap;
       var zoom = effect.Zoom;
 
@@ -281,8 +285,8 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
         var bitmapWidth = Math.ceil(rect.width / zoom) + 2;
         var bitmapHeight = Math.ceil(rect.height / zoom) + 2;
         var anchorX = fragment.anchorX(), anchorY = fragment.anchorY();
-        var vertices = new Float32Array(6);
-        for (var point = 0; point < 3; point++) {
+        var vertices = new Float32Array(frame.length * 2);
+        for (var point = 0; point < frame.length; point++) {
           var at = point * 2;
           vertices[at] = frame[point].x / zoom;
           vertices[at + 1] = frame[point].y / zoom;
@@ -304,8 +308,9 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
         PMJS.pixi4.retainMeshGeometry(image);
         image.uploadUvTransform = true;
         var color = fragment._isatGpuColor;
-        PMJS.plugins.mpp.setTriangleBitmap(image, {
-          points: [[vertices[0],vertices[1]], [vertices[2],vertices[3]], [vertices[4],vertices[5]]],
+        var paint = this._polygonFragments ? PMJS.plugins.mpp.setPolygonBitmap : PMJS.plugins.mpp.setTriangleBitmap;
+        paint.call(PMJS.plugins.mpp, image, {
+          points: frame.map(function(_point, index) { return [vertices[index * 2], vertices[index * 2 + 1]]; }),
           sourceBounds: bounds,
           stroke: { color: [color[0]/255,color[1]/255,color[2]/255],
             alpha: plugin.LineWidth > 0 ? 0.5 : 0,
@@ -425,7 +430,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
       return region;
     };
     GpuPresenter.prototype.update = function() {
-      var clearPoints = [], clearRectangles = [];
+      var clearPoints = [], clearRectangles = [], clearSizes = [];
       for (var index = 0; index < this._fragments.length; index++) {
         var fragment = this._fragments[index];
         var item = this._items[index];
@@ -433,6 +438,7 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
           this._broken[index] = true;
           if (this._clipBackground) {
             fragment._frame.forEach(function(point) { clearPoints.push(point.x, point.y); });
+            clearSizes.push(fragment._frame.length);
             var rect = fragment.rect();
             clearRectangles.push(rect.x, rect.y, rect.width, rect.height);
           }
@@ -461,11 +467,13 @@ PMJS.isatSourcePatches.register('js/plugins/MPP_EncounterEffect.js', 'Native GPU
         }
       }
       if (clearPoints.length) {
-        PMJS.plugins.mpp.clearBackground(this._backgroundTexture, new Float32Array(clearPoints),
+        if (this._polygonFragments) PMJS.plugins.mpp.clearBackgroundPolygons(this._backgroundTexture,
+          clearPoints, clearRectangles, clearSizes);
+        else PMJS.plugins.mpp.clearBackground(this._backgroundTexture, new Float32Array(clearPoints),
           new Float32Array(clearRectangles));
         var counters = stats();
         counters.backgroundEraseBatches = (counters.backgroundEraseBatches || 0) + 1;
-        counters.backgroundErasedTriangles = (counters.backgroundErasedTriangles || 0) + clearPoints.length / 6;
+        counters.backgroundErasedTriangles = (counters.backgroundErasedTriangles || 0) + (this._polygonFragments ? 0 : clearPoints.length / 6);
       }
       if (this._broken.every(function(broken) { return broken; })) this._background.visible = false;
     };

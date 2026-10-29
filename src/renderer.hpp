@@ -31,6 +31,7 @@ struct TexturedMeshMaterial {};
 struct TriangleBitmapMaterial {
   enum class RasterRule { area, canvasFourSample };
   std::array<float, 30> coefficients{};
+  std::vector<float> polygon;
   RasterRule rasterRule = RasterRule::area;
 };
 struct MvBitmapMaterial {
@@ -286,7 +287,8 @@ class Renderer {
                       std::uint32_t tint, BlendMode blendMode);
   bool releaseTileLayer(std::uint32_t layer);
   bool clearImageTriangles(ImageHandle image, const std::vector<float>& triangles,
-    const std::vector<float>& rectangles = {}, const std::vector<float>& normals = {});
+    const std::vector<float>& rectangles = {}, const std::vector<float>& normals = {},
+    const std::vector<std::uint32_t>& polygonSizes = {});
   struct PrimitiveSurfaceInfo {
     PrimitiveSurfaceHandle handle = 0;
     ImageInfo image;
@@ -581,6 +583,8 @@ class Renderer {
   int clearTrianglePointsUniform_ = -1;
   int clearTriangleNormalsUniform_ = -1;
   int clearTriangleRectangleUniform_ = -1;
+  int clearPolygonCoverageUniform_ = -1;
+  int clearPolygonOriginUniform_ = -1;
   std::uint32_t generatedTextureProgram_ = 0;
   int generatedTexturePremultipliedUniform_ = -1;
   std::uint32_t presentationProgram_ = 0;

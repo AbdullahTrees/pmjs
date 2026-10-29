@@ -492,6 +492,12 @@ napi_value createMppBitmapMesh(napi_env env, napi_callback_info info) try {
       compiledMode != std::floor(compiledMode)) throw std::runtime_error("invalid triangle raster mode");
   const auto modeBits = static_cast<unsigned>(compiledMode) & 24U;
   if (modeBits == 24U) material.rasterRule = pmjs::TriangleBitmapMaterial::RasterRule::canvasFourSample;
+  if (hasProperty(env, args[5], "polygon")) {
+    material.polygon = floatVector(env, property(env, args[5], "polygon"));
+    if (material.polygon.size() < 6 || material.polygon.size() > 64 || material.polygon.size() % 2)
+      throw std::runtime_error("invalid bitmap polygon");
+    for (float point : material.polygon) if (!std::isfinite(point)) throw std::runtime_error("invalid bitmap polygon");
+  }
   return createMeshResource(env, args, material);
 } catch (const std::exception& error) {
   napi_throw_range_error(env, nullptr, error.what()); return nullptr;
@@ -522,11 +528,12 @@ napi_value releaseMesh(napi_env env, napi_callback_info info) {
 }
 
 napi_value clearImageTriangles(napi_env env, napi_callback_info info) try {
-  auto args = arguments(env, info, 4);
+  auto args = arguments(env, info, 5);
   if (args.size() < 2) throw std::runtime_error("image triangle clear requires an image and points");
   if (!host(env).renderer.clearImageTriangles(asUint32(env, args[0]), floatVector(env, args[1]),
       args.size() > 2 ? floatVector(env, args[2]) : std::vector<float>{},
-      args.size() > 3 ? floatVector(env, args[3]) : std::vector<float>{})) {
+      args.size() > 3 ? floatVector(env, args[3]) : std::vector<float>{},
+      args.size() > 4 ? uintVector(env, args[4]) : std::vector<std::uint32_t>{})) {
     throw std::runtime_error("triangle clear requires a live GPU-only image and finite triangle coordinates");
   }
   return undefined(env);
@@ -788,6 +795,11 @@ void registerGraphicsBindings(napi_env env, napi_value exports) {
   method(env, render, "createMesh", createMesh);
   method(env, render, "releaseMesh", releaseMesh);
   napi_value plugins = moduleObject(env), mpp = moduleObject(env), mv = moduleObject(env);
+#ifdef PMJS_HAS_SKIA65
+  napi_set_named_property(env, mpp, "polygonBitmaps", boolean(env, true));
+#else
+  napi_set_named_property(env, mpp, "polygonBitmaps", boolean(env, false));
+#endif
   method(env, mpp, "createBitmapMesh", createMppBitmapMesh);
   method(env, mpp, "clearBackgroundTriangles", clearImageTriangles);
   method(env, mv, "createBitmapMesh", createMvBitmapMesh);

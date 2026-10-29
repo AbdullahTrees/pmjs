@@ -70,6 +70,9 @@ PMJS_SKIA65_API int pmjs_skia65_path_coverage(const float* points,
 PMJS_SKIA65_API int pmjs_skia65_shadow_bgra(const uint8_t* source, int source_width, int source_height,
   float x, float y, float blur, uint32_t color, int geometry_mask, uint8_t* pixels, int width, int height);
 /* RGBA8: fill coverage, first stroke, packed two-bit span rules, second stroke. */
+PMJS_SKIA65_API int pmjs_skia65_polygon_coverage(const float* points, size_t point_count,
+  float stroke_width, float miter_limit, float stroke_alpha,
+  float left, float top, int width, int height, uint8_t* coverage);
 PMJS_SKIA65_API int pmjs_skia65_triangle_coverage(const float points[6],
   float stroke_width, float miter_limit, float stroke_alpha,
   float left, float top, int width, int height, uint8_t* coverage);

@@ -1,6 +1,7 @@
 PMJS.plugins = PMJS.plugins || {};
 PMJS.plugins.mpp = PMJS.plugins.mpp || {};
 Object.assign(PMJS.plugins.mpp, {
+  supportsPolygonBitmaps: !!(NativeHost.plugins && NativeHost.plugins.mpp && NativeHost.plugins.mpp.polygonBitmaps),
   setTriangleBitmap: function(mesh, description) {
     if (description === null) {
       PMJS.pixi4.setMeshNativeMaterial(mesh, 'mpp-triangle-bitmap', null);
@@ -28,6 +29,21 @@ Object.assign(PMJS.plugins.mpp, {
       coefficients: Array.from(coefficients)
     });
     mesh._pmjsMppTriangleBitmap = coefficients;
+  },
+  setPolygonBitmap: function(mesh, description) {
+    var points = description.points;
+    if (!Array.isArray(points) || points.length < 3 || points.length > 32 ||
+        !points.every(function(point) { return Array.isArray(point) && point.length === 2 && point.every(Number.isFinite); })) {
+      throw new TypeError('Polygon bitmap requires finite points');
+    }
+    this.setTriangleBitmap(mesh, Object.assign({}, description, { points: points.slice(0, 3) }));
+    PMJS.pixi4.setMeshNativeMaterial(mesh, 'mpp-triangle-bitmap', {
+      coefficients: Array.from(mesh._pmjsMppTriangleBitmap), polygon: [].concat.apply([], points)
+    });
+  },
+  clearBackgroundPolygons: function(texture, points, rectangles, sizes) {
+    PMJS.pixi4.clearBackgroundTriangles(texture, Float32Array.from(points),
+      Float32Array.from(rectangles), new Float32Array(0), sizes);
   },
   clearBackground: function(texture, points, rectangles) {
     points = Float32Array.from(points);

@@ -821,6 +821,14 @@ std::uint32_t Renderer::createMesh(
       indices.size() > 65536U || positions.size() > 131072U) return 0;
   if (const auto* triangle = std::get_if<TriangleBitmapMaterial>(&material)) {
     const auto& values = triangle->coefficients;
+    if (!triangle->polygon.empty()) {
+#ifndef PMJS_HAS_SKIA65
+      return 0;
+#endif
+      if (triangle->rasterRule != TriangleBitmapMaterial::RasterRule::canvasFourSample ||
+          triangle->polygon.size() < 6 || triangle->polygon.size() > 64 || triangle->polygon.size() % 2) return 0;
+      for (float value : triangle->polygon) if (!std::isfinite(value)) return 0;
+    }
     for (float value : values) if (!std::isfinite(value)) return 0;
     if (values[8] <= values[6] || values[9] <= values[7] || values[14] < 0 ||
         values[15] < 1 || values[28] < 0 || values[29] < 0 || values[29] > 31 ||
@@ -901,7 +909,8 @@ std::uint32_t Renderer::createMesh(
     try {
       mesh.images.reserve(2);
       std::vector<std::uint8_t> coverage(extent->rgbaBytes);
-      if (!pmjs_skia65_triangle_coverage(p.data(), p[14], p[15], p[13], p[6], p[7],
+      if (!pmjs_skia65_polygon_coverage(triangle->polygon.empty() ? p.data() : triangle->polygon.data(),
+          triangle->polygon.empty() ? 3 : triangle->polygon.size() / 2, p[14], p[15], p[13], p[6], p[7],
           static_cast<int>(width), static_cast<int>(height), coverage.data())) {
         throw std::runtime_error("triangle bitmap rasterization failed");
       }

@@ -270,3 +270,23 @@ native.canvas.release(tonedCapture.handle); native.images.release(tonedSource.ha
 assert.throws(() => native.render.renderToImage(16, 16, 1), /alphaMode|object/,
   'positional alpha booleans are rejected');
 assert.throws(() => native.render.renderToImage(16, 16, {alphaMode:'unknown'}), /alphaMode/);
+
+
+if (native.plugins.mpp.polygonBitmaps) {
+native.beginFrame(); native.render.quad(0, 0, 16, 16, 1, 1, 1, 1);
+const polygonTarget = native.render.renderToImage(16, 16, { alphaMode: 'premultiplied' });
+const polygon = [1,1, 14,1, 7,7, 14,14, 1,14];
+assert.throws(() => native.plugins.mpp.clearBackgroundTriangles(polygonTarget.handle,
+  polygon, [], [], [4]), RangeError);
+assert.throws(() => native.plugins.mpp.clearBackgroundTriangles(polygonTarget.handle,
+  polygon.map((x, i) => i === 8 ? NaN : x), [], [], [5]), RangeError);
+native.plugins.mpp.clearBackgroundTriangles(polygonTarget.handle, polygon, [0,0,16,16], [], [5]);
+native.beginFrame();
+native.scene.submit(schema.version, new Uint32Array([1,0xffffffff,polygonTarget.handle,0xffffff,0,1032,0]), boundedSprite, 1);
+native.renderScene();
+const polygonPixels = native.canvas.captureSceneRawPremultiplied();
+assert.equal(polygonPixels[(4 * 16 + 3) * 4 + 3], 0);
+assert.equal(polygonPixels[(7 * 16 + 13) * 4 + 3], 255);
+assert.equal(polygonPixels[(0 * 16 + 0) * 4 + 3], 255);
+native.images.release(polygonTarget.handle);
+}

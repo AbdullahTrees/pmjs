@@ -59,8 +59,11 @@ function createGraphics({ disables = [], via = 'config', rendererReady = true, y
       } }
   };
   context.PMJS.plugins = { mpp: {
+    supportsPolygonBitmaps: true,
     sortFragments(values, compare) { sorts++; return Array.prototype.sort.call(values, compare); },
     clearBackground: context.PMJS.pixi4.clearBackground,
+    setPolygonBitmap: context.PMJS.pixi4.setTriangleBitmap,
+    clearBackgroundPolygons(texture, points, rectangles, sizes) { cleared.push({ texture, points: Array.from(points), sizes: Array.from(sizes) }); },
     setTriangleBitmap: context.PMJS.pixi4.setTriangleBitmap
   } };
   const renderOptions = new WeakMap();

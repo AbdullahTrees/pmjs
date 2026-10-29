@@ -24,11 +24,16 @@ constexpr const char* clearTriangleFragmentSource = R"(#version 300 es
   uniform vec2 points[3];
   uniform vec2 inward[3];
   uniform vec4 clearRectangle;
+  uniform bool polygonCoverageEnabled;
+  uniform sampler2D polygonCoverage;
+  uniform vec2 polygonOrigin;
   out vec4 outputColor;
   void main() {
     vec2 rectangle = clamp(gl_FragCoord.xy - clearRectangle.xy + vec2(0.5), 0.0, 1.0)
       * clamp(clearRectangle.zw - gl_FragCoord.xy + vec2(0.5), 0.0, 1.0);
-    float coverage = triangleClipCoverage(gl_FragCoord.xy, points, inward);
+    float coverage = polygonCoverageEnabled ?
+      texelFetch(polygonCoverage, ivec2(gl_FragCoord.xy - polygonOrigin), 0).r :
+      triangleClipCoverage(gl_FragCoord.xy, points, inward);
     outputColor = vec4(0.0, 0.0, 0.0, coverage * rectangle.x * rectangle.y);
   }
 )";

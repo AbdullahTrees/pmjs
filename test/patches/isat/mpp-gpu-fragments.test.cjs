@@ -11,7 +11,7 @@ function setup(options = {}) {
   const { context, hooks } = graphics;
   let source = `(function() {
     var MPPlugin = { LineWidth: 4, FlashOpacity: 200,
-      TypeParams: { 3: { 'Shape Type': 1, 'Split X': 10, 'Split Y': 6 } } };
+      TypeParams: { 1: { 'Shape Type': 0 }, 3: { 'Shape Type': 1, 'Split X': 10, 'Split Y': 6 } } };
     function Fragment() {}
     Fragment.prototype.createBitmap = function() {};
     Fragment.prototype.initFrame = function() {};
@@ -382,4 +382,38 @@ test('flash capture failure restores sampling and retains the ordinary flash fal
   context.failCapture = false;
   for (let tick = 0; tick < 8; tick++) presenter.update();
   assert.equal(presenter._flashAtlases.size, 0, 'failed allocation is not retried during the effect');
+});
+
+
+test('radial polygons retain every edge and clear their background once across handoff', () => {
+  const { context, scene, retained, cleared } = setup();
+  scene.type = 1;
+  assert.equal(typeof scene.launchBattle().destroy, 'function');
+  const piece = fragment();
+  piece._frame = [{x:0,y:0},{x:80,y:0},{x:70,y:40},{x:0,y:60}];
+  const effect = context.fixtureEffect;
+  effect.type = 1; effect._data = [piece];
+  scene.createEncEffSprites();
+  assert.equal(retained[0].paint.length, 18);
+  piece.visible = true;
+  scene.testSprite.update();
+  assert.deepEqual(cleared[0].points, [0,0,80,0,70,40,0,60]);
+  assert.deepEqual(cleared[0].sizes, [4]);
+  scene.testSprite.update();
+  assert.equal(cleared.length, 1);
+  const battle = new context.Scene_Base(); battle.createEncEffSprites();
+  assert.equal(battle.testSprite, scene.testSprite);
+  assert.equal(cleared.length, 1);
+  effect.clear();
+  assert.equal(scene.testSprite._atlas, null);
+});
+
+
+test('radial encounters retain Canvas when polygon coverage is unavailable', () => {
+  const { context, scene } = setup();
+  scene.type = 1;
+  context.PMJS.plugins.mpp.supportsPolygonBitmaps = false;
+  assert.equal(scene.launchBattle(), 'canvas');
+  assert.equal(context.fixtureEffect.NeedClip, true);
+  assert.equal(context.fixtureEffect.gpuFragmentsFor(3), true);
 });

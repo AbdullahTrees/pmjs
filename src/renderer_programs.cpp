@@ -3,6 +3,9 @@
 #include "renderer_shaders.hpp"
 #include "renderer_identity_shader.hpp"
 #include "scene_packet.hpp"
+#ifdef PMJS_HAS_SKIA65
+#include "skia65/pmjs_skia65.h"
+#endif
 
 #include <GLES3/gl3.h>
 
@@ -237,6 +240,10 @@ Renderer::Renderer(int width, int height, ImageStore& images)
   clearTrianglePointsUniform_ = glGetUniformLocation(clearTriangleProgram_, "points");
   clearTriangleNormalsUniform_ = glGetUniformLocation(clearTriangleProgram_, "inward");
   clearTriangleRectangleUniform_ = glGetUniformLocation(clearTriangleProgram_, "clearRectangle");
+  clearPolygonCoverageUniform_ = glGetUniformLocation(clearTriangleProgram_, "polygonCoverageEnabled");
+  clearPolygonOriginUniform_ = glGetUniformLocation(clearTriangleProgram_, "polygonOrigin");
+  glUseProgram(clearTriangleProgram_);
+  glUniform1i(glGetUniformLocation(clearTriangleProgram_, "polygonCoverage"), 0);
   primitiveSurfaceProgram_ = linkProgram(vertexSource,
                                           primitiveSurfaceFragmentSource);
   primitiveSurfaceSizeUniform_ =
@@ -994,12 +1001,23 @@ bool Renderer::renderPrimitiveSurface(
 }
 
 bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>& triangles,
-    const std::vector<float>& rectangles, const std::vector<float>& suppliedNormals) {
+    const std::vector<float>& rectangles, const std::vector<float>& suppliedNormals,
+    const std::vector<std::uint32_t>& polygonSizes) {
   const auto image = images_.lookup(handle);
-  if (!image || !images_.isRenderTarget(handle) || triangles.size() % 6 != 0 ||
-      triangles.size() > 4096U * 6U) return false;
+  const bool polygons = !polygonSizes.empty();
+#ifndef PMJS_HAS_SKIA65
+  if (polygons) return false;
+#endif
+  std::size_t coordinateCount = 0;
+  for (auto size : polygonSizes) {
+    if (size < 3 || size > 32) return false;
+    coordinateCount += size * 2;
+  }
+  const auto count = polygons ? polygonSizes.size() : triangles.size() / 6;
+  if (!image || !images_.isRenderTarget(handle) || count > 4096 ||
+      (polygons ? coordinateCount != triangles.size() : triangles.size() % 6 != 0)) return false;
   for (const float value : triangles) if (!std::isfinite(value)) return false;
-  if (!rectangles.empty() && rectangles.size() != triangles.size() / 6 * 4) return false;
+  if (!rectangles.empty() && rectangles.size() != count * 4) return false;
   for (std::size_t index = 0; index < rectangles.size(); ++index) {
     if (!std::isfinite(rectangles[index]) || (index % 4 >= 2 && rectangles[index] < 0)) return false;
   }
@@ -1010,7 +1028,7 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
   if (!suppliedNormals.empty() && suppliedNormals.size() != triangles.size()) return false;
   for (float normal : suppliedNormals) if (!std::isfinite(normal)) return false;
   // Validate the whole batch before modifying any target pixels.
-  for (std::size_t offset = 0; offset < triangles.size(); offset += 6) {
+  for (std::size_t offset = 0; !polygons && offset < triangles.size(); offset += 6) {
     const auto* p = triangles.data() + offset;
     const float area = (p[2] - p[0]) * (p[5] - p[1]) - (p[4] - p[0]) * (p[3] - p[1]);
     if (!std::isfinite(area)) return false;
@@ -1025,12 +1043,15 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
   if (!images_.preservePixelReads(handle)) return false;
 
   struct SavedState {
-    GLint framebuffer, viewport[4], program, vao, buffer;
+    GLint framebuffer, viewport[4], program, vao, buffer, activeTexture, texture;
     GLint blendRgbSource, blendRgbDestination, blendAlphaSource, blendAlphaDestination;
     GLint equationRgb, equationAlpha;
     GLboolean blend, scissor, depth, stencil, cull, colorMask[4];
-    GLuint target = 0;
+    GLuint target = 0, coverage = 0;
     SavedState() {
+      glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+      glActiveTexture(GL_TEXTURE0);
+      glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
       glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &framebuffer);
       glGetIntegerv(GL_VIEWPORT, viewport);
       glGetIntegerv(GL_CURRENT_PROGRAM, &program);
@@ -1048,6 +1069,10 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
       cull = glIsEnabled(GL_CULL_FACE);
     }
     ~SavedState() {
+      if (coverage) glDeleteTextures(1, &coverage);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, texture);
+      glActiveTexture(activeTexture);
       glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
       if (target) glDeleteFramebuffers(1, &target);
       glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
@@ -1074,16 +1099,39 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
   glBlendFuncSeparate(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
   glUseProgram(clearTriangleProgram_); glBindVertexArray(vertexArray_);
   glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
-  for (std::size_t offset = 0; offset < triangles.size(); offset += 6) {
+  glUniform1i(clearPolygonCoverageUniform_, polygons);
+  if (polygons) glGenTextures(1, &saved.coverage);
+  for (std::size_t item = 0, offset = 0; item < count; ++item) {
     const auto* points = triangles.data() + offset;
+    const auto size = polygons ? polygonSizes[item] : 3U;
+    const auto normalsOffset = offset;
+    offset += size * 2;
     const float area = (points[2] - points[0]) * (points[5] - points[1]) -
         (points[4] - points[0]) * (points[3] - points[1]);
-    if (area == 0) continue;
-    const float x0 = std::max(0.0F, std::floor(std::min({points[0], points[2], points[4]})));
-    const float y0 = std::max(0.0F, std::floor(std::min({points[1], points[3], points[5]})));
-    const float x1 = std::min(static_cast<float>(image->width), std::ceil(std::max({points[0], points[2], points[4]})));
-    const float y1 = std::min(static_cast<float>(image->height), std::ceil(std::max({points[1], points[3], points[5]})));
+    if (!polygons && area == 0) continue;
+    float minX = points[0], maxX = points[0], minY = points[1], maxY = points[1];
+    for (std::size_t i = 1; i < size; ++i) {
+      minX = std::min(minX, points[i * 2]); maxX = std::max(maxX, points[i * 2]);
+      minY = std::min(minY, points[i * 2 + 1]); maxY = std::max(maxY, points[i * 2 + 1]);
+    }
+    const float x0 = std::max(0.0F, std::floor(minX)), y0 = std::max(0.0F, std::floor(minY));
+    const float x1 = std::min(static_cast<float>(image->width), std::ceil(maxX));
+    const float y1 = std::min(static_cast<float>(image->height), std::ceil(maxY));
     if (x1 <= x0 || y1 <= y0) continue;
+#ifdef PMJS_HAS_SKIA65
+    if (polygons) {
+      const int width = static_cast<int>(x1 - x0), height = static_cast<int>(y1 - y0);
+      std::vector<std::uint8_t> coverage(static_cast<std::size_t>(width) * height * 4);
+      if (!pmjs_skia65_polygon_coverage(points, size, 0, 10, 0, x0, y0, width, height,
+          coverage.data())) return false;
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, saved.coverage);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, coverage.data());
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glUniform2f(clearPolygonOriginUniform_, x0, y0);
+    }
+#endif
     const float left = x0 / image->width * 2 - 1, right = x1 / image->width * 2 - 1;
     // Generated images store logical top-left row zero at texture row zero.
     const float top = y0 / image->height * 2 - 1, bottom = y1 / image->height * 2 - 1;
@@ -1096,7 +1144,7 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
       left, bottom, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1};
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices.data(), GL_STREAM_DRAW);
     std::array<float, 6> normals;
-    for (std::size_t edge = 0; suppliedNormals.empty() && edge < 3; ++edge) {
+    for (std::size_t edge = 0; !polygons && suppliedNormals.empty() && edge < 3; ++edge) {
       const auto next = (edge + 1) % 3;
       const double dx = double(points[next * 2]) - points[edge * 2];
       const double dy = double(points[next * 2 + 1]) - points[edge * 2 + 1];
@@ -1105,11 +1153,13 @@ bool Renderer::clearImageTriangles(ImageHandle handle, const std::vector<float>&
       normals[edge * 2] = static_cast<float>(-dy * winding / length);
       normals[edge * 2 + 1] = static_cast<float>(dx * winding / length);
     }
-    glUniform2fv(clearTrianglePointsUniform_, 3, points);
-    glUniform2fv(clearTriangleNormalsUniform_, 3, suppliedNormals.empty() ? normals.data() : suppliedNormals.data() + offset);
+    if (!polygons) {
+      glUniform2fv(clearTrianglePointsUniform_, 3, points);
+      glUniform2fv(clearTriangleNormalsUniform_, 3, suppliedNormals.empty() ? normals.data() : suppliedNormals.data() + normalsOffset);
+    }
     if (rectangles.empty()) glUniform4f(clearTriangleRectangleUniform_, 0, 0, image->width, image->height);
     else {
-      const auto* rect = rectangles.data() + offset / 6 * 4;
+      const auto* rect = rectangles.data() + item * 4;
       glUniform4f(clearTriangleRectangleUniform_, rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]);
     }
     glDrawArrays(GL_TRIANGLES, 0, 6);
