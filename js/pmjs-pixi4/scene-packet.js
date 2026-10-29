@@ -900,14 +900,27 @@ function encodeNativeScene(stage, backgroundColor = null) {
 }
 
 function submitNativeScene(stage, backgroundColor = null) {
-  var packet = encodeNativeScene(stage, backgroundColor);
+  var frameStats = globalThis.pmjsFrameStats;
+  var packet;
+  if (frameStats) frameStats.enter(1); // encode
+  try {
+    packet = encodeNativeScene(stage, backgroundColor);
+  } finally {
+    if (frameStats) frameStats.leave(1);
+  }
+  if (frameStats) frameStats.addRecords(packet.count);
   if (!NativeHost.scene) {
     disposeNativeCustomFilterPlans(packet.customFilterPlans);
     throw new Error('native scene was not rendered: scene service unavailable');
   }
   try {
-    NativeHost.scene.submit(packet.version, packet.metadata,
-      packet.values, packet.count);
+    if (frameStats) frameStats.enter(2); // submit
+    try {
+      NativeHost.scene.submit(packet.version, packet.metadata,
+        packet.values, packet.count);
+    } finally {
+      if (frameStats) frameStats.leave(2);
+    }
   } catch (error) {
     var resources = [];
     for (var recordIndex = 0; recordIndex < packet.count; recordIndex++) {
@@ -985,17 +998,24 @@ function renderNativeStage(stage, rootTransform, filterResolution, roundPixels,
   try {
     if (NativeHost.scene) {
       if (newStage) renderNativeStage._tilemaps = collectNativeTilemaps(stage, []);
-      var plan = !skipUpdateTransform && !localTransforms && options.worldState !== 'pixi' &&
-        pmjsPixiRenderPreflight.transformPlan(stage);
-      nativeSceneUsePixiWorldState = !!skipUpdateTransform || !localTransforms &&
-        (!!plan || options.worldState === 'pixi' || typeof stage.updateTransform === 'function');
-      nativeSceneTransformsPrepared = nativeSceneUsePixiWorldState;
-      if (!skipUpdateTransform && !localTransforms) {
-        if (plan) PMJS.pixi4.scenePreparation.transforms(plan, stage);
-        else if (typeof stage.updateTransform === 'function') stage.updateTransform();
-      }
-      if (!nativeSceneTransformsPrepared && typeof prepareNativeMvWindowTransforms === 'function') {
-        prepareNativeMvWindowTransforms(stage);
+      var plan;
+      var frameStats = globalThis.pmjsFrameStats;
+      if (frameStats) frameStats.enter(0); // prepare
+      try {
+        plan = !skipUpdateTransform && !localTransforms && options.worldState !== 'pixi' &&
+          pmjsPixiRenderPreflight.transformPlan(stage);
+        nativeSceneUsePixiWorldState = !!skipUpdateTransform || !localTransforms &&
+          (!!plan || options.worldState === 'pixi' || typeof stage.updateTransform === 'function');
+        nativeSceneTransformsPrepared = nativeSceneUsePixiWorldState;
+        if (!skipUpdateTransform && !localTransforms) {
+          if (plan) PMJS.pixi4.scenePreparation.transforms(plan, stage);
+          else if (typeof stage.updateTransform === 'function') stage.updateTransform();
+        }
+        if (!nativeSceneTransformsPrepared && typeof prepareNativeMvWindowTransforms === 'function') {
+          prepareNativeMvWindowTransforms(stage);
+        }
+      } finally {
+        if (frameStats) frameStats.leave(0);
       }
       if (parentReplaced) {
         stage.parent = parent;

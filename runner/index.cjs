@@ -17,6 +17,7 @@ const { resolveDefaults, validate, PMJS_MV_LOGIC_HZ, PMJS_SUPPORTED_RENDER_HZ,
   parseTimingConfig, resolveSwapDefault } = require('./config.cjs');
 const hostTimers = require('node:timers');
 const { createDiagnostics } = require('./diagnostics.cjs');
+const { createFrameStats } = require('./frame-stats.cjs');
 
 function sendSupervisorHeartbeat(processHandle, heartbeat) {
   if (!processHandle || typeof processHandle.send !== 'function' || !processHandle.connected) return false;
@@ -265,6 +266,14 @@ async function runSession(input, diagnostics, setNative) {
   console.log(`[pmjs] startup event=start started_at=${new Date().toISOString()} ` +
     `preparation=${options.assetPreparation.enabled ? 'on' : 'off'} maps=${options.assetPreparation.maps ? 'on' : 'off'}`);
   const hostProcess = process;
+  // Off unless PMJS_FRAME_STATS names a file; the guest hooks must exist before the bootstrap
+  // runs so the scene encoder can find them.
+  const frameStats = createFrameStats({ file: hostProcess.env.PMJS_FRAME_STATS,
+    intervalMs: Math.max(1000, Number(hostProcess.env.PMJS_FRAME_STATS_INTERVAL_MS) || 5000) });
+  if (frameStats) {
+    globalThis.pmjsFrameStats = frameStats.guest;
+    console.log('[pmjs] frame stats -> ' + hostProcess.env.PMJS_FRAME_STATS);
+  }
   // Load host addons before the bootstrap installs the guest process and require.
   const greenworks = options.greenworksModule ? require(options.greenworksModule) : null;
   if (options.greenworksModule && (!greenworks || typeof greenworks.initAPI !== 'function' ||
@@ -499,17 +508,23 @@ async function runSession(input, diagnostics, setNative) {
           const now = performance.now();
           const frame = () => {
             native.beginFrame();
+            if (frameStats) frameStats.frameStart();
             return Promise.resolve(globalThis.__pmjsTick(now)).then(() => {
               if (dispatcher && dispatcher.stopped) return;
+              if (frameStats) frameStats.markTick();
               globalThis.__pmjsRender(now);
+              if (frameStats) frameStats.markRender();
               native.renderFrame();
+              if (frameStats) frameStats.markRenderFrame();
               if (globalThis.__pmjsAfterPresent) globalThis.__pmjsAfterPresent();
               native.swapFrame();
+              if (frameStats) frameStats.markSwap();
               flushPreparationInvalidations();
             });
           };
           const complete = dispatcher ? dispatcher.runFrame(frame) : frame();
           complete.then(() => {
+            if (frameStats) frameStats.frameEnd();
             // Sample one in eight frames: no extra clock read on the other seven.
             if ((++diagnosticsFrameIndex & 7) === 0) {
               const observedAt = performance.now();
@@ -538,6 +553,7 @@ async function runSession(input, diagnostics, setNative) {
   } finally {
     if (removePromiseRejectionBridge) removePromiseRejectionBridge();
     cancelFrameSchedule();
+    if (frameStats) frameStats.stop();
     if (dispatcher) dispatcher.stop();
     if (subprocesses) await subprocesses.stop();
     try { flushPreparationInvalidations(true); } catch (_) {}
