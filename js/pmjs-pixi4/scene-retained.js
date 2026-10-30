@@ -36,7 +36,7 @@ PMJS.pixi4.retained = (function() {
   var verifyFailed = false, verifySetting = null;
   var skipIn = 0, harvestNext = false;
   var lastSpliced = 0, lastRecords = 0;
-  var current = { active: false, phaseA: false, spliced: 0, encoded: 0 };
+  var current = { active: false, phaseA: false, spliced: 0 };
   var stats = { frames: 0, phaseA: 0, probes: 0, resets: 0, mismatched: 0,
     splicedRecords: 0, encodedRecords: 0 };
 
@@ -424,9 +424,11 @@ PMJS.pixi4.retained = (function() {
     lastSpliced = current.spliced;
     lastRecords = nativeSceneCount;
     stats.splicedRecords += current.spliced;
-    stats.encodedRecords += current.encoded;
+    // A dirty subtree's captured range includes its spliced children, so
+    // counting fresh records per entry would double-count; the partition of
+    // the frame's record stream is exact from its total instead.
+    stats.encodedRecords += nativeSceneCount - current.spliced;
     current.spliced = 0;
-    current.encoded = 0;
     // The latch covers exactly one encode; between frames other encodes
     // must see retention as idle.
     current.active = false;
@@ -472,7 +474,6 @@ PMJS.pixi4.retained = (function() {
     entry.count = count;
     // A forced record embeds effect-scope words the signature does not model.
     entry.stamp = !forced && entry.sigStamp === frame ? frame : -1;
-    current.encoded += count;
   }
 
   function capture(node, startIndex, forced) {

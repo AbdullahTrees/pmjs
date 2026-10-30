@@ -28,6 +28,10 @@ function spliced(harness) {
   return harness.sandbox.PMJS.pixi4.retained.stats.splicedRecords;
 }
 
+function encoded(harness) {
+  return harness.sandbox.PMJS.pixi4.retained.stats.encodedRecords;
+}
+
 function preparedHarness(options = {}) {
   const harness = retainedHarness({ beforeWriter(sandbox) {
     const prototype = sandbox.PIXI.Container.prototype;
@@ -151,6 +155,23 @@ test('a volatile sibling keeps its ancestors dirty but splices clean siblings', 
     'a changed volatile node still leaves the sibling subtree splicing');
   assert.deepEqual(three, immediateFrame(harness, root),
     'the packet stays byte-identical to immediate encoding');
+});
+
+test('spliced and encoded counters partition the frame\'s records', () => {
+  const harness = retainedHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  const volatileNode = harness.sprite();
+  volatileNode.filters = [new sandbox.PIXI.filters.BlurFilter(4)];
+  const stable = new sandbox.PIXI.Container();
+  stable.addChild(harness.sprite());
+  root.addChild(volatileNode); root.addChild(stable);
+
+  const one = frame(harness, root);
+  const splicedBefore = spliced(harness), encodedBefore = encoded(harness);
+  frame(harness, root);
+  assert.equal(spliced(harness) - splicedBefore + encoded(harness) - encodedBefore,
+    one.count, 'every record of the frame is counted once, split between the two counters');
 });
 
 test('buffer growth splices correctly past the initial capacity', () => {
