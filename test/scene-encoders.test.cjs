@@ -78,6 +78,9 @@ test('nested rendering restores transform preparation and root state', () => {
   const harness = preparedHarness(), { sandbox, sprite } = harness;
   const stage = new sandbox.PIXI.Container();
   const capturing = sprite(), following = sprite();
+  // The assertion reads the prepared-world translate, which a quad author
+  // would overwrite with corner positions.
+  following.calculateVertices = undefined;
   stage.addChild(capturing); stage.addChild(following);
   following.x = 3;
   const nested = new sandbox.PIXI.Container();
@@ -2166,6 +2169,9 @@ test('triangle stroke coverage is retained material state with validated sample 
 
 test('Sprite world hooks and packed color are consumed before Float32 scene serialization', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
+  // The assertions read the prepared-world translate words, which a quad
+  // author would overwrite with corner positions.
+  sandbox.PIXI.Sprite.prototype.calculateVertices = undefined;
   Object.defineProperty(sandbox.PIXI.Container.prototype, 'worldTransform', {
     get() { return this.transform.worldTransform; } });
   sandbox.PIXI.Sprite.prototype.updateTransform = function() {
@@ -2306,6 +2312,8 @@ test('nonfinite leaf quads retain enclosing masks, filters and sibling traversal
 
 test('an unknown stage transform executes once before encoding', () => {
   const harness = makeHarness(), { sandbox, sprite } = harness;
+  // Leaves without a vertex author must not fabricate quad words.
+  sandbox.PIXI.Sprite.prototype.calculateVertices = undefined;
   const root = new sandbox.PIXI.Container(); root.addChild(sprite());
   let transforms = 0;
   root.updateTransform = () => { transforms++; };
@@ -2497,6 +2505,9 @@ test('incompatible scene protocols fail before any submission', () => {
 test('prepared Pixi world records preserve singular parents and root projection without inversion', () => {
   const h = makeHarness(), { sandbox, sprite } = h;
   const stage = new sandbox.PIXI.Container(), parent = sprite(), child = sprite();
+  // The assertions read the prepared-world words, which a quad author would
+  // overwrite; the parent keeps them because its children suppress the quad.
+  child.calculateVertices = undefined;
   stage.addChild(parent); parent.addChild(child);
   for (const node of [stage, parent, child]) node.worldTransform = node.transform.worldTransform;
   Object.assign(parent.worldTransform, { a: 0, d: 0, tx: 20, ty: 30 });

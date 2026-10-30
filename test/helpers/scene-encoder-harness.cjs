@@ -65,6 +65,24 @@ function makeHarness(options = {}) {
       super(); this.texture = texture || null;
       this.anchor = { x: 0, y: 0 };
     }
+    // Mirrors Pixi 4 Sprite.calculateVertices so the writer's quad path
+    // (flag 4096) runs in tests instead of silently skipping.
+    calculateVertices() {
+      const world = this.transform.worldTransform;
+      const texture = this.texture;
+      const original = texture.orig || texture._frame || texture.frame;
+      const left = -original.width * this.anchor.x, right = left + original.width;
+      const top = -original.height * this.anchor.y, bottom = top + original.height;
+      const vertices = this.vertexData || (this.vertexData = new Float32Array(8));
+      vertices[0] = world.a * left + world.c * top + world.tx;
+      vertices[1] = world.d * top + world.b * left + world.ty;
+      vertices[2] = world.a * right + world.c * top + world.tx;
+      vertices[3] = world.d * top + world.b * right + world.ty;
+      vertices[4] = world.a * right + world.c * bottom + world.tx;
+      vertices[5] = world.d * bottom + world.b * right + world.ty;
+      vertices[6] = world.a * left + world.c * bottom + world.tx;
+      vertices[7] = world.d * bottom + world.b * left + world.ty;
+    }
   }
   class Graphics extends Container {
     constructor() {

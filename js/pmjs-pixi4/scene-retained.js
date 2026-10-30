@@ -232,8 +232,13 @@ PMJS.pixi4.retained = (function() {
             var x = vertices[corner * 2], y = vertices[corner * 2 + 1];
             if (nativeSceneRootTransform !== nativeIdentityTransform) {
               var root = nativeSceneRootTransform;
-              x = root.a * x + root.c * y + root.tx;
-              y = root.b * x + root.d * y + root.ty;
+              // Both projected axes must read the untransformed corner like the
+              // writer does; reusing the stored x here drops x out of the
+              // fingerprint whenever the root transform is rotated.
+              var projectedX = root.a * x + root.c * y + root.tx;
+              var projectedY = root.b * x + root.d * y + root.ty;
+              x = projectedX;
+              y = projectedY;
             }
             var destination = offset + (corner < 3 ? 6 + corner * 2 : 21);
             u[destination] = f32bits(x);

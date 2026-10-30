@@ -11,24 +11,24 @@ function retainedHarness(options) {
   return makeHarness({ retained: true, ...options });
 }
 
-function frame(harness, stage) {
-  harness.sandbox.renderNativeStage(stage, undefined, 1, false, false, BACKGROUND);
+function frame(harness, stage, rootTransform) {
+  harness.sandbox.renderNativeStage(stage, rootTransform, 1, false, false, BACKGROUND);
   return harness.submitted.at(-1);
 }
 
 // Frame 3 reference: same batching, retention and bulk-clear off so per-record
 // zeroing makes packet tails deterministic across frames.
-function immediateFrame(harness, stage) {
+function immediateFrame(harness, stage, rootTransform) {
   harness.sandbox.PMJS.optimizations.isEnabled =
     id => id === 'scene.plain-sprite-segment';
-  return frame(harness, stage);
+  return frame(harness, stage, rootTransform);
 }
 
 function spliced(harness) {
   return harness.sandbox.PMJS.pixi4.retained.stats.splicedRecords;
 }
 
-function preparedHarness(options) {
+function preparedHarness(options = {}) {
   const harness = retainedHarness({ beforeWriter(sandbox) {
     const prototype = sandbox.PIXI.Container.prototype;
     Object.defineProperty(prototype, 'worldTransform', {
@@ -50,6 +50,10 @@ function preparedHarness(options) {
       this._worldID = (this._worldID || 0) + 1;
     };
     sandbox.NativeHost.scene.schema.preparedWorldState = true;
+    if (options.verify) {
+      sandbox.NativeHost.runtime.env = name =>
+        name === 'PMJS_RETAINED_VERIFY' ? '1' : undefined;
+    }
   }, ...options });
   harness.sandbox.pmjsPixiRenderPreflight.registerTransformPreparation(
     harness.sandbox.PIXI.Container.prototype.updateTransform, () => {}, () => true);
@@ -226,8 +230,60 @@ test('world-state leaf movement re-encodes the branch and splices the sibling', 
   a.x = 12.5;
   const two = frame(harness, root);
   assert.equal(spliced(harness) - before, 1, 'the untouched sibling still splices');
-  assert.equal(packetNode(two, 2).x, 12.5);
+  assert.equal(two.values[2 * 41], 12.5, 'quad corner 0 x tracks the move');
   assert.deepEqual(two, immediateFrame(harness, root));
+});
+
+// A rotated projection such as a plugin passes to renderer.render. Under a
+// 90° root transform the projected x is 480 - y and the projected y is the
+// untransformed x, so only the quad words can see horizontal movement.
+const ROTATED = { a: 0, b: 1, c: -1, d: 0, tx: 480, ty: 0 };
+
+function worldScene(harness) {
+  const { sandbox } = harness;
+  const stage = new sandbox.PIXI.Container();
+  const mover = harness.sprite();
+  const still = harness.sprite(); still.x = 100;
+  stage.addChild(mover); stage.addChild(still);
+  return { stage, mover, still };
+}
+
+test('world-state sprite quads re-encode when a sprite moves', () => {
+  const harness = preparedHarness();
+  const { stage, mover } = worldScene(harness);
+  const one = frame(harness, stage);
+  assert.equal(packetNode(one, 2).flags & 4096, 4096,
+    'the prepared quad path ran (anti-vacuity)');
+  frame(harness, stage);
+  mover.x = 37;
+  const three = frame(harness, stage);
+  assert.equal(three.values[2 * 41], 37, 'corner 0 x tracks the move');
+  assert.deepEqual(three, immediateFrame(harness, stage));
+});
+
+test('a rotated root transform must not drop movement from the fingerprint', () => {
+  const harness = preparedHarness();
+  const { stage, mover } = worldScene(harness);
+  frame(harness, stage, ROTATED);
+  frame(harness, stage, ROTATED);
+  mover.x = 37;
+  const three = frame(harness, stage, ROTATED);
+  assert.equal(three.values[2 * 41 + 1], 37,
+    'projected corner 0 y = untransformed x after the move');
+  assert.equal(three.values[2 * 41 + 3], 69,
+    'projected corner 1 y = untransformed x + width after the move');
+  assert.deepEqual(three, immediateFrame(harness, stage, ROTATED));
+});
+
+test('verify mode agrees with the immediate encode under a rotated root', () => {
+  const harness = preparedHarness({ verify: true });
+  const { stage, mover } = worldScene(harness);
+  frame(harness, stage, ROTATED);
+  frame(harness, stage, ROTATED);
+  mover.x = 37;
+  frame(harness, stage, ROTATED);
+  assert.equal(harness.sandbox.PMJS.pixi4.retained.stats.mismatched, 0);
+  assert.equal(harness.sandbox.PMJS.pixi4.retained.verifyActive(), true);
 });
 
 function verifyHarness() {
