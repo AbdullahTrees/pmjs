@@ -307,8 +307,11 @@ PMJS.pixi4.retained = (function() {
       entry.count > 0 && sigEqual(entry.sigOffset, offset);
     if (clean && entry.childEntries.length !== childEntries.length) clean = false;
     if (clean) {
+      // The spliced range covers this node's whole subtree, so every
+      // descendant record must be reproducible too, not just this node's.
       for (var child = 0; child < childEntries.length; child++) {
-        if (entry.childEntries[child].node !== childEntries[child].node) {
+        if (entry.childEntries[child].node !== childEntries[child].node ||
+            !childEntries[child].clean) {
           clean = false;
           break;
         }
@@ -558,7 +561,8 @@ PMJS.pixi4.retained = (function() {
       '; falling back to immediate encoding');
   }
 
-  return { active: false, beginFrame: beginFrame, endFrame: endFrame,
+  return { get active() { return current.active; },
+    beginFrame: beginFrame, endFrame: endFrame,
     splice: splice, capture: capture, captureSegment: captureSegment,
     verifyActive: verifyActive, verifyEncode: verifyEncode,
     verifyCompare: verifyCompare, verifyFail: verifyFail,
