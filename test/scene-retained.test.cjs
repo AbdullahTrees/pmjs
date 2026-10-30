@@ -128,6 +128,31 @@ test('a changed descendant invalidates ancestor splices', () => {
   assert.deepEqual(two, immediateFrame(harness, root));
 });
 
+test('a volatile sibling keeps its ancestors dirty but splices clean siblings', () => {
+  const harness = retainedHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  const volatileNode = harness.sprite();
+  volatileNode.filters = [new sandbox.PIXI.filters.BlurFilter(4)];
+  const stable = new sandbox.PIXI.Container();
+  stable.addChild(harness.sprite());
+  root.addChild(volatileNode); root.addChild(stable);
+
+  const one = frame(harness, root);
+  const before = spliced(harness);
+  const two = frame(harness, root);
+  assert.equal(spliced(harness) - before, 2,
+    'the clean stable subtree spliced although its volatile sibling re-encodes');
+  assert.deepEqual(two, one, 'the dirty root and volatile leaf re-derived the same bytes');
+  const afterTwo = spliced(harness);
+  volatileNode.tint = 0x112233;
+  const three = frame(harness, root);
+  assert.equal(spliced(harness) - afterTwo, 2,
+    'a changed volatile node still leaves the sibling subtree splicing');
+  assert.deepEqual(three, immediateFrame(harness, root),
+    'the packet stays byte-identical to immediate encoding');
+});
+
 test('buffer growth splices correctly past the initial capacity', () => {
   const harness = retainedHarness();
   const { sandbox } = harness;

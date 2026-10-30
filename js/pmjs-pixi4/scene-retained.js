@@ -272,7 +272,16 @@ PMJS.pixi4.retained = (function() {
       for (var index = 0; index < children.length; index++) {
         if (nativeSceneNodeRejected(children[index], null)) continue;
         var childEntry = visit(children[index], false);
-        if (!childEntry) return null;
+        if (!childEntry) {
+          // A node without an entry re-encodes every frame and can never
+          // splice, so its parent stays dirty — but that must not hide the
+          // clean siblings behind it from the walk. The marker also keeps the
+          // child list a faithful identity list, so the volatile node's
+          // removal or replacement invalidates the parent's spliced range.
+          childEntry = { node: children[index], start: -1, count: 0,
+            sigOffset: -1, childEntries: [], sigStamp: -1, stamp: -1,
+            clean: false, texture: null };
+        }
         childEntries.push(childEntry);
       }
     }
