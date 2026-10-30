@@ -534,7 +534,10 @@ function growNativeScene() {
 }
 
 function resetNativeSceneRecords() {
-  nativeSceneBulkClear = PMJS.optimizations.isEnabled('scene.record-bulk-clear');
+  // Spliced ranges carry exact bytes and the fill stops at the previous count,
+  // so only per-record zeroing keeps reused buffers free of stale words.
+  nativeSceneBulkClear = PMJS.optimizations.isEnabled('scene.record-bulk-clear') &&
+    !(PMJS.pixi4 && PMJS.pixi4.retained && PMJS.pixi4.retained.active);
 
   if (nativeSceneBulkClear && nativeSceneCount !== 0) {
     nativeSceneValues.fill(0, 0,

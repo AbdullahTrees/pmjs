@@ -10,7 +10,8 @@ const WRITER_REQUIREMENTS = new Set(['js/pmjs-core/methods.js', 'js/pmjs-web/can
   'js/pmjs-pixi4/scene-filters.js', 'js/pmjs-pixi4/scene-packet.js',
   'js/pmjs-mv/render-prepare.js',
   'js/pmjs-pixi4/scene-prepare.js', 'js/pmjs-pixi4/scene-classify.js',
-  'js/pmjs-pixi4/scene-encoders.js', 'js/pmjs-pixi4/scene-effects.js']);
+  'js/pmjs-pixi4/scene-encoders.js', 'js/pmjs-pixi4/scene-effects.js',
+  'js/pmjs-pixi4/scene-retained.js']);
 
 const root = path.resolve(__dirname, '../..');
 const profile = JSON.parse(fs.readFileSync(path.join(root, 'profiles/mv.json'), 'utf8'));
@@ -180,7 +181,8 @@ function makeHarness(options = {}) {
         total + (!prefix || kind.startsWith(prefix) ? count : 0), 0),
       hit: (...args) => sandbox.nativeCompatibilityHit(...args),
       observed: (...args) => sandbox.nativeCompatibilityObserved(...args) },
-      optimizations: { isEnabled: () => true } },
+      optimizations: { isEnabled: id => id !== 'render.retained-encoding' ||
+        options.retained === true } },
     nativeCompatibilityHits: hitCounts,
     nativeCompatibilityHit(kind, detail) {
       compatHits.push([kind, String(detail)]);

@@ -288,6 +288,7 @@ function nativePlainSpriteBinding(node) {
 
 function writeNativePlainSpriteSegment(bindings, parentIndex) {
   var boundBases = new Set();
+  var firstIndex = nativeSceneCount;
   for (var bindingIndex = 0; bindingIndex < bindings.length; bindingIndex++) {
     var binding = bindings[bindingIndex];
     if (nativeSceneRenderer && !boundBases.has(binding.base)) {
@@ -334,9 +335,26 @@ function writeNativePlainSpriteSegment(bindings, parentIndex) {
     nativeSceneValues[valueOffset + 13] = width;
     nativeSceneValues[valueOffset + 14] = height;
   }
+  var retained = PMJS.pixi4 && PMJS.pixi4.retained;
+  if (retained && retained.active) retained.captureSegment(bindings, firstIndex);
 }
 
 function writeNativeSceneNode(node, parentIndex, forcedClip, forcedMask,
+    particleContext, forcedAlpha) {
+  if (!node) return;
+  var retained = PMJS.pixi4 && PMJS.pixi4.retained;
+  if (retained && retained.active && retained.splice(node, parentIndex,
+      forcedClip, forcedMask, particleContext, forcedAlpha)) return;
+  var retainedStart = retained && retained.active ? nativeSceneCount : -1;
+  writeNativeSceneNodeImmediate(node, parentIndex, forcedClip, forcedMask,
+    particleContext, forcedAlpha);
+  if (retainedStart >= 0) {
+    retained.capture(node, retainedStart,
+      forcedClip || forcedMask || particleContext || forcedAlpha !== undefined);
+  }
+}
+
+function writeNativeSceneNodeImmediate(node, parentIndex, forcedClip, forcedMask,
     particleContext, forcedAlpha) {
   if (!node) return;
   if (nativeIsRectTileLayer(node)) {
@@ -868,8 +886,12 @@ function encodeNativeScene(stage, backgroundColor = null) {
     nativeSceneEmission = null;
   }
   nativeSceneEncodingDepth++;
+  var retained = previous ? null : (PMJS.pixi4 && PMJS.pixi4.retained || null);
   var encoded = false;
   try {
+    if (retained && retained.beginFrame) {
+      retained.beginFrame(stage, backgroundColor);
+    }
     nativeCustomFilterPlans = [];
     resetNativeSceneRecords();
     nativeSceneFilterDepth = 0;
@@ -878,6 +900,7 @@ function encodeNativeScene(stage, backgroundColor = null) {
         0, nativeIdentityTransform, 1, null, 0, null);
     }
     writeNativeSceneNode(stage, 0xffffffff);
+    if (retained && retained.endFrame) retained.endFrame();
     var packet = { version: nativeScenePacketVersion,
       metadata: nativeSceneMetadata, values: nativeSceneValues,
       count: nativeSceneCount, customFilterPlans: nativeCustomFilterPlans };
@@ -901,6 +924,15 @@ function encodeNativeScene(stage, backgroundColor = null) {
 
 function submitNativeScene(stage, backgroundColor = null) {
   var packet = encodeNativeScene(stage, backgroundColor);
+  var retained = PMJS.pixi4 && PMJS.pixi4.retained;
+  if (retained && retained.verifyActive && retained.verifyActive()) {
+    // Debug parity mode: the immediate packet is always the one submitted.
+    var scratch = retained.verifyEncode(stage, backgroundColor);
+    var mismatch = retained.verifyCompare(packet, scratch);
+    if (mismatch) retained.verifyFail(mismatch);
+    retained.verifyDispose(packet);
+    packet = scratch;
+  }
   if (!NativeHost.scene) {
     disposeNativeCustomFilterPlans(packet.customFilterPlans);
     throw new Error('native scene was not rendered: scene service unavailable');

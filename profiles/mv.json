@@ -55,6 +55,7 @@
     "js/pmjs-pixi4/scene-classify.js",
     "js/pmjs-pixi4/scene-encoders.js",
     "js/pmjs-pixi4/scene-effects.js",
+    "js/pmjs-pixi4/scene-retained.js",
     "js/pmjs-pixi4/renderer-managers.js",
     "js/pmjs-pixi4/renderer-facade.js",
     "js/pmjs-mv/renderer.js",
