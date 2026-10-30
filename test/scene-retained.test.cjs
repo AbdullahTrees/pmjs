@@ -44,9 +44,14 @@ function preparedHarness(options = {}) {
     Object.getPrototypeOf(sample.transform).updateTransform = function(parent) {
       this.updateLocalTransform();
       const local = this.localTransform, world = this.worldTransform, outer = parent.worldTransform;
-      world.a = outer.a; world.b = outer.b; world.c = outer.c; world.d = outer.d;
-      world.tx = outer.a * local.tx + outer.c * local.ty + outer.tx;
-      world.ty = outer.b * local.tx + outer.d * local.ty + outer.ty;
+      // Full parent x local composition like Pixi 4, so rotated locals reach
+      // calculateVertices instead of every world transform being a translation.
+      world.a = local.a * outer.a + local.b * outer.c;
+      world.b = local.a * outer.b + local.b * outer.d;
+      world.c = local.c * outer.a + local.d * outer.c;
+      world.d = local.c * outer.b + local.d * outer.d;
+      world.tx = local.tx * outer.a + local.ty * outer.c + outer.tx;
+      world.ty = local.tx * outer.b + local.ty * outer.d + outer.ty;
       this._worldID = (this._worldID || 0) + 1;
     };
     sandbox.NativeHost.scene.schema.preparedWorldState = true;
@@ -284,6 +289,110 @@ test('verify mode agrees with the immediate encode under a rotated root', () => 
   frame(harness, stage, ROTATED);
   assert.equal(harness.sandbox.PMJS.pixi4.retained.stats.mismatched, 0);
   assert.equal(harness.sandbox.PMJS.pixi4.retained.verifyActive(), true);
+});
+
+test('world-state per-field mutations keep retained frames identical to immediate encoding', async (t) => {
+  for (const [name, mutate] of Object.entries(mutations)) {
+    await t.test(name, () => {
+      const harness = preparedHarness();
+      const { sandbox } = harness;
+      const root = new sandbox.PIXI.Container();
+      const group = new sandbox.PIXI.Container();
+      const a = harness.sprite();
+      const b = harness.sprite();
+      root.addChild(group); group.addChild(a); group.addChild(b);
+
+      frame(harness, root, ROTATED);
+      mutate({ root, group, a, b, harness, sandbox });
+      const two = frame(harness, root, ROTATED);
+      const reference = immediateFrame(harness, root, ROTATED);
+      assert.equal(two.count, reference.count);
+      assert.deepEqual(two, reference);
+    });
+  }
+});
+
+test('world-state quad fuzz under a rotated root reports zero mismatches', () => {
+  const harness = preparedHarness({ verify: true });
+  const { sandbox } = harness;
+  const stats = sandbox.PMJS.pixi4.retained.stats;
+  let seed = 0x51ed;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const pick = size => Math.floor(rand() * size);
+
+  const stage = new sandbox.PIXI.Container();
+  const containers = [stage];
+  const nodes = [];
+  for (let index = 0; index < 4; index++) {
+    const group = new sandbox.PIXI.Container();
+    containers[pick(containers.length)].addChild(group);
+    containers.push(group); nodes.push(group);
+  }
+  for (let index = 0; index < 20; index++) {
+    const leaf = harness.sprite(8 + pick(40), 8 + pick(40));
+    containers[pick(containers.length)].addChild(leaf); nodes.push(leaf);
+  }
+
+  for (let iteration = 0; iteration < 500; iteration++) {
+    for (let op = 1 + pick(4); op > 0; op--) {
+      const node = nodes[pick(nodes.length)];
+      switch (pick(10)) {
+        case 0: node.x = pick(300) - 50; break;
+        case 1: node.y = pick(300) - 50; break;
+        case 2: node.alpha = rand(); break;
+        case 3: node.tint = pick(0x1000000); break;
+        case 4: if (node.anchor) node.anchor.y = rand(); break;
+        case 5:
+          if (node.texture) node.texture = harness.makeTexture(8 + pick(40), 8 + pick(40));
+          break;
+        case 6: if (node.texture) node._colorTone = [pick(100), 0, 0, pick(50)]; break;
+        case 7: node.visible = rand() < 0.85; break;
+        case 8:
+          if (nodes.length < 30) {
+            const leaf = harness.sprite(8 + pick(40), 8 + pick(40));
+            containers[pick(containers.length)].addChild(leaf);
+            nodes.push(leaf);
+          }
+          break;
+        case 9: {
+          const parent = containers[pick(containers.length)];
+          if (parent.children.length) {
+            const removed = parent.children.splice(pick(parent.children.length), 1)[0];
+            const at = nodes.indexOf(removed);
+            if (at >= 0) nodes.splice(at, 1);
+          }
+          break;
+        }
+      }
+    }
+    frame(harness, stage, ROTATED);
+    assert.equal(stats.mismatched, 0, 'mismatch at frame ' + iteration);
+  }
+  assert.equal(stats.frames, 500);
+  assert.equal(stats.phaseA, 500, 'verify probes every frame');
+  assert.equal(stats.splicedRecords > 0, true, 'splices happened');
+});
+
+// Render-to-texture layouts (an offscreen stage and the main stage every
+// frame) fail the single-stage precondition and re-clear the state each
+// frame. Per-stage slots wait until device measurement shows how often
+// OMORI hits this; these counters pin today's cadence for that measurement.
+test('interleaved stages re-clear retention state every frame', () => {
+  const harness = preparedHarness();
+  const { sandbox } = harness;
+  const stats = sandbox.PMJS.pixi4.retained.stats;
+  const { stage } = worldScene(harness);
+  const offscreen = new sandbox.PIXI.Container();
+  offscreen.addChild(harness.sprite());
+  for (let iteration = 0; iteration < 30; iteration++) {
+    frame(harness, offscreen);
+    frame(harness, stage);
+  }
+  assert.equal(stats.resets, 60, 'one clear per alternating-stage frame');
+  assert.equal(stats.splicedRecords, 0, 'nothing reuses across a clear');
 });
 
 function verifyHarness() {
