@@ -567,3 +567,13 @@ test('full churn pays for the walk in bursts, not every frame', () => {
   assert.equal(stats.probes, 2);
   assert.equal(stats.phaseA, 5);
 });
+
+test('the retention latch releases between frames', () => {
+  const harness = retainedHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  root.addChild(harness.sprite());
+  frame(harness, root);
+  assert.equal(sandbox.PMJS.pixi4.retained.active, false,
+    'no encode between frames may see one as still live');
+});

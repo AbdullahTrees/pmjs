@@ -391,6 +391,9 @@ PMJS.pixi4.retained = (function() {
       sigCursor = 0;
       visit(stage, true);
     }
+    // submitScene copies the packet out before returning, so the parked
+    // buffer from two frames ago is free to overwrite; a queued render
+    // thread (roadmap item 5) would need its own pair instead.
     var swap = prev;
     prev = { metadata: nativeSceneMetadata, values: nativeSceneValues,
       count: nativeSceneCount, capacity: nativeSceneCapacity };
@@ -415,6 +418,9 @@ PMJS.pixi4.retained = (function() {
     stats.encodedRecords += current.encoded;
     current.spliced = 0;
     current.encoded = 0;
+    // The latch covers exactly one encode; between frames other encodes
+    // must see retention as idle.
+    current.active = false;
   }
 
   function splice(node, parentIndex, forcedClip, forcedMask, particleContext,
