@@ -263,6 +263,32 @@ PMJS.pixi4.retained = (function() {
     u[offset + 4] = flags >>> 0;
   }
 
+  // The composed world transform and world alpha of the last full fingerprint,
+  // as float32 bits — the cheap movement probe for world-state mode.
+  function worldSigOf(node) {
+    var world = node.worldTransform;
+    var sig = new Uint32Array(7);
+    var components = ['a', 'b', 'c', 'd', 'tx', 'ty'];
+    for (var component = 0; component < 6; component++) {
+      sig[component] = f32bits(world[components[component]]);
+    }
+    var worldAlpha = node.worldAlpha;
+    sig[6] = f32bits(Number.isFinite(Math.fround(worldAlpha)) ? worldAlpha : 1);
+    return sig;
+  }
+
+  function worldMoved(node, worldSig) {
+    var world = node.worldTransform;
+    if (!world) return false;
+    var components = ['a', 'b', 'c', 'd', 'tx', 'ty'];
+    for (var component = 0; component < 6; component++) {
+      if (f32bits(world[components[component]]) !== worldSig[component]) return true;
+    }
+    var worldAlpha = node.worldAlpha;
+    return f32bits(Number.isFinite(Math.fround(worldAlpha)) ? worldAlpha : 1) !==
+      worldSig[6];
+  }
+
   function visit(node, isRoot) {
     if (!eligible(node)) return null;
     var type = nativeNodeRenderType(node);
@@ -310,14 +336,30 @@ PMJS.pixi4.retained = (function() {
     arenaEnsure(SIG_STRIDE);
     var offset = sigCursor;
     sigCursor += SIG_STRIDE;
-    captureSigWords(node, isRoot, offset, kind, image, texture, frame0);
     var entry = entries.get(node);
     if (!entry) {
       entry = { node: node, start: -1, count: 0, sigOffset: -1,
-        childEntries: null, sigStamp: -1, stamp: -1, clean: false };
+        childEntries: null, sigStamp: -1, stamp: -1, clean: false,
+        worldSig: null };
       entries.set(node, entry);
     }
-    var clean = entry.stamp === frame - 1 && entry.sigOffset >= 0 &&
+    // World-state records embed the composed world transform, so movement — the
+    // node's own, an ancestor's, or the camera's — changes the record by
+    // construction and no fingerprint can make it clean this frame. The cheap
+    // world-word compare stands in for the re-derivation on those frames; the
+    // anchor is refreshed either way so a stopped node re-enters the walk.
+    var moved = nativeSceneUsePixiWorldState && entry.sigOffset >= 0 &&
+      entry.worldSig && worldMoved(node, entry.worldSig);
+    if (moved) {
+      entry.sigOffset = -1;
+      entry.sigStamp = -1;
+    } else {
+      captureSigWords(node, isRoot, offset, kind, image, texture, frame0);
+    }
+    if (nativeSceneUsePixiWorldState && node.worldTransform) {
+      entry.worldSig = worldSigOf(node);
+    }
+    var clean = !moved && entry.stamp === frame - 1 && entry.sigOffset >= 0 &&
       entry.count > 0 && sigEqual(entry.sigOffset, offset);
     if (clean && entry.childEntries.length !== childEntries.length) clean = false;
     if (clean) {
@@ -331,8 +373,10 @@ PMJS.pixi4.retained = (function() {
         }
       }
     }
-    entry.sigOffset = offset;
-    entry.sigStamp = frame;
+    if (!moved) {
+      entry.sigOffset = offset;
+      entry.sigStamp = frame;
+    }
     entry.childEntries = childEntries;
     entry.clean = clean;
     entry.texture = kind === 1 ? base : null;
@@ -437,6 +481,10 @@ PMJS.pixi4.retained = (function() {
   function splice(node, parentIndex, forcedClip, forcedMask, particleContext,
       forcedAlpha) {
     if (nativeSceneEncodingDepth !== 1) return false;
+    // Only a same-frame walk verdict can splice (the guards below demand one),
+    // so on walk-less frames every node re-encodes and the per-node lookups
+    // would buy nothing.
+    if (!current.phaseA) return false;
     if (forcedClip || forcedMask || particleContext || forcedAlpha !== undefined) {
       return false;
     }
@@ -477,14 +525,16 @@ PMJS.pixi4.retained = (function() {
   }
 
   function capture(node, startIndex, forced) {
-    if (!current.active || nativeSceneEncodingDepth !== 1) return;
+    // Walk frames re-capture before any splice can consume a range (splice
+    // demands a same-frame verdict), so skip-frame stamping is pure overhead.
+    if (!current.active || !current.phaseA || nativeSceneEncodingDepth !== 1) return;
     var entry = entries.get(node);
     if (!entry) return;
     stampEntry(entry, startIndex, nativeSceneCount - startIndex, forced);
   }
 
   function captureSegment(bindings, firstIndex) {
-    if (!current.active || nativeSceneEncodingDepth !== 1) return;
+    if (!current.active || !current.phaseA || nativeSceneEncodingDepth !== 1) return;
     for (var index = 0; index < bindings.length; index++) {
       var entry = entries.get(bindings[index].node);
       if (entry) stampEntry(entry, firstIndex + index, 1, false);

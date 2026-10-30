@@ -174,6 +174,40 @@ test('spliced and encoded counters partition the frame\'s records', () => {
     one.count, 'every record of the frame is counted once, split between the two counters');
 });
 
+test('skip frames stay byte-identical under churn and world-state movement', () => {
+  const harness = preparedHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  const mover = harness.sprite();
+  const churn = [];
+  for (let i = 0; i < 6; i++) {
+    const volatileNode = harness.sprite();
+    volatileNode.filters = [new sandbox.PIXI.filters.BlurFilter(4)];
+    churn.push(volatileNode);
+    root.addChild(volatileNode);
+  }
+  const stable = new sandbox.PIXI.Container();
+  stable.addChild(harness.sprite());
+  root.addChild(mover); root.addChild(stable);
+
+  const enabled = sandbox.PMJS.optimizations.isEnabled;
+  const phaseABefore = sandbox.PMJS.pixi4.retained.stats.phaseA;
+  const splicedBefore = spliced(harness);
+  for (let i = 0; i < 8; i++) {
+    churn[i % churn.length].tint = 0x010203 + i;
+    if (i % 3 === 0) mover.x = 2 + i;
+    const packet = frame(harness, root);
+    sandbox.PMJS.optimizations.isEnabled = id => id === 'scene.plain-sprite-segment';
+    const reference = frame(harness, root);
+    sandbox.PMJS.optimizations.isEnabled = enabled;
+    assert.deepEqual(packet, reference, 'frame ' + i + ' matches immediate encoding');
+  }
+  const walks = sandbox.PMJS.pixi4.retained.stats.phaseA - phaseABefore;
+  assert.ok(walks < 8, 'the low splice rate leaves walk-less frames behind (' + walks + ' walks)');
+  assert.ok(spliced(harness) > splicedBefore,
+    'walk frames still splice the stable subtree across the skips');
+});
+
 test('buffer growth splices correctly past the initial capacity', () => {
   const harness = retainedHarness();
   const { sandbox } = harness;
