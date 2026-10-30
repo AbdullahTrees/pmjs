@@ -229,3 +229,176 @@ test('world-state leaf movement re-encodes the branch and splices the sibling', 
   assert.equal(packetNode(two, 2).x, 12.5);
   assert.deepEqual(two, immediateFrame(harness, root));
 });
+
+function verifyHarness() {
+  return retainedHarness({ beforeWriter(sandbox) {
+    sandbox.NativeHost.runtime.env = name =>
+      name === 'PMJS_RETAINED_VERIFY' ? '1' : undefined;
+  } });
+}
+
+test('verify mode runs the whole battery with zero mismatches', async (t) => {
+  for (const [name, mutate] of Object.entries(mutations)) {
+    await t.test(name, () => {
+      const harness = verifyHarness();
+      const { sandbox } = harness;
+      const root = new sandbox.PIXI.Container();
+      const group = new sandbox.PIXI.Container();
+      const a = harness.sprite();
+      const b = harness.sprite();
+      root.addChild(group); group.addChild(a); group.addChild(b);
+
+      frame(harness, root);
+      mutate({ root, group, a, b, harness, sandbox });
+      frame(harness, root);
+      assert.equal(sandbox.PMJS.pixi4.retained.stats.mismatched, 0);
+      assert.equal(sandbox.PMJS.pixi4.retained.verifyActive(), true);
+    });
+  }
+});
+
+test('verify mode catches a corrupted splice and submits the clean packet', () => {
+  const harness = verifyHarness();
+  const { sandbox } = harness;
+  const root = new sandbox.PIXI.Container();
+  const a = harness.sprite();
+  const b = harness.sprite();
+  root.addChild(a); root.addChild(b);
+  frame(harness, root);
+  a.x = 5;
+
+  let corrupted = false;
+  const retained = sandbox.PMJS.pixi4.retained;
+  const realSplice = retained.splice;
+  retained.splice = function(node, parentIndex, ...rest) {
+    const ok = realSplice.call(this, node, parentIndex, ...rest);
+    if (ok && !corrupted) {
+      corrupted = true;
+      sandbox.nativeSceneMetadata[(sandbox.nativeSceneCount - 1) * 7] ^= 8;
+    }
+    return ok;
+  };
+  frame(harness, root);
+  assert.equal(corrupted, true, 'the untouched sibling spliced');
+  assert.equal(retained.stats.mismatched, 1);
+  assert.equal(retained.verifyActive(), false, 'verify falls back after a mismatch');
+
+  const clean = makeHarness();
+  const other = new clean.sandbox.PIXI.Container();
+  const otherA = clean.sprite();
+  const otherB = clean.sprite();
+  other.addChild(otherA); other.addChild(otherB);
+  otherA.x = 5;
+  clean.sandbox.renderNativeStage(other, undefined, 1, false, false, BACKGROUND);
+  assert.deepEqual(harness.submitted.at(-1), clean.submitted.at(-1),
+    'the submitted packet is the uncorrupted immediate encode');
+});
+
+test('verify mode reports zero mismatches under random churn', () => {
+  const harness = verifyHarness();
+  const { sandbox } = harness;
+  const stats = sandbox.PMJS.pixi4.retained.stats;
+  let seed = 0x2f6e2b1;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const pick = size => Math.floor(rand() * size);
+
+  const root = new sandbox.PIXI.Container();
+  const containers = [root];
+  const nodes = [root];
+  const addNode = () => {
+    const parent = containers[pick(containers.length)];
+    if (rand() < 0.35 && containers.length < 8) {
+      const branch = new sandbox.PIXI.Container();
+      parent.addChild(branch); containers.push(branch); nodes.push(branch);
+    } else {
+      const leaf = harness.sprite(16 + pick(48), 16 + pick(48));
+      parent.addChild(leaf); nodes.push(leaf);
+    }
+  };
+  for (let index = 0; index < 12; index++) addNode();
+
+  const mutate = () => {
+    const ops = 1 + pick(6);
+    for (let op = 0; op < ops; op++) {
+      const node = nodes[pick(nodes.length)];
+      switch (pick(12)) {
+        case 0: node.x = pick(200) - 100; break;
+        case 1: node.y = pick(200) - 100; break;
+        case 2: node.alpha = 0.05 + rand() * 0.95; break;
+        case 3: node.tint = pick(0x1000000); break;
+        case 4: node.blendMode = pick(4); break;
+        case 5: node.visible = rand() < 0.8; break;
+        case 6: if (nodes.length < 30) addNode(); break;
+        case 7: {
+          const parent = containers[pick(containers.length)];
+          if (parent.children.length) {
+            const removed = parent.children.splice(pick(parent.children.length), 1)[0];
+            const at = nodes.indexOf(removed);
+            if (at >= 0) nodes.splice(at, 1);
+          }
+          break;
+        }
+        case 8: {
+          const parent = containers[pick(containers.length)];
+          if (parent.children.length > 1) parent.children.reverse();
+          break;
+        }
+        case 9: if (node.texture) node.texture.frame.x = pick(8); break;
+        case 10: if (node.texture) node.anchor.x = rand(); break;
+        case 11: if (node.texture) node.texture.baseTexture.resolution = 1 + pick(3); break;
+      }
+    }
+  };
+
+  for (let iteration = 0; iteration < 1000; iteration++) {
+    mutate();
+    frame(harness, root);
+    assert.equal(stats.mismatched, 0, 'mismatch at frame ' + iteration);
+  }
+  assert.equal(stats.frames, 1000);
+  assert.equal(stats.phaseA, 1000, 'verify probes every frame');
+  assert.equal(stats.splicedRecords > 0, true);
+  assert.equal(sandbox.PMJS.pixi4.retained.verifyActive(), true);
+});
+
+test('static scenes run the signature walk every frame', () => {
+  const harness = retainedHarness();
+  const { sandbox } = harness;
+  const stats = sandbox.PMJS.pixi4.retained.stats;
+  const root = new sandbox.PIXI.Container();
+  const group = new sandbox.PIXI.Container();
+  root.addChild(group);
+  group.addChild(harness.sprite());
+  group.addChild(harness.sprite());
+
+  for (let iteration = 0; iteration < 20; iteration++) frame(harness, root);
+  assert.equal(stats.frames, 20);
+  assert.equal(stats.phaseA, 20, 'a hot scene walks every frame');
+  assert.equal(stats.probes, 1,
+    'only frame 2 probes, before the scene is known splicable');
+});
+
+test('full churn pays for the walk in bursts, not every frame', () => {
+  const harness = retainedHarness();
+  const { sandbox } = harness;
+  const stats = sandbox.PMJS.pixi4.retained.stats;
+  const root = new sandbox.PIXI.Container();
+  const leaves = [];
+  for (let index = 0; index < 6; index++) {
+    const leaf = harness.sprite();
+    root.addChild(leaf); leaves.push(leaf);
+  }
+
+  for (let iteration = 0; iteration < 20; iteration++) {
+    for (const leaf of leaves) leaf.x = iteration + 1;
+    frame(harness, root);
+  }
+  assert.equal(stats.frames, 20);
+  // Probe frames land on 2 and 19, each followed by a harvesting walk; the
+  // fifteen frames between run without the signature walk at all.
+  assert.equal(stats.probes, 2);
+  assert.equal(stats.phaseA, 5);
+});

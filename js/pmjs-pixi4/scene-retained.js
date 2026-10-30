@@ -486,7 +486,10 @@ PMJS.pixi4.retained = (function() {
     nativeSceneValues = new Float32Array(nativeSceneCapacity * nativeSceneValueStride);
     nativeSceneCount = 0;
     nativeSceneEmission = null;
-    nativeSceneEncodingDepth++;
+    // The scratch runs after the live encode has unwound, so one increment
+    // would land on 1 where splice/capture are live and the second stamping
+    // poisons every entry; two keeps the hooks inert as intended.
+    nativeSceneEncodingDepth += 2;
     nativeCustomFilterPlans = [];
     resetNativeSceneRecords();
     nativeSceneBulkClear = false;
@@ -504,7 +507,7 @@ PMJS.pixi4.retained = (function() {
       // The scratch encode must leave the frame's observable side outputs alone.
       nativeScreenOverlays.length = previous.overlays;
       nativeTileRects = previous.tileRects;
-      nativeSceneEncodingDepth--;
+      nativeSceneEncodingDepth -= 2;
       nativeSceneMetadata = previous.metadata;
       nativeSceneValues = previous.values;
       nativeSceneCapacity = previous.capacity;
