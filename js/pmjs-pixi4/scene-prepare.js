@@ -50,7 +50,9 @@ function prepareNativeSceneNode(node, resolution, transformsPrepared) {
 }
 
 function prepareTransforms(plan, stage) {
+  var nodeCount = 0;
   function visit(node) {
+    nodeCount++;
     var entry = plan.get(node);
     // Callbacks can change the tree. Fall back without repeating earlier updates.
     if (!entry || entry.method !== node.updateTransform || !entry.nativePreparation) {
@@ -87,6 +89,8 @@ function prepareTransforms(plan, stage) {
     if (equivalent.afterChildren) equivalent.afterChildren(node);
   }
   visit(stage);
+  var frameStats = globalThis.pmjsFrameStats;
+  if (frameStats) frameStats.addNodes(nodeCount);
 }
 return { forNode: nativeScenePreparation, prepare: prepareNativeSceneNode,
   transforms: prepareTransforms };
