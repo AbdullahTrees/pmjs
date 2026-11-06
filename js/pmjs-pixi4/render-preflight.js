@@ -153,7 +153,34 @@
     }
   }
 
+  function inlineTransformPlanEnabled() {
+    return !!(PMJS.optimizations && PMJS.optimizations.isEnabled &&
+      PMJS.optimizations.isEnabled('scene.inline-transform-plan'));
+  }
+  // One classification per node, cached on the node and keyed by method identity.
+  // The cache is only a lookup accelerator: method swaps miss and reclassify.
+  function transformEntryFor(node) {
+    var method = node.updateTransform;
+    var cached = node.__pmjsTransformEntry;
+    if (cached && cached.method === method) return cached;
+    var equivalent = transformEquivalents.get(method);
+    var entry;
+    if (!equivalent || equivalent.verify && !equivalent.verify(node) ||
+        !node.transform || typeof node.transform.updateTransform !== 'function') {
+      entry = { method: method, fallback: true };
+    } else {
+      entry = { method: method, equivalent: equivalent, nativePreparation: true };
+    }
+    node.__pmjsTransformEntry = entry;
+    return entry;
+  }
   function transformPlan(stage) {
+    if (inlineTransformPlanEnabled()) {
+      for (var checkIndex = 0; checkIndex < renderTransformChecks.length; checkIndex++) {
+        if (!renderTransformChecks[checkIndex]()) return null;
+      }
+      return inlineTransformPlanMarker;
+    }
     var entries = new WeakMap();
     function visit(node) {
       if (!node) return 0;
@@ -186,6 +213,7 @@
     }
     return entries;
   }
+  var inlineTransformPlanMarker = { inline: true };
   function registerTransformEquivalent(method, predecessor, afterChildren, verify, perRender) {
     var equivalent = transformEquivalents.get(predecessor);
     if (!equivalent || typeof method !== 'function' || typeof verify !== 'function') return false;
@@ -240,6 +268,9 @@
   globalThis.pmjsPixiRenderPreflight = { scan: scan, report: report,
     unsupportedMethod: unsupportedMethod, producer: producer, check: check,
     filters: filters, checkLeaf: checkLeaf,
-    transformPlan: transformPlan, registerTransformEquivalent: registerTransformEquivalent,
+    transformPlan: transformPlan, transformEntryFor: transformEntryFor,
+    inlineTransformPlanEnabled: inlineTransformPlanEnabled,
+    inlineTransformPlanMarker: inlineTransformPlanMarker,
+    registerTransformEquivalent: registerTransformEquivalent,
     registerTransformPreparation: registerTransformPreparation };
 })();

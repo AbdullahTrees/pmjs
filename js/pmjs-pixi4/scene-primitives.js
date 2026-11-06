@@ -23,6 +23,9 @@ if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
   PMJS.optimizations.register({ id: 'scene.plain-sprite-segment',
     owner: 'pmjs-pixi4',
     fallback: 'encode each sprite through the generic recursive scene writer' });
+  PMJS.optimizations.register({ id: 'scene.inline-transform-plan',
+    owner: 'pmjs-pixi4',
+    fallback: 'rebuild the per-frame transform plan WeakMap with a separate tree walk' });
   PMJS.optimizations.register({ id: 'scene.solid-sprite-mask-clip',
     owner: 'pmjs-pixi4',
     fallback: 'encode Sprite masks through the alpha-mask filter group' });

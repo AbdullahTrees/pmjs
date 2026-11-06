@@ -68,7 +68,14 @@ test('reviewed transform preparation matches guest state and post-child rounding
   const child = accelerated.children[0];
   const prior = child.updateTransform;
   child.updateTransform = function() { calls++; prior.call(this); this.worldTransform.tx += 10; };
+  const plan = fast.sandbox.pmjsPixiRenderPreflight.transformPlan(accelerated);
+  // Inline plan defers unrecognized detection to the per-node walk; the legacy
+  // plan rejects the whole tree up front.
+  assert.ok(plan === null || plan.inline === true);
+  const wasEnabled = fast.sandbox.PMJS.optimizations.isEnabled;
+  fast.sandbox.PMJS.optimizations.isEnabled = () => false;
   assert.equal(fast.sandbox.pmjsPixiRenderPreflight.transformPlan(accelerated), null);
+  fast.sandbox.PMJS.optimizations.isEnabled = wasEnabled;
   fast.sandbox.renderNativeStage(accelerated);
   assert.equal(calls, 1);
   assert.equal(fast.submitted.at(-1).values[41 + 4], 8, 'encoding consumes the final effective hook result');
@@ -2546,5 +2553,110 @@ test('hidden children between plain sprites encode like the visible children alo
     const plain = new sandbox.PIXI.Container();
     for (const child of visible) plain.addChild(child);
     assert.deepEqual(submitOnly(harness, plain), withHidden, segmented ? 'segmented' : 'ordinary');
+  }
+});
+
+function transformState(root) {
+  const out = [];
+  (function walk(node) {
+    const t = node.transform;
+    out.push({
+      x: node.x, y: node.y, alpha: node.alpha, visible: node.visible,
+      worldAlpha: node.worldAlpha,
+      a: t.worldTransform.a, b: t.worldTransform.b, c: t.worldTransform.c,
+      d: t.worldTransform.d, tx: t.worldTransform.tx, ty: t.worldTransform.ty,
+      worldID: t._worldID, parentID: t._parentID,
+      boundsID: node._boundsID, boundsUpdateID: node._bounds && node._bounds.updateID
+    });
+    for (const child of node.children || []) walk(child);
+  })(root);
+  return out;
+}
+
+function buildFuzzFixture(harness) {
+  const { sandbox, sprite } = harness;
+  const root = new sandbox.PIXI.Container();
+  root._boundsID = 0;
+  const branch = new sandbox.PIXI.Container();
+  branch._boundsID = 0;
+  const sprites = [sprite(32, 32), sprite(16, 16), sprite(8, 8)];
+  for (const s of sprites) { s._boundsID = 0; if (s._bounds) s._bounds.updateID = 0; }
+  root.addChild(branch);
+  for (const s of sprites) branch.addChild(s);
+  const yep = sprite(32, 32);
+  yep._boundsID = 0;
+  const predecessor = sandbox.PIXI.Container.prototype.updateTransform;
+  const method = function() {
+    predecessor.call(this);
+    this.worldTransform.tx = Math.floor(this.worldTransform.tx);
+    this.worldTransform.ty = Math.floor(this.worldTransform.ty);
+  };
+  yep.updateTransform = method;
+  sandbox.pmjsPixiRenderPreflight.registerTransformEquivalent(method, predecessor,
+    node => {
+      node.worldTransform.tx = Math.floor(node.worldTransform.tx);
+      node.worldTransform.ty = Math.floor(node.worldTransform.ty);
+    }, () => true, true);
+  root.addChild(yep);
+  return { root, branch, sprites, yep, method, predecessor };
+}
+
+test('inline transform plan matches the reference under mutation fuzzing', () => {
+  const fast = preparedHarness(), guest = preparedHarness(), legacy = preparedHarness();
+  const a = buildFuzzFixture(fast), b = buildFuzzFixture(guest), c = buildFuzzFixture(legacy);
+  const trees = [a, b, c];
+  function syncApply(fn) {
+    for (const tree of trees) fn(tree);
+  }
+  function renderAll() {
+    fast.sandbox.renderNativeStage(a.root);
+    guest.sandbox.renderNativeStage(b.root, undefined, 1, false, false, null, { worldState: 'pixi' });
+    legacy.sandbox.PMJS.optimizations.isEnabled = id => id !== 'scene.inline-transform-plan';
+    legacy.sandbox.renderNativeStage(c.root);
+    legacy.sandbox.PMJS.optimizations.isEnabled = () => true;
+  }
+  renderAll();
+  assert.deepEqual(transformState(a.root), transformState(b.root));
+  assert.deepEqual(transformState(a.root), transformState(c.root));
+  let seed = 0x2f6e2b1;
+  function rnd(n) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed % n;
+  }
+  for (let frame = 0; frame < 40; frame++) {
+    const moves = {
+      rootX: rnd(200) - 100 + rnd(3) * 0.25,
+      branchAlpha: 0.4 + (rnd(60) / 100),
+      spriteX: rnd(80) - 40,
+      spriteVis: rnd(2) === 0,
+      yepY: rnd(50) - 25,
+      toggleChild: rnd(4) === 0,
+      swapMethod: rnd(5) === 0,
+      rootAlpha: rnd(6) === 0 ? 0.5 + (rnd(50) / 100) : null
+    };
+    syncApply(tree => {
+      const { root, branch, sprites, yep, method, predecessor } = tree;
+      root.x = moves.rootX;
+      branch.alpha = moves.branchAlpha;
+      sprites[0].x = moves.spriteX;
+      sprites[1].visible = moves.spriteVis;
+      yep.y = moves.yepY;
+      if (moves.rootAlpha !== null) root.alpha = moves.rootAlpha;
+      if (moves.toggleChild) {
+        const extra = sprites[2];
+        if (extra.parent === branch) {
+          const at = branch.children.indexOf(extra);
+          if (at >= 0) branch.children.splice(at, 1);
+          extra.parent = null;
+        } else branch.addChild(extra);
+      }
+      if (moves.swapMethod) {
+        if (yep.updateTransform === method) yep.updateTransform = predecessor;
+        else yep.updateTransform = method;
+      }
+    });
+    renderAll();
+    assert.deepEqual(transformState(a.root), transformState(b.root), 'inline vs stock frame ' + frame);
+    assert.deepEqual(transformState(a.root), transformState(c.root), 'inline vs legacy plan frame ' + frame);
   }
 });

@@ -50,14 +50,28 @@ function prepareNativeSceneNode(node, resolution, transformsPrepared) {
 }
 
 function prepareTransforms(plan, stage) {
+  var preflight = typeof pmjsPixiRenderPreflight !== 'undefined' && pmjsPixiRenderPreflight;
+  var inline = !!(preflight && preflight.inlineTransformPlanEnabled &&
+    preflight.inlineTransformPlanEnabled());
   function visit(node) {
-    var entry = plan.get(node);
-    // Callbacks can change the tree. Fall back without repeating earlier updates.
-    if (!entry || entry.method !== node.updateTransform || !entry.nativePreparation) {
-      node.updateTransform();
-      return;
+    var entry, equivalent;
+    if (inline) {
+      // transformPlan already ran renderTransformChecks to produce the marker.
+      entry = preflight.transformEntryFor(node);
+      if (entry.fallback || !entry.equivalent) {
+        if (typeof node.updateTransform === 'function') node.updateTransform();
+        return;
+      }
+      equivalent = entry.equivalent;
+    } else {
+      entry = plan.get(node);
+      // Callbacks can change the tree. Fall back without repeating earlier updates.
+      if (!entry || entry.method !== node.updateTransform || !entry.nativePreparation) {
+        node.updateTransform();
+        return;
+      }
+      equivalent = entry.equivalent;
     }
-    var equivalent = entry.equivalent;
     if (equivalent.verify && !equivalent.verify(node) ||
         equivalent.verifyRender && !equivalent.verifyRender()) {
       node.updateTransform();
