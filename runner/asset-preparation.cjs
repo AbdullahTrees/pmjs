@@ -411,6 +411,7 @@ async function prepareAssetsPhase({ gameRoot, cacheRoot, recipes, native, onProg
         throw new Error('LZ4 image preparation is unavailable in this addon; requires preparationWorkspaceVersion 1 and preparationLz4Version');
       processorIdentity = { ...processorIdentity, pageCodec: native.assets.preparationLz4Version };
     }
+    session.useGeneration?.('entries/', { processor: processorIdentity });
     if (!native.assets || typeof native.assets.processImage !== 'function' ||
         (!offline && typeof native.assets.installPrepared !== 'function')) {
       throw new Error('image preparation is unavailable in this addon');

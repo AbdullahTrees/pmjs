@@ -5,7 +5,8 @@ const fsp = fs.promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { acquireLock, createLease } = require('./preparation-lifetime.cjs');
-const { invalidateResults, invalidateCatalog } = require('./preparation-state.cjs');
+const { invalidateResults, invalidateCatalog, preparationRoot } = require('./preparation-state.cjs');
+const { COMPILER_VERSION } = require('./map-demand.cjs');
 const { discoverAdapterProcessors, discoverBundledProcessors } = require('./port-preparation.cjs');
 
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -13,12 +14,17 @@ const rebuildMarker = 'runtime-settings/rebuild-assets';
 const processorDiscovery = options => options.portDescriptors?.length ? [] :
   [...new Set([...discoverBundledProcessors(options.bundleRoot), ...discoverAdapterProcessors(options.adapters)])].sort();
 
+// Bump when a change makes existing startup catalogs wrong or useless: what a catalog
+// entry, the derived/storage/audio/tile lists or the map index contain or mean, or how
+// they are installed. Output-format changes are already covered by the processor
+// identities below (and the per-result keys). Editing these modules for any other reason
+// must not invalidate every installed cache: the catalog used to hash the module sources,
+// so an unrelated fix forced a full cold preparation pass on every device.
+const CATALOG_FORMAT_VERSION = 1;
+
 function signature(options) {
   const { native } = options;
-  const modules = ['asset-preparation.cjs', 'map-preparation.cjs', 'port-preparation.cjs',
-    'preparation.cjs', 'preparation-state.cjs', 'preparation-files.cjs', 'preparation-catalog.cjs',
-    'yed-sideview-recipes.cjs'];
-  return hash(JSON.stringify({ version: 1, modules: modules.map(name => hash(fs.readFileSync(path.join(__dirname, name)))),
+  return hash(JSON.stringify({ version: 2, format: CATALOG_FORMAT_VERSION, mapCompiler: COMPILER_VERSION,
     imageProcessor: native.assets.preparationVersion, tileProcessor: native.assets.tilePreparationVersion,
     lz4: native.assets.preparationLz4Version, images: options.images, maps: options.maps,
     pageCodec: options.pageCodec, workspaceBytes: options.workspaceBytes, recipes: options.recipes,
@@ -69,7 +75,7 @@ async function loadCatalog(options) {
   try {
     const gameRoot = await fsp.realpath(options.gameRoot);
     const cacheRoot = await fsp.realpath(options.cacheRoot);
-    const root = path.join(cacheRoot, 'preparation-v1', hash(JSON.stringify(gameRoot)).slice(0, 16));
+    const root = preparationRoot(cacheRoot, gameRoot);
     releaseLock = await acquireLock(root, shouldCancel, () => {}, native.assets);
     if (!releaseLock) return null;
     const invalidations = await fsp.readdir(path.join(root, 'invalidations')).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
@@ -110,4 +116,4 @@ async function loadCatalog(options) {
   } finally { releaseLease?.(); releaseLock?.(); }
 }
 
-module.exports = { loadCatalog, saveCatalog, rebuildMarker };
+module.exports = { loadCatalog, saveCatalog, rebuildMarker, signature, CATALOG_FORMAT_VERSION };

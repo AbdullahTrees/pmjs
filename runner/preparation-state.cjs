@@ -17,6 +17,37 @@ const inside = (root, name) => {
   return relative.split(path.sep).join('/');
 };
 
+// Per-game preparation directory. By default it is keyed by the game's absolute path,
+// so moving or renaming the game folder starts a new cache. PMJS_PREPARATION_KEY names
+// the directory explicitly (e.g. one key per game in a launcher), so the prepared outputs
+// survive a moved game folder; source receipts are path-keyed and are simply re-read.
+function preparationRoot(cacheRoot, gameRoot) {
+  const key = process.env.PMJS_PREPARATION_KEY;
+  if (key !== undefined && key !== '') {
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(key)) throw new Error('invalid PMJS_PREPARATION_KEY: ' + JSON.stringify(key));
+    return path.join(cacheRoot, 'preparation-v1', 'key-' + key);
+  }
+  return path.join(cacheRoot, 'preparation-v1', checksum(gameRoot).slice(0, 16));
+}
+
+// A result's generation: the output format it was prepared for. Results of another
+// generation (another runtime version) are kept for a while instead of deleted, so
+// switching between runtime versions does not re-prepare the whole cache each time.
+// Port results keep the old behaviour (no generation).
+function resultGeneration(name, record) {
+  if (!record || typeof record !== 'object') return null;
+  if (name.startsWith('maps/'))
+    return record.compiler !== undefined || record.processor !== undefined ?
+      'maps:' + checksum([record.compiler ?? null, record.processor ?? null]).slice(0, 16) : null;
+  if (name.startsWith('port/')) return null;
+  return record.processor !== undefined ? 'images:' + checksum(record.processor).slice(0, 16) : null;
+}
+const keptGenerations = () => {
+  const value = Number(process.env.PMJS_PREPARATION_KEEP_GENERATIONS ?? 1);
+  return Number.isSafeInteger(value) && value >= 0 && value <= 8 ? value : 1;
+};
+const generationRefreshMs = 24 * 60 * 60 * 1000;
+
 async function readState(filename) {
   if ((await fsp.stat(filename)).size > maximumStateBytes)
     throw new Error('cached preparation state exceeds the memory budget');
@@ -99,7 +130,7 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
   sourceRoots = [gameRoot, ...await Promise.all(sourceRoots.map(root => fsp.realpath(root).catch(() => null)))].filter(Boolean);
   await fsp.mkdir(cacheRoot, { recursive: true });
   cacheRoot = await fsp.realpath(cacheRoot);
-  const root = path.join(path.resolve(cacheRoot), 'preparation-v1', checksum(gameRoot).slice(0, 16));
+  const root = preparationRoot(path.resolve(cacheRoot), gameRoot);
   await fsp.mkdir(root, { recursive: true });
   const releaseLock = await acquireLock(root, shouldCancel,
     () => onProgress({ phase: 'wait', completed: 0, total: 0 }), native.assets);
@@ -116,14 +147,15 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
             typeof record.data[key] === 'object' && !Array.isArray(record.data[key]))) {
         saved = record.data;
         // Reuse only when normalization below preserves the exact JSON key order and values.
-        if (saved.failures && Object.keys(saved).join(',') === 'files,results,indices,failures')
+        if (saved.failures && saved.generations && Object.keys(saved).join(',') === 'files,results,indices,failures,generations')
           verifiedChecksum = record.checksum;
       }
     } catch (error) {
       if (error.code !== 'ENOENT') logger.warn('[pmjs] preparation state unavailable; rebuilding: ' + error.message);
     }
-    const data = { files: saved.files || {}, results: saved.results || {}, indices: saved.indices || {}, failures: saved.failures || {} };
-    const pending = new Map(), touched = new Set(), directories = new Map();
+    const data = { files: saved.files || {}, results: saved.results || {}, indices: saved.indices || {}, failures: saved.failures || {},
+      generations: saved.generations && typeof saved.generations === 'object' && !Array.isArray(saved.generations) ? saved.generations : {} };
+    const pending = new Map(), touched = new Set(), directories = new Map(), currentGenerations = new Set();
     for (const [name, record] of Object.entries(data.results)) {
       if (!record?.key) continue;
       directories.set(path.posix.dirname(name) + '/' + record.key, name);
@@ -193,6 +225,9 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         return value?.failed ? null : value;
       },
       touch(directory) { const key = inside(root, directory); if (Object.hasOwn(data.results, key)) touched.add(key); },
+      // Each phase registers the generation it prepares, so a phase that touches nothing
+      // (every source deleted) still treats its own generation's leftovers as stale.
+      useGeneration(name, record) { const generation = resultGeneration(name, record); if (generation) currentGenerations.add(generation); },
       discard(directory) {
         const key = inside(root, directory);
         if (Object.hasOwn(data.results, key)) { ++session.invalidated; stateDirty = true; }
@@ -228,12 +263,45 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         touched.add(relative);
       },
       async finish() {
+        const phaseOf = key => key.startsWith('maps/') ? 'maps' : key.startsWith('port/') ? 'port' : 'images';
+        const now = Date.now(), current = new Set(currentGenerations);
+        for (const generation of current)
+          if (!(now - (data.generations[generation] || 0) < generationRefreshMs)) { data.generations[generation] = now; stateDirty = true; }
+        for (const key of touched) {
+          const generation = resultGeneration(key, data.results[key]);
+          if (!generation) continue;
+          current.add(generation);
+          if (!(now - (data.generations[generation] || 0) < generationRefreshMs)) { data.generations[generation] = now; stateDirty = true; }
+        }
+        // Untouched results of a current generation are stale (source changed or removed).
+        // Untouched results of another generation belong to another runtime version: keep
+        // the most recently used `keptGenerations()` other generations per phase.
+        const foreign = new Map();
+        for (const [key, record] of Object.entries(data.results)) {
+          const generation = touched.has(key) ? null : resultGeneration(key, record);
+          if (!generation || current.has(generation)) continue;
+          const phase = phaseOf(key);
+          if (!foreign.has(phase)) foreign.set(phase, new Set());
+          foreign.get(phase).add(generation);
+        }
+        const keep = new Set();
+        for (const generations of foreign.values())
+          [...generations].sort((a, b) => (data.generations[b] || 0) - (data.generations[a] || 0))
+            .slice(0, keptGenerations()).forEach(generation => keep.add(generation));
+        const keptDirectories = [];
         for (const key of Object.keys(data.results)) {
-          const phase = key.startsWith('maps/') ? 'maps' : key.startsWith('port/') ? 'port' : 'images';
+          const phase = phaseOf(key);
           if (session.phaseStates.get(phase) === 'completed' && !touched.has(key)) {
+            if (keep.has(resultGeneration(key, data.results[key]))) {
+              keptDirectories.push(path.join(root, ...key.split('/')) + path.sep);
+              continue;
+            }
             delete data.results[key]; ++session.invalidated; stateDirty = true;
           }
         }
+        const referenced = new Set(Object.entries(data.results).map(([key, record]) => resultGeneration(key, record)));
+        for (const generation of Object.keys(data.generations))
+          if (!referenced.has(generation)) { delete data.generations[generation]; stateDirty = true; }
         for (const id of Object.keys(data.failures)) {
           const phase = id.startsWith('map:') ? 'maps' : id.startsWith('port:') ? 'port' : 'images';
           if (session.phaseStates.get(phase) === 'completed' && !session.outcomes.has(id)) {
@@ -252,6 +320,8 @@ async function openPreparation({ gameRoot, cacheRoot, native, verifyHashes = fal
         // after both image and map preparation complete.
         if (session.phaseStates.get('images') === 'completed' && session.phaseStates.get('maps') === 'completed')
           for (const file of Object.keys(data.files)) if (!session.files.receipts[file]) {
+            // Output receipts of kept results stay, so switching back does not re-hash them.
+            if (keptDirectories.some(directory => file.startsWith(directory))) continue;
             delete data.files[file]; stateDirty = true;
           }
         const committed = await session.checkpoint();
@@ -391,4 +461,4 @@ async function applyPendingInvalidations({ root, native, logger = console }) {
   } catch (error) { logger.warn('[pmjs] cannot apply preparation invalidations: ' + error.message); }
 }
 
-module.exports = { openPreparation, inventory, invalidateResults, invalidateCatalog };
+module.exports = { openPreparation, inventory, invalidateResults, invalidateCatalog, preparationRoot, resultGeneration };

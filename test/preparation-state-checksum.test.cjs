@@ -26,12 +26,13 @@ function fixture(data, checksum = hash(data)) {
 }
 
 for (const [name, make, expectedHashes] of [
-  ['canonical', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: {} }), 1],
+  ['canonical', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: {}, generations: {} }), 1],
+  ['legacy missing generations', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: {} }), 2],
   ['legacy missing failures', () => ({ files: {}, results: {}, indices: { marker: 'kept' } }), 2],
   ['reordered keys', () => ({ indices: { marker: 'kept' }, files: {}, results: {}, failures: {} }), 2],
   ['extra field', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: {}, extra: 'ignored' }), 2],
   ['falsy failures', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: null }), 2],
-  ['truthy primitive failures', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: 'legacy' }), 1],
+  ['truthy primitive failures', () => ({ files: {}, results: {}, indices: { marker: 'kept' }, failures: 'legacy', generations: {} }), 1],
 ]) {
   test('state checksum reuse: ' + name, async () => {
     const { filename, options } = fixture(make());

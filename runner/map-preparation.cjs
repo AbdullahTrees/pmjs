@@ -135,6 +135,7 @@ async function prepareMapsPhase({ gameRoot, cacheRoot, native, width = 816, heig
   preparationContext = 'live', portableIndex = null, portableAssetRoot = null, session }) {
   if (!session) throw new Error('map preparation phase requires a preparation session');
   cacheRoot = session.root;
+  session.useGeneration?.('maps/', { compiler: COMPILER_VERSION, processor: native.assets?.tilePreparationVersion });
   if (!['live', 'offline'].includes(preparationContext)) throw new Error('invalid preparation context');
   const offline = preparationContext === 'offline';
   const indexedMaps = new Map();

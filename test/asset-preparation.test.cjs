@@ -518,7 +518,25 @@ test('source and processor identities invalidate individual entries and remove s
   assert.equal(fs.existsSync(old), false);
   assert.equal((await prepareAssets({ ...f, processorIdentity: { processor: 'next' } })).generated, 1);
   assert.equal(f.jobs, 3);
-  assert.equal(manifests(f).length, 1);
+  // The previous runtime version's output is kept (one other generation by default), so
+  // switching back to it prepares nothing.
+  assert.equal(manifests(f).length, 2);
+  assert.equal((await prepareAssets(f)).generated, 0);
+  assert.equal(f.jobs, 3);
+});
+
+test('PMJS_PREPARATION_KEEP_GENERATIONS=0 removes the output of another processor identity', async () => {
+  const previous = process.env.PMJS_PREPARATION_KEEP_GENERATIONS;
+  process.env.PMJS_PREPARATION_KEEP_GENERATIONS = '0';
+  try {
+    const f = fixture();
+    await prepareAssets(f);
+    assert.equal((await prepareAssets({ ...f, processorIdentity: { processor: 'next' } })).generated, 1);
+    assert.equal(manifests(f).length, 1);
+  } finally {
+    if (previous === undefined) delete process.env.PMJS_PREPARATION_KEEP_GENERATIONS;
+    else process.env.PMJS_PREPARATION_KEEP_GENERATIONS = previous;
+  }
 });
 
 test('recipe changes regenerate and source checksums do not override explicit settings', async () => {
