@@ -965,6 +965,86 @@ test('MV preparation sorts tilemap children after their ordering inputs move', (
   assert.deepEqual(node.children.map(child => child.name), ['B', 'A']);
 });
 
+test('MV preparation skips stale tile layer positions and sorted child sorts', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..',
+    'js/pmjs-mv/render-prepare.js'), 'utf8');
+  class Tilemap {}
+  const sandbox = {
+    Tilemap, Window: function Window() {}, Math, nativeTileRebuilds: 0,
+    PMJS: { optimizations: { register() {}, isEnabled: id => id === 'tilemap.stale-prepare-skip' } }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(source + '\nthis.prepare = prepareNativeMvSceneNode;', sandbox);
+  const first = { name: 'A', z: 0, y: 9, spriteId: 1 };
+  const second = { name: 'B', z: 0, y: 1, spriteId: 2 };
+  const node = Object.assign(new Tilemap(), {
+    children: [first, second], origin: { x: 48, y: 0 }, roundPixels: true,
+    _margin: 0, _tileWidth: 48, _tileHeight: 48,
+    _lastStartX: 1, _lastStartY: 0, _needsRepaint: false,
+    _layers: [{ layerId: 0, position: { x: 0, y: 0 } }],
+    _priorityTiles: [],
+    tiledData: { layers: [{ offsetx: 0, offsety: 0 }] },
+    _updateLayerPositions(startX, startY) {
+      this.positionCalls = (this.positionCalls || 0) + 1;
+      this._layers[0].position.x = startX;
+    },
+    _paintAllTiles() {},
+    _compareChildOrder(a, b) {
+      return (a.z - b.z) || (a.y - b.y) || (a.spriteId - b.spriteId);
+    },
+    _sortChildren() {
+      this.sortCalls = (this.sortCalls || 0) + 1;
+      this.children.sort(this._compareChildOrder.bind(this));
+    }
+  });
+
+  sandbox.prepare(node);
+  assert.equal(node.positionCalls, 1, 'first frame writes layer positions');
+  assert.equal(node.sortCalls, 1, 'first frame sorts the unsorted children');
+  sandbox.prepare(node);
+  assert.equal(node.positionCalls, 1, 'same camera keeps layer positions');
+  assert.equal(node.sortCalls, 1, 'already-sorted children keep their order');
+
+  node.origin.x = 96;
+  sandbox.prepare(node);
+  assert.equal(node.positionCalls, 2, 'camera move refreshes layer positions');
+  assert.equal(node.sortCalls, 1, 'still sorted after the move');
+
+  node.children.unshift({ name: 'C', z: 0, y: 9, spriteId: 3 });
+  sandbox.prepare(node);
+  assert.equal(node.sortCalls, 2, 'unordered child forces a sort');
+  assert.deepEqual(node.children.map(child => child.name), ['B', 'A', 'C']);
+});
+
+test('MV preparation keeps per-frame tile prep when the skip is disabled', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..',
+    'js/pmjs-mv/render-prepare.js'), 'utf8');
+  class Tilemap {}
+  const sandbox = {
+    Tilemap, Window: function Window() {}, Math, nativeTileRebuilds: 0,
+    PMJS: { optimizations: { register() {}, isEnabled: () => false } }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(source + '\nthis.prepare = prepareNativeMvSceneNode;', sandbox);
+  const node = Object.assign(new Tilemap(), {
+    children: [{ name: 'A', z: 0, y: 1, spriteId: 1 }],
+    origin: { x: 0, y: 0 }, roundPixels: true,
+    _margin: 0, _tileWidth: 48, _tileHeight: 48,
+    _lastStartX: 0, _lastStartY: 0, _needsRepaint: false,
+    _updateLayerPositions() { this.positionCalls = (this.positionCalls || 0) + 1; },
+    _paintAllTiles() {},
+    _compareChildOrder(a, b) {
+      return (a.z - b.z) || (a.y - b.y) || (a.spriteId - b.spriteId);
+    },
+    _sortChildren() { this.sortCalls = (this.sortCalls || 0) + 1; }
+  });
+
+  sandbox.prepare(node);
+  sandbox.prepare(node);
+  assert.equal(node.positionCalls, 2);
+  assert.equal(node.sortCalls, 2);
+});
+
 test('filter parameter mutation re-renders without changing structure', () => {
   const harness = makeHarness();
   const { sandbox, sprite } = harness;
