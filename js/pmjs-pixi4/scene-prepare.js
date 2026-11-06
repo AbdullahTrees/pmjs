@@ -51,8 +51,8 @@ function prepareNativeSceneNode(node, resolution, transformsPrepared) {
 
 function prepareTransforms(plan, stage) {
   var preflight = typeof pmjsPixiRenderPreflight !== 'undefined' && pmjsPixiRenderPreflight;
-  var inline = !!(preflight && preflight.inlineTransformPlanEnabled &&
-    preflight.inlineTransformPlanEnabled());
+  // transformPlan returns the inline marker when the opt is on; a WeakMap otherwise.
+  var inline = !!(plan && plan.inline && preflight && preflight.transformEntryFor);
   function visit(node) {
     var entry, equivalent;
     if (inline) {
