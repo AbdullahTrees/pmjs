@@ -131,6 +131,31 @@ if (PIXI.BaseTexture) {
     };
   })();
 }
+// Pixi assigns _cacheData.sprite only after it has rendered the node into its cache texture.
+// That render goes through the native renderer, whose bitmap-cache preparation finds the same
+// node (cacheAsBitmap is already true, the sprite not yet set) and would initialize it again:
+// the nested call allocates a second render texture and canvas, its sprite is then overwritten
+// by the outer one, and the inner texture is never destroyed. One canvas leaked per cache
+// initialization (picture-layer captures re-initialize often), until a 1 GB device ran out of
+// memory. A node already being initialized is skipped; while it builds, it is flagged so the
+// encoder draws its live children, which is what the outer render needs.
+if (PIXI.DisplayObject && typeof PIXI.DisplayObject.prototype._initCachedDisplayObject === 'function') {
+  (function() {
+    var initialize = PIXI.DisplayObject.prototype._initCachedDisplayObject;
+    PIXI.DisplayObject.prototype._initCachedDisplayObject = function(renderer) {
+      if (this.__pmjsInitializingBitmapCache) return undefined;
+      var building = this.__pmjsBuildingBitmapCache;
+      this.__pmjsInitializingBitmapCache = true;
+      this.__pmjsBuildingBitmapCache = true;
+      try {
+        return initialize.call(this, renderer);
+      } finally {
+        this.__pmjsInitializingBitmapCache = false;
+        this.__pmjsBuildingBitmapCache = building;
+      }
+    };
+  })();
+}
 if (PIXI.BaseRenderTexture) {
   (function() {
     var destroy = PIXI.BaseRenderTexture.prototype.destroy;
