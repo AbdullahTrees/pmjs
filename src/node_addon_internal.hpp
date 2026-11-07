@@ -32,6 +32,15 @@ struct AudioView {
   std::string source;
   AudioEncryptionKey key;
 };
+struct FrameNativeCounters {
+  std::uint64_t uploadBytes = 0;
+  std::uint64_t uploadCount = 0;
+  std::uint64_t textureBinds = 0;
+  std::uint64_t drawCalls = 0;
+  std::uint64_t renderTargetSwitches = 0;
+  std::uint64_t filterPasses = 0;
+};
+
 struct State {
   State(const std::string& root, int initWidth, int initHeight,
         const std::string& assetRoot, const std::string& windowTitle,
@@ -52,6 +61,7 @@ struct State {
   double frameUploadMs = 0;
   double frameDrawMs = 0;
   double frameMemoryMs = 0;
+  FrameNativeCounters frameCounters;
   std::chrono::steady_clock::time_point preparationPresentedAt{};
   bool preparationFontsResolved = false;
   std::vector<std::filesystem::path> preparationFonts;

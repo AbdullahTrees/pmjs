@@ -526,6 +526,12 @@ napi_value preparationClear(napi_env env, napi_callback_info) try {
 napi_value renderFrame(napi_env env, napi_callback_info) try {
   State& value = host(env);
   const auto start = std::chrono::steady_clock::now();
+  const auto& statsBefore = value.renderer.stats();
+  const auto drawCallsBefore = statsBefore.drawCalls;
+  const auto filterDrawCallsBefore = statsBefore.filterDrawCalls;
+  const auto bufferUploadsBefore = statsBefore.bufferUploads;
+  const auto filterTargetAcquiresBefore = statsBefore.filterTargetAcquires;
+  const auto rendererTargetCreatesBefore = statsBefore.rendererTargetCreates;
   value.canvases.uploadDirty();
   const auto uploaded = std::chrono::steady_clock::now();
   value.core.syncDrawableSize();
@@ -536,6 +542,16 @@ napi_value renderFrame(napi_env env, napi_callback_info) try {
   value.frameUploadMs = std::chrono::duration<double, std::milli>(uploaded - start).count();
   value.frameDrawMs = std::chrono::duration<double, std::milli>(drawn - uploaded).count();
   value.frameMemoryMs = std::chrono::duration<double, std::milli>(accounted - drawn).count();
+  const auto& statsAfter = value.renderer.stats();
+  value.frameCounters.uploadBytes = value.canvases.lastUploadBytes();
+  value.frameCounters.uploadCount = value.canvases.lastUploadCount();
+  value.frameCounters.drawCalls = statsAfter.drawCalls - drawCallsBefore;
+  value.frameCounters.filterPasses = statsAfter.filterDrawCalls - filterDrawCallsBefore;
+  value.frameCounters.renderTargetSwitches =
+    (statsAfter.bufferUploads - bufferUploadsBefore) +
+    (statsAfter.filterTargetAcquires - filterTargetAcquiresBefore) +
+    (statsAfter.rendererTargetCreates - rendererTargetCreatesBefore);
+  value.frameCounters.textureBinds = value.frameCounters.drawCalls;
   return undefined(env);
 } catch (const std::exception& error) {
   return throwException(env, error);
@@ -578,6 +594,18 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
     number(env, host(env).frameDrawMs)), "cannot set frame draw time");
   check(env, napi_set_named_property(env, frameCosts, "memoryMs",
     number(env, host(env).frameMemoryMs)), "cannot set frame memory time");
+  check(env, napi_set_named_property(env, frameCosts, "uploadBytes",
+    number(env, static_cast<double>(host(env).frameCounters.uploadBytes))), "cannot set frame upload bytes");
+  check(env, napi_set_named_property(env, frameCosts, "uploadCount",
+    number(env, static_cast<double>(host(env).frameCounters.uploadCount))), "cannot set frame upload count");
+  check(env, napi_set_named_property(env, frameCosts, "drawCalls",
+    number(env, static_cast<double>(host(env).frameCounters.drawCalls))), "cannot set frame draw calls");
+  check(env, napi_set_named_property(env, frameCosts, "textureBinds",
+    number(env, static_cast<double>(host(env).frameCounters.textureBinds))), "cannot set frame texture binds");
+  check(env, napi_set_named_property(env, frameCosts, "renderTargetSwitches",
+    number(env, static_cast<double>(host(env).frameCounters.renderTargetSwitches))), "cannot set frame render target switches");
+  check(env, napi_set_named_property(env, frameCosts, "filterPasses",
+    number(env, static_cast<double>(host(env).frameCounters.filterPasses))), "cannot set frame filter passes");
   check(env, napi_set_named_property(env, result, "frameCosts", frameCosts), "cannot set frame costs");
   check(env, napi_set_named_property(env, result, "diagnostics",
     boolean(env, host(env).renderer.diagnosticsEnabled())), "cannot set renderer diagnostics state");

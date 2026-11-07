@@ -181,6 +181,8 @@ struct RendererStats {
   std::uint64_t constantBlackSourceDraws = 0;
   std::uint64_t constantBlackBorderDraws = 0;
   std::uint64_t meshDrawCalls = 0;
+  std::uint64_t textureBinds = 0;
+  std::uint64_t renderTargetSwitches = 0;
 };
 
 struct TileLayerTile {

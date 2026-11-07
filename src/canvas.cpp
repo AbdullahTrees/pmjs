@@ -2057,6 +2057,7 @@ bool CanvasStore::uploadSurface(Surface& target) {
   const int y = target.image ? surface.dirtyY0 : 0;
   const int width = target.image ? surface.dirtyX1 - x : surface.width;
   const int height = target.image ? surface.dirtyY1 - y : surface.height;
+  const auto uploadBytes = static_cast<std::uint64_t>(width) * height * 4;
   std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
   for (int row = 0; row < height; ++row) for (int column = 0; column < width; ++column) {
     const auto source = (static_cast<std::size_t>(y + row) * surface.width + x + column) * 4;
@@ -2068,9 +2069,14 @@ bool CanvasStore::uploadSurface(Surface& target) {
     const auto image = images_.createRgba(surface.width, surface.height, pixels.data(), true);
     if (!image) return false;
     target.image = image->handle;
+    lastUploadBytes_ += static_cast<std::uint64_t>(surface.width) * surface.height * 4;
+    lastUploadCount_++;
   } else if (!images_.updateRgbaRegion(target.image, x, y, width, height, pixels.data(), width,
       surface.knownAllZero && target.imageRevision == images_.contentRevision(target.image))) {
     return false;
+  } else {
+    lastUploadBytes_ += uploadBytes;
+    lastUploadCount_++;
   }
   target.imageRevision = images_.contentRevision(target.image);
   surface.dirtyX0 = surface.dirtyY0 = 0;
@@ -2079,6 +2085,8 @@ bool CanvasStore::uploadSurface(Surface& target) {
 }
 
 void CanvasStore::uploadDirty() {
+  lastUploadBytes_ = 0;
+  lastUploadCount_ = 0;
   for (auto& surface : surfaces_) {
     if (surface.live && surface.content->state == ContentState::Realized && surface.image) {
       uploadSurface(surface);

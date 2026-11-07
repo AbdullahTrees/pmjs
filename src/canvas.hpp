@@ -366,6 +366,12 @@ class CanvasStore {
   std::size_t peakCpuBytes_ = 0;
   std::uint64_t imageViewRegionReads_ = 0;
   std::size_t peakLiveCount_ = 0;
+  std::uint64_t lastUploadBytes_ = 0;
+  std::uint64_t lastUploadCount_ = 0;
+
+ public:
+  std::uint64_t lastUploadBytes() const { return lastUploadBytes_; }
+  std::uint64_t lastUploadCount() const { return lastUploadCount_; }
 };
 
 }  // namespace pmjs
