@@ -114,6 +114,33 @@ ImageChannelStorage grayscaleStorage(int channels) {
 
 ImageChannelStorage imageStorage(const ImagePixels& pixels) { return imageChannelStorage(pixels); }
 
+// scene.derived-region-storage: reuse cached storage decisions for derived
+// sprite-region crops instead of re-scanning pixels and building palettes
+// inside the draw path. PMJS_DISABLE_OPT=scene.derived-region-storage
+// restores the per-pixel analysis path.
+bool derivedRegionStorageDisabled() {
+  static const bool disabled = [] {
+    const char* env = std::getenv("PMJS_DISABLE_OPT");
+    if (!env) return false;
+    constexpr char id[] = "scene.derived-region-storage";
+    constexpr std::size_t idLength = sizeof(id) - 1;
+    const char* cursor = env;
+    while (*cursor) {
+      while (*cursor == ' ' || *cursor == '\t' || *cursor == ',') ++cursor;
+      if (!*cursor) break;
+      const char* end = cursor;
+      while (*end && *end != ',') ++end;
+      const char* trimmed = end;
+      while (trimmed > cursor && (trimmed[-1] == ' ' || trimmed[-1] == '\t')) --trimmed;
+      if (static_cast<std::size_t>(trimmed - cursor) == idLength &&
+          std::memcmp(cursor, id, idLength) == 0) return true;
+      cursor = end;
+    }
+    return false;
+  }();
+  return disabled;
+}
+
 std::uint32_t uploadTexture(int width, int height, const void* rgba, ImageChannelStorage storage,
                             std::uint32_t texture = 0, bool packed = false) {
   const int channels = storage.channels;
@@ -3087,7 +3114,8 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
     if (backing.descriptor.framePages) {
       auto& recent = backing.recentCells;
       std::erase(recent, i);
-      while (recent.size() >= 4) {
+      const std::size_t cellKeepAlive = derivedRegionStorageDisabled() ? 4 : 16;
+      while (recent.size() >= cellKeepAlive) {
         const auto oldest = recent.front();
         release(backing.cellImages[oldest]);
         backing.cellImages[oldest] = 0;
@@ -3111,7 +3139,30 @@ std::optional<SpriteImageRegion> ImageStore::resolveSpriteRegion(ImageHandle han
         std::copy_n(content->rgba.data()+(static_cast<std::size_t>(sy)*content->width+sx)*4,
                     4, pixels.rgba.data()+(static_cast<std::size_t>(row)*pixels.width+column)*4);
       }
-      auto created = createDecoded(pixels);
+      const ImageStorageDecision* cropOpt = nullptr;
+      ImageStorageDecision cropDecision;
+      if (!derivedRegionStorageDisabled()) {
+        const ImageStorageDecision* parent = nullptr;
+        if (cell.page >= 0 && static_cast<std::size_t>(cell.page) < backing.descriptor.pages.size() &&
+            backing.descriptor.pages[cell.page].storage) {
+          parent = &*backing.descriptor.pages[cell.page].storage;
+        } else {
+          parent = storageDecision(slot.cacheKey);
+        }
+        if (parent) {
+          cropDecision = *parent;
+          cropDecision.width = pixels.width;
+          cropDecision.height = pixels.height;
+          cropDecision.paletteBits = 0;
+          if (!cropDecision.hasPixelFacts) {
+            cropDecision.hasPixelFacts = true;
+            cropDecision.opaque = false;
+            cropDecision.allZero = false;
+          }
+          cropOpt = &cropDecision;
+        }
+      }
+      auto created = createDecoded(pixels, cropOpt);
       if (!created) return std::nullopt;
       image = created->handle;
     }
@@ -3361,7 +3412,17 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
         if (pixels.rgba[i+3] != 255)
           for (std::size_t c = 0; c < 3; ++c)
             pixels.rgba[i+c] = static_cast<std::uint8_t>((pixels.rgba[i+c]*pixels.rgba[i+3]+127)/255);
-    auto channelStorage = imageStorage(pixels);
+    ImageChannelStorage channelStorage;
+    if (!derivedRegionStorageDisabled()) {
+      if (const auto* parent = storageDecision(slot.cacheKey)) {
+        channelStorage = parent->channels;
+        ++storageDecisionHits_;
+      } else {
+        channelStorage = imageStorage(pixels);
+      }
+    } else {
+      channelStorage = imageStorage(pixels);
+    }
     auto bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
     if (linearPalette || bytes > preparedFrameBudgetBytes_) {
       int x0 = pixels.width, y0 = pixels.height, x1 = 0, y1 = 0;
@@ -3388,7 +3449,7 @@ std::optional<SpriteImageRegion> ImageStore::resolvePreparedFrameRegion(ImageHan
         storage = {storage[0]+x0, storage[1]+y0, cropped.width, cropped.height};
         pixels = std::move(cropped);
       }
-      channelStorage = imageStorage(pixels);
+      if (derivedRegionStorageDisabled()) channelStorage = imageStorage(pixels);
       bytes = static_cast<std::size_t>(pixels.width)*pixels.height*channelStorage.channels;
       if (bytes > preparedFrameBudgetBytes_) return std::nullopt;
     }

@@ -26,6 +26,9 @@ if (typeof PMJS !== 'undefined' && PMJS.optimizations &&
   PMJS.optimizations.register({ id: 'scene.solid-sprite-mask-clip',
     owner: 'pmjs-pixi4',
     fallback: 'encode Sprite masks through the alpha-mask filter group' });
+  PMJS.optimizations.register({ id: 'scene.derived-region-storage',
+    owner: 'pmjs-pixi4',
+    fallback: 'per-pixel imageStorage and makePalette analysis for each derived sprite region' });
 }
 
 var nativeTransformParent = new PIXI.Container();
