@@ -57,6 +57,20 @@ if (typeof ImageCache !== 'undefined') {
       if (Number.isFinite(value) && value >= 0) gameRequestedImageCachePixels = value;
     }
   });
+  // Memory cull (runner/memory-guard.cjs): drop every cached image MV's own truncation may
+  // drop, as if the cache limit were zero for one pass. _truncateCache keeps reserved and
+  // still-loading items, and bitmaps that sprites or windows hold stay alive through those
+  // references; only images nothing uses are released (after the next full collection).
+  globalThis.__pmjsMemoryCull = function() {
+    var cache = typeof ImageManager !== 'undefined' && ImageManager._imageCache;
+    if (!cache || !cache._items || typeof cache._truncateCache !== 'function') return null;
+    var before = Object.keys(cache._items).length;
+    var configured = configuredImageCacheMaxPixels;
+    configuredImageCacheMaxPixels = 1;
+    try { cache._truncateCache(); }
+    finally { configuredImageCacheMaxPixels = configured; }
+    return { cachedImages: before, keptImages: Object.keys(cache._items).length };
+  };
 }
 
 // Pending images must be held by MV's ImageCache. Once a Bitmap becomes ready,

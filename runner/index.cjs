@@ -354,6 +354,21 @@ async function runSession(input, diagnostics, setNative) {
   const memoryReclaimer = createMemoryReclaimer({ native,
     readMemory: () => reclamationMemoryState({ processObject: hostProcess }),
     readRss: () => hostProcess.memoryUsage.rss(), now: () => performance.now() });
+  {
+    const { createMemoryGuard, garbageCollector } = require('./memory-guard.cjs');
+    const guardEnv = hostProcess.env;
+    if (guardEnv.PMJS_MEMORY_GUARD === '1' || guardEnv.PMJS_MEMORY_LOG) {
+      const v8 = require('node:v8');
+      const memoryGuard = createMemoryGuard({ native, env: guardEnv, guest: globalThis,
+        readMemory: () => reclamationMemoryState({ processObject: hostProcess }),
+        readHeap: () => { const heap = v8.getHeapStatistics(); return { used: heap.used_heap_size, total: heap.total_heap_size }; },
+        now: () => performance.now(),
+        collectGarbage: guardEnv.PMJS_MEMORY_CULL_MB === '0' ? null : garbageCollector() });
+      memoryGuard.start(hostTimers);
+      console.log('[pmjs] memory-guard enabled log=' + JSON.stringify(guardEnv.PMJS_MEMORY_LOG || null) +
+        ' cull_mb=' + (guardEnv.PMJS_MEMORY_CULL_MB || '500'));
+    }
+  }
   const scan = native.runtime.vfsIndexStats?.();
   if (scan) console.log(`[pmjs] startup stage=vfs-index statistics=${JSON.stringify(scan)}`);
   console.log(`[pmjs] startup stage=host-initialized elapsed_ms=${(performance.now() - startupStarted).toFixed(1)}`);
