@@ -84,6 +84,7 @@ std::uint32_t Renderer::linkProgram(const char* vertexSource, const char* fragme
     for (const auto& attribute : attributes)
       glBindAttribLocation(program, attribute.location, attribute.name);
     glLinkProgram(program);
+    ++stats_.programBuilds;
   }
 
   GLint linked = GL_FALSE;

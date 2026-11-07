@@ -1,10 +1,13 @@
 #include "node_addon_internal.hpp"
 
+#include "log.hpp"
+
 #include <SDL.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <iomanip>
 #include <limits>
 #if defined(__GLIBC__)
 #include <dlfcn.h>
@@ -525,6 +528,11 @@ napi_value preparationClear(napi_env env, napi_callback_info) try {
 
 napi_value renderFrame(napi_env env, napi_callback_info) try {
   State& value = host(env);
+  static const double spikeThresholdMs = [] {
+    const char* text = std::getenv("PMJS_DRAW_SPIKE_MS");
+    if (!text) return 0.0;
+    try { return std::stod(text); } catch (...) { return 0.0; }
+  }();
   const auto start = std::chrono::steady_clock::now();
   const auto& statsBefore = value.renderer.stats();
   const auto drawCallsBefore = statsBefore.drawCalls;
@@ -532,6 +540,15 @@ napi_value renderFrame(napi_env env, napi_callback_info) try {
   const auto bufferUploadsBefore = statsBefore.bufferUploads;
   const auto filterTargetAcquiresBefore = statsBefore.filterTargetAcquires;
   const auto rendererTargetCreatesBefore = statsBefore.rendererTargetCreates;
+  const auto programBuildsBefore = statsBefore.programBuilds;
+  const auto& imagesBefore = value.images;
+  const auto imageTextureCreatesBefore = imagesBefore.textureCreates();
+  const auto imageUploadBytesBefore = imagesBefore.textureUploadBytes();
+  const auto materializationsBefore =
+    imagesBefore.preparedMaterializations() + imagesBefore.tileMaterializations();
+  const auto compactUploadsBefore = imagesBefore.compactTextureUploads();
+  const auto sceneryFallbacksBefore = imagesBefore.sceneryFullFallbacks();
+  const auto mipmapGensBefore = imagesBefore.mipmapGenerations();
   value.canvases.uploadDirty();
   const auto uploaded = std::chrono::steady_clock::now();
   value.core.syncDrawableSize();
@@ -552,6 +569,35 @@ napi_value renderFrame(napi_env env, napi_callback_info) try {
     (statsAfter.filterTargetAcquires - filterTargetAcquiresBefore) +
     (statsAfter.rendererTargetCreates - rendererTargetCreatesBefore);
   value.frameCounters.textureBinds = value.frameCounters.drawCalls;
+  value.frameCounters.imageTextureCreates =
+    value.images.textureCreates() - imageTextureCreatesBefore;
+  value.frameCounters.imageUploadBytes =
+    value.images.textureUploadBytes() - imageUploadBytesBefore;
+  value.frameCounters.materializations =
+    (value.images.preparedMaterializations() + value.images.tileMaterializations()) -
+    materializationsBefore;
+  value.frameCounters.compactUploads =
+    value.images.compactTextureUploads() - compactUploadsBefore;
+  value.frameCounters.sceneryFallbacks =
+    value.images.sceneryFullFallbacks() - sceneryFallbacksBefore;
+  value.frameCounters.programBuilds = statsAfter.programBuilds - programBuildsBefore;
+  value.frameCounters.mipmapGens =
+    value.images.mipmapGenerations() - mipmapGensBefore;
+  if (spikeThresholdMs > 0 && value.frameDrawMs >= spikeThresholdMs) {
+    Log() << "[pmjs-draw-spike] drawMs=" << std::fixed << std::setprecision(3)
+      << value.frameDrawMs << " uploadMs=" << value.frameUploadMs
+      << " commands=" << statsAfter.commands
+      << " drawCalls=" << value.frameCounters.drawCalls
+      << " filterPasses=" << value.frameCounters.filterPasses
+      << " targetSwitches=" << value.frameCounters.renderTargetSwitches
+      << " imageCreates=" << value.frameCounters.imageTextureCreates
+      << " imageUploadBytes=" << value.frameCounters.imageUploadBytes
+      << " materializations=" << value.frameCounters.materializations
+      << " compactUploads=" << value.frameCounters.compactUploads
+      << " sceneryFallbacks=" << value.frameCounters.sceneryFallbacks
+      << " programBuilds=" << value.frameCounters.programBuilds
+      << " mipmapGens=" << value.frameCounters.mipmapGens;
+  }
   return undefined(env);
 } catch (const std::exception& error) {
   return throwException(env, error);
@@ -606,6 +652,20 @@ napi_value rendererStats(napi_env env, napi_callback_info) try {
     number(env, static_cast<double>(host(env).frameCounters.renderTargetSwitches))), "cannot set frame render target switches");
   check(env, napi_set_named_property(env, frameCosts, "filterPasses",
     number(env, static_cast<double>(host(env).frameCounters.filterPasses))), "cannot set frame filter passes");
+  check(env, napi_set_named_property(env, frameCosts, "imageTextureCreates",
+    number(env, static_cast<double>(host(env).frameCounters.imageTextureCreates))), "cannot set frame image creates");
+  check(env, napi_set_named_property(env, frameCosts, "imageUploadBytes",
+    number(env, static_cast<double>(host(env).frameCounters.imageUploadBytes))), "cannot set frame image upload bytes");
+  check(env, napi_set_named_property(env, frameCosts, "materializations",
+    number(env, static_cast<double>(host(env).frameCounters.materializations))), "cannot set frame materializations");
+  check(env, napi_set_named_property(env, frameCosts, "compactUploads",
+    number(env, static_cast<double>(host(env).frameCounters.compactUploads))), "cannot set frame compact uploads");
+  check(env, napi_set_named_property(env, frameCosts, "sceneryFallbacks",
+    number(env, static_cast<double>(host(env).frameCounters.sceneryFallbacks))), "cannot set frame scenery fallbacks");
+  check(env, napi_set_named_property(env, frameCosts, "programBuilds",
+    number(env, static_cast<double>(host(env).frameCounters.programBuilds))), "cannot set frame program builds");
+  check(env, napi_set_named_property(env, frameCosts, "mipmapGens",
+    number(env, static_cast<double>(host(env).frameCounters.mipmapGens))), "cannot set frame mipmap generations");
   check(env, napi_set_named_property(env, result, "frameCosts", frameCosts), "cannot set frame costs");
   check(env, napi_set_named_property(env, result, "diagnostics",
     boolean(env, host(env).renderer.diagnosticsEnabled())), "cannot set renderer diagnostics state");

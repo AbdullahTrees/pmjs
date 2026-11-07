@@ -39,6 +39,14 @@ struct FrameNativeCounters {
   std::uint64_t drawCalls = 0;
   std::uint64_t renderTargetSwitches = 0;
   std::uint64_t filterPasses = 0;
+  // Draw-path realization (lazy first-use work inside renderFrame).
+  std::uint64_t imageTextureCreates = 0;
+  std::uint64_t imageUploadBytes = 0;
+  std::uint64_t materializations = 0;
+  std::uint64_t compactUploads = 0;
+  std::uint64_t sceneryFallbacks = 0;
+  std::uint64_t programBuilds = 0;
+  std::uint64_t mipmapGens = 0;
 };
 
 struct State {

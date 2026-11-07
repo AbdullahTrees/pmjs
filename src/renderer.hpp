@@ -176,6 +176,7 @@ struct RendererStats {
   std::uint64_t spriteTextureChangesBatched = 0;
   std::uint64_t tilingSpriteDrawCalls = 0;
   std::uint64_t screenFillDrawCalls = 0;
+  std::uint64_t programBuilds = 0;
   std::uint64_t constantBlackGroups = 0;
   std::uint64_t constantBlackGroupsSkipped = 0;
   std::uint64_t constantBlackSourceDraws = 0;

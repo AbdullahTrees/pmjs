@@ -1995,6 +1995,7 @@ bool ImageStore::ensureMipmaps(ImageHandle handle, bool premultiplied) {
   while (glGetError() != GL_NO_ERROR) {}
   glBindTexture(GL_TEXTURE_2D, info->texture);
   glGenerateMipmap(GL_TEXTURE_2D);
+  ++mipmapGenerations_;
   if (glGetError() != GL_NO_ERROR) throw std::runtime_error("cannot generate image mipmaps");
   if (!bytes) {
     for (int w = info->width, h = info->height; w > 1 || h > 1;) {
