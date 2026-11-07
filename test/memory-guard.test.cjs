@@ -52,8 +52,14 @@ test('critically low available memory culls without growth, but never during ima
   assert.equal(idle.step(6000).cull.reason, 'critical-available');
 });
 
-test('PMJS_MEMORY_CULL_MB=0 logs without culling; disabled guards do nothing', () => {
-  const logging = harness({ env: { PMJS_MEMORY_CULL_MB: '0' }, memories: [at(700, 40)] });
+test('the safety net culls on low available memory even below the RSS threshold', () => {
+  const net = harness({ env: { PMJS_MEMORY_CULL_MB: '0', PMJS_MEMORY_CRITICAL_MB: '150' }, memories: [at(300, 200), at(320, 140)] });
+  assert.equal(net.step().cull, undefined);
+  assert.equal(net.step(6000).cull.reason, 'critical-available');
+});
+
+test('both triggers at 0 log without culling; disabled guards do nothing', () => {
+  const logging = harness({ env: { PMJS_MEMORY_CULL_MB: '0', PMJS_MEMORY_CRITICAL_MB: '0' }, memories: [at(700, 40)] });
   assert.equal(logging.step().cull, undefined);
   const off = createMemoryGuard({ native: {}, env: {}, readMemory: () => at(700, 40), now: () => 0 });
   assert.equal(off.enabled, false);

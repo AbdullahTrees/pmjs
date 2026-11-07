@@ -9,15 +9,17 @@
 //   not currently hold (globalThis.__pmjsMemoryCull, installed by the MV layer), V8 runs a full
 //   collection so dropped bitmaps release their native images, and the allocator is trimmed.
 //
-// Enabled when PMJS_MEMORY_GUARD=1 or PMJS_MEMORY_LOG is set. Tunables (environment):
-//   PMJS_MEMORY_CULL_MB          RSS above which culls may run (default 500; 0 disables culls)
+// Enabled when PMJS_MEMORY_GUARD=1 or PMJS_MEMORY_LOG is set. Two independent triggers:
+// - safety net: available memory below PMJS_MEMORY_CRITICAL_MB culls whatever the RSS;
+// - growth: RSS above PMJS_MEMORY_CULL_MB that grew since the last cull.
+// Tunables (environment):
+//   PMJS_MEMORY_CRITICAL_MB      available memory below which culls run (default 96; 0 disables)
+//   PMJS_MEMORY_CULL_MB          RSS above which growth culls may run (default 500; 0 disables)
 //   PMJS_MEMORY_CULL_GROWTH_MB   growth since the last cull that re-arms it (default 32)
 //   PMJS_MEMORY_CULL_INTERVAL_MS minimum time between culls (default 5000)
 //   PMJS_MEMORY_LOG_SYNC_MS      how often the log is synced to storage (default 5000)
 const fs = require('node:fs');
 const MiB = 1024 * 1024;
-// Below this much available memory, cull even without growth since the last cull.
-const CRITICAL_AVAILABLE_BYTES = 96 * MiB;
 
 function numberFrom(env, name, fallback) {
   const value = Number(env[name]);
@@ -30,6 +32,7 @@ function createMemoryGuard({ native, readMemory, readHeap, now, env = {}, guest 
   fileSystem = fs, collectGarbage = null, logger = console }) {
   const enabled = env.PMJS_MEMORY_GUARD === '1' || Boolean(env.PMJS_MEMORY_LOG);
   const cullBytes = numberFrom(env, 'PMJS_MEMORY_CULL_MB', 500) * MiB;
+  const criticalBytes = numberFrom(env, 'PMJS_MEMORY_CRITICAL_MB', 96) * MiB;
   const growthBytes = numberFrom(env, 'PMJS_MEMORY_CULL_GROWTH_MB', 32) * MiB;
   const cullIntervalMs = numberFrom(env, 'PMJS_MEMORY_CULL_INTERVAL_MS', 5000);
   const syncIntervalMs = numberFrom(env, 'PMJS_MEMORY_LOG_SYNC_MS', 5000);
@@ -123,10 +126,10 @@ function createMemoryGuard({ native, readMemory, readHeap, now, env = {}, guest 
       catch (_) {}
       Object.assign(record, images(), context());
       let culled = null;
-      if (cullBytes > 0 && memory.rssBytes > cullBytes && at - lastCullAt >= cullIntervalMs &&
-          !(record.pendingDecodes > 0)) {
-        const critical = memory.availableBytes < CRITICAL_AVAILABLE_BYTES;
-        if (critical || memory.rssBytes >= lastCullRss + growthBytes) {
+      if (at - lastCullAt >= cullIntervalMs && !(record.pendingDecodes > 0)) {
+        const critical = criticalBytes > 0 && memory.availableBytes < criticalBytes;
+        const growth = cullBytes > 0 && memory.rssBytes > cullBytes && memory.rssBytes >= lastCullRss + growthBytes;
+        if (critical || growth) {
           culled = cull(memory, critical ? 'critical-available' : 'rss-growth');
           record.cull = culled;
         }
